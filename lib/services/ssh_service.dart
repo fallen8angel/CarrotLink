@@ -6,10 +6,42 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import '../constants.dart';
+import 'diagnostics_service.dart';
+
+class SSHCommandResult {
+  final String command;
+  final String stdout;
+  final String stderr;
+  final int exitCode;
+  final Duration duration;
+
+  const SSHCommandResult({
+    required this.command,
+    required this.stdout,
+    required this.stderr,
+    required this.exitCode,
+    required this.duration,
+  });
+
+  bool get isSuccess => exitCode == 0;
+
+  String get output {
+    if (stdout.isNotEmpty && stderr.isNotEmpty) {
+      return '$stdout\n$stderr';
+    }
+    if (stdout.isNotEmpty) return stdout;
+    return stderr;
+  }
+}
 
 class SSHService extends ChangeNotifier {
   SSHClient? _client;
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
+  final DiagnosticsService _diag = DiagnosticsService.instance;
+  static const int _defaultSshPort = 22;
+  static const int _maxHeartbeatFailures = 5;
+  static const Duration _heartbeatInterval = Duration(seconds: 8);
+  static const Duration _heartbeatTimeout = Duration(seconds: 4);
 
   SSHService() {
     _initServiceListener();
@@ -17,20 +49,26 @@ class SSHService extends ChangeNotifier {
 
   void _initServiceListener() {
     final service = FlutterBackgroundService();
-    
+
     service.on('connectionState').listen((event) {
       if (event != null) {
         final isServiceConnected = event['isConnected'] == true;
-        if (!isServiceConnected && isConnected) {
-           disconnect(fromService: true);
+        // Do not force-close foreground connection on a transient background hiccup.
+        // Foreground heartbeat remains the source of truth for foreground session health.
+        if (!isServiceConnected &&
+            !isConnected &&
+            _connectionStatus != "Disconnected") {
+          _handleDisconnect(notifyService: false, reason: "background");
         }
       }
     });
 
     service.on('status').listen((event) async {
+      if (_manualDisconnectRequested) return;
       if (event != null && event['isConnected'] == true) {
         if (!isConnected && !_isConnecting) {
-          print("Background service is connected. Attempting to sync foreground...");
+          print(
+              "Background service is connected. Attempting to sync foreground...");
           await _reconnectFromStorage();
         }
       }
@@ -44,26 +82,35 @@ class SSHService extends ChangeNotifier {
     final ip = await _storage.read(key: 'ssh_ip');
     final username = await _storage.read(key: 'ssh_username');
     final password = await _storage.read(key: 'ssh_password');
-    
+    final portStr = await _storage.read(key: 'ssh_port');
+    final port = int.tryParse(portStr ?? '') ?? _defaultSshPort;
+
     // 새로운 키 저장 구조에서 로드
     final privateKey = await _storage.read(key: 'current_private_key');
-    
-    print('[SSHService] Reconnect from storage - IP: $ip, Username: $username');
+
+    print(
+        '[SSHService] Reconnect from storage - IP: $ip, Username: $username, Port: $port');
+    _diag.info('ssh', 'Reconnect from storage target=$ip:$port user=$username');
 
     if (ip != null && username != null) {
       // Reconnect using standard flow
-      connect(ip, username, password: password, privateKey: privateKey);
+      await connect(ip, username,
+          port: port, password: password, privateKey: privateKey);
     }
   }
-  
+
   bool get isConnected => _client != null && !_client!.isClosed;
   String _connectionStatus = "Disconnected";
   String get connectionStatus => _connectionStatus;
   String? _connectedIp;
   String? get connectedIp => _connectedIp;
-  
+  int? _connectedPort;
+  int? get connectedPort => _connectedPort;
+
   String? _targetIp;
   String? get targetIp => _targetIp;
+  int? _targetPort;
+  int? get targetPort => _targetPort;
 
   // IP Discovery
   StreamController<String>? _ipDiscoveryController;
@@ -71,26 +118,67 @@ class SSHService extends ChangeNotifier {
     _ipDiscoveryController ??= StreamController<String>.broadcast();
     return _ipDiscoveryController!.stream;
   }
+
   RawDatagramSocket? _udpSocket;
+  Timer? _discoveryStopTimer;
   Timer? _heartbeatTimer;
   bool _isDiscoveryActive = false;
+  bool get isDiscoveryActive => _isDiscoveryActive;
+  String _discoverySource = 'none';
+  String get discoverySource => _discoverySource;
+  bool _discoveryManualSession = false;
+  bool get discoveryManualSession => _discoveryManualSession;
+  DateTime? _discoverySessionEndsAt;
+  DateTime? get discoverySessionEndsAt => _discoverySessionEndsAt;
+  int _discoveryGeneration = 0;
+  String? _lastDiscoveredIp;
+  DateTime? _lastDiscoveredAt;
 
   bool _isConnecting = false;
   bool get isConnecting => _isConnecting;
+  Future<void> _commandQueue = Future.value();
+  int _runningCommandCount = 0;
+  bool get isCommandBusy => _runningCommandCount > 0;
+  bool _isHandlingDisconnect = false;
+  bool _heartbeatInFlight = false;
+  int _heartbeatFailureCount = 0;
+  bool _manualDisconnectRequested = false;
+  DateTime? _manualDisconnectUntil;
+  static const Duration _manualDisconnectCooldown = Duration(minutes: 2);
+  bool get manualDisconnectRequested {
+    if (!_manualDisconnectRequested) return false;
+    final until = _manualDisconnectUntil;
+    if (until == null) return true;
+    if (DateTime.now().isBefore(until)) return true;
+    _manualDisconnectRequested = false;
+    _manualDisconnectUntil = null;
+    return false;
+  }
 
-  Future<void> connect(String ip, String username, {String? password, String? privateKey}) async {
+  Future<void> connect(
+    String ip,
+    String username, {
+    int port = _defaultSshPort,
+    String? password,
+    String? privateKey,
+  }) async {
     if (_isConnecting) return;
-    
+
+    _manualDisconnectRequested = false;
+    _manualDisconnectUntil = null;
     _isConnecting = true;
     _targetIp = ip; // Set target IP immediately
-    _connectionStatus = "Connecting to $ip...";
+    _targetPort = port;
+    _connectionStatus = "Connecting to $ip:$port...";
+    _diag.info('ssh', 'Connecting to $ip:$port as $username');
     // _connectedIp = ip; // Do not set IP until connected to avoid "Ghost IP"
-    
+
     notifyListeners();
 
     try {
-      final socket = await SSHSocket.connect(ip, 22, timeout: const Duration(seconds: 5));
-      
+      final socket = await SSHSocket.connect(ip, port,
+          timeout: const Duration(seconds: 5));
+
       // Check if disconnected while connecting
       if (!_isConnecting) {
         socket.destroy();
@@ -101,16 +189,16 @@ class SSHService extends ChangeNotifier {
         try {
           print("Debug: Attempting to parse PEM key...");
           print("Debug: Key starts with: ${privateKey.substring(0, 50)}...");
-          
+
           final keys = SSHKeyPair.fromPem(privateKey);
           print("Debug: Parsed ${keys.length} keys from PEM.");
-          
+
           if (keys.isEmpty) {
-             throw Exception("No valid keys found in the provided PEM.");
+            throw Exception("No valid keys found in the provided PEM.");
           }
-          
+
           print("Debug: Key type: ${keys.first.type}");
-          
+
           _client = SSHClient(
             socket,
             username: username,
@@ -139,32 +227,42 @@ class SSHService extends ChangeNotifier {
 
       _connectionStatus = "Connected";
       _connectedIp = ip; // Set IP only after successful connection
-      
+      _connectedPort = port;
+      _diag.info('ssh', 'Connected to $ip:$port');
+
       // 키 인증 성공 시 key_verified = true 설정
       if (privateKey != null) {
         await _storage.write(key: 'key_verified', value: 'true');
       }
-      
+
       // Start Background Service Connection
       FlutterBackgroundService().invoke('connect', {
         'ip': ip,
+        'port': port,
         'username': username,
         'password': password,
         'privateKey': privateKey,
       });
-      
+
       // Listen for immediate disconnection events from the socket
       _client!.done.then((_) {
         print("SSH Connection closed by OS/Remote");
-        disconnect();
+        _handleDisconnect(reason: "socket closed");
+      }).catchError((e) {
+        print("SSH Connection error: $e");
+        _handleDisconnect(reason: "socket error");
       });
 
       _startHeartbeat();
     } catch (e) {
       print("Connection failed: $e");
       _connectionStatus = _mapErrorToMessage(e);
+      _diag.warn('ssh', 'Connection failed target=$ip:$port error=$e');
       _client = null;
       _connectedIp = null; // Clear IP on error
+      _connectedPort = null;
+      _targetIp = null;
+      _targetPort = null;
       rethrow;
     } finally {
       _isConnecting = false;
@@ -174,7 +272,9 @@ class SSHService extends ChangeNotifier {
 
   String _mapErrorToMessage(dynamic error) {
     final e = error.toString();
-    if (e.contains("SocketException") || e.contains("Connection refused") || e.contains("Network is unreachable")) {
+    if (e.contains("SocketException") ||
+        e.contains("Connection refused") ||
+        e.contains("Network is unreachable")) {
       return "연결 실패 (네트워크)";
     } else if (e.contains("TimeoutException")) {
       return "연결 시간 초과";
@@ -188,64 +288,215 @@ class SSHService extends ChangeNotifier {
 
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
-    // 2 seconds interval for faster detection
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
+    _heartbeatFailureCount = 0;
+    _heartbeatInFlight = false;
+
+    _heartbeatTimer = Timer.periodic(_heartbeatInterval, (timer) async {
       if (_client == null) {
         timer.cancel();
-        return;
-      }
-      
-      if (_client!.isClosed) {
-        print("Heartbeat: Client is closed");
-        disconnect();
+        _handleDisconnect(reason: "heartbeat: no client");
         return;
       }
 
+      if (_client!.isClosed) {
+        print("Heartbeat: Client is closed");
+        timer.cancel();
+        _handleDisconnect(reason: "heartbeat: client closed");
+        return;
+      }
+
+      if (_heartbeatInFlight) {
+        return;
+      }
+      // Avoid overlapping extra probes while a command pipeline is busy.
+      if (_runningCommandCount > 0) {
+        return;
+      }
+
+      _heartbeatInFlight = true;
       try {
-        // Fallback to lightweight command since sendIgnore is not available in this version
-        // Use a short timeout (1.5s) to detect dead connections quickly
-        await _client!.run('true').timeout(const Duration(milliseconds: 1500));
+        await _client!.run('true').timeout(_heartbeatTimeout);
+        _heartbeatFailureCount = 0;
       } catch (e) {
-        print("Heartbeat failed: $e");
-        disconnect();
+        _heartbeatFailureCount += 1;
+        print(
+            "Heartbeat failed (${_heartbeatFailureCount}/$_maxHeartbeatFailures): $e");
+        if (_heartbeatFailureCount >= _maxHeartbeatFailures) {
+          timer.cancel();
+          _handleDisconnect(reason: "heartbeat failures");
+        }
+      } finally {
+        _heartbeatInFlight = false;
       }
     });
   }
 
+  // 연결 해제 즉시 처리
+  void _handleDisconnect({
+    bool notifyService = true,
+    String reason = "unknown",
+    bool manual = false,
+  }) {
+    if (_isHandlingDisconnect) return;
+    if (_client == null && _connectionStatus == "Disconnected" && !manual)
+      return; // 이미 처리됨
+    _isHandlingDisconnect = true;
+
+    try {
+      print("Connection lost - updating state immediately (reason: $reason)");
+      _diag.warn('ssh', 'Disconnected reason=$reason manual=$manual');
+      _manualDisconnectRequested = manual;
+      _manualDisconnectUntil =
+          manual ? DateTime.now().add(_manualDisconnectCooldown) : null;
+      _isConnecting = false;
+      _heartbeatTimer?.cancel();
+      _heartbeatTimer = null;
+      _heartbeatInFlight = false;
+      _heartbeatFailureCount = 0;
+      _sftp?.close();
+      _sftp = null;
+      _client?.close();
+      _client = null;
+      _connectionStatus = "Disconnected";
+      _connectedIp = null;
+      _connectedPort = null;
+      _targetIp = null;
+      _targetPort = null;
+
+      if (notifyService) {
+        FlutterBackgroundService().invoke('disconnect');
+      }
+      notifyListeners(); // 즉시 UI 업데이트
+    } finally {
+      _isHandlingDisconnect = false;
+    }
+  }
 
   Future<String> executeCommand(String command) async {
-    if (!isConnected) return "Not Connected";
-    
     try {
-      final result = await _client!.run(command);
-      return utf8.decode(result);
+      final result = await executeCommandResult(command);
+      return result.output;
     } catch (e) {
-      print("Command execution failed: $e");
-      if (e.toString().contains("SocketException") || 
-          e.toString().contains("Connection closed") || 
-          e.toString().contains("Broken pipe")) {
-        disconnect();
-      }
       return "Error executing command: $e";
     }
   }
 
+  Future<SSHCommandResult> executeCommandResult(
+    String command, {
+    Duration timeout = const Duration(seconds: 90),
+  }) async {
+    if (!isConnected) {
+      throw Exception("Not Connected");
+    }
+
+    return _enqueueCommand(() async {
+      if (!isConnected) {
+        throw Exception("Not Connected");
+      }
+
+      final startedAt = DateTime.now();
+      _runningCommandCount += 1;
+      notifyListeners();
+
+      try {
+        final session = await _client!.execute(command);
+        final stdoutBytes = <int>[];
+        final stderrBytes = <int>[];
+
+        final stdoutDone = Completer<void>();
+        final stderrDone = Completer<void>();
+
+        late final StreamSubscription<List<int>> stdoutSub;
+        late final StreamSubscription<List<int>> stderrSub;
+
+        stdoutSub = session.stdout.listen(
+          stdoutBytes.addAll,
+          onError: (_) {},
+          onDone: () => stdoutDone.complete(),
+        );
+        stderrSub = session.stderr.listen(
+          stderrBytes.addAll,
+          onError: (_) {},
+          onDone: () => stderrDone.complete(),
+        );
+
+        try {
+          await session.done.timeout(timeout);
+          await Future.wait([stdoutDone.future, stderrDone.future]);
+        } on TimeoutException {
+          try {
+            session.close();
+          } catch (_) {}
+          throw Exception("Command timeout after ${timeout.inSeconds}s");
+        } finally {
+          await stdoutSub.cancel();
+          await stderrSub.cancel();
+        }
+
+        final duration = DateTime.now().difference(startedAt);
+        final stdout = utf8.decode(stdoutBytes, allowMalformed: true).trim();
+        final stderr = utf8.decode(stderrBytes, allowMalformed: true).trim();
+        final exitCode = session.exitCode ?? 255;
+
+        return SSHCommandResult(
+          command: command,
+          stdout: stdout,
+          stderr: stderr,
+          exitCode: exitCode,
+          duration: duration,
+        );
+      } catch (e) {
+        print("Command execution failed: $e");
+        final errorStr = e.toString();
+        if (errorStr.contains("SocketException") ||
+            errorStr.contains("Connection closed") ||
+            errorStr.contains("Broken pipe") ||
+            errorStr.contains("Connection reset") ||
+            errorStr.contains("Software caused connection abort")) {
+          _handleDisconnect(reason: "command error");
+        }
+        rethrow;
+      } finally {
+        _runningCommandCount = (_runningCommandCount - 1).clamp(0, 1 << 30);
+        notifyListeners();
+      }
+    });
+  }
+
+  Future<T> _enqueueCommand<T>(Future<T> Function() action) {
+    final completer = Completer<T>();
+    _commandQueue = _commandQueue.catchError((_) {}).then((_) async {
+      try {
+        final result = await action();
+        if (!completer.isCompleted) {
+          completer.complete(result);
+        }
+      } catch (e, st) {
+        if (!completer.isCompleted) {
+          completer.completeError(e, st);
+        }
+      }
+    });
+    return completer.future;
+  }
+
   /// Executes a command and streams stdout/stderr.
   /// Returns the exit code.
-  Stream<List<int>> executeCommandStream(String command, {Function(int)? onExit}) async* {
+  Stream<List<int>> executeCommandStream(String command,
+      {Function(int)? onExit}) async* {
     if (!isConnected) throw Exception("Not Connected");
 
     final session = await _client!.execute(command);
-    
+
     // Merge stdout and stderr
     // Note: This is a simple merge. For strict separation, we'd need a different return type.
     // But for a terminal-like view, merging is usually fine or we can prefix.
-    
+
     // We can't easily merge two streams into one generator without a controller or complex logic,
     // but dartssh2 sessions expose stdout and stderr streams.
-    
+
     final controller = StreamController<List<int>>();
-    
+
     session.stdout.listen((data) {
       controller.add(data);
     }, onError: (e) {
@@ -258,11 +509,19 @@ class SSHService extends ChangeNotifier {
       controller.addError(e);
     });
 
+    controller.onCancel = () {
+      try {
+        session.close();
+      } catch (_) {}
+    };
+
     session.done.then((_) {
       if (onExit != null && session.exitCode != null) {
         onExit(session.exitCode!);
       }
-      controller.close();
+      if (!controller.isClosed) {
+        controller.close();
+      }
     });
 
     yield* controller.stream;
@@ -323,19 +582,22 @@ class SSHService extends ChangeNotifier {
     final file = await client.open(path);
     final size = (await file.stat()).size ?? 0;
     final content = file.read(length: size);
-    
+
     final List<int> bytes = [];
     await for (final chunk in content) {
       bytes.addAll(chunk);
     }
-    
+
     await file.close();
     return utf8.decode(bytes);
   }
 
   Future<void> writeTextFile(String path, String content) async {
     final client = await sftp;
-    final file = await client.open(path, mode: SftpFileOpenMode.write | SftpFileOpenMode.create | SftpFileOpenMode.truncate);
+    final file = await client.open(path,
+        mode: SftpFileOpenMode.write |
+            SftpFileOpenMode.create |
+            SftpFileOpenMode.truncate);
     await file.write(Stream.value(utf8.encode(content)));
     await file.close();
   }
@@ -350,32 +612,119 @@ class SSHService extends ChangeNotifier {
     await for (final chunk in stream) {
       chunks.addAll(chunk);
     }
+    await file.close();
     return Uint8List.fromList(chunks);
   }
 
-  Future<void> disconnect({bool fromService = false}) async {
-    _isConnecting = false;
-    _heartbeatTimer?.cancel();
-    _heartbeatTimer = null;
-    _sftp?.close();
-    _sftp = null;
-    _client?.close();
-    _client = null;
-    _connectionStatus = "Disconnected";
-    _connectedIp = null; // Clear IP on disconnect
-    
-    if (!fromService) {
-      FlutterBackgroundService().invoke('disconnect');
+  /// Streams a remote file directly to local disk to reduce memory pressure.
+  Future<void> downloadBinaryFile(
+    String remotePath,
+    String localPath, {
+    void Function(int received, int total)? onProgress,
+  }) async {
+    final client = await sftp;
+    final remote = await client.open(remotePath);
+    final total = (await remote.stat()).size ?? 0;
+    final localFile = File(localPath);
+    final localDir = localFile.parent;
+    if (!await localDir.exists()) {
+      await localDir.create(recursive: true);
     }
 
+    final sink = localFile.openWrite(mode: FileMode.writeOnly);
+    var received = 0;
+
+    try {
+      final stream = total > 0 ? remote.read(length: total) : remote.read();
+      await for (final chunk in stream) {
+        received += chunk.length;
+        sink.add(chunk);
+        onProgress?.call(received, total);
+      }
+      await sink.flush();
+    } finally {
+      await sink.close();
+      await remote.close();
+    }
+  }
+
+  /// Streams a local file to remote path to avoid loading entire file in memory.
+  Future<void> uploadBinaryFile(
+    String localPath,
+    String remotePath, {
+    void Function(int sent, int total)? onProgress,
+  }) async {
+    final client = await sftp;
+    final localFile = File(localPath);
+    if (!await localFile.exists()) {
+      throw Exception("Local file not found: $localPath");
+    }
+
+    final total = await localFile.length();
+    var sent = 0;
+
+    // Ensure parent directory exists.
+    final sep = remotePath.lastIndexOf('/');
+    if (sep > 0) {
+      final parent = remotePath.substring(0, sep);
+      final quotedParent = "'${parent.replaceAll("'", "'\"'\"'")}'";
+      final mkdir = await executeCommandResult("mkdir -p -- $quotedParent");
+      if (!mkdir.isSuccess) {
+        throw Exception(
+            "Failed to create remote directory: ${mkdir.output.trim()}");
+      }
+    }
+
+    final remote = await client.open(
+      remotePath,
+      mode: SftpFileOpenMode.write |
+          SftpFileOpenMode.create |
+          SftpFileOpenMode.truncate,
+    );
+
+    Stream<Uint8List> progressStream() async* {
+      await for (final chunk in localFile.openRead()) {
+        sent += chunk.length;
+        onProgress?.call(sent, total);
+        yield Uint8List.fromList(chunk);
+      }
+    }
+
+    try {
+      await remote.write(progressStream());
+    } finally {
+      await remote.close();
+    }
+  }
+
+  Future<void> disconnect({bool fromService = false}) async {
+    _handleDisconnect(
+      notifyService: !fromService,
+      reason: fromService ? "service event" : "manual request",
+      manual: !fromService,
+    );
+  }
+
+  void resumeAutoReconnect() {
+    _manualDisconnectRequested = false;
+    _manualDisconnectUntil = null;
     notifyListeners();
   }
-  
-  Future<void> saveConnection(String ip, String username, String? password, String? keyPath) async {
+
+  Future<void> saveConnection(
+    String ip,
+    String username,
+    String? password,
+    String? keyPath, {
+    int port = _defaultSshPort,
+  }) async {
     await _storage.write(key: 'ssh_ip', value: ip);
     await _storage.write(key: 'ssh_username', value: username);
-    if (password != null) await _storage.write(key: 'ssh_password', value: password);
-    if (keyPath != null) await _storage.write(key: 'ssh_key_path', value: keyPath);
+    await _storage.write(key: 'ssh_port', value: port.toString());
+    if (password != null)
+      await _storage.write(key: 'ssh_password', value: password);
+    if (keyPath != null)
+      await _storage.write(key: 'ssh_key_path', value: keyPath);
   }
 
   // Helper methods for Dashboard
@@ -402,7 +751,8 @@ class SSHService extends ChangeNotifier {
   Future<String> getCpuTemp() async {
     // This path might vary depending on the device (C2/C3). Using a generic thermal zone.
     // Often thermal_zone0 is CPU.
-    final result = await executeCommand("cat /sys/class/thermal/thermal_zone0/temp");
+    final result =
+        await executeCommand("cat /sys/class/thermal/thermal_zone0/temp");
     try {
       final temp = int.parse(result.trim());
       return "${(temp / 1000).toStringAsFixed(1)}°C";
@@ -412,7 +762,8 @@ class SSHService extends ChangeNotifier {
   }
 
   Future<String> getStorageUsage() async {
-    final result = await executeCommand("df -h /data | awk 'NR==2 {print \$5}'");
+    final result =
+        await executeCommand("df -h /data | awk 'NR==2 {print \$5}'");
     return result.trim();
   }
 
@@ -421,26 +772,43 @@ class SSHService extends ChangeNotifier {
   }
 
   Future<String> getCarModel() async {
-    // This is tricky, usually stored in params or log. 
+    // This is tricky, usually stored in params or log.
     // Let's try to read a param if possible, or just return a placeholder.
     // For now, let's return "Unknown" or try to cat a file.
-    return "Unknown"; 
+    return "Unknown";
   }
 
-  Future<void> startDiscovery() async {
-    if (_isDiscoveryActive) return; // 중복 실행 방지
+  Future<bool> startDiscovery({
+    bool forceRestart = false,
+    Duration timeout = const Duration(seconds: 30),
+    String source = 'auto',
+    bool manualSession = false,
+  }) async {
+    if (_isDiscoveryActive && !forceRestart) return false; // 중복 실행 방지
+    if (_isDiscoveryActive && forceRestart) {
+      stopDiscovery();
+    }
+
     _isDiscoveryActive = true;
-    
+    _discoverySource = source;
+    _discoveryManualSession = manualSession;
+    _discoverySessionEndsAt = DateTime.now().add(timeout);
+    _diag.info('discovery',
+        'Start source=$source manual=$manualSession timeout=${timeout.inSeconds}s');
+    _discoveryGeneration += 1;
+    final generation = _discoveryGeneration;
+
     // 컨트롤러 재생성 (닫혀있을 수 있음)
     if (_ipDiscoveryController == null || _ipDiscoveryController!.isClosed) {
       _ipDiscoveryController = StreamController<String>.broadcast();
     }
-    
+
     // 1. Start UDP Listener (Passive)
     try {
       _udpSocket?.close();
       _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 7705);
       _udpSocket!.listen((RawSocketEvent event) {
+        if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
         if (event == RawSocketEvent.read) {
           final datagram = _udpSocket!.receive();
           if (datagram != null) {
@@ -448,9 +816,9 @@ class SSHService extends ChangeNotifier {
               final message = utf8.decode(datagram.data);
               final data = json.decode(message);
               if (data is Map<String, dynamic> && data.containsKey('ip')) {
-                final ip = data['ip'] as String;
-                if (_ipDiscoveryController != null && !_ipDiscoveryController!.isClosed) {
-                  _ipDiscoveryController!.add(ip);
+                final ip = data['ip'];
+                if (ip is String && _isValidIpv4(ip)) {
+                  _emitDiscoveredIp(ip);
                 }
               }
             } catch (e) {
@@ -465,11 +833,19 @@ class SSHService extends ChangeNotifier {
       print("Error binding UDP socket: $e");
     }
 
+    _discoveryStopTimer?.cancel();
+    _discoveryStopTimer = Timer(timeout, () {
+      if (_isDiscoveryActive && generation == _discoveryGeneration) {
+        stopDiscovery();
+      }
+    });
+
     // 2. Start Active Subnet Scan
-    _scanSubnet();
+    unawaited(_scanSubnet(generation));
+    return true;
   }
 
-  Future<void> _scanSubnet() async {
+  Future<void> _scanSubnet(int generation) async {
     try {
       final interfaces = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
@@ -477,22 +853,26 @@ class SSHService extends ChangeNotifier {
       );
 
       for (final interface in interfaces) {
+        if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
         for (final addr in interface.addresses) {
+          if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
           if (addr.isLoopback) continue;
-          
+
           final ip = addr.address;
           final parts = ip.split('.');
           if (parts.length != 4) continue;
 
           final prefix = "${parts[0]}.${parts[1]}.${parts[2]}";
-          
+
           // Scan 1-254 in batches to avoid FD limits
           for (int i = 1; i < 255; i += 20) {
+            if (!_isDiscoveryActive || generation != _discoveryGeneration)
+              return;
             final futures = <Future>[];
             for (int j = 0; j < 20 && (i + j) < 255; j++) {
               final targetIp = "$prefix.${i + j}";
               if (targetIp == ip) continue; // Skip self
-              futures.add(_checkPort(targetIp, 22));
+              futures.add(_checkPort(targetIp, _defaultSshPort, generation));
             }
             await Future.wait(futures);
           }
@@ -503,23 +883,53 @@ class SSHService extends ChangeNotifier {
     }
   }
 
-  Future<void> _checkPort(String ip, int port) async {
+  Future<void> _checkPort(String ip, int port, int generation) async {
+    if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
     try {
-      final socket = await Socket.connect(ip, port, timeout: const Duration(milliseconds: 500));
+      final socket = await Socket.connect(ip, port,
+          timeout: const Duration(milliseconds: 500));
       socket.destroy();
-      if (_ipDiscoveryController != null && !_ipDiscoveryController!.isClosed) {
-        _ipDiscoveryController!.add(ip);
-      }
+      if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
+      _emitDiscoveredIp(ip);
       print("Found openpilot at $ip");
     } catch (e) {
       // Connection failed or timed out
     }
   }
 
+  void _emitDiscoveredIp(String ip) {
+    final now = DateTime.now();
+    if (_lastDiscoveredIp == ip &&
+        _lastDiscoveredAt != null &&
+        now.difference(_lastDiscoveredAt!) < const Duration(seconds: 5)) {
+      return;
+    }
+
+    _lastDiscoveredIp = ip;
+    _lastDiscoveredAt = now;
+
+    if (_ipDiscoveryController != null && !_ipDiscoveryController!.isClosed) {
+      _ipDiscoveryController!.add(ip);
+    }
+  }
+
+  bool _isValidIpv4(String ip) {
+    final parsed = InternetAddress.tryParse(ip);
+    return parsed != null && parsed.type == InternetAddressType.IPv4;
+  }
+
   void stopDiscovery() {
+    final prevSource = _discoverySource;
+    _discoveryGeneration += 1;
     _isDiscoveryActive = false;
+    _discoverySource = 'none';
+    _discoveryManualSession = false;
+    _discoverySessionEndsAt = null;
+    _discoveryStopTimer?.cancel();
+    _discoveryStopTimer = null;
     _udpSocket?.close();
     _udpSocket = null;
+    _diag.info('discovery', 'Stop source=$prevSource');
   }
 
   // Git Status
@@ -529,32 +939,50 @@ class SSHService extends ChangeNotifier {
   Future<void> checkGitUpdates() async {
     if (!isConnected) return;
     try {
-      // Fetch latest info
-      await executeCommand(CarrotConstants.gitFetchCmd);
-      
-      // Get current branch
-      final currentBranch = (await executeCommand(CarrotConstants.gitBranchCmd)).trim();
-      
-      // Get local hash
-      final localHash = (await executeCommand("cd ${CarrotConstants.openpilotPath} && git rev-parse HEAD")).trim();
-      
-      // Get remote hash
-      final remoteHash = (await executeCommand("cd ${CarrotConstants.openpilotPath} && git rev-parse origin/$currentBranch")).trim();
-
-      if (localHash.isNotEmpty && remoteHash.isNotEmpty && localHash != remoteHash) {
-        _hasGitUpdate = true;
+      final script = '''
+REPO="";
+for d in /data/openpilot /home/comma/openpilot; do
+  if [ -d "\$d/.git" ]; then
+    REPO="\$d"
+    break
+  fi
+done
+if [ -z "\$REPO" ]; then
+  echo OPENPILOT_REPO_NOT_FOUND
+  exit 2
+fi
+git -C "\$REPO" fetch --all --prune >/dev/null 2>&1 || true
+BRANCH="\$(git -C "\$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+LOCAL_HASH="\$(git -C "\$REPO" rev-parse HEAD 2>/dev/null || true)"
+REMOTE_HASH="\$(git -C "\$REPO" rev-parse "origin/\$BRANCH" 2>/dev/null || true)"
+echo "\$LOCAL_HASH|\$REMOTE_HASH"
+''';
+      final command = "bash -lc '${script.replaceAll("'", "'\"'\"'")}'";
+      final result = await executeCommandResult(command);
+      final line = result.stdout.trim().split('\n').last.trim();
+      final parts = line.split('|');
+      if (parts.length == 2) {
+        final localHash = parts[0].trim();
+        final remoteHash = parts[1].trim();
+        _hasGitUpdate = localHash.isNotEmpty &&
+            remoteHash.isNotEmpty &&
+            localHash != remoteHash;
       } else {
         _hasGitUpdate = false;
       }
       notifyListeners();
     } catch (e) {
       print("Git update check failed: $e");
+      _hasGitUpdate = false;
+      notifyListeners();
     }
   }
 
   @override
   void dispose() {
     stopDiscovery();
+    _discoveryStopTimer?.cancel();
+    _discoveryStopTimer = null;
     _ipDiscoveryController?.close();
     _ipDiscoveryController = null;
     super.dispose();

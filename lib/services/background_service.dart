@@ -1,10 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:ui';
 import 'package:dartssh2/dartssh2.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
-import 'package:flutter_background_service_android/flutter_background_service_android.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 // Notification Channel ID
@@ -32,7 +31,7 @@ Future<void> initializeService() async {
   // Initialize Notifications with Actions
   const AndroidInitializationSettings initializationSettingsAndroid =
       AndroidInitializationSettings('@mipmap/launcher_icon'); // Ensure icon exists
-  final InitializationSettings initializationSettings =
+  const InitializationSettings initializationSettings =
       InitializationSettings(android: initializationSettingsAndroid);
   
   await flutterLocalNotificationsPlugin.initialize(
@@ -76,18 +75,6 @@ Future<bool> onIosBackground(ServiceInstance service) async {
 
 @pragma('vm:entry-point')
 void onStart(ServiceInstance service) async {
-  DartPluginRegistrant.ensureInitialized();
-
-  final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
-      FlutterLocalNotificationsPlugin();
-  
-  // Initialize notifications in background isolate
-  const AndroidInitializationSettings initializationSettingsAndroid =
-      AndroidInitializationSettings('@mipmap/launcher_icon');
-  final InitializationSettings initializationSettings =
-      InitializationSettings(android: initializationSettingsAndroid);
-  await flutterLocalNotificationsPlugin.initialize(initializationSettings);
-
   SSHClient? sshClient;
   Timer? heartbeatTimer;
   String currentTitle = 'CarrotLink';
@@ -98,24 +85,14 @@ void onStart(ServiceInstance service) async {
     if (title != null) currentTitle = title;
     if (content != null) currentContent = content;
 
-    if (service is AndroidServiceInstance) {
-      if (await service.isForegroundService()) {
-        flutterLocalNotificationsPlugin.show(
-          notificationId,
-          currentTitle,
-          currentContent,
-          NotificationDetails(
-            android: AndroidNotificationDetails(
-              notificationChannelId,
-              'CarrotLink Service',
-              icon: '@mipmap/launcher_icon',
-              ongoing: true,
-              showWhen: false,
-              number: 0,
-            ),
-          ),
-        );
-      }
+    if (service is! AndroidServiceInstance) return;
+    final androidService = service;
+
+    if (await androidService.isForegroundService()) {
+      await androidService.setForegroundNotificationInfo(
+        title: currentTitle,
+        content: currentContent,
+      );
     }
   }
 
@@ -130,14 +107,20 @@ void onStart(ServiceInstance service) async {
   service.on('connect').listen((event) async {
     if (event == null) return;
     final ip = event['ip'];
+    final portRaw = event['port'];
+    final port = portRaw is int ? portRaw : int.tryParse(portRaw?.toString() ?? '') ?? 22;
     final username = event['username'];
     final password = event['password'];
     final privateKey = event['privateKey'];
 
     try {
+      heartbeatTimer?.cancel();
+      sshClient?.close();
+      sshClient = null;
+
       await updateNotification(title: 'CarrotLink: 연결 중...', content: 'IP: $ip');
       
-      final socket = await SSHSocket.connect(ip, 22, timeout: const Duration(seconds: 10));
+      final socket = await SSHSocket.connect(ip, port, timeout: const Duration(seconds: 10));
       
       if (privateKey != null) {
         final keys = SSHKeyPair.fromPem(privateKey);
@@ -168,7 +151,7 @@ void onStart(ServiceInstance service) async {
           // Use a short timeout (2s) to detect dead connections quickly
           await sshClient!.run('true').timeout(const Duration(seconds: 2));
         } catch (e) {
-          print("Background Heartbeat failed: $e");
+          debugPrint("Background Heartbeat failed: $e");
           sshClient?.close();
           // Force update notification immediately
           await updateNotification(title: 'CarrotLink: 연결 끊김', content: '재연결 대기 중...');

@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import '../services/storage_layout_service.dart';
 import 'dashboard_screen.dart';
 import 'permission_screen.dart';
 
@@ -34,12 +37,14 @@ class _SplashScreenState extends State<SplashScreen> {
   Future<void> _checkFirstRun() async {
     // Wait at least 1.5 seconds for splash effect
     await Future.delayed(const Duration(milliseconds: 1500));
+    unawaited(StorageLayoutService.instance.ensureBaseFolders());
 
     final prefs = await SharedPreferences.getInstance();
     final isFirstRun = prefs.getBool('is_first_run') ?? true;
+    final hasRequiredPermissions = await _hasRequiredPermissions();
 
     if (mounted) {
-      if (isFirstRun) {
+      if (isFirstRun || !hasRequiredPermissions) {
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(builder: (context) => const PermissionScreen()),
         );
@@ -49,6 +54,18 @@ class _SplashScreenState extends State<SplashScreen> {
         );
       }
     }
+  }
+
+  Future<bool> _hasRequiredPermissions() async {
+    if (!Platform.isAndroid) return true;
+
+    final notification = await Permission.notification.status;
+    final battery = await Permission.ignoreBatteryOptimizations.status;
+    final manageStorage = await Permission.manageExternalStorage.status;
+    final legacyStorage = await Permission.storage.status;
+
+    final storageGranted = manageStorage.isGranted || legacyStorage.isGranted;
+    return notification.isGranted && battery.isGranted && storageGranted;
   }
 
   @override

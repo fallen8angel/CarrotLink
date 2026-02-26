@@ -1,16 +1,16 @@
 import 'dart:async';
 import 'package:intl/intl.dart';
 import 'package:carrot_pilot_manager/screens/backup_manager_screen.dart';
-import 'package:carrot_pilot_manager/widgets/drive_list_widget.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:provider/provider.dart';
 import '../../services/ssh_service.dart';
 import '../../services/google_drive_service.dart';
 import '../../services/backup_service.dart';
+import '../../services/github_service.dart';
 import '../../widgets/custom_toast.dart';
 
 import 'package:carrot_pilot_manager/widgets/design_components.dart';
-import 'package:carrot_pilot_manager/constants.dart';
 
 class HomeTab extends StatefulWidget {
   const HomeTab({super.key});
@@ -24,7 +24,10 @@ class _HomeTabState extends State<HomeTab> {
   String _commit = "--";
   String _dongleId = "--";
   String _serial = "--";
+  bool _hasGitHubLogin = false;
+  bool _hasActiveSshKey = false;
   Timer? _statusTimer;
+  Timer? _prereqTimer;
   final GlobalKey _backupChipKey = GlobalKey();
   final LayerLink _layerLink = LayerLink();
   OverlayEntry? _tooltipEntry;
@@ -33,8 +36,11 @@ class _HomeTabState extends State<HomeTab> {
   void initState() {
     super.initState();
     _refreshStatus();
-    _statusTimer = Timer.periodic(const Duration(seconds: 30), (_) => _refreshStatus());
-    
+    _statusTimer =
+        Timer.periodic(const Duration(seconds: 30), (_) => _refreshStatus());
+    _prereqTimer = Timer.periodic(
+        const Duration(seconds: 2), (_) => _refreshConnectionPrerequisites());
+
     // Start auto-backup monitor
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final ssh = Provider.of<SSHService>(context, listen: false);
@@ -48,6 +54,7 @@ class _HomeTabState extends State<HomeTab> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     final ssh = Provider.of<SSHService>(context);
+    _refreshConnectionPrerequisites();
     if (ssh.isConnected && _branch == "--") {
       _refreshStatus();
     }
@@ -56,11 +63,14 @@ class _HomeTabState extends State<HomeTab> {
   @override
   void dispose() {
     _statusTimer?.cancel();
+    _prereqTimer?.cancel();
     _tooltipEntry?.remove();
     super.dispose();
   }
 
   Future<void> _refreshStatus() async {
+    await _refreshConnectionPrerequisites();
+
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (ssh.isConnected) {
       try {
@@ -83,6 +93,46 @@ class _HomeTabState extends State<HomeTab> {
         print("Status refresh failed: $e");
       }
     }
+  }
+
+  Future<void> _refreshConnectionPrerequisites() async {
+    try {
+      final token = await GitHubService().getToken();
+      final privateKey =
+          await const FlutterSecureStorage().read(key: 'current_private_key');
+      final nextHasGitHubLogin = token != null && token.isNotEmpty;
+      final nextHasActiveSshKey = privateKey != null && privateKey.isNotEmpty;
+      if (!mounted) return;
+      if (_hasGitHubLogin == nextHasGitHubLogin &&
+          _hasActiveSshKey == nextHasActiveSshKey) {
+        return;
+      }
+      setState(() {
+        _hasGitHubLogin = nextHasGitHubLogin;
+        _hasActiveSshKey = nextHasActiveSshKey;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _hasGitHubLogin = false;
+        _hasActiveSshKey = false;
+      });
+    }
+  }
+
+  String _statusHeadline(SSHService ssh) {
+    if (!_hasGitHubLogin) return "GitHub 연동 필요";
+    if (!_hasActiveSshKey) return "SSH 개인키 적용 필요";
+    if (ssh.isConnected) return "연결됨";
+    if (ssh.connectionStatus.startsWith("Connecting")) return "연결 중...";
+    if (ssh.connectionStatus.contains("Error")) return "연결 실패";
+    return "연결 대기";
+  }
+
+  Color _statusColor(BuildContext context, SSHService ssh) {
+    if (!_hasGitHubLogin || !_hasActiveSshKey) return Colors.grey;
+    if (ssh.connectionStatus.contains("Error")) return Colors.grey;
+    return Theme.of(context).colorScheme.primary;
   }
 
   void _showBackupTooltip(BuildContext context, BackupService backup) {
@@ -132,12 +182,17 @@ class _HomeTabState extends State<HomeTab> {
                       Container(
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
-                          color: (ssh.isConnected ? Theme.of(context).colorScheme.primary : Colors.grey).withOpacity(0.1),
+                          color: (ssh.isConnected
+                                  ? Theme.of(context).colorScheme.primary
+                                  : Colors.grey)
+                              .withOpacity(0.1),
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Icon(
                           Icons.directions_car,
-                          color: ssh.isConnected ? Theme.of(context).colorScheme.primary : Colors.grey,
+                          color: ssh.isConnected
+                              ? Theme.of(context).colorScheme.primary
+                              : Colors.grey,
                           size: 32,
                         ),
                       ),
@@ -147,43 +202,51 @@ class _HomeTabState extends State<HomeTab> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              'Comma IP',
-                              style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                                color: Colors.grey,
-                              ),
+                              '상태',
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .labelMedium
+                                  ?.copyWith(
+                                    color: Colors.grey,
+                                  ),
                             ),
                             GestureDetector(
                               onTap: () {
-                                if (ssh.isConnected || ssh.connectionStatus.startsWith("Connecting")) {
+                                if (ssh.isConnected ||
+                                    ssh.connectionStatus
+                                        .startsWith("Connecting")) {
                                   ssh.disconnect();
                                   CustomToast.show(context, "연결이 해제되었습니다.");
                                 }
                               },
                               child: Text(
-                                (ssh.isConnected || ssh.connectionStatus.startsWith("Connecting") || ssh.targetIp != null)
-                                    ? (ssh.connectedIp ?? ssh.targetIp ?? "Unknown")
-                                    : "연결 없음",
-                                style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                                  fontWeight: FontWeight.bold,
-                                  color: ssh.isConnected ? null : Colors.redAccent,
-                                ),
+                                _statusHeadline(ssh),
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .titleLarge
+                                    ?.copyWith(
+                                      fontWeight: FontWeight.bold,
+                                      color: _statusColor(context, ssh),
+                                    ),
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
                             const SizedBox(height: 4),
                             Text(
-                              ssh.isConnected 
-                                  ? "연결됨" 
-                                  : (ssh.connectionStatus.startsWith("Connecting") 
-                                      ? "연결 중..." 
-                                      : (ssh.connectionStatus.contains("Error") ? "연결 실패" : "연결 안 됨")),
-                              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                color: ssh.isConnected 
-                                    ? Colors.green 
-                                    : (ssh.connectionStatus.startsWith("Connecting") ? Colors.orange : Colors.grey),
-                                fontWeight: FontWeight.bold,
-                              ),
+                              (ssh.isConnected ||
+                                      ssh.connectionStatus
+                                          .startsWith("Connecting") ||
+                                      ssh.targetIp != null)
+                                  ? "IP: ${ssh.connectedIp ?? ssh.targetIp ?? "Unknown"}"
+                                  : "GitHub 로그인 및 SSH 키 적용 후 연결 가능합니다.",
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.copyWith(
+                                    color: Colors.grey,
+                                    fontWeight: FontWeight.w500,
+                                  ),
                             ),
                           ],
                         ),
@@ -196,35 +259,30 @@ class _HomeTabState extends State<HomeTab> {
                   // Info Grid
                   Row(
                     children: [
-                      Expanded(child: _buildInfoItem(Icons.call_split, "브랜치", ssh.isConnected ? _branch : "연결 안 됨")),
-                      Expanded(child: _buildInfoItem(Icons.commit, "커밋", ssh.isConnected ? _commit : "연결 안 됨")),
+                      Expanded(
+                          child: _buildInfoItem(Icons.call_split, "브랜치",
+                              ssh.isConnected ? _branch : "연결 안 됨")),
+                      Expanded(
+                          child: _buildInfoItem(Icons.commit, "커밋",
+                              ssh.isConnected ? _commit : "연결 안 됨")),
                     ],
                   ),
                   const SizedBox(height: 16),
                   Row(
                     children: [
-                      Expanded(child: _buildInfoItem(Icons.fingerprint, "Dongle ID", ssh.isConnected ? _dongleId : "연결 안 됨")),
-                      Expanded(child: _buildInfoItem(Icons.qr_code, "Serial", ssh.isConnected ? _serial : "연결 안 됨")),
+                      Expanded(
+                          child: _buildInfoItem(Icons.fingerprint, "Dongle ID",
+                              ssh.isConnected ? _dongleId : "연결 안 됨")),
+                      Expanded(
+                          child: _buildInfoItem(Icons.qr_code, "Serial",
+                              ssh.isConnected ? _serial : "연결 안 됨")),
                     ],
                   ),
                 ],
               ),
             ),
-            
+
             // Quick Actions Grid Removed
-
-            const SizedBox(height: 24),
-            Text(
-              "녹화 영상",
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            const SizedBox(height: 16),
-            const SizedBox(
-              height: 260, // Adjusted height for horizontal list
-              child: DriveListWidget(),
-            ),
-
-
             const SizedBox(height: 24),
             _buildBackupSection(context),
             const SizedBox(height: 150), // Bottom padding for SnackBar
@@ -248,17 +306,17 @@ class _HomeTabState extends State<HomeTab> {
             subtitle: "설정값을 날짜별로 백업하고, 변경된 부분만 선택하여 복원할 수 있습니다.",
           ),
           const SizedBox(height: 16),
-          
+
           // Status Chips
           Consumer<BackupService>(
             builder: (context, backup, child) {
-              final checkTime = backup.lastCheckTime != null 
-                  ? DateFormat('MM.dd HH:mm:ss').format(backup.lastCheckTime!) 
+              final checkTime = backup.lastCheckTime != null
+                  ? DateFormat('MM.dd HH:mm:ss').format(backup.lastCheckTime!)
                   : "--";
-              final backupTime = backup.lastBackupTime != null 
-                  ? DateFormat('MM.dd HH:mm:ss').format(backup.lastBackupTime!) 
+              final backupTime = backup.lastBackupTime != null
+                  ? DateFormat('MM.dd HH:mm:ss').format(backup.lastBackupTime!)
                   : "--";
-                  
+
               return Row(
                 children: [
                   Expanded(
@@ -266,9 +324,9 @@ class _HomeTabState extends State<HomeTab> {
                       link: _layerLink,
                       child: DesignStatusChip(
                         key: _backupChipKey,
-                        icon: Icons.sync, 
-                        label: "백업 확인", 
-                        value: checkTime, 
+                        icon: Icons.sync,
+                        label: "백업 확인",
+                        value: checkTime,
                         color: Theme.of(context).colorScheme.secondaryContainer,
                         onTap: () => _showBackupTooltip(context, backup),
                       ),
@@ -277,8 +335,8 @@ class _HomeTabState extends State<HomeTab> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: DesignStatusChip(
-                      icon: Icons.save_outlined, 
-                      label: "최근 백업", 
+                      icon: Icons.save_outlined,
+                      label: "최근 백업",
                       value: backupTime,
                       color: Theme.of(context).colorScheme.tertiaryContainer,
                     ),
@@ -287,7 +345,7 @@ class _HomeTabState extends State<HomeTab> {
               );
             },
           ),
-          
+
           const SizedBox(height: 20),
           Row(
             children: [
@@ -296,7 +354,8 @@ class _HomeTabState extends State<HomeTab> {
                   onPressed: () {
                     Navigator.push(
                       context,
-                      MaterialPageRoute(builder: (context) => const BackupManagerScreen()),
+                      MaterialPageRoute(
+                          builder: (context) => const BackupManagerScreen()),
                     );
                   },
                   icon: const Icon(Icons.history),
@@ -314,8 +373,12 @@ class _HomeTabState extends State<HomeTab> {
                           title: const Text("구글 드라이브 연동 해제"),
                           content: const Text("구글 드라이브 연동을 해제하시겠습니까?"),
                           actions: [
-                            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("취소")),
-                            TextButton(onPressed: () => Navigator.pop(context, true), child: const Text("해제")),
+                            TextButton(
+                                onPressed: () => Navigator.pop(context, false),
+                                child: const Text("취소")),
+                            TextButton(
+                                onPressed: () => Navigator.pop(context, true),
+                                child: const Text("해제")),
                           ],
                         ),
                       );
@@ -327,7 +390,8 @@ class _HomeTabState extends State<HomeTab> {
                         await driveService.signIn();
                       } catch (e) {
                         if (context.mounted) {
-                          CustomToast.show(context, "Google Sign-In Failed: $e", isError: true);
+                          CustomToast.show(context, "Google Sign-In Failed: $e",
+                              isError: true);
                         }
                       }
                     }
@@ -340,7 +404,9 @@ class _HomeTabState extends State<HomeTab> {
                   label: Text(isSignedIn ? "연동됨" : "구글 연동"),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: isSignedIn ? Colors.green : null,
-                    side: isSignedIn ? const BorderSide(color: Colors.green) : null,
+                    side: isSignedIn
+                        ? const BorderSide(color: Colors.green)
+                        : null,
                   ),
                 ),
               ),
@@ -349,11 +415,6 @@ class _HomeTabState extends State<HomeTab> {
         ],
       ),
     );
-  }
-
-  Widget _buildStatusChip(BuildContext context, IconData icon, String label, String time, Color bgColor, Color fgColor) {
-    // Deprecated: Use DesignStatusChip instead
-    return Container(); 
   }
 
   Widget _buildInfoItem(IconData icon, String label, String value) {
@@ -365,8 +426,11 @@ class _HomeTabState extends State<HomeTab> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(label, style: TextStyle(color: Colors.grey[600], fontSize: 12)),
-              Text(value, style: const TextStyle(fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis),
+              Text(label,
+                  style: TextStyle(color: Colors.grey[600], fontSize: 12)),
+              Text(value,
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                  overflow: TextOverflow.ellipsis),
             ],
           ),
         ),
@@ -388,7 +452,8 @@ class _BackupTimerTooltip extends StatefulWidget {
   State<_BackupTimerTooltip> createState() => _BackupTimerTooltipState();
 }
 
-class _BackupTimerTooltipState extends State<_BackupTimerTooltip> with SingleTickerProviderStateMixin {
+class _BackupTimerTooltipState extends State<_BackupTimerTooltip>
+    with SingleTickerProviderStateMixin {
   late Timer _timer;
   String _timeLeft = "";
   late AnimationController _controller;
@@ -399,7 +464,7 @@ class _BackupTimerTooltipState extends State<_BackupTimerTooltip> with SingleTic
     super.initState();
     _updateTime();
     _timer = Timer.periodic(const Duration(seconds: 1), (_) => _updateTime());
-    
+
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 200),
@@ -455,7 +520,10 @@ class _BackupTimerTooltipState extends State<_BackupTimerTooltip> with SingleTic
             ),
             child: Text(
               _timeLeft,
-              style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold),
               textAlign: TextAlign.center,
             ),
           ),

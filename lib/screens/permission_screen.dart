@@ -1,6 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../services/storage_layout_service.dart';
 import 'dashboard_screen.dart';
 
 class PermissionScreen extends StatefulWidget {
@@ -15,6 +18,7 @@ class PermissionScreen extends StatefulWidget {
 class _PermissionScreenState extends State<PermissionScreen> {
   bool _notificationGranted = false;
   bool _batteryGranted = false;
+  bool _storageGranted = false;
 
   @override
   void initState() {
@@ -22,14 +26,26 @@ class _PermissionScreenState extends State<PermissionScreen> {
     _checkPermissions();
   }
 
+  Future<bool> _isStoragePermissionGranted() async {
+    if (!Platform.isAndroid) return true;
+
+    final manageStatus = await Permission.manageExternalStorage.status;
+    if (manageStatus.isGranted) return true;
+
+    final legacyStatus = await Permission.storage.status;
+    return legacyStatus.isGranted;
+  }
+
   Future<void> _checkPermissions() async {
     final notificationStatus = await Permission.notification.status;
     final batteryStatus = await Permission.ignoreBatteryOptimizations.status;
+    final storageStatus = await _isStoragePermissionGranted();
 
     if (mounted) {
       setState(() {
         _notificationGranted = notificationStatus.isGranted;
         _batteryGranted = batteryStatus.isGranted;
+        _storageGranted = storageStatus;
       });
     }
   }
@@ -52,7 +68,33 @@ class _PermissionScreenState extends State<PermissionScreen> {
     }
   }
 
+  Future<void> _requestStorage() async {
+    if (!Platform.isAndroid) return;
+
+    var granted = await _isStoragePermissionGranted();
+    if (!granted) {
+      final manageStatus = await Permission.manageExternalStorage.request();
+      granted = manageStatus.isGranted;
+    }
+    if (!granted) {
+      final legacyStatus = await Permission.storage.request();
+      granted = legacyStatus.isGranted;
+    }
+
+    if (mounted) {
+      setState(() {
+        _storageGranted = granted;
+      });
+    }
+
+    if (granted) {
+      await StorageLayoutService.instance.ensureBaseFolders();
+    }
+  }
+
   Future<void> _finish() async {
+    await StorageLayoutService.instance.ensureBaseFolders();
+
     if (!widget.fromSettings) {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('is_first_run', false);
@@ -65,6 +107,20 @@ class _PermissionScreenState extends State<PermissionScreen> {
     } else {
       Navigator.pop(context);
     }
+  }
+
+  int _requiredPermissionCount() {
+    if (!Platform.isAndroid) return 0;
+    return 3;
+  }
+
+  int _grantedPermissionCount() {
+    if (!Platform.isAndroid) return 0;
+    var count = 0;
+    if (_notificationGranted) count++;
+    if (_batteryGranted) count++;
+    if (_storageGranted) count++;
+    return count;
   }
 
   @override
@@ -84,7 +140,7 @@ class _PermissionScreenState extends State<PermissionScreen> {
                 const Icon(Icons.security, size: 80, color: Color(0xFFFF6D00)),
                 const SizedBox(height: 24),
                 Text(
-                  "필수 권한 요청",
+                  "권한 설정",
                   style: Theme.of(context).textTheme.headlineMedium?.copyWith(
                     fontWeight: FontWeight.bold,
                   ),
@@ -92,12 +148,22 @@ class _PermissionScreenState extends State<PermissionScreen> {
                 ),
                 const SizedBox(height: 16),
                 Text(
-                  "안정적인 백그라운드 연결과 백업을 위해\n다음 권한들이 필요합니다.",
+                  "안정적인 연결/백업을 위해\n다음 권한을 확인해주세요.",
                   style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                     color: Colors.grey,
                   ),
                   textAlign: TextAlign.center,
                 ),
+                if (Platform.isAndroid) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    "${_grantedPermissionCount()}/${_requiredPermissionCount()} 권한 허용됨",
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: Colors.grey[500],
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
                 const SizedBox(height: 40),
               ],
               
@@ -115,6 +181,14 @@ class _PermissionScreenState extends State<PermissionScreen> {
                 description: "화면이 꺼져도 연결이 끊기지 않도록 합니다.",
                 isGranted: _batteryGranted,
                 onTap: _requestBattery,
+              ),
+              const SizedBox(height: 16),
+              _buildPermissionItem(
+                icon: Icons.folder_open,
+                title: "저장소 접근",
+                description: "SSH 키 백업/복원을 위해 필요합니다.",
+                isGranted: _storageGranted,
+                onTap: _requestStorage,
               ),
 
               const Spacer(),

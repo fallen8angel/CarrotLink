@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
+import 'dart:async';
 
 import 'services/ssh_service.dart';
 import 'screens/splash_screen.dart';
@@ -12,11 +13,14 @@ import 'services/google_drive_service.dart';
 import 'services/backup_service.dart';
 import 'services/background_service.dart';
 import 'services/update_service.dart';
+import 'services/diagnostics_service.dart';
+import 'services/storage_layout_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await initializeDateFormatting('ko_KR', null);
   initializeService(); // Don't await to prevent app freeze on startup
+  unawaited(StorageLayoutService.instance.ensureBaseFolders());
   
   // Listen for exit command from background service
   FlutterBackgroundService().on('exitApp').listen((event) {
@@ -36,6 +40,7 @@ void main() async {
         ChangeNotifierProvider(create: (_) => GoogleDriveService()),
         ChangeNotifierProvider(create: (_) => BackupService()),
         ChangeNotifierProvider(create: (_) => UpdateService()),
+        ChangeNotifierProvider.value(value: DiagnosticsService.instance),
       ],
       child: const CarrotLinkApp(),
     ),

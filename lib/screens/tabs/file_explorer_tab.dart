@@ -1,11 +1,16 @@
 import 'package:carrot_pilot_manager/screens/tabs/file_editor_screen.dart';
+import 'package:carrot_pilot_manager/screens/tabs/file_explorer/file_explorer_controller.dart';
+import 'package:carrot_pilot_manager/screens/tabs/file_explorer/widgets/file_explorer_bottom_bar.dart';
+import 'package:carrot_pilot_manager/screens/tabs/file_explorer/widgets/file_explorer_file_list_view.dart';
+import 'package:carrot_pilot_manager/screens/tabs/file_explorer/widgets/file_explorer_top_toolbar.dart';
 import 'package:dartssh2/dartssh2.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
+import 'package:provider/provider.dart';
+
 import '../../services/ssh_service.dart';
-import '../../constants.dart';
 import '../../widgets/custom_toast.dart';
 
 class FileExplorerTab extends StatefulWidget {
@@ -16,93 +21,244 @@ class FileExplorerTab extends StatefulWidget {
 }
 
 class _FileExplorerTabState extends State<FileExplorerTab> {
-  String _currentPath = CarrotConstants.openpilotPath; // Default openpilot path
-  List<SftpName> _files = [];
-  List<SftpName> _filteredFiles = [];
-  bool _isLoading = false;
-  bool _isSearching = false;
+  late final FileExplorerController _controller;
   final TextEditingController _searchController = TextEditingController();
-  List<String> _bookmarks = [];
+  final TextEditingController _pathController = TextEditingController();
+  final FocusNode _pathFocusNode = FocusNode();
+  bool _didInit = false;
 
   @override
   void initState() {
     super.initState();
-    _loadBookmarks();
-    // _loadFiles(); // Removed to prevent "Not connected" error on startup
-  }
-
-  @override
-  void dispose() {
-    _searchController.dispose();
-    super.dispose();
+    _controller = FileExplorerController();
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     final ssh = Provider.of<SSHService>(context);
-    if (ssh.isConnected && _files.isEmpty && !_isLoading) {
-      _loadFiles();
+    _controller.bindSsh(ssh);
+    if (!_didInit) {
+      _didInit = true;
+      _controller.initializeIfNeeded().then((_) => _controller.ensureLoaded());
+    } else {
+      _controller.ensureLoaded();
     }
   }
 
-  Future<void> _loadBookmarks() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _bookmarks = prefs.getStringList('file_bookmarks') ?? [CarrotConstants.openpilotPath, CarrotConstants.mediaPath];
-    });
+  @override
+  void dispose() {
+    _searchController.dispose();
+    _pathController.dispose();
+    _pathFocusNode.dispose();
+    _controller.dispose();
+    super.dispose();
   }
 
-  Future<void> _addBookmark() async {
-    if (!_bookmarks.contains(_currentPath)) {
-      final prefs = await SharedPreferences.getInstance();
-      final newBookmarks = List<String>.from(_bookmarks)..add(_currentPath);
-      await prefs.setStringList('file_bookmarks', newBookmarks);
-      setState(() {
-        _bookmarks = newBookmarks;
-      });
-      if (mounted) {
-        CustomToast.show(context, "북마크 추가됨");
-      }
+  void _syncPathField() {
+    if (_pathFocusNode.hasFocus) return;
+    final target = _controller.currentPath;
+    if (_pathController.text != target) {
+      _pathController.text = target;
+      _pathController.selection =
+          TextSelection.collapsed(offset: target.length);
     }
   }
 
-  Future<void> _removeBookmark(String path) async {
-    final prefs = await SharedPreferences.getInstance();
-    final newBookmarks = List<String>.from(_bookmarks)..remove(path);
-    await prefs.setStringList('file_bookmarks', newBookmarks);
-    setState(() {
-      _bookmarks = newBookmarks;
-    });
+  Future<void> _navigateWithError(String path, {bool showToast = true}) async {
+    try {
+      await _controller.navigate(path);
+    } catch (e) {
+      if (!mounted || !showToast) return;
+      CustomToast.show(context, "이동 실패: $e", isError: true);
+    }
   }
 
-  void _showBookmarks() {
-    showModalBottomSheet(
+  Future<void> _refresh() async {
+    try {
+      await _controller.refresh();
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, "새로고침 실패: $e", isError: true);
+    }
+  }
+
+  Future<String?> _promptInput({
+    required String title,
+    String? initialValue,
+    String label = '입력',
+    String actionLabel = '확인',
+  }) async {
+    final controller = TextEditingController(text: initialValue ?? '');
+    return showDialog<String>(
       context: context,
-      builder: (context) => ListView(
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          decoration: InputDecoration(labelText: label),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("취소"),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: Text(actionLabel),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<bool> _confirm({
+    required String title,
+    required String message,
+    bool destructive = false,
+  }) async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("취소"),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: destructive
+                ? ElevatedButton.styleFrom(backgroundColor: Colors.red)
+                : null,
+            child: const Text("확인"),
+          ),
+        ],
+      ),
+    );
+    return result == true;
+  }
+
+  Future<void> _createFolder() async {
+    final name =
+        await _promptInput(title: "새 폴더", label: "폴더 이름", actionLabel: "생성");
+    if (name == null || name.isEmpty) return;
+    try {
+      await _controller.createDirectory(name);
+      if (!mounted) return;
+      CustomToast.show(context, "폴더 생성됨");
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, "폴더 생성 실패: $e", isError: true);
+    }
+  }
+
+  Future<void> _createFile() async {
+    final name =
+        await _promptInput(title: "새 파일", label: "파일 이름", actionLabel: "생성");
+    if (name == null || name.isEmpty) return;
+    try {
+      await _controller.createFile(name);
+      if (!mounted) return;
+      CustomToast.show(context, "파일 생성됨");
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, "파일 생성 실패: $e", isError: true);
+    }
+  }
+
+  Future<void> _uploadLocalFiles() async {
+    try {
+      final picked = await FilePicker.platform.pickFiles(
+        allowMultiple: true,
+        withData: false,
+      );
+      if (picked == null || picked.files.isEmpty) return;
+
+      final paths = picked.files
+          .map((f) => f.path)
+          .whereType<String>()
+          .where((p) => p.isNotEmpty)
+          .toList();
+      if (paths.isEmpty) {
+        if (mounted) {
+          CustomToast.show(context, "선택된 로컬 파일 경로가 없습니다.", isError: true);
+        }
+        return;
+      }
+
+      final summary = await _controller.uploadLocalFiles(paths);
+      if (!mounted) return;
+      CustomToast.show(
+        context,
+        "업로드 완료: 성공 ${summary.success} / 스킵 ${summary.skipped} / 실패 ${summary.failed}",
+        isError: summary.failed > 0,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, "업로드 실패: $e", isError: true);
+    }
+  }
+
+  Future<void> _uploadLocalFolder() async {
+    try {
+      final directoryPath = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: '업로드할 폴더 선택',
+      );
+      if (directoryPath == null || directoryPath.isEmpty) return;
+
+      final summary = await _controller.uploadLocalDirectory(
+        directoryPath,
+        includeRootDirectory: true,
+      );
+      if (!mounted) return;
+      CustomToast.show(
+        context,
+        "폴더 업로드 완료: 성공 ${summary.success} / 스킵 ${summary.skipped} / 실패 ${summary.failed}",
+        isError: summary.failed > 0,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, "폴더 업로드 실패: $e", isError: true);
+    }
+  }
+
+  Future<void> _showBookmarks() async {
+    if (!mounted) return;
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => ListView(
         children: [
-          const ListTile(title: Text("북마크", style: TextStyle(fontWeight: FontWeight.bold))),
-          ..._bookmarks.map((path) => ListTile(
-            leading: const Icon(Icons.bookmark),
-            title: Text(path),
-            onTap: () {
-              Navigator.pop(context);
-              _navigate(path);
-            },
-            trailing: IconButton(
-              icon: const Icon(Icons.delete_outline),
-              onPressed: () {
-                Navigator.pop(context);
-                _removeBookmark(path);
+          const ListTile(
+            title: Text("북마크", style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+          ..._controller.bookmarks.map(
+            (path) => ListTile(
+              leading: const Icon(Icons.bookmark),
+              title: Text(path),
+              onTap: () {
+                Navigator.pop(ctx);
+                _navigateWithError(path);
               },
+              trailing: IconButton(
+                icon: const Icon(Icons.delete_outline),
+                onPressed: () async {
+                  Navigator.pop(ctx);
+                  await _controller.removeBookmark(path);
+                },
+              ),
             ),
-          )),
+          ),
           ListTile(
             leading: const Icon(Icons.add),
             title: const Text("현재 위치 추가"),
-            onTap: () {
-              Navigator.pop(context);
-              _addBookmark();
+            onTap: () async {
+              Navigator.pop(ctx);
+              await _controller.addBookmark();
+              if (mounted) {
+                CustomToast.show(context, "북마크 추가됨");
+              }
             },
           ),
         ],
@@ -110,440 +266,417 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
     );
   }
 
-  Future<void> _loadFiles() async {
-    if (!mounted) return;
-    final ssh = Provider.of<SSHService>(context, listen: false);
-    if (!ssh.isConnected) return;
-
-    setState(() => _isLoading = true);
-    try {
-      final files = await ssh.listFiles(_currentPath);
-      if (mounted) {
-        setState(() {
-          _files = files.where((f) => f.filename != '.' && f.filename != '..').toList();
-          _filterFiles();
-          _isLoading = false;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _isLoading = false);
-        // Don't show toast for connection closed if we are navigating away
-        if (!e.toString().contains("Connection closed")) {
-           CustomToast.show(context, "오류: $e", isError: true);
-        }
-      }
-    }
-  }
-
-  void _filterFiles() {
-    final query = _searchController.text.toLowerCase();
-    if (query.isEmpty) {
-      _filteredFiles = List.from(_files);
-    } else {
-      _filteredFiles = _files.where((f) => f.filename.toLowerCase().contains(query)).toList();
-    }
-    // Sort: Directories first, then files
-    _filteredFiles.sort((a, b) {
-      if (a.attr.isDirectory && !b.attr.isDirectory) return -1;
-      if (!a.attr.isDirectory && b.attr.isDirectory) return 1;
-      return a.filename.compareTo(b.filename);
-    });
-  }
-
-  Future<void> _navigate(String path) async {
-    setState(() => _isLoading = true);
-    final ssh = Provider.of<SSHService>(context, listen: false);
-    try {
-      // Normalize path to avoid double slashes or weird segments
-      final normalizedPath = p.posix.normalize(path);
-      final files = await ssh.listFiles(normalizedPath);
-      if (mounted) {
-        setState(() {
-          _currentPath = normalizedPath;
-          _files = files.where((f) => f.filename != '.' && f.filename != '..').toList();
-          _filterFiles();
-          _isLoading = false;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _isLoading = false);
-        
-        // Check if it's a "No such file" error
-        final errorStr = e.toString();
-        if (errorStr.contains("No such file") || errorStr.contains("code 2")) {
-           _showPathNotFoundError(path);
-        } else {
-           CustomToast.show(context, "이동 실패: $path\n$e", isError: true);
-        }
-      }
-    }
-  }
-
-  void _showPathNotFoundError(String path) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text("경로를 찾을 수 없음"),
-        content: Text("'$path' 경로가 존재하지 않습니다.\n북마크에서 제거하시겠습니까?"),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text("취소"),
-          ),
-          if (_bookmarks.contains(path))
-            TextButton(
-              onPressed: () {
-                _removeBookmark(path);
-                Navigator.pop(context);
-                CustomToast.show(context, "북마크가 제거되었습니다.");
-              },
-              child: const Text("북마크 제거", style: TextStyle(color: Colors.red)),
-            ),
-        ],
-      ),
+  Future<void> _rename(SftpName item) async {
+    final fullPath = _controller.fullPathOf(item);
+    final newName = await _promptInput(
+      title: "이름 바꾸기",
+      initialValue: item.filename,
+      label: "새 이름",
     );
+    if (newName == null || newName.isEmpty || newName == item.filename) return;
+
+    final newPath = p.posix.join(_controller.currentPath, newName);
+    try {
+      await _controller.rename(fullPath, newPath);
+      if (!mounted) return;
+      CustomToast.show(context, "이름 변경됨");
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, "이름 변경 실패: $e", isError: true);
+    }
   }
 
-  void _goUp() {
-    if (_currentPath == "/") return;
-    final newPath = p.posix.dirname(_currentPath);
-    _navigate(newPath);
-  }
-
-  void _goHome() {
-    _navigate("/data/openpilot");
-  }
-
-  Future<void> _deleteItem(SftpName item) async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text("삭제 확인"),
-        content: Text("${item.filename} 파일을 삭제하시겠습니까?"),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("취소")),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            child: const Text("삭제"),
-          ),
-        ],
-      ),
+  Future<void> _changePermissions(SftpName item) async {
+    final perms = await _promptInput(
+      title: "권한 변경 (chmod)",
+      initialValue: "755",
+      label: "예: 755",
     );
+    if (perms == null || perms.isEmpty) return;
+    try {
+      await _controller.changePermissions(_controller.fullPathOf(item), perms);
+      if (!mounted) return;
+      CustomToast.show(context, "권한 변경됨");
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, "권한 변경 실패: $e", isError: true);
+    }
+  }
 
-    if (confirm == true && mounted) {
-      final ssh = Provider.of<SSHService>(context, listen: false);
-      try {
-        final fullPath = p.posix.join(_currentPath, item.filename);
-        await ssh.deleteFile(fullPath);
-        _loadFiles();
-        if (mounted) {
-          CustomToast.show(context, "삭제됨");
-        }
-      } catch (e) {
-        if (mounted) {
-          CustomToast.show(context, "삭제 실패: $e", isError: true);
-        }
+  Future<void> _deleteSingle(SftpName item) async {
+    final ok = await _confirm(
+      title: "삭제 확인",
+      message: "${item.filename} 항목을 삭제하시겠습니까?",
+      destructive: true,
+    );
+    if (!ok) return;
+    try {
+      await _controller.deletePaths({_controller.fullPathOf(item)});
+      if (!mounted) return;
+      CustomToast.show(context, "삭제됨");
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, "삭제 실패: $e", isError: true);
+    }
+  }
+
+  Future<void> _deleteSelected() async {
+    if (_controller.selectedCount == 0) return;
+    final ok = await _confirm(
+      title: "선택 항목 삭제",
+      message: "${_controller.selectedCount}개 항목을 삭제하시겠습니까?",
+      destructive: true,
+    );
+    if (!ok) return;
+    try {
+      await _controller.deletePaths(_controller.selectedPaths);
+      if (!mounted) return;
+      CustomToast.show(context, "삭제 완료");
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, "삭제 실패: $e", isError: true);
+    }
+  }
+
+  Future<void> _copySelectedToDirectory() async {
+    if (_controller.selectedCount == 0) return;
+    final target = await _promptInput(
+      title: "복사 대상",
+      initialValue: _controller.currentPath,
+      label: "대상 경로",
+      actionLabel: "복사",
+    );
+    if (target == null || target.isEmpty) return;
+    try {
+      await _controller.copyToDirectory(_controller.selectedPaths, target);
+      if (!mounted) return;
+      CustomToast.show(context, "복사 완료");
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, "복사 실패: $e", isError: true);
+    }
+  }
+
+  Future<void> _compressSelected() async {
+    if (_controller.selectedCount == 0) return;
+    final now = DateTime.now();
+    final defaultName =
+        "archive_${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}_${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}${now.second.toString().padLeft(2, '0')}.tar.gz";
+    final name = await _promptInput(
+      title: "압축 파일명",
+      initialValue: defaultName,
+      label: "압축 파일명",
+      actionLabel: "압축",
+    );
+    if (name == null || name.isEmpty) return;
+    try {
+      await _controller.compressSelected(name);
+      if (!mounted) return;
+      CustomToast.show(context, "압축 완료");
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, "압축 실패: $e", isError: true);
+    }
+  }
+
+  Future<void> _downloadSelected() async {
+    if (_controller.selectedCount == 0) return;
+    try {
+      final summary =
+          await _controller.downloadPaths(_controller.selectedPaths);
+      if (!mounted) return;
+      CustomToast.show(
+        context,
+        "다운로드 완료: 성공 ${summary.success} / 스킵 ${summary.skipped} / 실패 ${summary.failed}",
+        isError: summary.failed > 0,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, "다운로드 실패: $e", isError: true);
+    }
+  }
+
+  Future<void> _downloadSingle(SftpName item) async {
+    final fullPath = _controller.fullPathOf(item);
+    try {
+      final summary = await _controller.downloadPaths({fullPath});
+      if (!mounted) return;
+      CustomToast.show(
+        context,
+        "다운로드 완료: 성공 ${summary.success} / 스킵 ${summary.skipped} / 실패 ${summary.failed}",
+        isError: summary.failed > 0,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, "다운로드 실패: $e", isError: true);
+    }
+  }
+
+  Future<void> _copyPath(String fullPath) async {
+    await Clipboard.setData(ClipboardData(text: fullPath));
+    if (mounted) {
+      CustomToast.show(context, "경로 복사됨");
+    }
+  }
+
+  String _quoteShell(String value) {
+    return "'${value.replaceAll("'", "'\"'\"'")}'";
+  }
+
+  Future<void> _extractArchive(String fullPath) async {
+    final name = await _promptInput(
+      title: "압축 해제 경로",
+      initialValue: _controller.currentPath,
+      label: "대상 경로",
+    );
+    if (name == null || name.isEmpty) return;
+
+    try {
+      final ssh = _controller.ssh;
+      if (ssh == null || !ssh.isConnected) {
+        throw Exception('기기와 연결되어 있지 않습니다.');
       }
+      final cmd =
+          "mkdir -p -- ${_quoteShell(name)} && (tar -xf ${_quoteShell(fullPath)} -C ${_quoteShell(name)} || unzip -o ${_quoteShell(fullPath)} -d ${_quoteShell(name)})";
+      final result = await ssh.executeCommandResult(
+        cmd,
+        timeout: const Duration(minutes: 5),
+      );
+      if (!result.isSuccess) {
+        throw Exception(result.output.trim().isEmpty
+            ? "압축 해제 실패 (exit=${result.exitCode})"
+            : result.output.trim());
+      }
+      if (!mounted) return;
+      CustomToast.show(context, "압축 해제 완료");
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, "압축 해제 실패: $e", isError: true);
     }
   }
 
   Future<void> _editFile(SftpName item) async {
-    final ssh = Provider.of<SSHService>(context, listen: false);
-    final fullPath = p.posix.join(_currentPath, item.filename);
-    
-    try {
-      // Check file size first. If too big, warn or skip.
-      if ((item.attr.size ?? 0) > 1024 * 1024) { // 1MB limit for text editing
-         CustomToast.show(context, "파일이 너무 커서 편집할 수 없습니다.", isError: true);
-         return;
+    final ssh = _controller.ssh;
+    if (ssh == null || !ssh.isConnected) {
+      if (mounted) {
+        CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
       }
-
+      return;
+    }
+    final fullPath = _controller.fullPathOf(item);
+    if ((item.attr.size ?? 0) > 1024 * 1024) {
+      CustomToast.show(context, "파일이 너무 커서 편집할 수 없습니다.", isError: true);
+      return;
+    }
+    try {
       final content = await ssh.readTextFile(fullPath);
       if (!mounted) return;
-      
       await Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (context) => FileEditorScreen(
+          builder: (_) => FileEditorScreen(
             filePath: fullPath,
             initialContent: content,
           ),
         ),
       );
-      // Reload after edit
-      _loadFiles();
-      
+      await _refresh();
     } catch (e) {
-      if (mounted) {
-        String title = "파일 열기 실패";
-        String message = "파일을 읽는 도중 오류가 발생했습니다.";
-        
-        final errorStr = e.toString();
-        if (errorStr.contains("code 4") || errorStr.contains("Failure")) {
-          if (item.attr.isSymbolicLink) {
-             message = "심볼릭 링크가 가리키는 원본 파일을 찾을 수 없거나 접근할 수 없습니다.";
-          } else {
-             message = "파일을 읽을 수 없습니다. (시스템 오류)";
-          }
-        } else if (errorStr.contains("Permission denied")) {
-           message = "파일에 접근할 권한이 없습니다.";
-        }
-
-        showDialog(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: Text(title),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(message),
-                const SizedBox(height: 8),
-                const Text("상세 오류:", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
-                Text(errorStr, style: const TextStyle(fontSize: 12, color: Colors.grey)),
-              ],
-            ),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("확인")),
-            ],
-          ),
-        );
-      }
+      if (!mounted) return;
+      CustomToast.show(context, "파일 열기 실패: $e", isError: true);
     }
   }
 
-  Future<void> _renameItem(SftpName item) async {
-    final controller = TextEditingController(text: item.filename);
-    final newName = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text("이름 바꾸기"),
-        content: TextField(controller: controller, decoration: const InputDecoration(labelText: "새 이름")),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("취소")),
-          ElevatedButton(onPressed: () => Navigator.pop(ctx, controller.text), child: const Text("확인")),
-        ],
-      ),
-    );
+  void _setClipboardFromSelection(bool cut) {
+    if (_controller.selectedCount == 0) return;
+    _controller.setClipboard(_controller.selectedPaths, cut: cut);
+    CustomToast.show(context, cut ? "잘라내기 준비됨" : "복사 준비됨");
+  }
 
-    if (newName != null && newName.isNotEmpty && newName != item.filename) {
-      final ssh = Provider.of<SSHService>(context, listen: false);
-      try {
-        final oldPath = p.posix.join(_currentPath, item.filename);
-        final newPath = p.posix.join(_currentPath, newName);
-        await ssh.renameFile(oldPath, newPath);
-        _loadFiles();
-        if (mounted) CustomToast.show(context, "이름 변경됨");
-      } catch (e) {
-        if (mounted) CustomToast.show(context, "오류: $e", isError: true);
-      }
+  void _setClipboardSingle(String fullPath, bool cut) {
+    _controller.setClipboard({fullPath}, cut: cut);
+    CustomToast.show(context, cut ? "잘라내기 준비됨" : "복사 준비됨");
+  }
+
+  Future<void> _pasteClipboard() async {
+    if (!_controller.hasClipboard) return;
+    try {
+      await _controller.pasteClipboardToCurrentPath();
+      if (!mounted) return;
+      CustomToast.show(context, "붙여넣기 완료");
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, "붙여넣기 실패: $e", isError: true);
     }
   }
 
-  Future<void> _changePermissions(SftpName item) async {
-    final controller = TextEditingController(text: "755"); // Default
-    final perms = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text("권한 변경 (chmod)"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
+  Widget _buildSelectionToolbar() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.only(top: 6),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
           children: [
-            const Text("예: 755, 644, 777"),
-            TextField(controller: controller, keyboardType: TextInputType.number),
+            Chip(label: Text("${_controller.selectedCount}개 선택")),
+            const SizedBox(width: 6),
+            ActionChip(
+              label: const Text("전체 선택"),
+              onPressed: _controller.selectAllVisible,
+            ),
+            const SizedBox(width: 6),
+            ActionChip(
+              label: const Text("복사"),
+              onPressed: () => _setClipboardFromSelection(false),
+            ),
+            const SizedBox(width: 6),
+            ActionChip(
+              label: const Text("잘라내기"),
+              onPressed: () => _setClipboardFromSelection(true),
+            ),
+            const SizedBox(width: 6),
+            ActionChip(
+              label: const Text("붙여넣기"),
+              onPressed: _controller.hasClipboard ? _pasteClipboard : null,
+            ),
+            const SizedBox(width: 6),
+            ActionChip(
+              label: const Text("경로복사"),
+              onPressed: () => _copyPath(_controller.selectedPaths.join('\n')),
+            ),
+            const SizedBox(width: 6),
+            ActionChip(
+              label: const Text("폴더로 복사"),
+              onPressed: _copySelectedToDirectory,
+            ),
+            const SizedBox(width: 6),
+            ActionChip(
+              label: const Text("압축"),
+              onPressed: _compressSelected,
+            ),
+            const SizedBox(width: 6),
+            ActionChip(
+              label: const Text("다운로드"),
+              onPressed: _downloadSelected,
+            ),
+            const SizedBox(width: 6),
+            ActionChip(
+              label: const Text("삭제"),
+              onPressed: _deleteSelected,
+            ),
+            const SizedBox(width: 6),
+            ActionChip(
+              label: const Text("선택 해제"),
+              onPressed: _controller.clearSelection,
+            ),
           ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("취소")),
-          ElevatedButton(onPressed: () => Navigator.pop(ctx, controller.text), child: const Text("확인")),
-        ],
       ),
     );
+  }
 
-    if (perms != null && perms.isNotEmpty) {
-      final ssh = Provider.of<SSHService>(context, listen: false);
-      try {
-        final fullPath = p.posix.join(_currentPath, item.filename);
-        await ssh.executeCommand("chmod $perms $fullPath");
-        _loadFiles();
-        if (mounted) CustomToast.show(context, "권한 변경됨");
-      } catch (e) {
-        if (mounted) CustomToast.show(context, "오류: $e", isError: true);
-      }
-    }
+  Widget _buildTopToolbar() {
+    return FileExplorerTopToolbar(
+      controller: _controller,
+      searchController: _searchController,
+      onGoHome: () => _controller.goHome().catchError((e) {
+        if (mounted) {
+          CustomToast.show(context, "이동 실패: $e", isError: true);
+        }
+      }),
+      onGoUp: _controller.currentPath == '/'
+          ? null
+          : () => _controller.goUp().catchError((e) {
+                if (mounted) {
+                  CustomToast.show(context, "이동 실패: $e", isError: true);
+                }
+              }),
+      onShowBookmarks: _showBookmarks,
+      onToggleSearch: () {
+        _controller.setSearching(!_controller.isSearching);
+        if (!_controller.isSearching) {
+          _searchController.clear();
+        }
+      },
+      onToggleSelectionMode: () {
+        if (_controller.selectionMode) {
+          _controller.clearSelection();
+        } else {
+          _controller.enterSelectionMode();
+        }
+      },
+      onCreateFolder: _createFolder,
+      onCreateFile: _createFile,
+      onUploadFiles: _uploadLocalFiles,
+      onUploadFolder: _uploadLocalFolder,
+      onRefresh: _refresh,
+      onSortSelected: _controller.setSortMode,
+      onSearchChanged: _controller.updateSearchQuery,
+      onSearchClose: () {
+        _searchController.clear();
+        _controller.setSearching(false);
+      },
+      selectionBar: _controller.selectionMode ? _buildSelectionToolbar() : null,
+    );
+  }
+
+  Widget _buildBottomPathBar() {
+    return FileExplorerBottomBar(
+      controller: _controller,
+      pathController: _pathController,
+      pathFocusNode: _pathFocusNode,
+      onGoBack: _controller.canGoBack
+          ? () => _controller.goBack().catchError((e) {
+                if (mounted) {
+                  CustomToast.show(context, "이동 실패: $e", isError: true);
+                }
+              })
+          : null,
+      onGoForward: _controller.canGoForward
+          ? () => _controller.goForward().catchError((e) {
+                if (mounted) {
+                  CustomToast.show(context, "이동 실패: $e", isError: true);
+                }
+              })
+          : null,
+      onNavigate: () => _navigateWithError(_pathController.text.trim()),
+      onPaste: _controller.hasClipboard ? _pasteClipboard : null,
+    );
+  }
+
+  Widget _buildFileList() {
+    return FileExplorerFileListView(
+      controller: _controller,
+      onNavigateDirectory: _navigateWithError,
+      onEditFile: _editFile,
+      onRename: _rename,
+      onChangePermissions: _changePermissions,
+      onDownload: _downloadSingle,
+      onCopyPath: _copyPath,
+      onSelect: _controller.enterSelectionMode,
+      onCopyClipboard: (path) => _setClipboardSingle(path, false),
+      onCutClipboard: (path) => _setClipboardSingle(path, true),
+      onDelete: _deleteSingle,
+      onExtractArchive: _extractArchive,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Container(
-          padding: const EdgeInsets.all(8),
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surfaceContainer,
-            border: Border(
-              bottom: BorderSide(
-                color: Theme.of(context).colorScheme.outlineVariant.withOpacity(0.5),
-              ),
-            ),
-          ),
-          child: Column(
-            children: [
-              Row(
-                children: [
-                  IconButton(
-                    icon: const Icon(Icons.home),
-                    onPressed: _goHome,
-                    tooltip: "홈 (/data/openpilot)",
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.arrow_upward),
-                    onPressed: _currentPath == "/" ? null : _goUp,
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.bookmark_border),
-                    onPressed: _showBookmarks,
-                    tooltip: "북마크",
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _isSearching 
-                      ? TextField(
-                          controller: _searchController,
-                          autofocus: true,
-                          decoration: InputDecoration(
-                            hintText: "검색...",
-                            suffixIcon: IconButton(
-                              icon: const Icon(Icons.close),
-                              onPressed: () {
-                                setState(() {
-                                  _isSearching = false;
-                                  _searchController.clear();
-                                  _filterFiles();
-                                });
-                              },
-                            ),
-                          ),
-                          onChanged: (value) {
-                            setState(() {
-                              _filterFiles();
-                            });
-                          },
-                        )
-                      : GestureDetector(
-                          onTap: () {
-                            // Maybe allow manual path entry?
-                          },
-                          child: Text(
-                            _currentPath,
-                            style: const TextStyle(fontWeight: FontWeight.bold),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                  ),
-                  if (!_isSearching)
-                    IconButton(
-                      icon: const Icon(Icons.search),
-                      onPressed: () {
-                        setState(() {
-                          _isSearching = true;
-                        });
-                      },
-                    ),
-                  IconButton(
-                    icon: const Icon(Icons.refresh),
-                    onPressed: _loadFiles,
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-        if (_isLoading) const LinearProgressIndicator(),
-        Expanded(
-          child: ListView.builder(
-            padding: const EdgeInsets.only(bottom: 150),
-            itemCount: _filteredFiles.length,
-            itemBuilder: (context, index) {
-              final item = _filteredFiles[index];
-              final isDir = item.attr.isDirectory;
-              final isLink = item.attr.isSymbolicLink;
-              return ListTile(
-                leading: Icon(
-                  isDir ? Icons.folder : (isLink ? Icons.link : Icons.insert_drive_file),
-                  color: isDir ? Colors.amber : (isLink ? Colors.blue : Colors.grey),
-                ),
-                title: Text(item.filename),
-                subtitle: isDir ? null : Text(item.attr.size != null ? "${(item.attr.size! / 1024).toStringAsFixed(1)} KB" : ""),
-                onTap: () {
-                  if (isDir) {
-                    final newPath = p.posix.join(_currentPath, item.filename);
-                    _navigate(newPath);
-                  } else {
-                    _editFile(item);
-                  }
-                },
-                trailing: PopupMenuButton<String>(
-                  onSelected: (value) {
-                    switch (value) {
-                      case 'edit':
-                        _editFile(item);
-                        break;
-                      case 'rename':
-                        _renameItem(item);
-                        break;
-                      case 'chmod':
-                        _changePermissions(item);
-                        break;
-                      case 'delete':
-                        _deleteItem(item);
-                        break;
-                    }
-                  },
-                  itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
-                    if (!isDir)
-                      const PopupMenuItem<String>(
-                        value: 'edit',
-                        child: ListTile(
-                          leading: Icon(Icons.edit),
-                          title: Text('편집'),
-                          contentPadding: EdgeInsets.zero,
-                        ),
-                      ),
-                    const PopupMenuItem<String>(
-                      value: 'rename',
-                      child: ListTile(
-                        leading: Icon(Icons.drive_file_rename_outline),
-                        title: Text('이름 바꾸기'),
-                        contentPadding: EdgeInsets.zero,
-                      ),
-                    ),
-                    const PopupMenuItem<String>(
-                      value: 'chmod',
-                      child: ListTile(
-                        leading: Icon(Icons.lock),
-                        title: Text('권한 설정'),
-                        contentPadding: EdgeInsets.zero,
-                      ),
-                    ),
-                    const PopupMenuItem<String>(
-                      value: 'delete',
-                      child: ListTile(
-                        leading: Icon(Icons.delete, color: Colors.red),
-                        title: Text('삭제', style: TextStyle(color: Colors.red)),
-                        contentPadding: EdgeInsets.zero,
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
-        ),
-      ],
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) {
+        _syncPathField();
+        return Column(
+          children: [
+            _buildTopToolbar(),
+            if (_controller.isLoading && _controller.visibleFiles.isNotEmpty)
+              const LinearProgressIndicator(),
+            Expanded(child: _buildFileList()),
+            _buildBottomPathBar(),
+          ],
+        );
+      },
     );
   }
 }

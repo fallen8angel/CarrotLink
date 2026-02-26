@@ -9,7 +9,6 @@ import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import '../services/ssh_service.dart';
-import 'package:dartssh2/dartssh2.dart';
 import 'design_components.dart';
 import 'custom_toast.dart';
 
@@ -65,11 +64,11 @@ class _DriveListWidgetState extends State<DriveListWidget> {
     if (!silent) {
       setState(() => _isLoading = true);
     }
-    
+
     try {
       // Add a small delay to ensure SFTP is ready
       if (!silent) await Future.delayed(const Duration(milliseconds: 500));
-      
+
       final files = await ssh.listFiles('/data/media/0/realdata');
       // Group by route name (remove --segment)
       // Example: 2023-10-27--12-34-56--0 -> 2023-10-27--12-34-56
@@ -84,7 +83,7 @@ class _DriveListWidgetState extends State<DriveListWidget> {
           }
         }
       }
-      
+
       final routes = routeSet.toList()..sort((a, b) => b.compareTo(a));
 
       if (mounted) {
@@ -124,10 +123,7 @@ class _DriveListWidgetState extends State<DriveListWidget> {
           return SizedBox(
             width: 200, // Fixed width for horizontal items
             child: RouteCard(
-              route: route, 
-              index: index,
-              onTap: () => _openRoute(route)
-            ),
+                route: route, index: index, onTap: () => _openRoute(route)),
           );
         },
       ),
@@ -140,12 +136,11 @@ class RouteCard extends StatefulWidget {
   final int index;
   final VoidCallback onTap;
 
-  const RouteCard({
-    super.key, 
-    required this.route, 
-    required this.index,
-    required this.onTap
-  });
+  const RouteCard(
+      {super.key,
+      required this.route,
+      required this.index,
+      required this.onTap});
 
   @override
   State<RouteCard> createState() => _RouteCardState();
@@ -187,7 +182,8 @@ class _RouteCardState extends State<RouteCard> {
 
         if (!exists) {
           // Generate GIF - use -t 1 for faster generation (1 second only)
-          final genCmd = 'ffmpeg -y -i $remoteVideo -ss 5 -t 1 -vf scale=320:-1 -r 10 $remoteGif';
+          final genCmd =
+              'ffmpeg -y -i $remoteVideo -ss 5 -t 1 -vf scale=320:-1 -r 10 $remoteGif';
           // Run in background or wait? Waiting might block if many items load at once.
           // But we are in async function.
           await ssh.executeCommand(genCmd);
@@ -231,11 +227,12 @@ class _RouteCardState extends State<RouteCard> {
                       child: Center(
                         child: _loadingImage
                             ? const SizedBox(
-                                width: 24, 
-                                height: 24, 
-                                child: CircularProgressIndicator(strokeWidth: 2)
-                              )
-                            : const Icon(Icons.movie, size: 50, color: Colors.grey),
+                                width: 24,
+                                height: 24,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2))
+                            : const Icon(Icons.movie,
+                                size: 50, color: Colors.grey),
                       ),
                     ),
             ),
@@ -292,7 +289,7 @@ class _SegmentTileState extends State<SegmentTile> {
   String? _dateStr;
   String? _sizeStr;
   bool _infoLoaded = false;
-  
+
   // Static queue to limit concurrent ffmpeg processes
   static int _activeGenerations = 0;
   static final List<Function> _taskQueue = [];
@@ -306,22 +303,22 @@ class _SegmentTileState extends State<SegmentTile> {
 
   Future<void> _loadSegmentInfo() async {
     if (_infoLoaded) return;
-    
+
     try {
       // 1. 폴더 이름에서 날짜 파싱 (예: 2024-11-25--14-30-00)
       // route 형식: 2024-11-25--14-30-00 또는 20241125--143000
       String? month, day, hour, minute;
-      
+
       // 형식 1: 2024-11-25--14-30-00
       if (widget.route.contains('-') && widget.route.contains('--')) {
         final routeParts = widget.route.split('--');
         if (routeParts.length >= 2) {
           final datePart = routeParts[0]; // 2024-11-25
           final timePart = routeParts[1]; // 14-30-00
-          
+
           final dateComponents = datePart.split('-');
           final timeComponents = timePart.split('-');
-          
+
           if (dateComponents.length >= 3 && timeComponents.length >= 2) {
             month = dateComponents[1];
             day = dateComponents[2];
@@ -344,7 +341,7 @@ class _SegmentTileState extends State<SegmentTile> {
           }
         }
       }
-      
+
       if (month != null && day != null) {
         if (hour != null && minute != null) {
           _dateStr = '$month/$day $hour:$minute';
@@ -352,25 +349,31 @@ class _SegmentTileState extends State<SegmentTile> {
           _dateStr = '$month/$day';
         }
       }
-      
+
       // 2. Fleet Manager API로 크기 가져오기 (선택적)
       final ssh = Provider.of<SSHService>(context, listen: false);
       if (ssh.isConnected && ssh.connectedIp != null) {
         try {
           final segmentIndex = widget.segment.split('--').last;
-          final folderPath = '/data/media/0/realdata/${widget.route}--$segmentIndex';
-          final url = 'http://${ssh.connectedIp}:8082/folder-info?path=$folderPath';
-          
-          final response = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 3));
+          final folderPath =
+              '/data/media/0/realdata/${widget.route}--$segmentIndex';
+          final url =
+              'http://${ssh.connectedIp}:8082/folder-info?path=$folderPath';
+
+          final response = await http
+              .get(Uri.parse(url))
+              .timeout(const Duration(seconds: 3));
           if (response.statusCode == 200) {
             final data = json.decode(response.body);
             if (data['status'] == 'success' && data['size'] != null) {
               final totalSize = data['size'] as int;
               if (totalSize > 0) {
                 if (totalSize >= 1024 * 1024 * 1024) {
-                  _sizeStr = '${(totalSize / (1024 * 1024 * 1024)).toStringAsFixed(1)}GB';
+                  _sizeStr =
+                      '${(totalSize / (1024 * 1024 * 1024)).toStringAsFixed(1)}GB';
                 } else if (totalSize >= 1024 * 1024) {
-                  _sizeStr = '${(totalSize / (1024 * 1024)).toStringAsFixed(1)}MB';
+                  _sizeStr =
+                      '${(totalSize / (1024 * 1024)).toStringAsFixed(1)}MB';
                 } else if (totalSize >= 1024) {
                   _sizeStr = '${(totalSize / 1024).toStringAsFixed(0)}KB';
                 } else {
@@ -383,7 +386,7 @@ class _SegmentTileState extends State<SegmentTile> {
           // Fleet Manager API 실패 시 무시 (날짜만 표시)
         }
       }
-      
+
       _infoLoaded = true;
       if (mounted) setState(() {});
     } catch (e) {
@@ -408,13 +411,14 @@ class _SegmentTileState extends State<SegmentTile> {
       final convertToMp4 = prefs.getBool('share_convert_mp4') ?? false;
 
       if (mounted) {
-        CustomToast.show(context, convertToMp4 ? "MP4 변환 및 파일 준비 중..." : "파일 다운로드 및 준비 중...");
+        CustomToast.show(context,
+            convertToMp4 ? "MP4 변환 및 파일 준비 중..." : "파일 다운로드 및 준비 중...");
       }
 
       final tempDir = await getTemporaryDirectory();
       final segmentIndex = widget.segment.split('--').last;
       final remoteDir = '/data/media/0/realdata/${widget.route}--$segmentIndex';
-      
+
       // Files to share
       final filesToShare = <XFile>[];
       final fileNames = ['qcamera.ts', 'rlog', 'qlog']; // Common files
@@ -422,27 +426,30 @@ class _SegmentTileState extends State<SegmentTile> {
       for (final name in fileNames) {
         var remotePath = '$remoteDir/$name';
         var localFileName = '${widget.route}--$segmentIndex--$name';
-        
+
         // Handle MP4 conversion for qcamera.ts
         if (convertToMp4 && name == 'qcamera.ts') {
           final mp4Name = 'qcamera.mp4';
           final remoteMp4Path = '$remoteDir/$mp4Name';
           localFileName = '${widget.route}--$segmentIndex--$mp4Name';
-          
+
           // Check if mp4 already exists remotely
-          final existsMp4Cmd = 'test -f $remoteMp4Path && echo "yes" || echo "no"';
-          final existsMp4 = (await ssh.executeCommand(existsMp4Cmd)).trim() == "yes";
-          
+          final existsMp4Cmd =
+              'test -f $remoteMp4Path && echo "yes" || echo "no"';
+          final existsMp4 =
+              (await ssh.executeCommand(existsMp4Cmd)).trim() == "yes";
+
           if (!existsMp4) {
-             // CustomToast.show(context, "MP4 변환 중... (잠시만 기다려주세요)");
-             // Convert using ffmpeg. -c copy is fast if container change is enough.
-             // But qcamera.ts might need re-muxing. -c copy usually works for ts->mp4 if codecs are compatible.
-             // If not, we might need -c:v libx264 etc. but that's slow on device.
-             // Let's try -c copy first.
-             final convertCmd = 'ffmpeg -y -i $remotePath -c copy $remoteMp4Path';
-             await ssh.executeCommand(convertCmd);
+            // CustomToast.show(context, "MP4 변환 중... (잠시만 기다려주세요)");
+            // Convert using ffmpeg. -c copy is fast if container change is enough.
+            // But qcamera.ts might need re-muxing. -c copy usually works for ts->mp4 if codecs are compatible.
+            // If not, we might need -c:v libx264 etc. but that's slow on device.
+            // Let's try -c copy first.
+            final convertCmd =
+                'ffmpeg -y -i $remotePath -c copy $remoteMp4Path';
+            await ssh.executeCommand(convertCmd);
           }
-          
+
           remotePath = remoteMp4Path;
         }
 
@@ -456,27 +463,25 @@ class _SegmentTileState extends State<SegmentTile> {
         if (exists) {
           // Download if not exists locally
           if (!await file.exists()) {
-             // CustomToast.show(context, "${remotePath.split('/').last} 다운로드 중...");
-             final content = await ssh.readBinaryFile(remotePath);
-             await file.writeAsBytes(content);
+            // CustomToast.show(context, "${remotePath.split('/').last} 다운로드 중...");
+            await ssh.downloadBinaryFile(remotePath, localPath);
           }
           filesToShare.add(XFile(localPath));
         }
       }
 
       if (filesToShare.isNotEmpty) {
-        await Share.shareXFiles(filesToShare, text: "${widget.route} -- Segment ${widget.index}");
+        await Share.shareXFiles(filesToShare,
+            text: "${widget.route} -- Segment ${widget.index}");
       } else {
         if (mounted) CustomToast.show(context, "공유할 파일이 없습니다.", isError: true);
       }
-
     } catch (e) {
       if (mounted) CustomToast.show(context, "공유 실패: $e", isError: true);
     } finally {
       if (mounted) setState(() => _sharing = false);
     }
   }
-
 
   Future<void> _loadThumbnail() async {
     if (_loading) return;
@@ -485,7 +490,8 @@ class _SegmentTileState extends State<SegmentTile> {
     final ssh = Provider.of<SSHService>(context, listen: false);
     try {
       final tempDir = await getTemporaryDirectory();
-      final localPath = '${tempDir.path}/${widget.route}--${widget.segment}.jpg';
+      final localPath =
+          '${tempDir.path}/${widget.route}--${widget.segment}.jpg';
       final file = File(localPath);
 
       if (await file.exists()) {
@@ -496,9 +502,10 @@ class _SegmentTileState extends State<SegmentTile> {
         // Enqueue remote generation
         _enqueueTask(() async {
           if (!mounted) return;
-          
+
           final segmentIndex = widget.segment.split('--').last;
-          final remoteDir = '/data/media/0/realdata/${widget.route}--$segmentIndex';
+          final remoteDir =
+              '/data/media/0/realdata/${widget.route}--$segmentIndex';
           final remoteImg = '$remoteDir/thumbnail.jpg';
           final remoteVideo = '$remoteDir/qcamera.ts';
 
@@ -508,7 +515,8 @@ class _SegmentTileState extends State<SegmentTile> {
 
           if (!exists) {
             // Generate thumbnail
-            final genCmd = 'ffmpeg -y -i $remoteVideo -ss 5 -vframes 1 -vf scale=160:-1 $remoteImg';
+            final genCmd =
+                'ffmpeg -y -i $remoteVideo -ss 5 -vframes 1 -vf scale=160:-1 $remoteImg';
             await ssh.executeCommand(genCmd);
           }
 
@@ -527,7 +535,8 @@ class _SegmentTileState extends State<SegmentTile> {
   }
 
   void _enqueueTask(Future<void> Function() task) {
-    if (_activeGenerations < 2) { // Max 2 concurrent tasks
+    if (_activeGenerations < 2) {
+      // Max 2 concurrent tasks
       _activeGenerations++;
       task().then((_) => _processNext()).catchError((_) => _processNext());
     } else {
@@ -546,7 +555,7 @@ class _SegmentTileState extends State<SegmentTile> {
 
   String _buildSubtitle() {
     if (!_infoLoaded) return '로딩...';
-    
+
     final parts = <String>[];
     if (_dateStr != null && _dateStr!.isNotEmpty) {
       parts.add(_dateStr!);
@@ -554,7 +563,7 @@ class _SegmentTileState extends State<SegmentTile> {
     if (_sizeStr != null && _sizeStr!.isNotEmpty) {
       parts.add(_sizeStr!);
     }
-    
+
     if (parts.isEmpty) {
       return '세그먼트 ${widget.index}';
     }
@@ -565,7 +574,7 @@ class _SegmentTileState extends State<SegmentTile> {
   Widget build(BuildContext context) {
     // 세그먼트 번호 추출 (--뒤의 숫자)
     final segmentNum = widget.segment.split('--').last;
-    
+
     return ListTile(
       leading: Container(
         width: 80,
@@ -574,7 +583,11 @@ class _SegmentTileState extends State<SegmentTile> {
         child: _thumbnail != null
             ? Image.file(_thumbnail!, fit: BoxFit.cover)
             : (_loading
-                ? const Center(child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)))
+                ? const Center(
+                    child: SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2)))
                 : const Icon(Icons.play_circle_outline)),
       ),
       title: Text(
@@ -593,8 +606,11 @@ class _SegmentTileState extends State<SegmentTile> {
         mainAxisSize: MainAxisSize.min,
         children: [
           IconButton(
-            icon: _sharing 
-                ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+            icon: _sharing
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2))
                 : const Icon(Icons.share),
             onPressed: _shareSegment,
           ),
@@ -630,10 +646,11 @@ class _RouteDetailScreenState extends State<RouteDetailScreen> {
       // List all folders in realdata that start with route
       final files = await ssh.listFiles('/data/media/0/realdata');
       final segments = files
-          .where((f) => f.attr.isDirectory && f.filename.startsWith('${widget.route}--'))
+          .where((f) =>
+              f.attr.isDirectory && f.filename.startsWith('${widget.route}--'))
           .map((f) => f.filename) // Keep full filename
           .toList();
-        
+
       // Numerical sort
       segments.sort((a, b) {
         final indexA = int.tryParse(a.split('--').last) ?? 0;
@@ -657,12 +674,13 @@ class _RouteDetailScreenState extends State<RouteDetailScreen> {
   Future<void> _playInBrowser(String segmentFilename) async {
     final ssh = Provider.of<SSHService>(context, listen: false);
     final ip = ssh.connectedIp ?? '192.168.0.1';
-    
+
     // Extract segment number from filename: route--N
     final segmentIndex = segmentFilename.split('--').last;
-    
-    final url = Uri.parse('http://$ip:8082/footage/${widget.route}?$segmentIndex,qcamera');
-    
+
+    final url = Uri.parse(
+        'http://$ip:8082/footage/${widget.route}?$segmentIndex,qcamera');
+
     if (await canLaunchUrl(url)) {
       await launchUrl(url, mode: LaunchMode.externalApplication);
     } else {
@@ -696,6 +714,4 @@ class _RouteDetailScreenState extends State<RouteDetailScreen> {
   }
 }
 
-
 // Removed VideoPlayerScreen class
-

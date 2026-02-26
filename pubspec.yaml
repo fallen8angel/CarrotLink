@@ -1,7 +1,7 @@
 name: carrot_pilot_manager
 description: A CarrotLink App
 publish_to: 'none'
-version: 1.1013.0+25
+version: 1.1014.0+26
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -36,6 +36,7 @@ dependencies:
   path: ^1.9.1
   pointycastle: ^3.9.1
   webview_flutter: ^4.13.0
+  file_picker: ^8.0.7
 
 dev_dependencies:
   flutter_test:

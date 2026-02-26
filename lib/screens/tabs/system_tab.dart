@@ -1,12 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../../services/device_action_service.dart';
 import '../../services/ssh_service.dart';
-import '../../services/macro_service.dart';
-import '../../constants.dart';
-import '../../widgets/design_components.dart';
 import '../../widgets/custom_toast.dart';
-
-import '../../widgets/command_execution_dialog.dart';
+import '../../widgets/design_components.dart';
 
 class SystemTab extends StatefulWidget {
   const SystemTab({super.key});
@@ -16,10 +13,66 @@ class SystemTab extends StatefulWidget {
 }
 
 class _SystemTabState extends State<SystemTab> {
-  
-  Future<void> _executeSafeCommand(BuildContext context, String command, String title, String message, {bool isDestructive = false}) async {
+  final DeviceActionService _actionService = DeviceActionService();
+
+  String _formatActionLog({
+    required String title,
+    required DeviceActionType action,
+    required String commandPreview,
+    required DeviceActionResult result,
+  }) {
+    final stdout = result.stdout.trim().isEmpty ? "(없음)" : result.stdout.trim();
+    final stderr = result.stderr.trim().isEmpty ? "(없음)" : result.stderr.trim();
+    final status = result.ok ? "SUCCESS" : "FAIL";
+
+    return '''
+[작업] $title
+[액션] ${action.name}
+[상태] $status
+[종료코드] ${result.exitCode}
+[소요시간] ${result.duration.inMilliseconds}ms
+[전송] ${result.transport}
+
+[명령어]
+$commandPreview
+
+[STDOUT]
+$stdout
+
+[STDERR]
+$stderr
+''';
+  }
+
+  String _formatActionErrorLog({
+    required String title,
+    required DeviceActionType action,
+    required String commandPreview,
+    required Object error,
+  }) {
+    return '''
+[작업] $title
+[액션] ${action.name}
+[상태] ERROR
+
+[명령어]
+$commandPreview
+
+[예외]
+$error
+''';
+  }
+
+  Future<void> _executeManagedAction(
+    BuildContext context, {
+    required DeviceActionType action,
+    required String title,
+    required String message,
+    bool isDestructive = false,
+  }) async {
     final ssh = Provider.of<SSHService>(context, listen: false);
-    
+    final commandPreview = _actionService.previewAction(action);
+
     if (!ssh.isConnected) {
       CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
       return;
@@ -31,12 +84,19 @@ class _SystemTabState extends State<SystemTab> {
         title: Text(title),
         content: Text(message),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("취소")),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("취소"),
+          ),
           ElevatedButton(
             onPressed: () => Navigator.pop(ctx, true),
             style: ElevatedButton.styleFrom(
-              backgroundColor: isDestructive ? Theme.of(context).colorScheme.error : Theme.of(context).colorScheme.primary,
-              foregroundColor: isDestructive ? Theme.of(context).colorScheme.onError : Theme.of(context).colorScheme.onPrimary,
+              backgroundColor: isDestructive
+                  ? Theme.of(context).colorScheme.error
+                  : Theme.of(context).colorScheme.primary,
+              foregroundColor: isDestructive
+                  ? Theme.of(context).colorScheme.onError
+                  : Theme.of(context).colorScheme.onPrimary,
             ),
             child: const Text("확인"),
           ),
@@ -44,49 +104,128 @@ class _SystemTabState extends State<SystemTab> {
       ),
     );
 
-    if (confirmed == true && mounted) {
-      showDialog(
+    if (confirmed != true || !mounted) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: CircularProgressIndicator(),
+      ),
+    );
+
+    DeviceActionResult? result;
+    Object? error;
+
+    try {
+      result = await _actionService.runAction(ssh, action);
+    } catch (e) {
+      error = e;
+    } finally {
+      if (mounted && Navigator.of(context, rootNavigator: true).canPop()) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+    }
+
+    if (!mounted) return;
+
+    if (error != null) {
+      final errorLog = _formatActionErrorLog(
+        title: title,
+        action: action,
+        commandPreview: commandPreview,
+        error: error,
+      );
+      await showDialog<void>(
         context: context,
-        barrierDismissible: false,
-        builder: (context) => CommandExecutionDialog(
-          title: title,
-          command: command,
-          autoClose: false,
+        builder: (_) => AlertDialog(
+          title: Text("$title 실패"),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: SelectableText(
+                errorLog,
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text("닫기"),
+            ),
+          ],
         ),
+      );
+      CustomToast.show(context, "실행 실패: $error", isError: true);
+      return;
+    }
+
+    if (result == null) {
+      CustomToast.show(context, "실행 결과가 비어 있습니다.", isError: true);
+      return;
+    }
+
+    final finalResult = result;
+    final logText = _formatActionLog(
+      title: title,
+      action: action,
+      commandPreview: commandPreview,
+      result: finalResult,
+    );
+
+    await showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text(title),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: SelectableText(
+              logText,
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("닫기"),
+          ),
+        ],
+      ),
+    );
+
+    if (finalResult.ok) {
+      CustomToast.show(context, "$title 완료");
+    } else {
+      CustomToast.show(
+        context,
+        "$title 실패 (code: ${finalResult.exitCode})",
+        isError: true,
       );
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final macroService = Provider.of<MacroService>(context);
-    final softRestartCmd = macroService.macros.firstWhere(
-      (m) => m.name.toLowerCase() == "soft restart",
-      orElse: () => Macro(
-        name: "Soft restart", 
-        command: "tmux kill-session -t tmp 2>/dev/null; tmux new -d -s tmp; tmux split-window -v -t tmp; tmux send-keys -t tmp.0 \"/data/openpilot/launch_openpilot.sh\" C-m; tmux send-keys -t tmp.1 \"tmux kill-session -t comma\" C-m; tmux send-keys -t tmp.1 \"tmux rename-session -t tmp comma\" C-m; tmux send-keys -t tmp.1 \"exit\" C-m"
-      ),
-    ).command;
-
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
         _buildSection(context, "전원 및 프로세스", Icons.power_settings_new, [
           _buildActionButton(
-            context, 
-            "소프트 재시작 (Soft Restart)", 
-            Icons.refresh, 
-            // Wrap in bash login shell to ensure environment variables (like PATH) are set correctly,
-            // similar to how it runs in the interactive terminal.
-            "bash -l -c '$softRestartCmd'",
+            context,
+            "소프트 재시작 (Soft Restart)",
+            Icons.refresh,
+            DeviceActionType.softRestart,
             "UI를 재시작하시겠습니까?",
             Colors.orange,
           ),
           _buildActionButton(
-            context, 
-            "기기 재부팅 (Reboot)", 
-            Icons.restart_alt, 
-            "sudo reboot", 
+            context,
+            "기기 재부팅 (Reboot)",
+            Icons.restart_alt,
+            DeviceActionType.reboot,
             "기기를 재부팅하시겠습니까?",
             Colors.red,
             isDestructive: true,
@@ -95,10 +234,10 @@ class _SystemTabState extends State<SystemTab> {
         const SizedBox(height: 16),
         _buildSection(context, "빌드 및 유지보수", Icons.build_circle_outlined, [
           _buildActionButton(
-            context, 
-            "오픈파일럿 재빌드 (Rebuild)", 
-            Icons.build, 
-            "bash -l -c 'cd /data/openpilot && scons -c && rm .sconsign.dblite && rm -rf /tmp/scons_cache && rm prebuilt && sudo reboot'", 
+            context,
+            "오픈파일럿 재빌드 (Rebuild)",
+            Icons.build,
+            DeviceActionType.rebuildOpenpilot,
             "재빌드를 시작하시겠습니까? 시간이 소요될 수 있습니다.",
             Colors.blue,
           ),
@@ -106,27 +245,36 @@ class _SystemTabState extends State<SystemTab> {
         const SizedBox(height: 16),
         _buildSection(context, "데이터 관리", Icons.storage, [
           _buildActionButton(
-            context, 
-            "학습 데이터 초기화 (Live Params)", 
-            Icons.tune, 
-            "bash -l -c 'rm ${CarrotConstants.paramsPath}/LiveParameters'", 
+            context,
+            "학습 데이터 초기화 (Live Params)",
+            Icons.tune,
+            DeviceActionType.resetLiveParameters,
             "주행 학습 데이터를 초기화하시겠습니까?",
             Colors.grey,
           ),
           _buildActionButton(
-            context, 
-            "캘리브레이션 초기화 (Calibration)", 
-            Icons.camera_alt, 
-            "bash -l -c 'rm ${CarrotConstants.paramsPath}/CalibrationParams'", 
+            context,
+            "캘리브레이션 초기화 (Calibration)",
+            Icons.camera_alt,
+            DeviceActionType.resetCalibration,
             "카메라 캘리브레이션을 초기화하시겠습니까?",
             Colors.grey,
           ),
           _buildActionButton(
-            context, 
-            "녹화 영상 삭제 (Delete Videos)", 
-            Icons.video_library, 
-            "bash -l -c 'rm -rf /data/media/0/videos'", 
+            context,
+            "녹화 영상 삭제 (Delete Videos)",
+            Icons.video_library,
+            DeviceActionType.deleteVideos,
             "모든 주행 녹화 영상을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.",
+            Colors.red,
+            isDestructive: true,
+          ),
+          _buildActionButton(
+            context,
+            "주행 로그 삭제 (Delete Logs)",
+            Icons.delete_sweep,
+            DeviceActionType.deleteLogs,
+            "모든 주행 로그를 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.",
             Colors.red,
             isDestructive: true,
           ),
@@ -136,13 +284,18 @@ class _SystemTabState extends State<SystemTab> {
     );
   }
 
-  Widget _buildSection(BuildContext context, String title, IconData icon, List<Widget> children) {
+  Widget _buildSection(
+    BuildContext context,
+    String title,
+    IconData icon,
+    List<Widget> children,
+  ) {
     return DesignCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           DesignSectionHeader(
-            icon: icon, 
+            icon: icon,
             title: title,
             marginBottom: 8,
           ),
@@ -152,7 +305,17 @@ class _SystemTabState extends State<SystemTab> {
     );
   }
 
-  Widget _buildActionButton(BuildContext context, String label, IconData icon, String command, String confirmMessage, Color? color, {bool isDestructive = false}) {
+  Widget _buildActionButton(
+    BuildContext context,
+    String label,
+    IconData icon,
+    DeviceActionType action,
+    String confirmMessage,
+    Color? color, {
+    bool isDestructive = false,
+  }) {
+    final preview = _actionService.previewAction(action);
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4.0),
       child: ListTile(
@@ -160,19 +323,27 @@ class _SystemTabState extends State<SystemTab> {
         leading: Container(
           padding: const EdgeInsets.all(8),
           decoration: BoxDecoration(
-            color: (color ?? Theme.of(context).colorScheme.primary).withOpacity(0.1),
+            color: (color ?? Theme.of(context).colorScheme.primary)
+                .withOpacity(0.1),
             borderRadius: BorderRadius.circular(8),
           ),
-          child: Icon(icon, color: color ?? Theme.of(context).colorScheme.primary, size: 20),
+          child: Icon(
+            icon,
+            color: color ?? Theme.of(context).colorScheme.primary,
+            size: 20,
+          ),
         ),
-        title: Text(label, style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 14)),
+        title: Text(
+          label,
+          style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 14),
+        ),
         trailing: const Icon(Icons.chevron_right, size: 20, color: Colors.grey),
-        onTap: () => _executeSafeCommand(
-          context, 
-          command, 
-          label, 
-          confirmMessage, 
-          isDestructive: isDestructive
+        onTap: () => _executeManagedAction(
+          context,
+          action: action,
+          title: label,
+          message: confirmMessage,
+          isDestructive: isDestructive,
         ),
         onLongPress: () {
           showDialog(
@@ -183,7 +354,10 @@ class _SystemTabState extends State<SystemTab> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text("실행되는 명령어:", style: TextStyle(fontWeight: FontWeight.bold)),
+                  const Text(
+                    "실행되는 명령어:",
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
                   const SizedBox(height: 8),
                   Container(
                     padding: const EdgeInsets.all(8),
@@ -192,14 +366,20 @@ class _SystemTabState extends State<SystemTab> {
                       borderRadius: BorderRadius.circular(4),
                     ),
                     child: Text(
-                      command,
-                      style: const TextStyle(fontFamily: 'monospace', color: Colors.white),
+                      preview,
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        color: Colors.white,
+                      ),
                     ),
                   ),
                 ],
               ),
               actions: [
-                TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("닫기")),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text("닫기"),
+                ),
               ],
             ),
           );

@@ -5,7 +5,7 @@ import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../services/ssh_service.dart';
-import '../../constants.dart';
+import '../../services/device_action_service.dart';
 import '../../widgets/design_components.dart';
 import '../../widgets/custom_toast.dart';
 
@@ -20,6 +20,7 @@ class _GitTabState extends State<GitTab> {
   bool _isLoading = false;
   List<Map<String, String>> _logs = [];
   final ScrollController _scrollController = ScrollController();
+  final DeviceActionService _actionService = DeviceActionService();
 
   @override
   void initState() {
@@ -43,7 +44,8 @@ class _GitTabState extends State<GitTab> {
         // Scroll to bottom after loading
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (_scrollController.hasClients) {
-            _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+            _scrollController
+                .jumpTo(_scrollController.position.maxScrollExtent);
           }
         });
       } catch (e) {
@@ -91,7 +93,12 @@ class _GitTabState extends State<GitTab> {
     await prefs.remove('git_logs');
   }
 
-  Future<void> _runGitCommand(BuildContext context, String command, String successMessage) async {
+  Future<void> _runGitAction(
+    BuildContext context,
+    DeviceActionType action,
+    String successMessage, {
+    String? branch,
+  }) async {
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
       CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
@@ -99,16 +106,38 @@ class _GitTabState extends State<GitTab> {
     }
 
     setState(() => _isLoading = true);
-    _addLog("명령어 실행: $command");
+    final actionLabel = successMessage.replaceAll(' 완료', '').trim();
+    _addLog("명령 실행: $actionLabel");
 
-        final result = await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && $command'");
+    try {
+      final result =
+          await _actionService.runAction(ssh, action, branch: branch);
+      if (!mounted) return;
+
+      if (result.output.trim().isNotEmpty) {
+        _addLog(result.output.trim());
+      }
+      if (result.ok && result.output.trim().isEmpty) {
+        _addLog("완료");
+      }
+
+      if (result.ok) {
+        CustomToast.show(context, successMessage);
+      } else {
+        CustomToast.show(
+          context,
+          "${successMessage.replaceAll("완료", "실패")} (code: ${result.exitCode})",
+          isError: true,
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      _addLog("오류: $e");
+      CustomToast.show(context, "명령 실행 실패: $e", isError: true);
+    }
 
     if (mounted) {
       setState(() => _isLoading = false);
-      _addLog(result.trim());
-      if (result.isNotEmpty) {
-         CustomToast.show(context, successMessage);
-      }
     }
   }
 
@@ -125,7 +154,9 @@ class _GitTabState extends State<GitTab> {
         title: const Text("기기 재부팅"),
         content: const Text("기기를 재부팅하시겠습니까?"),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("취소")),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("취소")),
           ElevatedButton(
             onPressed: () => Navigator.pop(ctx, true),
             style: ElevatedButton.styleFrom(
@@ -140,8 +171,11 @@ class _GitTabState extends State<GitTab> {
 
     if (confirmed == true && mounted) {
       _addLog("기기 재부팅 중...");
-      await ssh.executeCommand("sudo reboot");
-      CustomToast.show(context, "재부팅 명령을 전송했습니다.");
+      await _runGitAction(
+        context,
+        DeviceActionType.reboot,
+        "재부팅 명령을 전송했습니다.",
+      );
     }
   }
 
@@ -154,95 +188,32 @@ class _GitTabState extends State<GitTab> {
 
     setState(() => _isLoading = true);
     _addLog("브랜치 목록 가져오는 중...");
-    
+
     try {
-      // Fetch latest info from remote with prune to remove stale branches
-      await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git fetch --all --prune'");
+      final snapshot = await _actionService.loadGitBranchSnapshot(ssh);
 
-      // Get Repo URL
-      String repoUrl = "";
-      try {
-        final urlOutput = await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git config --get remote.origin.url'");
-        repoUrl = urlOutput.trim();
-        if (repoUrl.endsWith('.git')) {
-          repoUrl = repoUrl.substring(0, repoUrl.length - 4);
-        }
-      } catch (_) {}
-
-      // Get default branch
-      String defaultBranch = "";
-      try {
-        final remoteShow = await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git remote show origin'");
-        final match = RegExp(r"HEAD branch: (.*)").firstMatch(remoteShow);
-        if (match != null) {
-          defaultBranch = match.group(1)?.trim() ?? "";
-        }
-      } catch (_) {}
-
-      // Get current branch
-      String currentBranch = "";
-      try {
-        currentBranch = (await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git rev-parse --abbrev-ref HEAD'")).trim();
-      } catch (_) {}
-
-      // Get all branches with date and commit hash
-      final output = await ssh.executeCommand(
-        "bash -l -c 'cd ${CarrotConstants.openpilotPath} && git for-each-ref --sort=-committerdate --format=\"%(refname:short)|%(committerdate:relative)|%(objectname)\" refs/remotes/origin'"
-      );
-      
       setState(() => _isLoading = false);
 
       if (!mounted) return;
-
-      final branches = output.split('\n')
-          .map((e) => e.trim())
-          .where((e) => e.isNotEmpty && !e.contains('->'))
-          .map((e) {
-            final parts = e.split('|');
-            final fullName = parts[0];
-            // Remove 'origin/' prefix - handle multiple possible formats
-            String name = fullName;
-            if (name.startsWith('origin/')) {
-              name = name.substring(7);
-            } else if (name.contains('/')) {
-              // For cases like refs/remotes/origin/branch
-              final lastSlash = name.lastIndexOf('/');
-              name = name.substring(lastSlash + 1);
-            }
-            final date = parts.length > 1 ? parts[1] : "";
-            final hash = parts.length > 2 ? parts[2] : "";
-            return {'name': name, 'date': date, 'hash': hash, 'fullName': fullName};
-          })
-          .where((b) => b['name'] != 'HEAD' && b['name'] != 'origin' && b['name']!.isNotEmpty) // Filter out HEAD, origin and empty names
-          .toList();
-
-      // Check for updates (ahead count) for each branch relative to local
-      // This is expensive to do one by one. 
-      // Instead, we can check if the remote hash is different from local hash for the *current* branch at least.
-      // Or for all local branches.
-      // Let's just check for the current branch for now to be fast, or maybe all if we can get local refs easily.
-      
-      // Get local refs
-      final localRefsOutput = await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git for-each-ref --format=\"%(refname:short)|%(objectname)\" refs/heads'");
-      final localRefs = <String, String>{};
-      for (final line in localRefsOutput.split('\n')) {
-        final parts = line.trim().split('|');
-        if (parts.length == 2) {
-          localRefs[parts[0]] = parts[1];
-        }
-      }
+      final branches = snapshot.branches;
+      final localRefs = snapshot.localRefs;
 
       showDialog(
         context: context,
         builder: (ctx) => _BranchListDialog(
           branches: branches,
-          defaultBranch: defaultBranch,
-          currentBranch: currentBranch,
+          defaultBranch: snapshot.defaultBranch,
+          currentBranch: snapshot.currentBranch,
           localRefs: localRefs,
-          repoUrl: repoUrl,
+          repoUrl: snapshot.repoUrl,
           onSelect: (name) {
             Navigator.pop(ctx);
-            _runGitCommand(context, "git checkout $name", "$name 브랜치로 변경됨");
+            _runGitAction(
+              context,
+              DeviceActionType.gitCheckout,
+              "$name 브랜치로 변경됨",
+              branch: name,
+            );
           },
         ),
       );
@@ -253,43 +224,7 @@ class _GitTabState extends State<GitTab> {
   }
 
   Future<void> _performGitSync(BuildContext context) async {
-    final ssh = Provider.of<SSHService>(context, listen: false);
-    if (!ssh.isConnected) {
-      CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
-      return;
-    }
-
-    setState(() => _isLoading = true);
-    _addLog("Git Sync 시작...");
-
-    try {
-      // 1. Get current branch
-      final branchResult = await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git rev-parse --abbrev-ref HEAD'");
-      final currentBranch = branchResult.trim();
-      
-      if (currentBranch.isEmpty || currentBranch.contains("fatal")) {
-        throw Exception("브랜치 정보를 가져올 수 없습니다: $branchResult");
-      }
-      _addLog("현재 브랜치: $currentBranch");
-
-      // 2. Fetch all
-      _addLog("원격 저장소 동기화 중 (Fetch)...");
-      await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git fetch --all'");
-
-      // 3. Reset hard to origin/branch
-      _addLog("강제 리셋 중 (Reset --hard origin/$currentBranch)...");
-      final resetResult = await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git reset --hard origin/$currentBranch && git clean -fd'");
-      
-      _addLog(resetResult.trim());
-      CustomToast.show(context, "Git Sync 완료");
-    } catch (e) {
-      _addLog("오류 발생: $e");
-      CustomToast.show(context, "Git Sync 실패", isError: true);
-    } finally {
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
-    }
+    await _runGitAction(context, DeviceActionType.gitSync, "Git Sync 완료");
   }
 
   @override
@@ -307,7 +242,7 @@ class _GitTabState extends State<GitTab> {
                   Row(
                     children: [
                       const DesignSectionHeader(
-                        icon: Icons.terminal, 
+                        icon: Icons.terminal,
                         title: "Git 로그",
                         marginBottom: 0,
                       ),
@@ -350,14 +285,16 @@ class _GitTabState extends State<GitTab> {
                             child: RichText(
                               text: TextSpan(
                                 style: TextStyle(
-                                  fontFamily: 'monospace', 
-                                  fontSize: 12, 
-                                  color: isOld ? Colors.grey : Colors.white
-                                ),
+                                    fontFamily: 'monospace',
+                                    fontSize: 12,
+                                    color: isOld ? Colors.grey : Colors.white),
                                 children: [
                                   TextSpan(
                                     text: "[${log['time']}] ",
-                                    style: TextStyle(color: isOld ? Colors.grey[600] : Colors.greenAccent),
+                                    style: TextStyle(
+                                        color: isOld
+                                            ? Colors.grey[600]
+                                            : Colors.greenAccent),
                                   ),
                                   TextSpan(text: log['message']),
                                 ],
@@ -413,14 +350,22 @@ class _GitTabState extends State<GitTab> {
                       "Git Pull",
                       Icons.download,
                       Colors.green,
-                      () => _runGitCommand(context, "git pull", "Git Pull 완료"),
+                      () => _runGitAction(
+                        context,
+                        DeviceActionType.gitPull,
+                        "Git Pull 완료",
+                      ),
                     ),
                     _buildActionButton(
                       context,
                       "Git Reset",
                       Icons.restore,
                       Colors.orange,
-                      () => _runGitCommand(context, "git reset --hard HEAD && git clean -fd", "Git Reset 완료"),
+                      () => _runGitAction(
+                        context,
+                        DeviceActionType.gitResetHardClean,
+                        "Git Reset 완료",
+                      ),
                     ),
                     _buildActionButton(
                       context,
@@ -447,7 +392,8 @@ class _GitTabState extends State<GitTab> {
     );
   }
 
-  Widget _buildActionButton(BuildContext context, String label, IconData icon, Color color, VoidCallback onTap) {
+  Widget _buildActionButton(BuildContext context, String label, IconData icon,
+      Color color, VoidCallback onTap) {
     return FilledButton.icon(
       onPressed: _isLoading ? null : onTap,
       icon: Icon(icon, size: 18),
@@ -493,7 +439,8 @@ class _BranchListDialogState extends State<_BranchListDialog> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final index = widget.branches.indexWhere((b) => b['name'] == widget.currentBranch);
+      final index =
+          widget.branches.indexWhere((b) => b['name'] == widget.currentBranch);
       if (index != -1 && _scrollController.hasClients) {
         // Estimate item height ~72.0
         final offset = index * 72.0;
@@ -527,7 +474,7 @@ class _BranchListDialogState extends State<_BranchListDialog> {
             final hash = branch['hash']!;
             final isDefault = name == widget.defaultBranch;
             final isCurrent = name == widget.currentBranch;
-            
+
             bool hasUpdate = false;
             if (widget.localRefs.containsKey(name)) {
               if (widget.localRefs[name] != hash) {
@@ -536,19 +483,26 @@ class _BranchListDialogState extends State<_BranchListDialog> {
             }
 
             return ListTile(
-              tileColor: isCurrent ? Theme.of(context).colorScheme.secondaryContainer : null,
+              tileColor: isCurrent
+                  ? Theme.of(context).colorScheme.secondaryContainer
+                  : null,
               title: Row(
                 children: [
-                  Text(name, style: TextStyle(fontWeight: isDefault ? FontWeight.bold : FontWeight.normal)),
+                  Text(name,
+                      style: TextStyle(
+                          fontWeight:
+                              isDefault ? FontWeight.bold : FontWeight.normal)),
                   if (isDefault) ...[
                     const SizedBox(width: 8),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
                         color: Colors.blue.withOpacity(0.2),
                         borderRadius: BorderRadius.circular(4),
                       ),
-                      child: const Text("Default", style: TextStyle(fontSize: 10, color: Colors.blue)),
+                      child: const Text("Default",
+                          style: TextStyle(fontSize: 10, color: Colors.blue)),
                     ),
                   ],
                   if (isCurrent) ...[
@@ -557,17 +511,20 @@ class _BranchListDialogState extends State<_BranchListDialog> {
                   ],
                 ],
               ),
-              subtitle: Text(date, style: const TextStyle(fontSize: 12, color: Colors.grey)),
-              trailing: hasUpdate 
-                ? IconButton(
-                    icon: const Icon(Icons.priority_high, color: Colors.red, size: 20),
-                    tooltip: "업데이트 가능",
-                    onPressed: () async {
+              subtitle: Text(date,
+                  style: const TextStyle(fontSize: 12, color: Colors.grey)),
+              trailing: hasUpdate
+                  ? IconButton(
+                      icon: const Icon(Icons.priority_high,
+                          color: Colors.red, size: 20),
+                      tooltip: "업데이트 가능",
+                      onPressed: () async {
                         if (widget.repoUrl.isNotEmpty) {
                           final url = "${widget.repoUrl}/commits/$name";
                           final uri = Uri.parse(url);
                           if (await canLaunchUrl(uri)) {
-                            await launchUrl(uri, mode: LaunchMode.externalApplication);
+                            await launchUrl(uri,
+                                mode: LaunchMode.externalApplication);
                           } else {
                             if (context.mounted) {
                               showDialog(
@@ -575,15 +532,19 @@ class _BranchListDialogState extends State<_BranchListDialog> {
                                 builder: (_) => AlertDialog(
                                   title: const Text("커밋 내역"),
                                   content: SelectableText(url),
-                                  actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text("닫기"))],
+                                  actions: [
+                                    TextButton(
+                                        onPressed: () => Navigator.pop(context),
+                                        child: const Text("닫기"))
+                                  ],
                                 ),
                               );
                             }
                           }
                         }
-                    },
-                  ) 
-                : null,
+                      },
+                    )
+                  : null,
               onTap: () => widget.onSelect(name),
             );
           },

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/ssh_service.dart';
 import '../../services/macro_service.dart';
 import '../../widgets/custom_toast.dart';
+import 'file_explorer_tab.dart';
 import 'macro_tab.dart';
 // import 'system_tab.dart'; // Removed
 
@@ -18,13 +20,14 @@ class TerminalTab extends StatefulWidget {
   State<TerminalTab> createState() => _TerminalTabState();
 }
 
-class _TerminalTabState extends State<TerminalTab> with SingleTickerProviderStateMixin {
+class _TerminalTabState extends State<TerminalTab>
+    with SingleTickerProviderStateMixin {
   late TabController _tabController;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    _tabController = TabController(length: 3, vsync: this);
   }
 
   @override
@@ -43,7 +46,8 @@ class _TerminalTabState extends State<TerminalTab> with SingleTickerProviderStat
           unselectedLabelColor: Colors.grey,
           tabs: const [
             Tab(text: "터미널", icon: Icon(Icons.terminal)),
-            Tab(text: "매크로 관리", icon: Icon(Icons.edit_note)),
+            Tab(text: "매크로", icon: Icon(Icons.edit_note)),
+            Tab(text: "파일", icon: Icon(Icons.folder_outlined)),
           ],
         ),
         Expanded(
@@ -52,6 +56,7 @@ class _TerminalTabState extends State<TerminalTab> with SingleTickerProviderStat
             children: const [
               TerminalScreen(),
               MacroTab(),
+              FileExplorerTab(),
             ],
           ),
         ),
@@ -67,11 +72,19 @@ class TerminalScreen extends StatefulWidget {
   State<TerminalScreen> createState() => _TerminalScreenState();
 }
 
-class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAliveClientMixin {
+class _TerminalScreenState extends State<TerminalScreen>
+    with AutomaticKeepAliveClientMixin {
   late final xterm.Terminal _terminal;
-  final xterm.TerminalController _terminalController = xterm.TerminalController();
+  final xterm.TerminalController _terminalController =
+      xterm.TerminalController();
   SSHSession? _session;
+  SSHService? _sshService;
+  StreamSubscription<List<int>>? _stdoutSub;
+  StreamSubscription<List<int>>? _stderrSub;
   bool _isSessionActive = false;
+  bool _isStartingTerminal = false;
+  bool _manualSessionClose = false;
+  bool _shouldAutoReattach = false;
   double _fontSize = 14.0;
   bool _showVirtualKeys = false;
 
@@ -120,49 +133,130 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // Auto-connect removed
+    final ssh = Provider.of<SSHService>(context);
+    if (!identical(_sshService, ssh)) {
+      _sshService?.removeListener(_onSshChanged);
+      _sshService = ssh;
+      _sshService?.addListener(_onSshChanged);
+    }
   }
 
   @override
   void dispose() {
+    _sshService?.removeListener(_onSshChanged);
+    _stdoutSub?.cancel();
+    _stderrSub?.cancel();
     _session?.close();
     super.dispose();
   }
 
-  Future<void> _startTerminal() async {
-    final ssh = Provider.of<SSHService>(context, listen: false);
+  void _onSshChanged() {
+    final ssh = _sshService;
+    if (!mounted || ssh == null) return;
+
     if (!ssh.isConnected) {
-      _terminal.write('SSH 연결 대기 중...\r\n');
+      if (_isSessionActive) {
+        _terminal.write('\r\n[SSH 연결 끊김]\r\n');
+      }
+      setState(() {
+        _isSessionActive = false;
+      });
+      _session = null;
       return;
     }
 
-    if (_isSessionActive) return;
+    if (_shouldAutoReattach && !_isSessionActive && !_isStartingTerminal) {
+      _terminal.write('\r\n[SSH 재연결 감지: 터미널 자동 복구 시도]\r\n');
+      _startTerminal(autoReconnect: true);
+    }
+  }
+
+  Future<void> _startTerminal({bool autoReconnect = false}) async {
+    final ssh = _sshService ?? Provider.of<SSHService>(context, listen: false);
+    if (!ssh.isConnected) {
+      if (!autoReconnect) {
+        _terminal.write('SSH 연결 대기 중...\r\n');
+      }
+      return;
+    }
+
+    if (_isSessionActive || _isStartingTerminal) return;
 
     try {
-      _terminal.write('터미널 세션 시작 중...\r\n');
+      _isStartingTerminal = true;
+      if (!autoReconnect) {
+        _terminal.write('터미널 세션 시작 중...\r\n');
+      }
       _session = await ssh.startShell();
+      if (!mounted) return;
       setState(() => _isSessionActive = true);
+      _manualSessionClose = false;
+      _shouldAutoReattach = true;
 
       _terminal.onOutput = (data) {
         _session?.write(utf8.encode(data));
       };
 
-      _session!.stdout.listen((data) {
+      _stdoutSub?.cancel();
+      _stderrSub?.cancel();
+
+      _stdoutSub = _session!.stdout.listen((data) {
         _terminal.write(utf8.decode(data));
       });
 
-      _session!.stderr.listen((data) {
+      _stderrSub = _session!.stderr.listen((data) {
         _terminal.write(utf8.decode(data));
       });
 
       _session!.done.then((_) {
+        final manualClose = _manualSessionClose;
+        _manualSessionClose = false;
+        _session = null;
         if (mounted) {
           setState(() => _isSessionActive = false);
           _terminal.write('\r\n세션이 종료되었습니다.\r\n');
         }
+
+        if (!manualClose &&
+            mounted &&
+            (_sshService?.isConnected ?? false) &&
+            _shouldAutoReattach) {
+          Future.delayed(const Duration(seconds: 1), () {
+            if (!mounted) return;
+            if ((_sshService?.isConnected ?? false) &&
+                !_isSessionActive &&
+                !_isStartingTerminal &&
+                _shouldAutoReattach) {
+              _terminal.write('[세션 자동 복구 시도]\r\n');
+              _startTerminal(autoReconnect: true);
+            }
+          });
+        }
       });
     } catch (e) {
       _terminal.write('오류 발생: $e\r\n');
+    } finally {
+      _isStartingTerminal = false;
+    }
+  }
+
+  Future<void> _stopTerminal({bool manual = true}) async {
+    if (manual) {
+      _shouldAutoReattach = false;
+    }
+    _manualSessionClose = manual;
+    try {
+      await _stdoutSub?.cancel();
+      await _stderrSub?.cancel();
+    } catch (_) {}
+    _stdoutSub = null;
+    _stderrSub = null;
+    try {
+      _session?.close();
+    } catch (_) {}
+    _session = null;
+    if (mounted) {
+      setState(() => _isSessionActive = false);
     }
   }
 
@@ -178,9 +272,9 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
         _terminalController.clearSelection();
       }
     } else {
-       if (mounted) {
-          CustomToast.show(context, "선택된 텍스트가 없습니다.", isError: true);
-        }
+      if (mounted) {
+        CustomToast.show(context, "선택된 텍스트가 없습니다.", isError: true);
+      }
     }
   }
 
@@ -253,34 +347,35 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
                 tooltip: "붙여넣기",
               ),
               IconButton(
-                icon: Icon(_showVirtualKeys ? Icons.keyboard_hide : Icons.keyboard),
-                onPressed: () => setState(() => _showVirtualKeys = !_showVirtualKeys),
+                icon: Icon(
+                    _showVirtualKeys ? Icons.keyboard_hide : Icons.keyboard),
+                onPressed: () =>
+                    setState(() => _showVirtualKeys = !_showVirtualKeys),
                 tooltip: "가상 키보드",
               ),
               const Spacer(),
               if (!_isSessionActive)
                 ElevatedButton.icon(
-                  onPressed: _startTerminal,
+                  onPressed: () => _startTerminal(),
                   icon: const Icon(Icons.refresh, size: 16),
                   label: const Text("연결"),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.green,
                     foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   ),
                 )
               else
                 ElevatedButton.icon(
-                  onPressed: () {
-                    _session?.close();
-                    setState(() => _isSessionActive = false);
-                  },
+                  onPressed: () => _stopTerminal(manual: true),
                   icon: const Icon(Icons.close, size: 16),
                   label: const Text("끊기"),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.red,
                     foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   ),
                 ),
             ],
@@ -290,11 +385,12 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
           child: xterm.TerminalView(
             _terminal,
             controller: _terminalController,
-            textStyle: xterm.TerminalStyle(fontSize: _fontSize, fontFamily: 'monospace'),
+            textStyle: xterm.TerminalStyle(
+                fontSize: _fontSize, fontFamily: 'monospace'),
             readOnly: false,
           ),
         ),
-        
+
         // Fixed Bottom Area (Virtual Keys + Macros)
         Container(
           decoration: BoxDecoration(
@@ -342,7 +438,7 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
                       ),
                     ),
                   ),
-                
+
                 // Quick Macros
                 if (macros.isNotEmpty)
                   Container(
@@ -359,7 +455,8 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
                           child: ElevatedButton(
                             onPressed: () => _sendMacro(macro.command),
                             style: ElevatedButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(horizontal: 12),
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 12),
                               minimumSize: const Size(0, 36),
                             ),
                             child: Text(macro.name),
@@ -376,4 +473,3 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
     );
   }
 }
-
