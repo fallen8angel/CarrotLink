@@ -45,10 +45,11 @@ class KeyBackupService {
     return File('$basePath/$_backupFolderName/$_backupFileName');
   }
 
-  Future<bool> ensureStoragePermission({bool requestForSharedStorage = false}) async {
+  Future<bool> ensureStoragePermission(
+      {bool requestForSharedStorage = false}) async {
     if (!Platform.isAndroid) return true;
 
-    final manage = Permission.manageExternalStorage;
+    const manage = Permission.manageExternalStorage;
     if (await manage.isGranted) return true;
     if (!requestForSharedStorage) return false;
 
@@ -96,7 +97,10 @@ class KeyBackupService {
         final privateKey = data['privateKey']?.toString();
         final keyTitle = data['keyTitle']?.toString() ?? 'carrotpilot';
         final checksum = data['checksumSha256']?.toString();
-        if (privateKey == null || privateKey.isEmpty || checksum == null || checksum.isEmpty) {
+        if (privateKey == null ||
+            privateKey.isEmpty ||
+            checksum == null ||
+            checksum.isEmpty) {
           continue;
         }
 

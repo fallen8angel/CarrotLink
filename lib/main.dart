@@ -21,7 +21,7 @@ void main() async {
   await initializeDateFormatting('ko_KR', null);
   initializeService(); // Don't await to prevent app freeze on startup
   unawaited(StorageLayoutService.instance.ensureBaseFolders());
-  
+
   // Listen for exit command from background service
   FlutterBackgroundService().on('exitApp').listen((event) {
     SystemNavigator.pop();
@@ -95,8 +95,10 @@ class CarrotLinkApp extends StatelessWidget {
             backgroundColor: const Color(0xFFFF6D00),
             foregroundColor: Colors.white,
             padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 18),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            textStyle:
+                const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
             elevation: 0,
           ),
         ),
@@ -105,14 +107,15 @@ class CarrotLinkApp extends StatelessWidget {
           contentTextStyle: const TextStyle(color: Colors.white),
           behavior: SnackBarBehavior.floating,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-          insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+          insetPadding:
+              const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
         ),
         navigationBarTheme: NavigationBarThemeData(
           labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
           height: 80,
           indicatorColor: const Color(0xFFFF6D00).withOpacity(0.2),
-          iconTheme: MaterialStateProperty.resolveWith((states) {
-            if (states.contains(MaterialState.selected)) {
+          iconTheme: WidgetStateProperty.resolveWith((states) {
+            if (states.contains(WidgetState.selected)) {
               return const IconThemeData(color: Color(0xFFFF6D00));
             }
             return const IconThemeData(color: Colors.grey);

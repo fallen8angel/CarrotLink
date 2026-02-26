@@ -19,9 +19,10 @@ class BackupManagerScreen extends StatefulWidget {
   State<BackupManagerScreen> createState() => _BackupManagerScreenState();
 }
 
-class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTickerProviderStateMixin {
+class _BackupManagerScreenState extends State<BackupManagerScreen>
+    with SingleTickerProviderStateMixin {
   late TabController _tabController;
-  
+
   // Local Backups State
   List<FileSystemEntity> _localBackups = [];
   bool _isLocalLoading = false;
@@ -45,16 +46,18 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
     _tabController.addListener(_handleTabSelection);
-    
+
     _loadLastRestored();
     _loadLocalBackups();
-    // Cloud backups are loaded when tab is switched or manually refreshed to save API calls, 
+    // Cloud backups are loaded when tab is switched or manually refreshed to save API calls,
     // but we can load them initially if signed in.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final driveService = Provider.of<GoogleDriveService>(context, listen: false);
+      final driveService =
+          Provider.of<GoogleDriveService>(context, listen: false);
       if (driveService.currentUser != null) {
         _loadCloudBackups();
-        final backupService = Provider.of<BackupService>(context, listen: false);
+        final backupService =
+            Provider.of<BackupService>(context, listen: false);
         backupService.syncBackups(driveService);
       }
     });
@@ -100,13 +103,13 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
       final files = dir.listSync();
       // Allow 12 to 14 digits for timestamp (minutes or seconds precision)
       final newFormatRegex = RegExp(r'^\d{12,14}\(.*\)(_auto)?\.json$');
-      
+
       _localBackups = files.where((f) {
         final basename = path.basename(f.path);
-        return (basename.startsWith('backup_') && basename.endsWith('.json')) || 
-               newFormatRegex.hasMatch(basename);
+        return (basename.startsWith('backup_') && basename.endsWith('.json')) ||
+            newFormatRegex.hasMatch(basename);
       }).toList();
-      
+
       _sortLocalBackups();
     } catch (e) {
       print("Error loading local backups: $e");
@@ -120,7 +123,9 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
       final nameA = path.basename(a.path);
       final nameB = path.basename(b.path);
       // Sort by filename (which starts with timestamp)
-      return _localSortAscending ? nameA.compareTo(nameB) : nameB.compareTo(nameA);
+      return _localSortAscending
+          ? nameA.compareTo(nameB)
+          : nameB.compareTo(nameA);
     });
   }
 
@@ -133,17 +138,22 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
         title: const Text("선택 삭제"),
         content: Text("${_selectedLocalPaths.length}개의 로컬 백업을 삭제하시겠습니까?"),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("취소")),
-          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text("삭제")),
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text("취소")),
+          TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text("삭제")),
         ],
       ),
     );
 
     if (confirm == true) {
       int deletedCount = 0;
-      final driveService = Provider.of<GoogleDriveService>(context, listen: false);
+      final driveService =
+          Provider.of<GoogleDriveService>(context, listen: false);
       final pathsToDelete = List<String>.from(_selectedLocalPaths);
-      
+
       // 1. Delete local files immediately and update UI
       for (final pathStr in pathsToDelete) {
         try {
@@ -159,7 +169,8 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
 
       // Update UI immediately
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("$deletedCount개 삭제 완료. 클라우드 동기화 중...")));
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text("$deletedCount개 삭제 완료. 클라우드 동기화 중...")));
         _toggleSelectionMode();
         _loadLocalBackups(); // Reload local list
       }
@@ -169,22 +180,23 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
         try {
           final cloudFiles = await driveService.listFiles();
           final futures = <Future>[];
-          
+
           for (final pathStr in pathsToDelete) {
             final filename = path.basename(pathStr);
             try {
-              final cloudFile = cloudFiles.firstWhere((f) => f.name == filename, orElse: () => drive.File());
+              final cloudFile = cloudFiles.firstWhere((f) => f.name == filename,
+                  orElse: () => drive.File());
               if (cloudFile.id != null) {
                 futures.add(driveService.deleteFile(cloudFile.id!));
               }
             } catch (_) {}
           }
-          
+
           if (futures.isNotEmpty) {
             await Future.wait(futures);
             if (mounted) {
-               // Optional: Notify when cloud sync is done
-               // ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("클라우드 동기화 완료")));
+              // Optional: Notify when cloud sync is done
+              // ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("클라우드 동기화 완료")));
             }
           }
         } catch (e) {
@@ -199,7 +211,8 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
   Future<void> _loadCloudBackups() async {
     setState(() => _isCloudLoading = true);
     try {
-      final driveService = Provider.of<GoogleDriveService>(context, listen: false);
+      final driveService =
+          Provider.of<GoogleDriveService>(context, listen: false);
       if (driveService.currentUser == null) {
         _cloudBackups = [];
         return;
@@ -208,7 +221,9 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
       _cloudBackups = files;
       _sortCloudBackups();
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("클라우드 로드 실패: $e")));
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text("클라우드 로드 실패: $e")));
     } finally {
       if (mounted) setState(() => _isCloudLoading = false);
     }
@@ -219,7 +234,9 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
       final nameA = a.name ?? "";
       final nameB = b.name ?? "";
       // Sort by filename (which starts with timestamp)
-      return _cloudSortAscending ? nameA.compareTo(nameB) : nameB.compareTo(nameA);
+      return _cloudSortAscending
+          ? nameA.compareTo(nameB)
+          : nameB.compareTo(nameA);
     });
   }
 
@@ -232,21 +249,28 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
         title: const Text("선택 삭제"),
         content: Text("${_selectedCloudIds.length}개의 클라우드 백업을 삭제하시겠습니까?"),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("취소")),
-          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text("삭제")),
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text("취소")),
+          TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text("삭제")),
         ],
       ),
     );
 
     if (confirm == true) {
-      final driveService = Provider.of<GoogleDriveService>(context, listen: false);
+      final driveService =
+          Provider.of<GoogleDriveService>(context, listen: false);
       final idsToDelete = List<String>.from(_selectedCloudIds);
-      
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("삭제 중...")));
+
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text("삭제 중...")));
 
       // Optimistic UI Update: Remove from list immediately
       setState(() {
-        _cloudBackups.removeWhere((f) => f.id != null && idsToDelete.contains(f.id));
+        _cloudBackups
+            .removeWhere((f) => f.id != null && idsToDelete.contains(f.id));
         _toggleSelectionMode(); // Exit selection mode
       });
 
@@ -254,14 +278,16 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
       try {
         final futures = idsToDelete.map((id) => driveService.deleteFile(id));
         await Future.wait(futures);
-        
+
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("${idsToDelete.length}개 삭제 완료")));
+          ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text("${idsToDelete.length}개 삭제 완료")));
         }
       } catch (e) {
         print("Error deleting cloud files: $e");
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("일부 파일 삭제 실패: $e")));
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text("일부 파일 삭제 실패: $e")));
           _loadCloudBackups(); // Revert/Reload on error
         }
       }
@@ -346,10 +372,12 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
   Future<void> _createBackup() async {
     final ssh = Provider.of<SSHService>(context, listen: false);
     final backupService = Provider.of<BackupService>(context, listen: false);
-    final driveService = Provider.of<GoogleDriveService>(context, listen: false);
-    
+    final driveService =
+        Provider.of<GoogleDriveService>(context, listen: false);
+
     if (!ssh.isConnected) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("연결되지 않음")));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text("연결되지 않음")));
       return;
     }
     backupService.createBackup(ssh, driveService);
@@ -359,15 +387,19 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
     try {
       final filename = path.basename(file.path);
       await file.delete();
-      
-      final driveService = Provider.of<GoogleDriveService>(context, listen: false);
+
+      final driveService =
+          Provider.of<GoogleDriveService>(context, listen: false);
       if (driveService.currentUser != null) {
         try {
           final files = await driveService.listFiles();
-          final cloudFile = files.firstWhere((f) => f.name == filename, orElse: () => drive.File());
+          final cloudFile = files.firstWhere((f) => f.name == filename,
+              orElse: () => drive.File());
           if (cloudFile.id != null) {
             await driveService.deleteFile(cloudFile.id!);
-            if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("클라우드 파일도 삭제되었습니다.")));
+            if (mounted)
+              ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text("클라우드 파일도 삭제되었습니다.")));
           }
         } catch (e) {
           print("Cloud delete sync failed: $e");
@@ -375,7 +407,9 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
       }
 
       await _loadLocalBackups();
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("삭제되었습니다.")));
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text("삭제되었습니다.")));
     } catch (e) {
       print("Delete error: $e");
     }
@@ -384,7 +418,8 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
   Future<void> _restoreWithDiff(File file) async {
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("연결되지 않음")));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text("연결되지 않음")));
       return;
     }
 
@@ -394,9 +429,9 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
       final content = await file.readAsString();
       final Map<String, dynamic> backupParams = jsonDecode(content);
       final Map<String, String> currentParams = {};
-      
+
       final result = await ssh.executeCommand("grep -r . /data/params/d/");
-      
+
       if (!result.startsWith("Error")) {
         final lines = result.split('\n');
         for (final line in lines) {
@@ -414,7 +449,7 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
       for (final key in backupParams.keys) {
         final backupVal = backupParams[key].toString();
         final currentVal = currentParams[key] ?? "(없음)";
-        
+
         if (backupVal != currentVal) {
           diffs.add({
             'key': key,
@@ -426,32 +461,37 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
 
       if (mounted) {
         setState(() => _comparingFile = null);
-        
+
         if (diffs.isEmpty) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("변경된 설정이 없습니다.")));
+          ScaffoldMessenger.of(context)
+              .showSnackBar(const SnackBar(content: Text("변경된 설정이 없습니다.")));
           return;
         }
 
         showDialog(
           context: context,
-          builder: (context) => _DiffRestoreDialog(diffs: diffs, onRestore: (selectedKeys) async {
-            Navigator.pop(context);
-            await _performRestore(backupParams, selectedKeys);
-          }),
+          builder: (context) => _DiffRestoreDialog(
+              diffs: diffs,
+              onRestore: (selectedKeys) async {
+                Navigator.pop(context);
+                await _performRestore(backupParams, selectedKeys);
+              }),
         );
       }
-
     } catch (e) {
       if (mounted) {
         setState(() => _comparingFile = null);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("비교 실패: $e")));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text("비교 실패: $e")));
       }
     }
   }
 
-  Future<void> _performRestore(Map<String, dynamic> backupParams, List<String> keysToRestore) async {
+  Future<void> _performRestore(
+      Map<String, dynamic> backupParams, List<String> keysToRestore) async {
     final ssh = Provider.of<SSHService>(context, listen: false);
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("복원 시작...")));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text("복원 시작...")));
 
     try {
       int successCount = 0;
@@ -460,29 +500,37 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
         await ssh.executeCommand('echo -n "$value" > /data/params/d/$key');
         successCount++;
       }
-      
+
       if (_comparingFile != null) {
         await _setLastRestored(_comparingFile!.path);
       }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("$successCount개 항목 복원 완료")));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text("$successCount개 항목 복원 완료")));
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("복원 실패: $e")));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text("복원 실패: $e")));
       }
     }
   }
 
   Future<void> _uploadToDrive(File file) async {
-    final driveService = Provider.of<GoogleDriveService>(context, listen: false);
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("구글 드라이브 업로드 중...")));
+    final driveService =
+        Provider.of<GoogleDriveService>(context, listen: false);
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text("구글 드라이브 업로드 중...")));
     try {
       await driveService.uploadFile(file);
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("업로드 완료")));
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text("업로드 완료")));
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("업로드 실패: $e")));
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text("업로드 실패: $e")));
     }
   }
 
@@ -513,8 +561,13 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
                       final key = keys[index];
                       final value = data[key];
                       return ListTile(
-                        title: Text(key, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
-                        subtitle: Text(value.toString(), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
+                        title: Text(key,
+                            style: const TextStyle(
+                                fontSize: 13, fontWeight: FontWeight.bold)),
+                        subtitle: Text(value.toString(),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 12)),
                         dense: true,
                         contentPadding: EdgeInsets.zero,
                       );
@@ -525,25 +578,34 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
             ),
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text("닫기")),
+            TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text("닫기")),
           ],
         ),
       );
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("파일 읽기 실패: $e")));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text("파일 읽기 실패: $e")));
     }
   }
 
   Future<void> _downloadFromDrive(String fileId, String fileName) async {
-    final driveService = Provider.of<GoogleDriveService>(context, listen: false);
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("다운로드 중...")));
+    final driveService =
+        Provider.of<GoogleDriveService>(context, listen: false);
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text("다운로드 중...")));
     try {
       final dir = await getApplicationDocumentsDirectory();
       await driveService.downloadFile(fileId, '${dir.path}/$fileName');
       await _loadLocalBackups();
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("다운로드 완료")));
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text("다운로드 완료")));
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("다운로드 실패: $e")));
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text("다운로드 실패: $e")));
     }
   }
 
@@ -554,22 +616,30 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
         title: const Text("삭제 확인"),
         content: const Text("정말 삭제하시겠습니까?"),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("취소")),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text("삭제")),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("취소")),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text("삭제")),
         ],
       ),
     );
 
     if (confirm == true) {
       try {
-        final driveService = Provider.of<GoogleDriveService>(context, listen: false);
+        final driveService =
+            Provider.of<GoogleDriveService>(context, listen: false);
         await driveService.deleteFile(fileId);
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("삭제되었습니다.")));
+          ScaffoldMessenger.of(context)
+              .showSnackBar(const SnackBar(content: Text("삭제되었습니다.")));
           _loadCloudBackups();
         }
       } catch (e) {
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("삭제 실패: $e")));
+        if (mounted)
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text("삭제 실패: $e")));
       }
     }
   }
@@ -578,29 +648,30 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
     String dateStr = "";
     String branchName = "";
     bool isAuto = name.contains("_auto.json");
-    
-    String nameForParsing = name.replaceAll('.json', '').replaceAll('_auto', '');
+
+    String nameForParsing =
+        name.replaceAll('.json', '').replaceAll('_auto', '');
 
     if (name.startsWith("backup_")) {
-       final parts = nameForParsing.split('_');
-       if (parts.length >= 3) {
-         dateStr = "${parts[1]}${parts[2]}";
-         if (parts.length > 3) branchName = parts.sublist(3).join('_');
-       }
+      final parts = nameForParsing.split('_');
+      if (parts.length >= 3) {
+        dateStr = "${parts[1]}${parts[2]}";
+        if (parts.length > 3) branchName = parts.sublist(3).join('_');
+      }
     } else {
-       // Match 12 or 14 digits
-       final regex = RegExp(r'^(\d{12,14})\((.*)\)$');
-       final match = regex.firstMatch(nameForParsing);
-       if (match != null) {
-         dateStr = match.group(1)!;
-         branchName = match.group(2)!;
-       } else {
-         final dateRegex = RegExp(r'^(\d{12,14})');
-         final dateMatch = dateRegex.firstMatch(nameForParsing);
-         if (dateMatch != null) {
-            dateStr = dateMatch.group(1)!;
-         }
-       }
+      // Match 12 or 14 digits
+      final regex = RegExp(r'^(\d{12,14})\((.*)\)$');
+      final match = regex.firstMatch(nameForParsing);
+      if (match != null) {
+        dateStr = match.group(1)!;
+        branchName = match.group(2)!;
+      } else {
+        final dateRegex = RegExp(r'^(\d{12,14})');
+        final dateMatch = dateRegex.firstMatch(nameForParsing);
+        if (dateMatch != null) {
+          dateStr = dateMatch.group(1)!;
+        }
+      }
     }
 
     String displayName = name;
@@ -620,21 +691,22 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
         String hh = dateStr.substring(8, 10);
         String min = dateStr.substring(10, 12);
         displayName = "$yy년 $mm월 $dd일 $hh시 $min분";
-      } else if (dateStr.length == 14 || (dateStr.length == 15 && dateStr.contains('_'))) {
-         String cleanDate = dateStr.replaceAll('_', '');
-         if (cleanDate.length >= 12) {
-            String yy = cleanDate.substring(2, 4);
-            String mm = cleanDate.substring(4, 6);
-            String dd = cleanDate.substring(6, 8);
-            String hh = cleanDate.substring(8, 10);
-            String min = cleanDate.substring(10, 12);
-            displayName = "$yy년 $mm월 $dd일 $hh시 $min분";
-         }
+      } else if (dateStr.length == 14 ||
+          (dateStr.length == 15 && dateStr.contains('_'))) {
+        String cleanDate = dateStr.replaceAll('_', '');
+        if (cleanDate.length >= 12) {
+          String yy = cleanDate.substring(2, 4);
+          String mm = cleanDate.substring(4, 6);
+          String dd = cleanDate.substring(6, 8);
+          String hh = cleanDate.substring(8, 10);
+          String min = cleanDate.substring(10, 12);
+          displayName = "$yy년 $mm월 $dd일 $hh시 $min분";
+        }
       }
     } catch (e) {
       displayName = name;
     }
-    
+
     return {
       'displayName': displayName,
       'branch': branchName,
@@ -644,10 +716,10 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
 
   String _formatBackupName(String name) {
     final info = _parseBackupInfo(name);
-    String result = info['branch'].isNotEmpty 
-        ? "${info['displayName']} (${info['branch']})" 
+    String result = info['branch'].isNotEmpty
+        ? "${info['displayName']} (${info['branch']})"
         : info['displayName'];
-        
+
     if (info['isAuto']) {
       result += " [자동]";
     }
@@ -655,7 +727,8 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
   }
 
   Future<void> _handleDriveConnection() async {
-    final driveService = Provider.of<GoogleDriveService>(context, listen: false);
+    final driveService =
+        Provider.of<GoogleDriveService>(context, listen: false);
     if (driveService.currentUser == null) {
       await driveService.signIn();
     } else {
@@ -673,8 +746,9 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
     final backupService = Provider.of<BackupService>(context);
     final isSignedIn = driveService.currentUser != null;
     final isLocalTab = _tabController.index == 0;
-    
-    final selectedCount = isLocalTab ? _selectedLocalPaths.length : _selectedCloudIds.length;
+
+    final selectedCount =
+        isLocalTab ? _selectedLocalPaths.length : _selectedCloudIds.length;
     final totalCount = isLocalTab ? _localBackups.length : _cloudBackups.length;
 
     return PopScope(
@@ -698,19 +772,28 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
                       _isSelectionMode ? "$selectedCount개 선택됨" : "백업 관리",
                       style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
-                    leading: _isSelectionMode 
-                        ? IconButton(icon: const Icon(Icons.close), onPressed: _toggleSelectionMode)
+                    leading: _isSelectionMode
+                        ? IconButton(
+                            icon: const Icon(Icons.close),
+                            onPressed: _toggleSelectionMode)
                         : const BackButton(),
                     actions: [
                       if (_isSelectionMode) ...[
                         IconButton(
                           icon: const Icon(Icons.select_all),
-                          onPressed: selectedCount == totalCount ? _deselectAll : _selectAll,
+                          onPressed: selectedCount == totalCount
+                              ? _deselectAll
+                              : _selectAll,
                           tooltip: "전체 선택/해제",
                         ),
                         IconButton(
-                          icon: const Icon(Icons.delete_outline, color: Colors.red),
-                          onPressed: selectedCount == 0 ? null : (isLocalTab ? _deleteSelectedLocalBackups : _deleteSelectedCloudBackups),
+                          icon: const Icon(Icons.delete_outline,
+                              color: Colors.red),
+                          onPressed: selectedCount == 0
+                              ? null
+                              : (isLocalTab
+                                  ? _deleteSelectedLocalBackups
+                                  : _deleteSelectedCloudBackups),
                           tooltip: "선택 삭제",
                         ),
                       ] else ...[
@@ -733,7 +816,8 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
                       TabBar(
                         controller: _tabController,
                         labelColor: Theme.of(context).colorScheme.primary,
-                        unselectedLabelColor: Theme.of(context).colorScheme.onSurfaceVariant,
+                        unselectedLabelColor:
+                            Theme.of(context).colorScheme.onSurfaceVariant,
                         indicatorSize: TabBarIndicatorSize.label,
                         tabs: const [
                           Tab(text: "로컬 저장소"),
@@ -763,7 +847,8 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
                       top: 0,
                       left: 0,
                       right: 0,
-                      child: LinearProgressIndicator(value: backupService.progress),
+                      child: LinearProgressIndicator(
+                          value: backupService.progress),
                     ),
                 ],
               ),
@@ -776,7 +861,8 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
                 child: Material(
                   color: Colors.transparent,
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 12),
                     decoration: BoxDecoration(
                       color: const Color(0xFF333333).withOpacity(0.95),
                       borderRadius: BorderRadius.circular(12),
@@ -791,18 +877,20 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
                     child: Row(
                       children: [
                         const SizedBox(
-                          width: 16, 
-                          height: 16, 
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2, 
-                            color: Colors.white,
-                          )
-                        ),
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            )),
                         const SizedBox(width: 12),
                         Expanded(
                           child: Text(
-                            backupService.statusMessage, 
-                            style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                            backupService.statusMessage,
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
@@ -814,7 +902,7 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
               ),
           ],
         ),
-        floatingActionButton: isLocalTab 
+        floatingActionButton: isLocalTab
             ? FloatingActionButton.extended(
                 onPressed: backupService.isBackingUp ? null : _createBackup,
                 icon: const Icon(Icons.add),
@@ -841,11 +929,15 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
               ),
               child: Row(
                 children: [
-                  Icon(Icons.access_time, size: 14, color: Theme.of(context).colorScheme.onSurfaceVariant),
+                  Icon(Icons.access_time,
+                      size: 14,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant),
                   const SizedBox(width: 4),
                   Text(
                     "확인: ${DateFormat('HH:mm:ss').format(backupService.lastCheckTime!)}",
-                    style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant),
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant),
                   ),
                 ],
               ),
@@ -855,19 +947,27 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
 
           // Right: Sort Button
           TextButton.icon(
-            onPressed: _isSelectionMode ? null : () {
-              setState(() {
-                if (isLocalTab) {
-                  _localSortAscending = !_localSortAscending;
-                  _sortLocalBackups();
-                } else {
-                  _cloudSortAscending = !_cloudSortAscending;
-                  _sortCloudBackups();
-                }
-              });
-            },
-            icon: Icon((isLocalTab ? _localSortAscending : _cloudSortAscending) ? Icons.arrow_upward : Icons.arrow_downward, size: 16),
-            label: Text((isLocalTab ? _localSortAscending : _cloudSortAscending) ? "오래된 순" : "최신 순"),
+            onPressed: _isSelectionMode
+                ? null
+                : () {
+                    setState(() {
+                      if (isLocalTab) {
+                        _localSortAscending = !_localSortAscending;
+                        _sortLocalBackups();
+                      } else {
+                        _cloudSortAscending = !_cloudSortAscending;
+                        _sortCloudBackups();
+                      }
+                    });
+                  },
+            icon: Icon(
+                (isLocalTab ? _localSortAscending : _cloudSortAscending)
+                    ? Icons.arrow_upward
+                    : Icons.arrow_downward,
+                size: 16),
+            label: Text((isLocalTab ? _localSortAscending : _cloudSortAscending)
+                ? "오래된 순"
+                : "최신 순"),
             style: TextButton.styleFrom(
               visualDensity: VisualDensity.compact,
             ),
@@ -878,15 +978,21 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
   }
 
   Widget _buildLocalList() {
-    if (_isLocalLoading) return const Center(child: CircularProgressIndicator());
+    if (_isLocalLoading)
+      return const Center(child: CircularProgressIndicator());
     if (_localBackups.isEmpty) {
       return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.folder_off, size: 64, color: Theme.of(context).colorScheme.outline),
+            Icon(Icons.folder_off,
+                size: 64, color: Theme.of(context).colorScheme.outline),
             const SizedBox(height: 16),
-            Text("백업 기록이 없습니다.", style: Theme.of(context).textTheme.bodyLarge?.copyWith(color: Theme.of(context).colorScheme.outline)),
+            Text("백업 기록이 없습니다.",
+                style: Theme.of(context)
+                    .textTheme
+                    .bodyLarge
+                    ?.copyWith(color: Theme.of(context).colorScheme.outline)),
           ],
         ),
       );
@@ -899,7 +1005,7 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
       itemBuilder: (context, index) {
         final file = _localBackups[index] as File;
         final name = path.basename(file.path);
-        
+
         final info = _parseBackupInfo(name);
         final displayName = info['displayName'];
         final branch = info['branch'];
@@ -908,24 +1014,26 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
         final isComparing = _comparingFile == file;
         final isLastRestored = _lastRestoredPath == file.path;
         final isSelected = _selectedLocalPaths.contains(file.path);
-        final isSignedIn = Provider.of<GoogleDriveService>(context).currentUser != null;
+        final isSignedIn =
+            Provider.of<GoogleDriveService>(context).currentUser != null;
 
         return Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Card(
             elevation: 0,
-            color: isSelected 
-                ? Theme.of(context).colorScheme.secondaryContainer 
+            color: isSelected
+                ? Theme.of(context).colorScheme.secondaryContainer
                 : Theme.of(context).colorScheme.surfaceContainer,
             clipBehavior: Clip.antiAlias,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),
-              side: isSelected 
-                  ? BorderSide(color: Theme.of(context).colorScheme.primary, width: 2)
+              side: isSelected
+                  ? BorderSide(
+                      color: Theme.of(context).colorScheme.primary, width: 2)
                   : BorderSide.none,
             ),
             child: InkWell(
-              onTap: _isSelectionMode 
+              onTap: _isSelectionMode
                   ? () => _toggleLocalSelection(file.path)
                   : () => _showBackupContents(file),
               onLongPress: () {
@@ -943,21 +1051,28 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
                       width: 40,
                       height: 40,
                       decoration: BoxDecoration(
-                        color: isLastRestored 
-                            ? Colors.green.withOpacity(0.2) 
-                            : Theme.of(context).colorScheme.surfaceContainerHighest,
+                        color: isLastRestored
+                            ? Colors.green.withOpacity(0.2)
+                            : Theme.of(context)
+                                .colorScheme
+                                .surfaceContainerHighest,
                         borderRadius: BorderRadius.circular(12),
                       ),
                       child: _isSelectionMode
                           ? Checkbox(
                               value: isSelected,
-                              onChanged: (val) => _toggleLocalSelection(file.path),
+                              onChanged: (val) =>
+                                  _toggleLocalSelection(file.path),
                             )
                           : Icon(
-                              isLastRestored ? Icons.check_circle : Icons.description,
-                              color: isLastRestored 
-                                  ? Colors.green 
-                                  : Theme.of(context).colorScheme.onSurfaceVariant,
+                              isLastRestored
+                                  ? Icons.check_circle
+                                  : Icons.description,
+                              color: isLastRestored
+                                  ? Colors.green
+                                  : Theme.of(context)
+                                      .colorScheme
+                                      .onSurfaceVariant,
                             ),
                     ),
                     const SizedBox(width: 16),
@@ -968,10 +1083,13 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
                         children: [
                           Text(
                             displayName,
-                            style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                              fontWeight: FontWeight.bold,
-                              color: isLastRestored ? Colors.green : null,
-                            ),
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleSmall
+                                ?.copyWith(
+                                  fontWeight: FontWeight.bold,
+                                  color: isLastRestored ? Colors.green : null,
+                                ),
                           ),
                           const SizedBox(height: 4),
                           Row(
@@ -979,34 +1097,49 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
                               if (branch.isNotEmpty)
                                 Container(
                                   margin: const EdgeInsets.only(right: 6),
-                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 6, vertical: 2),
                                   decoration: BoxDecoration(
-                                    color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .surfaceContainerHighest,
                                     borderRadius: BorderRadius.circular(4),
                                   ),
-                                  child: Text(branch, style: TextStyle(fontSize: 10, color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                                  child: Text(branch,
+                                      style: TextStyle(
+                                          fontSize: 10,
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .onSurfaceVariant)),
                                 ),
                               Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 6, vertical: 2),
                                 decoration: BoxDecoration(
-                                  color: isAuto 
-                                      ? Colors.orange.withOpacity(0.2) 
+                                  color: isAuto
+                                      ? Colors.orange.withOpacity(0.2)
                                       : Colors.blue.withOpacity(0.2),
                                   borderRadius: BorderRadius.circular(4),
                                 ),
-                                child: Text(
-                                  isAuto ? "자동" : "수동", 
-                                  style: TextStyle(
-                                    fontSize: 10, 
-                                    color: isAuto ? Colors.orange : Colors.blue,
-                                    fontWeight: FontWeight.bold
-                                  )
-                                ),
+                                child: Text(isAuto ? "자동" : "수동",
+                                    style: TextStyle(
+                                        fontSize: 10,
+                                        color: isAuto
+                                            ? Colors.orange
+                                            : Colors.blue,
+                                        fontWeight: FontWeight.bold)),
                               ),
                               const SizedBox(width: 8),
                               FutureBuilder<String>(
-                                future: file.length().then((len) => "${(len / 1024).toStringAsFixed(1)} KB"),
-                                builder: (context, snapshot) => Text(snapshot.data ?? "...", style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.outline)),
+                                future: file.length().then((len) =>
+                                    "${(len / 1024).toStringAsFixed(1)} KB"),
+                                builder: (context, snapshot) => Text(
+                                    snapshot.data ?? "...",
+                                    style: TextStyle(
+                                        fontSize: 11,
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .outline)),
                               ),
                             ],
                           ),
@@ -1017,23 +1150,28 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
                     if (!_isSelectionMode)
                       isComparing
                           ? const SizedBox(
-                              width: 24, 
-                              height: 24, 
-                              child: CircularProgressIndicator(strokeWidth: 2)
-                            )
+                              width: 24,
+                              height: 24,
+                              child: CircularProgressIndicator(strokeWidth: 2))
                           : PopupMenuButton<String>(
                               icon: const Icon(Icons.more_vert),
                               onSelected: (value) {
                                 if (value == 'upload') {
-                                  if (isSignedIn) _uploadToDrive(file);
-                                  else ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("구글 로그인 필요")));
+                                  if (isSignedIn) {
+                                    _uploadToDrive(file);
+                                  } else {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                        const SnackBar(
+                                            content: Text("구글 로그인 필요")));
+                                  }
                                 } else if (value == 'restore') {
                                   _restoreWithDiff(file);
                                 } else if (value == 'delete') {
                                   _deleteBackup(file);
                                 }
                               },
-                              itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+                              itemBuilder: (BuildContext context) =>
+                                  <PopupMenuEntry<String>>[
                                 PopupMenuItem<String>(
                                   value: 'upload',
                                   enabled: isSignedIn,
@@ -1059,9 +1197,11 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
                                   value: 'delete',
                                   child: Row(
                                     children: [
-                                      Icon(Icons.delete_outline, color: Colors.red, size: 20),
+                                      Icon(Icons.delete_outline,
+                                          color: Colors.red, size: 20),
                                       SizedBox(width: 12),
-                                      Text('삭제', style: TextStyle(color: Colors.red)),
+                                      Text('삭제',
+                                          style: TextStyle(color: Colors.red)),
                                     ],
                                   ),
                                 ),
@@ -1083,7 +1223,8 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.cloud_off, size: 64, color: Theme.of(context).colorScheme.outline),
+            Icon(Icons.cloud_off,
+                size: 64, color: Theme.of(context).colorScheme.outline),
             const SizedBox(height: 16),
             const Text("구글 드라이브에 연결되어 있지 않습니다."),
             const SizedBox(height: 16),
@@ -1097,15 +1238,21 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
       );
     }
 
-    if (_isCloudLoading) return const Center(child: CircularProgressIndicator());
+    if (_isCloudLoading)
+      return const Center(child: CircularProgressIndicator());
     if (_cloudBackups.isEmpty) {
       return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.cloud_queue, size: 64, color: Theme.of(context).colorScheme.outline),
+            Icon(Icons.cloud_queue,
+                size: 64, color: Theme.of(context).colorScheme.outline),
             const SizedBox(height: 16),
-            Text("클라우드 백업이 없습니다.", style: Theme.of(context).textTheme.bodyLarge?.copyWith(color: Theme.of(context).colorScheme.outline)),
+            Text("클라우드 백업이 없습니다.",
+                style: Theme.of(context)
+                    .textTheme
+                    .bodyLarge
+                    ?.copyWith(color: Theme.of(context).colorScheme.outline)),
           ],
         ),
       );
@@ -1127,18 +1274,19 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Card(
             elevation: 0,
-            color: isSelected 
-                ? Theme.of(context).colorScheme.secondaryContainer 
+            color: isSelected
+                ? Theme.of(context).colorScheme.secondaryContainer
                 : Theme.of(context).colorScheme.surfaceContainer,
             clipBehavior: Clip.antiAlias,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),
-              side: isSelected 
-                  ? BorderSide(color: Theme.of(context).colorScheme.primary, width: 2)
+              side: isSelected
+                  ? BorderSide(
+                      color: Theme.of(context).colorScheme.primary, width: 2)
                   : BorderSide.none,
             ),
             child: InkWell(
-              onTap: _isSelectionMode 
+              onTap: _isSelectionMode
                   ? () => _toggleCloudSelection(file.id!)
                   : null,
               onLongPress: () {
@@ -1155,13 +1303,16 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
                       width: 40,
                       height: 40,
                       decoration: BoxDecoration(
-                        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                        color: Theme.of(context)
+                            .colorScheme
+                            .surfaceContainerHighest,
                         borderRadius: BorderRadius.circular(12),
                       ),
                       child: _isSelectionMode
                           ? Checkbox(
                               value: isSelected,
-                              onChanged: (val) => _toggleCloudSelection(file.id!),
+                              onChanged: (val) =>
+                                  _toggleCloudSelection(file.id!),
                             )
                           : Icon(
                               Icons.cloud,
@@ -1175,9 +1326,12 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
                         children: [
                           Text(
                             displayName,
-                            style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                              fontWeight: FontWeight.bold,
-                            ),
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleSmall
+                                ?.copyWith(
+                                  fontWeight: FontWeight.bold,
+                                ),
                           ),
                           const SizedBox(height: 4),
                           Row(
@@ -1185,33 +1339,47 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
                               if (branch.isNotEmpty)
                                 Container(
                                   margin: const EdgeInsets.only(right: 6),
-                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 6, vertical: 2),
                                   decoration: BoxDecoration(
-                                    color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .surfaceContainerHighest,
                                     borderRadius: BorderRadius.circular(4),
                                   ),
-                                  child: Text(branch, style: TextStyle(fontSize: 10, color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                                  child: Text(branch,
+                                      style: TextStyle(
+                                          fontSize: 10,
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .onSurfaceVariant)),
                                 ),
                               Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 6, vertical: 2),
                                 decoration: BoxDecoration(
-                                  color: isAuto 
-                                      ? Colors.orange.withOpacity(0.2) 
+                                  color: isAuto
+                                      ? Colors.orange.withOpacity(0.2)
                                       : Colors.blue.withOpacity(0.2),
                                   borderRadius: BorderRadius.circular(4),
                                 ),
-                                child: Text(
-                                  isAuto ? "자동" : "수동", 
-                                  style: TextStyle(
-                                    fontSize: 10, 
-                                    color: isAuto ? Colors.orange : Colors.blue,
-                                    fontWeight: FontWeight.bold
-                                  )
-                                ),
+                                child: Text(isAuto ? "자동" : "수동",
+                                    style: TextStyle(
+                                        fontSize: 10,
+                                        color: isAuto
+                                            ? Colors.orange
+                                            : Colors.blue,
+                                        fontWeight: FontWeight.bold)),
                               ),
                               const SizedBox(width: 8),
                               if (file.size != null)
-                                Text("${(int.parse(file.size!) / 1024).toStringAsFixed(1)} KB", style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.outline)),
+                                Text(
+                                    "${(int.parse(file.size!) / 1024).toStringAsFixed(1)} KB",
+                                    style: TextStyle(
+                                        fontSize: 11,
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .outline)),
                             ],
                           ),
                         ],
@@ -1227,7 +1395,8 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
                             _deleteCloudFile(file.id!);
                           }
                         },
-                        itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+                        itemBuilder: (BuildContext context) =>
+                            <PopupMenuEntry<String>>[
                           const PopupMenuItem<String>(
                             value: 'download',
                             child: Row(
@@ -1242,7 +1411,8 @@ class _BackupManagerScreenState extends State<BackupManagerScreen> with SingleTi
                             value: 'delete',
                             child: Row(
                               children: [
-                                Icon(Icons.delete_outline, color: Colors.red, size: 20),
+                                Icon(Icons.delete_outline,
+                                    color: Colors.red, size: 20),
                                 SizedBox(width: 12),
                                 Text('삭제', style: TextStyle(color: Colors.red)),
                               ],
@@ -1272,7 +1442,8 @@ class _SliverTabBarDelegate extends SliverPersistentHeaderDelegate {
   double get maxExtent => _tabBar.preferredSize.height;
 
   @override
-  Widget build(BuildContext context, double shrinkOffset, bool overlapsContent) {
+  Widget build(
+      BuildContext context, double shrinkOffset, bool overlapsContent) {
     return Container(
       color: Theme.of(context).scaffoldBackgroundColor,
       child: _tabBar,
@@ -1332,7 +1503,9 @@ class _DiffRestoreDialogState extends State<_DiffRestoreDialog> {
                       }
                     });
                   },
-                  child: Text(_selectedKeys.length == widget.diffs.length ? "전체 해제" : "전체 선택"),
+                  child: Text(_selectedKeys.length == widget.diffs.length
+                      ? "전체 해제"
+                      : "전체 선택"),
                 ),
               ],
             ),
@@ -1358,12 +1531,18 @@ class _DiffRestoreDialogState extends State<_DiffRestoreDialog> {
                         }
                       });
                     },
-                    title: Text(key, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                    title: Text(key,
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 13)),
                     subtitle: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text("백업: $backupVal", style: const TextStyle(color: Colors.green, fontSize: 12)),
-                        Text("현재: $currentVal", style: const TextStyle(color: Colors.red, fontSize: 12)),
+                        Text("백업: $backupVal",
+                            style: const TextStyle(
+                                color: Colors.green, fontSize: 12)),
+                        Text("현재: $currentVal",
+                            style: const TextStyle(
+                                color: Colors.red, fontSize: 12)),
                       ],
                     ),
                     contentPadding: EdgeInsets.zero,
@@ -1381,7 +1560,9 @@ class _DiffRestoreDialogState extends State<_DiffRestoreDialog> {
           child: const Text("취소"),
         ),
         ElevatedButton(
-          onPressed: _selectedKeys.isEmpty ? null : () => widget.onRestore(_selectedKeys.toList()),
+          onPressed: _selectedKeys.isEmpty
+              ? null
+              : () => widget.onRestore(_selectedKeys.toList()),
           child: Text("${_selectedKeys.length}개 복원"),
         ),
       ],

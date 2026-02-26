@@ -10,7 +10,7 @@ class UpdateDialog extends StatelessWidget {
     return Consumer<UpdateService>(
       builder: (context, updateService, child) {
         final release = updateService.latestRelease;
-        
+
         if (release == null) {
           return AlertDialog(
             title: const Text("업데이트 확인"),
@@ -40,7 +40,7 @@ class UpdateDialog extends StatelessWidget {
 
         final String tagName = release['tag_name'] ?? "Unknown";
         final String body = release['body'] ?? "";
-        
+
         return AlertDialog(
           title: Text("새로운 업데이트: $tagName"),
           content: SingleChildScrollView(
@@ -52,21 +52,24 @@ class UpdateDialog extends StatelessWidget {
                 const SizedBox(height: 8),
                 if (body.isNotEmpty) ...[
                   const Divider(),
-                  const Text("변경 사항:", style: TextStyle(fontWeight: FontWeight.bold)),
+                  const Text("변경 사항:",
+                      style: TextStyle(fontWeight: FontWeight.bold)),
                   const SizedBox(height: 4),
                   Text(body, style: const TextStyle(fontSize: 13)),
                 ],
                 const SizedBox(height: 16),
                 if (updateService.isDownloading) ...[
-                  LinearProgressIndicator(value: updateService.downloadProgress),
+                  LinearProgressIndicator(
+                      value: updateService.downloadProgress),
                   const SizedBox(height: 8),
-                  Text("${(updateService.downloadProgress * 100).toStringAsFixed(0)}%"),
+                  Text(
+                      "${(updateService.downloadProgress * 100).toStringAsFixed(0)}%"),
                 ] else if (updateService.downloadedFilePath != null) ...[
-                  Row(
+                  const Row(
                     children: [
-                      const Icon(Icons.check_circle, color: Colors.green),
-                      const SizedBox(width: 8),
-                      const Text("다운로드 완료"),
+                      Icon(Icons.check_circle, color: Colors.green),
+                      SizedBox(width: 8),
+                      Text("다운로드 완료"),
                     ],
                   ),
                 ],
@@ -77,8 +80,8 @@ class UpdateDialog extends StatelessWidget {
                       updateService.statusMessage,
                       style: TextStyle(
                         fontSize: 12,
-                        color: updateService.statusMessage.contains("실패") 
-                            ? Colors.red 
+                        color: updateService.statusMessage.contains("실패")
+                            ? Colors.red
                             : Colors.grey,
                       ),
                     ),

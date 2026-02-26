@@ -429,7 +429,7 @@ class _SegmentTileState extends State<SegmentTile> {
 
         // Handle MP4 conversion for qcamera.ts
         if (convertToMp4 && name == 'qcamera.ts') {
-          final mp4Name = 'qcamera.mp4';
+          const mp4Name = 'qcamera.mp4';
           final remoteMp4Path = '$remoteDir/$mp4Name';
           localFileName = '${widget.route}--$segmentIndex--$mp4Name';
 

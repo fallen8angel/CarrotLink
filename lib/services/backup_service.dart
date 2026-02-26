@@ -14,13 +14,14 @@ class BackupService extends ChangeNotifier {
   bool _isBackingUp = false;
   double _progress = 0.0;
   String _statusMessage = "";
-  
+
   bool get isBackingUp => _isBackingUp;
   double get progress => _progress;
   String get statusMessage => _statusMessage;
 
   // Event to notify when a backup is completed so screens can refresh lists
-  final StreamController<void> _backupCompleteController = StreamController<void>.broadcast();
+  final StreamController<void> _backupCompleteController =
+      StreamController<void>.broadcast();
   Stream<void> get onBackupComplete => _backupCompleteController.stream;
 
   Timer? _monitorTimer;
@@ -46,7 +47,7 @@ class BackupService extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     final checkTimeStr = prefs.getString('last_check_time');
     final backupTimeStr = prefs.getString('last_backup_time');
-    
+
     if (checkTimeStr != null) {
       _lastCheckTime = DateTime.tryParse(checkTimeStr);
     }
@@ -59,28 +60,34 @@ class BackupService extends ChangeNotifier {
   Future<void> _savePersistedState() async {
     final prefs = await SharedPreferences.getInstance();
     if (_lastCheckTime != null) {
-      await prefs.setString('last_check_time', _lastCheckTime!.toIso8601String());
+      await prefs.setString(
+          'last_check_time', _lastCheckTime!.toIso8601String());
     }
     if (_lastBackupTime != null) {
-      await prefs.setString('last_backup_time', _lastBackupTime!.toIso8601String());
+      await prefs.setString(
+          'last_backup_time', _lastBackupTime!.toIso8601String());
     }
   }
 
   void _updateNotification(String content) {
     final service = FlutterBackgroundService();
-    
-    String checkTime = _lastCheckTime != null ? DateFormat('HH:mm:ss').format(_lastCheckTime!) : "--:--:--";
-    String backupTime = _lastBackupTime != null ? DateFormat('MM/dd HH:mm').format(_lastBackupTime!) : "--/-- --:--";
-    
+
+    String checkTime = _lastCheckTime != null
+        ? DateFormat('HH:mm:ss').format(_lastCheckTime!)
+        : "--:--:--";
+    String backupTime = _lastBackupTime != null
+        ? DateFormat('MM/dd HH:mm').format(_lastBackupTime!)
+        : "--/-- --:--";
+
     // Format: 백업 확인:확인 시간 l 최근 백업: 시간
     // Use the passed content as prefix if it's specific (like "백업 진행 중..."), otherwise default to "백업 확인"
     String prefix = "백업 확인";
     if (content.contains("백업 진행 중") || content.contains("업로드")) {
-       prefix = content;
+      prefix = content;
     }
 
     String fullContent = "$prefix: $checkTime | 최근 백업: $backupTime";
-    
+
     // Use 'updateContent' as defined in background_service.dart
     service.invoke("updateContent", {"content": fullContent});
   }
@@ -88,17 +95,18 @@ class BackupService extends ChangeNotifier {
   Future<void> _performCheck() async {
     final ssh = _sshService;
     final driveService = _driveService;
-    
+
     if (ssh == null || driveService == null) return;
     if (!ssh.isConnected || _isBackingUp) return;
-    
+
     try {
       // Check if params changed by hashing all files in /data/params/d/
       // Using md5sum on all files and then hashing the result
       // This command lists all files, calculates md5 for each, sorts them (for consistency), and hashes the result.
-      final cmd = "find /data/params/d/ -type f -exec md5sum {} + | sort | md5sum";
+      const cmd =
+          "find /data/params/d/ -type f -exec md5sum {} + | sort | md5sum";
       final result = await ssh.executeCommand(cmd);
-      
+
       _lastCheckTime = DateTime.now();
       _savePersistedState(); // Save state
       notifyListeners(); // Update UI with last check time
@@ -106,11 +114,11 @@ class BackupService extends ChangeNotifier {
 
       if (!result.startsWith("Error") && result.isNotEmpty) {
         final currentHash = result.trim();
-        
+
         // Initialize hash if null (first run)
         if (_lastParamsHash == null) {
-           _lastParamsHash = currentHash;
-           return;
+          _lastParamsHash = currentHash;
+          return;
         }
 
         if (_lastParamsHash != currentHash) {
@@ -124,7 +132,8 @@ class BackupService extends ChangeNotifier {
     }
   }
 
-  Future<void> startMonitoring(SSHService ssh, GoogleDriveService driveService) async {
+  Future<void> startMonitoring(
+      SSHService ssh, GoogleDriveService driveService) async {
     // Clean up existing listeners/timers first
     _monitorTimer?.cancel();
     if (_sshService != null && _sshListener != null) {
@@ -135,7 +144,7 @@ class BackupService extends ChangeNotifier {
     _driveService = driveService;
 
     await _loadPersistedState(); // Load state on start
-    
+
     // Start Background Service to keep app alive
     // Permission is handled in DashboardScreen
     final service = FlutterBackgroundService();
@@ -146,8 +155,9 @@ class BackupService extends ChangeNotifier {
 
     final prefs = await SharedPreferences.getInstance();
     _intervalMinutes = prefs.getInt('backup_interval_minutes') ?? 3;
-    
-    print("Starting backup monitoring with interval: $_intervalMinutes minutes");
+
+    print(
+        "Starting backup monitoring with interval: $_intervalMinutes minutes");
 
     // Setup SSH listener to trigger check on connection
     _wasConnected = ssh.isConnected;
@@ -162,10 +172,11 @@ class BackupService extends ChangeNotifier {
 
     // Initial check (if already connected)
     if (ssh.isConnected) {
-       _performCheck();
+      _performCheck();
     }
 
-    _monitorTimer = Timer.periodic(Duration(minutes: _intervalMinutes), (timer) async {
+    _monitorTimer =
+        Timer.periodic(Duration(minutes: _intervalMinutes), (timer) async {
       _performCheck();
     });
   }
@@ -173,26 +184,29 @@ class BackupService extends ChangeNotifier {
   void stopMonitoring() {
     _monitorTimer?.cancel();
     _monitorTimer = null;
-    
+
     if (_sshService != null && _sshListener != null) {
       _sshService!.removeListener(_sshListener!);
       _sshListener = null;
     }
     _sshService = null;
     _driveService = null;
-    
+
     final service = FlutterBackgroundService();
     service.invoke("stopService");
   }
 
-  Future<void> createBackup(SSHService ssh, GoogleDriveService driveService, {bool isAuto = false, int retryCount = 0}) async {
+  Future<void> createBackup(SSHService ssh, GoogleDriveService driveService,
+      {bool isAuto = false, int retryCount = 0}) async {
     if (_isBackingUp) return;
-    
+
     const maxRetries = 3;
 
     _isBackingUp = true;
     _progress = 0.0;
-    _statusMessage = retryCount > 0 ? "재시도 중 ($retryCount/$maxRetries)..." : "파라미터 목록 가져오는 중...";
+    _statusMessage = retryCount > 0
+        ? "재시도 중 ($retryCount/$maxRetries)..."
+        : "파라미터 목록 가져오는 중...";
     notifyListeners();
     _updateNotification("백업 진행 중...");
 
@@ -201,21 +215,24 @@ class BackupService extends ChangeNotifier {
       if (!ssh.isConnected) {
         throw Exception("SSH 연결이 끊어졌습니다.");
       }
-      
+
       // Get branch name
       String branch = "unknown";
       try {
-        final branchResult = await ssh.executeCommand("cd /data/openpilot && git rev-parse --abbrev-ref HEAD");
+        final branchResult = await ssh.executeCommand(
+            "cd /data/openpilot && git rev-parse --abbrev-ref HEAD");
         if (!branchResult.startsWith("Error")) {
           branch = branchResult.trim();
         }
       } catch (_) {}
 
-      final managerContent = await ssh.executeCommand("cat /data/openpilot/system/manager/manager.py");
+      final managerContent = await ssh
+          .executeCommand("cat /data/openpilot/system/manager/manager.py");
       if (managerContent.isEmpty) throw Exception("manager.py를 읽을 수 없습니다.");
 
       final keys = <String>[];
-      final defaultParamsRegex = RegExp(r'default_params\s*(?::[\s\S]*?)?=\s*\[([\s\S]*?)\]');
+      final defaultParamsRegex =
+          RegExp(r'default_params\s*(?::[\s\S]*?)?=\s*\[([\s\S]*?)\]');
       final match = defaultParamsRegex.firstMatch(managerContent);
 
       if (match != null) {
@@ -246,14 +263,14 @@ for key in $keysString; do
   fi
 done
 ''';
-      
+
       final batchResult = await ssh.executeCommand(batchCmd);
-      
+
       if (!batchResult.startsWith("Error") && batchResult.contains("===")) {
         // 결과 파싱
         String? currentKey;
         final buffer = StringBuffer();
-        
+
         for (final line in batchResult.split('\n')) {
           if (line.startsWith('===') && line.endsWith('===')) {
             // 이전 키의 값 저장
@@ -273,21 +290,24 @@ done
           backupData[currentKey] = buffer.toString().trim();
         }
       }
-      
+
       // 방법 2: Fallback - 개별 파일 읽기 (느리지만 확실함)
       // 배치 방법이 실패했거나 결과가 부족한 경우
-      final missingKeys = keys.where((k) => !backupData.containsKey(k)).toList();
-      
+      final missingKeys =
+          keys.where((k) => !backupData.containsKey(k)).toList();
+
       if (missingKeys.isNotEmpty) {
-        print("Batch read got ${backupData.length}/${keys.length} keys. Reading ${missingKeys.length} missing keys...");
-        
+        print(
+            "Batch read got ${backupData.length}/${keys.length} keys. Reading ${missingKeys.length} missing keys...");
+
         for (final key in missingKeys) {
           current++;
           _progress = current / missingKeys.length;
           _statusMessage = "추가 데이터 읽는 중... ($current/${missingKeys.length})";
           notifyListeners();
 
-          final value = await ssh.executeCommand("cat /data/params/d/$key 2>/dev/null");
+          final value =
+              await ssh.executeCommand("cat /data/params/d/$key 2>/dev/null");
           if (!value.startsWith("Error") && value.isNotEmpty) {
             backupData[key] = value.trim();
           }
@@ -299,13 +319,17 @@ done
       // Check for duplicates (Skip if identical to last backup)
       if (backupData.isNotEmpty) {
         try {
-          final files = dir.listSync().whereType<File>().where((f) => f.path.endsWith('.json')).toList();
+          final files = dir
+              .listSync()
+              .whereType<File>()
+              .where((f) => f.path.endsWith('.json'))
+              .toList();
           if (files.isNotEmpty) {
             files.sort((a, b) => b.path.compareTo(a.path)); // Newest first
             final lastFile = files.first;
             final lastContent = await lastFile.readAsString();
             final Map<String, dynamic> lastJson = jsonDecode(lastContent);
-            
+
             bool isSame = true;
             if (lastJson.length != backupData.length) {
               isSame = false;
@@ -319,7 +343,8 @@ done
             }
 
             if (isSame) {
-              print("Backup skipped: Content identical to last backup (${lastFile.path})");
+              print(
+                  "Backup skipped: Content identical to last backup (${lastFile.path})");
               return;
             }
           }
@@ -335,14 +360,14 @@ done
       final suffix = isAuto ? "_auto" : "";
       final fileName = '$timestamp($safeBranch)$suffix.json';
       final file = File('${dir.path}/$fileName');
-      
+
       // Ensure we don't write if something went wrong or empty
       if (backupData.isNotEmpty) {
         await file.writeAsString(jsonEncode(backupData));
-        
+
         _lastBackupTime = DateTime.now(); // Update last backup time
         _savePersistedState(); // Save state
-        
+
         // Auto Upload
         // Try to ensure we are signed in if possible, or just check current state
         if (driveService.currentUser != null) {
@@ -355,41 +380,41 @@ done
             // Don't fail the whole backup just because upload failed
           }
         } else {
-           print("Auto upload skipped: Not signed in");
+          print("Auto upload skipped: Not signed in");
         }
 
         _backupCompleteController.add(null); // Notify listeners
       }
-
     } catch (e) {
       _statusMessage = "백업 실패: $e";
       print("Backup error: $e");
-      
+
       // 네트워크 관련 에러면 재시도
       final errorStr = e.toString().toLowerCase();
-      final isNetworkError = errorStr.contains('socket') || 
-                             errorStr.contains('connection') || 
-                             errorStr.contains('timeout') ||
-                             errorStr.contains('broken pipe') ||
-                             errorStr.contains('ssh 연결');
-      
+      final isNetworkError = errorStr.contains('socket') ||
+          errorStr.contains('connection') ||
+          errorStr.contains('timeout') ||
+          errorStr.contains('broken pipe') ||
+          errorStr.contains('ssh 연결');
+
       if (isNetworkError && retryCount < 3) {
         _isBackingUp = false; // 재시도를 위해 플래그 해제
         _statusMessage = "네트워크 오류 - ${retryCount + 1}번째 재시도 대기 중...";
         notifyListeners();
-        
+
         // 대기 후 재시도 (5초, 10초, 15초)
         await Future.delayed(Duration(seconds: 5 * (retryCount + 1)));
-        
+
         // 재연결 대기 (최대 10초)
         for (int i = 0; i < 10; i++) {
           if (ssh.isConnected) break;
           await Future.delayed(const Duration(seconds: 1));
         }
-        
+
         if (ssh.isConnected) {
           print("Retrying backup (attempt ${retryCount + 1})...");
-          await createBackup(ssh, driveService, isAuto: isAuto, retryCount: retryCount + 1);
+          await createBackup(ssh, driveService,
+              isAuto: isAuto, retryCount: retryCount + 1);
           return;
         }
       }
@@ -413,22 +438,31 @@ done
     try {
       final dir = await getApplicationDocumentsDirectory();
       if (!dir.existsSync()) dir.createSync();
-      
+
       // 1. List Local Files
-      final localFiles = dir.listSync().whereType<File>().where((f) => f.path.endsWith('.json')).toList();
-      final localFileNames = localFiles.map((f) => f.path.split(Platform.pathSeparator).last).toSet();
+      final localFiles = dir
+          .listSync()
+          .whereType<File>()
+          .where((f) => f.path.endsWith('.json'))
+          .toList();
+      final localFileNames = localFiles
+          .map((f) => f.path.split(Platform.pathSeparator).last)
+          .toSet();
 
       // 2. List Cloud Files
       final cloudFiles = await driveService.listFiles();
-      final cloudFileNames = cloudFiles.map((f) => f.name).whereType<String>().toSet();
+      final cloudFileNames =
+          cloudFiles.map((f) => f.name).whereType<String>().toSet();
 
       // 3. Download Missing (Cloud -> Local)
       for (final cloudFile in cloudFiles) {
-        if (cloudFile.name != null && !localFileNames.contains(cloudFile.name)) {
+        if (cloudFile.name != null &&
+            !localFileNames.contains(cloudFile.name)) {
           _statusMessage = "다운로드 중: ${cloudFile.name}";
           notifyListeners();
           try {
-            await driveService.downloadFile(cloudFile.id!, '${dir.path}/${cloudFile.name}');
+            await driveService.downloadFile(
+                cloudFile.id!, '${dir.path}/${cloudFile.name}');
           } catch (e) {
             print("Sync download failed for ${cloudFile.name}: $e");
           }
@@ -448,9 +482,8 @@ done
           }
         }
       }
-      
-      _backupCompleteController.add(null); // Refresh UI
 
+      _backupCompleteController.add(null); // Refresh UI
     } catch (e) {
       print("Sync error: $e");
     } finally {

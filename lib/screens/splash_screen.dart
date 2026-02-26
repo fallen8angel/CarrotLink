@@ -35,16 +35,20 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 
   Future<void> _checkFirstRun() async {
-    // Wait at least 1.5 seconds for splash effect
-    await Future.delayed(const Duration(milliseconds: 1500));
-    unawaited(StorageLayoutService.instance.ensureBaseFolders());
-
     final prefs = await SharedPreferences.getInstance();
     final isFirstRun = prefs.getBool('is_first_run') ?? true;
     final hasRequiredPermissions = await _hasRequiredPermissions();
+    final needsOnboarding = isFirstRun || !hasRequiredPermissions;
+
+    // Only keep the long splash effect when the user is heading into
+    // onboarding/permissions. Normal launches should restore quickly.
+    if (needsOnboarding) {
+      await Future.delayed(const Duration(milliseconds: 1500));
+    }
+    unawaited(StorageLayoutService.instance.ensureBaseFolders());
 
     if (mounted) {
-      if (isFirstRun || !hasRequiredPermissions) {
+      if (needsOnboarding) {
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(builder: (context) => const PermissionScreen()),
         );
@@ -82,7 +86,8 @@ class _SplashScreenState extends State<SplashScreen> {
               width: 120,
               height: 120,
               errorBuilder: (context, error, stackTrace) {
-                return const Icon(Icons.directions_car, size: 120, color: Color(0xFFFF6D00));
+                return const Icon(Icons.directions_car,
+                    size: 120, color: Color(0xFFFF6D00));
               },
             ),
             const SizedBox(height: 24),
@@ -90,17 +95,17 @@ class _SplashScreenState extends State<SplashScreen> {
             Text(
               'CarrotLink',
               style: Theme.of(context).textTheme.headlineLarge?.copyWith(
-                fontWeight: FontWeight.bold,
-                color: const Color(0xFFFF6D00),
-              ),
+                    fontWeight: FontWeight.bold,
+                    color: const Color(0xFFFF6D00),
+                  ),
             ),
             const SizedBox(height: 8),
             // Version
             Text(
               _version,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: Colors.grey,
-              ),
+                    color: Colors.grey,
+                  ),
             ),
           ],
         ),

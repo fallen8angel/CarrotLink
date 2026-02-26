@@ -15,54 +15,6 @@ class SystemTab extends StatefulWidget {
 class _SystemTabState extends State<SystemTab> {
   final DeviceActionService _actionService = DeviceActionService();
 
-  String _formatActionLog({
-    required String title,
-    required DeviceActionType action,
-    required String commandPreview,
-    required DeviceActionResult result,
-  }) {
-    final stdout = result.stdout.trim().isEmpty ? "(없음)" : result.stdout.trim();
-    final stderr = result.stderr.trim().isEmpty ? "(없음)" : result.stderr.trim();
-    final status = result.ok ? "SUCCESS" : "FAIL";
-
-    return '''
-[작업] $title
-[액션] ${action.name}
-[상태] $status
-[종료코드] ${result.exitCode}
-[소요시간] ${result.duration.inMilliseconds}ms
-[전송] ${result.transport}
-
-[명령어]
-$commandPreview
-
-[STDOUT]
-$stdout
-
-[STDERR]
-$stderr
-''';
-  }
-
-  String _formatActionErrorLog({
-    required String title,
-    required DeviceActionType action,
-    required String commandPreview,
-    required Object error,
-  }) {
-    return '''
-[작업] $title
-[액션] ${action.name}
-[상태] ERROR
-
-[명령어]
-$commandPreview
-
-[예외]
-$error
-''';
-  }
-
   Future<void> _executeManagedAction(
     BuildContext context, {
     required DeviceActionType action,
@@ -71,7 +23,6 @@ $error
     bool isDestructive = false,
   }) async {
     final ssh = Provider.of<SSHService>(context, listen: false);
-    final commandPreview = _actionService.previewAction(action);
 
     if (!ssh.isConnected) {
       CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
@@ -130,33 +81,6 @@ $error
     if (!mounted) return;
 
     if (error != null) {
-      final errorLog = _formatActionErrorLog(
-        title: title,
-        action: action,
-        commandPreview: commandPreview,
-        error: error,
-      );
-      await showDialog<void>(
-        context: context,
-        builder: (_) => AlertDialog(
-          title: Text("$title 실패"),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: SingleChildScrollView(
-              child: SelectableText(
-                errorLog,
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-              ),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text("닫기"),
-            ),
-          ],
-        ),
-      );
       CustomToast.show(context, "실행 실패: $error", isError: true);
       return;
     }
@@ -167,35 +91,6 @@ $error
     }
 
     final finalResult = result;
-    final logText = _formatActionLog(
-      title: title,
-      action: action,
-      commandPreview: commandPreview,
-      result: finalResult,
-    );
-
-    await showDialog<void>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: Text(title),
-        content: SizedBox(
-          width: double.maxFinite,
-          child: SingleChildScrollView(
-            child: SelectableText(
-              logText,
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text("닫기"),
-          ),
-        ],
-      ),
-    );
-
     if (finalResult.ok) {
       CustomToast.show(context, "$title 완료");
     } else {
@@ -314,8 +209,6 @@ $error
     Color? color, {
     bool isDestructive = false,
   }) {
-    final preview = _actionService.previewAction(action);
-
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4.0),
       child: ListTile(
@@ -324,7 +217,7 @@ $error
           padding: const EdgeInsets.all(8),
           decoration: BoxDecoration(
             color: (color ?? Theme.of(context).colorScheme.primary)
-                .withOpacity(0.1),
+                .withValues(alpha: 0.1),
             borderRadius: BorderRadius.circular(8),
           ),
           child: Icon(
@@ -345,45 +238,6 @@ $error
           message: confirmMessage,
           isDestructive: isDestructive,
         ),
-        onLongPress: () {
-          showDialog(
-            context: context,
-            builder: (ctx) => AlertDialog(
-              title: Text(label),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    "실행되는 명령어:",
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 8),
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Colors.grey[900],
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Text(
-                      preview,
-                      style: const TextStyle(
-                        fontFamily: 'monospace',
-                        color: Colors.white,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text("닫기"),
-                ),
-              ],
-            ),
-          );
-        },
       ),
     );
   }

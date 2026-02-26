@@ -30,10 +30,11 @@ Future<void> initializeService() async {
 
   // Initialize Notifications with Actions
   const AndroidInitializationSettings initializationSettingsAndroid =
-      AndroidInitializationSettings('@mipmap/launcher_icon'); // Ensure icon exists
+      AndroidInitializationSettings(
+          '@mipmap/launcher_icon'); // Ensure icon exists
   const InitializationSettings initializationSettings =
       InitializationSettings(android: initializationSettingsAndroid);
-  
+
   await flutterLocalNotificationsPlugin.initialize(
     initializationSettings,
     onDidReceiveNotificationResponse: (NotificationResponse response) {
@@ -81,7 +82,8 @@ void onStart(ServiceInstance service) async {
   String currentContent = '연결 대기 중...';
 
   // Helper to update notification
-  Future<void> updateNotification({String? title, String? content, bool isConnected = false}) async {
+  Future<void> updateNotification(
+      {String? title, String? content, bool isConnected = false}) async {
     if (title != null) currentTitle = title;
     if (content != null) currentContent = content;
 
@@ -108,7 +110,9 @@ void onStart(ServiceInstance service) async {
     if (event == null) return;
     final ip = event['ip'];
     final portRaw = event['port'];
-    final port = portRaw is int ? portRaw : int.tryParse(portRaw?.toString() ?? '') ?? 22;
+    final port = portRaw is int
+        ? portRaw
+        : int.tryParse(portRaw?.toString() ?? '') ?? 22;
     final username = event['username'];
     final password = event['password'];
     final privateKey = event['privateKey'];
@@ -118,32 +122,38 @@ void onStart(ServiceInstance service) async {
       sshClient?.close();
       sshClient = null;
 
-      await updateNotification(title: 'CarrotLink: 연결 중...', content: 'IP: $ip');
-      
-      final socket = await SSHSocket.connect(ip, port, timeout: const Duration(seconds: 10));
-      
+      await updateNotification(
+          title: 'CarrotLink: 연결 중...', content: 'IP: $ip');
+
+      final socket = await SSHSocket.connect(ip, port,
+          timeout: const Duration(seconds: 10));
+
       if (privateKey != null) {
         final keys = SSHKeyPair.fromPem(privateKey);
         sshClient = SSHClient(socket, username: username, identities: keys);
       } else {
-        sshClient = SSHClient(socket, username: username, onPasswordRequest: () => password);
+        sshClient = SSHClient(socket,
+            username: username, onPasswordRequest: () => password);
       }
 
       await sshClient!.authenticated;
-      
+
       // Set Title to IP as requested
-      await updateNotification(title: 'IP: $ip', content: '백업 확인 준비 중...', isConnected: true);
-      
+      await updateNotification(
+          title: 'IP: $ip', content: '백업 확인 준비 중...', isConnected: true);
+
       // Notify UI
       service.invoke('connectionState', {'isConnected': true, 'ip': ip});
 
       // Start Heartbeat
       heartbeatTimer?.cancel();
       // Check every 5 seconds
-      heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
+      heartbeatTimer =
+          Timer.periodic(const Duration(seconds: 5), (timer) async {
         if (sshClient == null || sshClient!.isClosed) {
           timer.cancel();
-          await updateNotification(title: 'CarrotLink: 연결 끊김', content: '재연결 대기 중...');
+          await updateNotification(
+              title: 'CarrotLink: 연결 끊김', content: '재연결 대기 중...');
           service.invoke('connectionState', {'isConnected': false});
           return;
         }
@@ -154,14 +164,16 @@ void onStart(ServiceInstance service) async {
           debugPrint("Background Heartbeat failed: $e");
           sshClient?.close();
           // Force update notification immediately
-          await updateNotification(title: 'CarrotLink: 연결 끊김', content: '재연결 대기 중...');
+          await updateNotification(
+              title: 'CarrotLink: 연결 끊김', content: '재연결 대기 중...');
           service.invoke('connectionState', {'isConnected': false});
         }
       });
-
     } catch (e) {
-      await updateNotification(title: 'CarrotLink: 연결 실패', content: '오류: ${e.toString()}');
-      service.invoke('connectionState', {'isConnected': false, 'error': e.toString()});
+      await updateNotification(
+          title: 'CarrotLink: 연결 실패', content: '오류: ${e.toString()}');
+      service.invoke(
+          'connectionState', {'isConnected': false, 'error': e.toString()});
       sshClient?.close();
       sshClient = null;
     }
@@ -172,10 +184,10 @@ void onStart(ServiceInstance service) async {
     if (event == null) return;
     final id = event['id'];
     final cmd = event['cmd'];
-    
+
     if (sshClient == null || sshClient!.isClosed) {
-       service.invoke('commandResult', {'id': id, 'error': 'Not connected'});
-       return;
+      service.invoke('commandResult', {'id': id, 'error': 'Not connected'});
+      return;
     }
 
     try {
@@ -205,13 +217,10 @@ void onStart(ServiceInstance service) async {
   service.on('stopService').listen((event) {
     heartbeatTimer?.cancel();
     sshClient?.close();
-    // Invoke exitApp BEFORE stopping the service to ensure the message is sent
-    service.invoke('exitApp');
-    
-    // Give a small delay for the message to propagate before killing the service
-    Future.delayed(const Duration(milliseconds: 500), () {
-      service.stopSelf();
-    });
+
+    // Stopping the background service should not forcibly close the app UI.
+    // This can otherwise look like an unexpected app restart when returning.
+    service.stopSelf();
   });
 
   service.on('updateContent').listen((event) async {
@@ -224,4 +233,3 @@ void onStart(ServiceInstance service) async {
     }
   });
 }
-

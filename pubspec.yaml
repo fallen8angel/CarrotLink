@@ -38,6 +38,8 @@ dependencies:
   webview_flutter: ^4.13.0
   file_picker: ^8.0.7
   flutter_fancy_tree_view2: ^1.6.3
+  re_editor: ^0.8.0
+  re_highlight: ^0.0.3
 
 dev_dependencies:
   flutter_test:

@@ -47,9 +47,10 @@ class GoogleDriveService extends ChangeNotifier {
 
   Future<String> _getOrCreateBackupFolder(drive.DriveApi api) async {
     const folderName = "CarrotLink_Backups";
-    final q = "mimeType = 'application/vnd.google-apps.folder' and name = '$folderName' and trashed = false";
+    const q =
+        "mimeType = 'application/vnd.google-apps.folder' and name = '$folderName' and trashed = false";
     final list = await api.files.list(q: q);
-    
+
     if (list.files != null && list.files!.isNotEmpty) {
       return list.files!.first.id!;
     }
@@ -57,7 +58,7 @@ class GoogleDriveService extends ChangeNotifier {
     final folder = drive.File()
       ..name = folderName
       ..mimeType = 'application/vnd.google-apps.folder';
-    
+
     final created = await api.files.create(folder);
     return created.id!;
   }
@@ -69,7 +70,7 @@ class GoogleDriveService extends ChangeNotifier {
     final folderId = await _getOrCreateBackupFolder(api);
     final fileName = path.basename(file.path);
     final media = drive.Media(file.openRead(), file.lengthSync());
-    
+
     final driveFile = drive.File()
       ..name = fileName
       ..parents = [folderId];
@@ -83,11 +84,11 @@ class GoogleDriveService extends ChangeNotifier {
 
     String? folderId;
     try {
-        folderId = await _getOrCreateBackupFolder(api);
+      folderId = await _getOrCreateBackupFolder(api);
     } catch (e) {
-        print("Error getting folder: $e");
-        // If we can't find/create the folder, we shouldn't list random files from root.
-        return [];
+      print("Error getting folder: $e");
+      // If we can't find/create the folder, we shouldn't list random files from root.
+      return [];
     }
 
     // Strictly search inside the folder
@@ -105,10 +106,11 @@ class GoogleDriveService extends ChangeNotifier {
     final api = await getDriveApi();
     if (api == null) throw Exception("Google Drive API unavailable");
 
-    final media = await api.files.get(fileId, downloadOptions: drive.DownloadOptions.fullMedia) as drive.Media;
+    final media = await api.files.get(fileId,
+        downloadOptions: drive.DownloadOptions.fullMedia) as drive.Media;
     final file = File(savePath);
     final sink = file.openWrite();
-    
+
     await media.stream.pipe(sink);
     await sink.close();
   }

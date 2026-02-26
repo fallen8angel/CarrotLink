@@ -300,7 +300,7 @@ class _HomeTabState extends State<HomeTab> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          DesignSectionHeader(
+          const DesignSectionHeader(
             icon: Icons.cloud_sync_outlined,
             title: "당근 백업/복원",
             subtitle: "설정값을 날짜별로 백업하고, 변경된 부분만 선택하여 복원할 수 있습니다.",
@@ -494,7 +494,7 @@ class _BackupTimerTooltipState extends State<_BackupTimerTooltip>
     } else {
       final min = diff.inMinutes;
       final sec = diff.inSeconds % 60;
-      setState(() => _timeLeft = "다음 확인: ${min}분 ${sec}초");
+      setState(() => _timeLeft = "다음 확인: $min분 $sec초");
     }
   }
 

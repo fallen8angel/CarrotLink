@@ -7,6 +7,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/ssh_service.dart';
 import '../../services/backup_service.dart';
 import '../../services/google_drive_service.dart';
@@ -16,8 +17,8 @@ import '../../services/github_service.dart';
 import '../../widgets/custom_toast.dart';
 import '../../widgets/update_dialog.dart';
 import 'tabs/home_tab.dart';
-import 'tabs/git_tab.dart';
-import 'tabs/system_tab.dart';
+import 'tabs/git_management_tab.dart';
+import 'tabs/carrot_settings_tab.dart';
 import 'tabs/terminal_tab.dart';
 import 'tabs/logs_tab.dart';
 import 'settings_screen.dart';
@@ -31,6 +32,7 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen>
     with WidgetsBindingObserver {
+  static const String _lastDashboardTabIndexKey = 'dashboard_last_tab_index';
   int _currentIndex = 0;
   Timer? _reconnectTimer;
   StreamSubscription<String>? _discoverySubscription;
@@ -49,19 +51,22 @@ class _DashboardScreenState extends State<DashboardScreen>
   String? _lastDiscoveryAttemptIp;
   DateTime? _lastDiscoveryAttemptAt;
   final DiagnosticsService _diag = DiagnosticsService.instance;
+  final GlobalKey<TerminalTabState> _terminalTabKey =
+      GlobalKey<TerminalTabState>();
 
-  final List<Widget> _tabs = const [
-    HomeTab(),
-    GitTab(),
-    SystemTab(),
-    TerminalTab(),
-    LogsTab(),
+  late final List<Widget> _tabs = [
+    const HomeTab(),
+    const CarrotSettingsTab(),
+    const GitManagementTab(),
+    TerminalTab(key: _terminalTabKey),
+    const LogsTab(),
   ];
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    unawaited(_restoreLastTabIndex());
     _requestPermissions();
     _tryAutoConnect();
     _startReconnectLoop();
@@ -89,7 +94,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     if (hasUpdate && mounted) {
       showDialog(
         context: context,
-        builder: (ctx) => UpdateDialog(),
+        builder: (ctx) => const UpdateDialog(),
       );
     }
   }
@@ -170,7 +175,7 @@ class _DashboardScreenState extends State<DashboardScreen>
         return;
       }
 
-      final storage = const FlutterSecureStorage();
+      const storage = FlutterSecureStorage();
       final storedIp = await storage.read(key: 'ssh_ip');
       final portStr = await storage.read(key: 'ssh_port');
       final port = int.tryParse(portStr ?? '') ?? _defaultSshPort;
@@ -239,7 +244,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   }
 
   Future<bool> _hasOpenpilotPrerequisites() async {
-    final storage = const FlutterSecureStorage();
+    const storage = FlutterSecureStorage();
     final token = await GitHubService().getToken();
     final privateKey = await storage.read(key: 'current_private_key');
     return token != null &&
@@ -326,7 +331,35 @@ class _DashboardScreenState extends State<DashboardScreen>
         print("App resumed: Connection lost, trying to reconnect...");
         _tryAutoConnect(reason: 'resume');
       }
+    } else if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      unawaited(_persistLastTabIndex(_currentIndex));
     }
+  }
+
+  Future<void> _restoreLastTabIndex() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getInt(_lastDashboardTabIndexKey);
+    if (saved == null || saved < 0) return;
+    // Old layout migration:
+    // [홈, 설정, Git, 관리, 콘솔, 로그] -> [홈, 설정, Git관리, 콘솔, 로그]
+    var restored = saved;
+    if (saved == 3) {
+      restored = 2;
+    } else if (saved == 4) {
+      restored = 3;
+    } else if (saved == 5) {
+      restored = 4;
+    }
+    if (restored >= _tabs.length) return;
+    if (!mounted) return;
+    setState(() => _currentIndex = restored);
+  }
+
+  Future<void> _persistLastTabIndex(int index) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_lastDashboardTabIndexKey, index);
   }
 
   void _startReconnectLoop() {
@@ -397,7 +430,7 @@ class _DashboardScreenState extends State<DashboardScreen>
         return;
       }
 
-      final storage = const FlutterSecureStorage();
+      const storage = FlutterSecureStorage();
       final ip = await storage.read(key: 'ssh_ip');
       final username = await storage.read(key: 'ssh_username');
       final portStr = await storage.read(key: 'ssh_port');
@@ -508,10 +541,19 @@ class _DashboardScreenState extends State<DashboardScreen>
     }
   }
 
+  Future<bool> _handleNestedBackStack() async {
+    // UX 단순화를 위해 안드로이드 시스템 뒤로가기는
+    // 내부 파일탭 탐색 히스토리를 소비하지 않고 앱 종료 확인으로 처리한다.
+    return false;
+  }
+
   @override
   Widget build(BuildContext context) {
     return WillPopScope(
       onWillPop: () async {
+        if (await _handleNestedBackStack()) {
+          return false;
+        }
         final shouldExit = await showDialog<bool>(
           context: context,
           builder: (context) => AlertDialog(
@@ -557,7 +599,8 @@ class _DashboardScreenState extends State<DashboardScreen>
               selectedIndex: _currentIndex,
               onDestinationSelected: (idx) {
                 setState(() => _currentIndex = idx);
-                if (idx == 1) ssh.checkGitUpdates();
+                unawaited(_persistLastTabIndex(idx));
+                if (idx == 2) ssh.checkGitUpdates();
               },
               destinations: [
                 const NavigationDestination(
@@ -565,23 +608,23 @@ class _DashboardScreenState extends State<DashboardScreen>
                   selectedIcon: Icon(Icons.home),
                   label: '홈',
                 ),
+                const NavigationDestination(
+                  icon: Icon(Icons.settings_outlined),
+                  selectedIcon: Icon(Icons.settings),
+                  label: '설정',
+                ),
                 NavigationDestination(
                   icon: Badge(
                     isLabelVisible: ssh.hasGitUpdate,
                     label: const Text("!"),
-                    child: const Icon(Icons.source_outlined),
+                    child: const Icon(Icons.tune_outlined),
                   ),
                   selectedIcon: Badge(
                     isLabelVisible: ssh.hasGitUpdate,
                     label: const Text("!"),
-                    child: const Icon(Icons.source),
+                    child: const Icon(Icons.tune),
                   ),
-                  label: 'Git',
-                ),
-                const NavigationDestination(
-                  icon: Icon(Icons.settings_system_daydream_outlined),
-                  selectedIcon: Icon(Icons.settings_system_daydream),
-                  label: '관리',
+                  label: '메뉴',
                 ),
                 const NavigationDestination(
                   icon: Icon(Icons.terminal_outlined),

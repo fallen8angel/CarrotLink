@@ -11,6 +11,7 @@ import 'package:provider/provider.dart';
 
 import '../../services/ssh_service.dart';
 import '../../widgets/custom_toast.dart';
+import '../../widgets/section_tab_bar.dart';
 
 class LogsTab extends StatefulWidget {
   const LogsTab({super.key});
@@ -38,10 +39,8 @@ class _LogsTabState extends State<LogsTab> with SingleTickerProviderStateMixin {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        TabBar(
+        SectionTabBar(
           controller: _tabController,
-          labelColor: Theme.of(context).colorScheme.primary,
-          unselectedLabelColor: Colors.grey,
           tabs: const [
             Tab(text: "대시캠녹화", icon: Icon(Icons.videocam_outlined)),
             Tab(text: "화면녹화", icon: Icon(Icons.screen_share_outlined)),
@@ -55,6 +54,7 @@ class _LogsTabState extends State<LogsTab> with SingleTickerProviderStateMixin {
               _DashcamLogsView(),
               _RemoteVideoLogsView(
                 folderCandidates: [
+                  "/data/media/0/videos",
                   "/data/media/0/screenrecord",
                   "/data/media/0/screen_recordings",
                   "/data/media/0/screenrecords",
@@ -269,7 +269,7 @@ class _RemoteVideoLogsViewState extends State<_RemoteVideoLogsView> {
                     const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(10),
-                  side: BorderSide(color: Colors.grey.withOpacity(0.2)),
+                  side: BorderSide(color: Colors.grey.withValues(alpha: 0.2)),
                 ),
                 leading: const Icon(Icons.play_circle_outline),
                 title: Text(
@@ -324,6 +324,22 @@ else
 fi
 ''';
 
+  static const String _tmuxInspectCommandFull = '''
+if command -v tmux >/dev/null 2>&1; then
+  echo "== tmux sessions =="
+  tmux ls 2>&1 || true
+  echo
+  if tmux has-session -t comma 2>/dev/null; then
+    echo "== comma:0.0 full output =="
+    tmux capture-pane -pt comma:0.0 -S - 2>&1 || true
+  else
+    echo "comma session not found"
+  fi
+else
+  echo "tmux not installed"
+fi
+''';
+
   @override
   void initState() {
     super.initState();
@@ -366,6 +382,88 @@ fi
     return "[이전 ${lines.length - _maxVisibleLines}줄은 화면에서 숨김]\n$kept";
   }
 
+  Future<String> _fetchTmuxOutput({required bool fullHistory}) async {
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    if (!ssh.isConnected) {
+      throw Exception("기기와 연결되어 있지 않습니다.");
+    }
+
+    final result = await ssh.executeCommandResult(
+      fullHistory ? _tmuxInspectCommandFull : _tmuxInspectCommand,
+      timeout: fullHistory
+          ? const Duration(seconds: 60)
+          : const Duration(seconds: 30),
+    );
+    final stdout = result.stdout.trim();
+    final stderr = result.stderr.trim();
+    return [
+      if (stdout.isNotEmpty) stdout,
+      if (stderr.isNotEmpty) "\n[stderr]\n$stderr",
+      if (stdout.isEmpty && stderr.isEmpty) "(출력 없음)",
+    ].join('\n');
+  }
+
+  Future<Directory> _resolveTmuxDownloadDir() async {
+    final preferred = Directory('/storage/emulated/0/CarrotLink/downloads');
+    try {
+      if (!await preferred.exists()) {
+        await preferred.create(recursive: true);
+      }
+      return preferred;
+    } catch (_) {
+      final docs = await getApplicationDocumentsDirectory();
+      final fallback = Directory('${docs.path}/downloads');
+      if (!await fallback.exists()) {
+        await fallback.create(recursive: true);
+      }
+      return fallback;
+    }
+  }
+
+  String _timestampForFileName() {
+    final now = DateTime.now();
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${now.year}${two(now.month)}${two(now.day)}_'
+        '${two(now.hour)}${two(now.minute)}${two(now.second)}';
+  }
+
+  Future<T> _runBlockingAction<T>(
+    String message,
+    Future<T> Function() action,
+  ) async {
+    if (!mounted) return action();
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          content: Row(
+            children: [
+              const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2.4),
+              ),
+              const SizedBox(width: 12),
+              Expanded(child: Text(message)),
+            ],
+          ),
+        ),
+      ),
+    );
+    try {
+      return await action();
+    } finally {
+      if (mounted) {
+        final navigator = Navigator.of(context, rootNavigator: true);
+        if (navigator.canPop()) {
+          navigator.pop();
+        }
+      }
+    }
+  }
+
   Future<void> _refreshTmux({bool silent = false}) async {
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
@@ -381,17 +479,7 @@ fi
       setState(() => _isLoading = true);
     }
     try {
-      final result = await ssh.executeCommandResult(
-        _tmuxInspectCommand,
-        timeout: const Duration(seconds: 30),
-      );
-      final stdout = result.stdout.trim();
-      final stderr = result.stderr.trim();
-      final merged = [
-        if (stdout.isNotEmpty) stdout,
-        if (stderr.isNotEmpty) "\n[stderr]\n$stderr",
-        if (stdout.isEmpty && stderr.isEmpty) "(출력 없음)",
-      ].join('\n');
+      final merged = await _fetchTmuxOutput(fullHistory: false);
       if (!mounted) return;
       setState(() {
         _isLoading = false;
@@ -408,9 +496,35 @@ fi
   }
 
   Future<void> _copyOutput() async {
-    await Clipboard.setData(ClipboardData(text: _output));
-    if (mounted) {
-      CustomToast.show(context, "tmux 로그를 복사했습니다.");
+    try {
+      final fullText = await _runBlockingAction<String>(
+        'tmux 전체 로그 가져오는 중...',
+        () => _fetchTmuxOutput(fullHistory: true),
+      );
+      await Clipboard.setData(ClipboardData(text: fullText));
+      if (!mounted) return;
+      CustomToast.show(context, "tmux 전체 로그를 복사했습니다.");
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, "tmux 로그 복사 실패: $e", isError: true);
+    }
+  }
+
+  Future<void> _downloadOutputAsFile() async {
+    try {
+      final fullText = await _runBlockingAction<String>(
+        'tmux 전체 로그 파일 저장 중...',
+        () => _fetchTmuxOutput(fullHistory: true),
+      );
+      final dir = await _resolveTmuxDownloadDir();
+      final file =
+          File('${dir.path}/tmux_comma_${_timestampForFileName()}.log');
+      await file.writeAsString(fullText);
+      if (!mounted) return;
+      CustomToast.show(context, "tmux 로그 저장됨: ${file.path}");
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, "tmux 로그 다운로드 실패: $e", isError: true);
     }
   }
 
@@ -419,6 +533,23 @@ fi
     _startPolling();
     if (enabled) {
       _refreshTmux(silent: true);
+    }
+  }
+
+  Future<void> _handleMenuAction(String action) async {
+    switch (action) {
+      case 'toggle_live':
+        _toggleLive(!_isLive);
+        break;
+      case 'copy_all':
+        await _copyOutput();
+        break;
+      case 'download':
+        await _downloadOutputAsFile();
+        break;
+      case 'refresh':
+        await _refreshTmux();
+        break;
     }
   }
 
@@ -432,23 +563,63 @@ fi
             children: [
               Expanded(
                 child: Text(
-                  "tmux 실시간 로그 (${_isLive ? "ON" : "OFF"}) · 최대 $_maxVisibleLines줄",
+                  "tmux 실시간 로그 (${_isLive ? "ON" : "OFF"})",
                   style: const TextStyle(fontSize: 12, color: Colors.grey),
                 ),
               ),
-              Switch(
-                value: _isLive,
-                onChanged: _toggleLive,
-              ),
-              IconButton(
-                tooltip: "복사",
-                onPressed: _output.isEmpty ? null : _copyOutput,
-                icon: const Icon(Icons.copy_all),
-              ),
-              IconButton(
-                tooltip: "새로고침",
-                onPressed: () => _refreshTmux(),
-                icon: const Icon(Icons.refresh),
+              PopupMenuButton<String>(
+                tooltip: "메뉴",
+                icon: const Icon(Icons.more_vert),
+                onSelected: (value) {
+                  unawaited(_handleMenuAction(value));
+                },
+                itemBuilder: (context) => [
+                  PopupMenuItem<String>(
+                    value: 'toggle_live',
+                    child: Row(
+                      children: [
+                        Icon(
+                          _isLive
+                              ? Icons.pause_circle_outline
+                              : Icons.play_arrow,
+                          size: 18,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(_isLive ? '실시간 갱신 끄기' : '실시간 갱신 켜기'),
+                      ],
+                    ),
+                  ),
+                  const PopupMenuItem<String>(
+                    value: 'refresh',
+                    child: Row(
+                      children: [
+                        Icon(Icons.refresh, size: 18),
+                        SizedBox(width: 8),
+                        Text('새로고침'),
+                      ],
+                    ),
+                  ),
+                  const PopupMenuItem<String>(
+                    value: 'copy_all',
+                    child: Row(
+                      children: [
+                        Icon(Icons.copy_all, size: 18),
+                        SizedBox(width: 8),
+                        Text('전체 복사'),
+                      ],
+                    ),
+                  ),
+                  const PopupMenuItem<String>(
+                    value: 'download',
+                    child: Row(
+                      children: [
+                        Icon(Icons.download, size: 18),
+                        SizedBox(width: 8),
+                        Text('파일 저장'),
+                      ],
+                    ),
+                  ),
+                ],
               ),
             ],
           ),

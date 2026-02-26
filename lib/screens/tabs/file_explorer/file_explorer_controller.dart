@@ -81,8 +81,15 @@ class FileExplorerController extends ChangeNotifier {
   static const String _bookmarkKey = 'file_bookmarks';
   static const String _uploadIncludeRootDirectoryKey =
       'file_upload_include_root_directory';
-  static const int _pageSize = 220;
-  static const Duration _progressEmitInterval = Duration(milliseconds: 120);
+  static const String _lastPathKey = 'file_last_path';
+  static const String _pendingOperationActiveKey =
+      'file_pending_operation_active';
+  static const String _pendingOperationLabelKey =
+      'file_pending_operation_label';
+  static const int _pageSize = 160;
+  static const Duration _progressEmitInterval = Duration(milliseconds: 220);
+  final ChangeNotifier _browserNotifier = ChangeNotifier();
+  final ChangeNotifier _transferNotifier = ChangeNotifier();
 
   SSHService? _ssh;
   bool _initialized = false;
@@ -117,6 +124,8 @@ class FileExplorerController extends ChangeNotifier {
   Future<FileTransferRetrySummary> Function()? _retryAction;
   int _retryFailureCount = 0;
   String _retryLabel = '';
+  int _navigationEpoch = 0;
+  String? _startupInterruptedOperationLabel;
 
   SSHService? get ssh => _ssh;
   String get currentPath => _currentPath;
@@ -160,6 +169,18 @@ class FileExplorerController extends ChangeNotifier {
       !_isBatchBusy && _retryAction != null && _retryFailureCount > 0;
   int get retryableFailureCount => _retryFailureCount;
   String get retryLabel => _retryLabel;
+  Listenable get browserListenable => _browserNotifier;
+  Listenable get transferListenable => _transferNotifier;
+
+  void _notifyTransferListeners() {
+    _transferNotifier.notifyListeners();
+  }
+
+  @override
+  void notifyListeners() {
+    _browserNotifier.notifyListeners();
+    super.notifyListeners();
+  }
 
   void bindSsh(SSHService sshService) {
     if (identical(_ssh, sshService)) return;
@@ -174,8 +195,28 @@ class FileExplorerController extends ChangeNotifier {
         <String>[CarrotConstants.openpilotPath, CarrotConstants.mediaPath];
     _includeRootDirectoryOnUpload =
         prefs.getBool(_uploadIncludeRootDirectoryKey) ?? true;
+    final savedPath = prefs.getString(_lastPathKey)?.trim();
+    if (savedPath != null && savedPath.isNotEmpty) {
+      _currentPath = p.posix.normalize(savedPath);
+    }
+
+    final hadPendingOperation =
+        prefs.getBool(_pendingOperationActiveKey) ?? false;
+    if (hadPendingOperation) {
+      final label = prefs.getString(_pendingOperationLabelKey)?.trim();
+      _startupInterruptedOperationLabel =
+          (label == null || label.isEmpty) ? '파일 작업' : label;
+      await prefs.remove(_pendingOperationActiveKey);
+      await prefs.remove(_pendingOperationLabelKey);
+    }
     _applyVisibleFilter(notify: false);
     notifyListeners();
+  }
+
+  String? takeStartupInterruptedOperationLabel() {
+    final value = _startupInterruptedOperationLabel;
+    _startupInterruptedOperationLabel = null;
+    return value;
   }
 
   Future<void> ensureLoaded() async {
@@ -322,15 +363,18 @@ class FileExplorerController extends ChangeNotifier {
   }) async {
     _assertSshReady();
     final normalized = p.posix.normalize(path);
+    final requestEpoch = ++_navigationEpoch;
     _isLoading = true;
     notifyListeners();
     try {
       final listed = await _ssh!.listFiles(normalized);
+      if (requestEpoch != _navigationEpoch) return;
       if (addToHistory && normalized != _currentPath) {
         _backHistory.add(_currentPath);
         _forwardHistory.clear();
       }
       _currentPath = normalized;
+      unawaited(_persistLastPath(_currentPath));
       _files
         ..clear()
         ..addAll(listed.where((f) => f.filename != '.' && f.filename != '..'));
@@ -339,6 +383,7 @@ class FileExplorerController extends ChangeNotifier {
       _applyVisibleFilter(notify: false);
       notifyListeners();
     } catch (e) {
+      if (requestEpoch != _navigationEpoch) return;
       _isLoading = false;
       notifyListeners();
       rethrow;
@@ -363,9 +408,9 @@ class FileExplorerController extends ChangeNotifier {
     await navigate(CarrotConstants.openpilotPath);
   }
 
-  Future<void> goUp() async {
+  Future<void> goUp({bool addToHistory = true}) async {
     if (_currentPath == '/') return;
-    await navigate(p.posix.dirname(_currentPath));
+    await navigate(p.posix.dirname(_currentPath), addToHistory: addToHistory);
   }
 
   Future<void> refresh() async {
@@ -494,31 +539,55 @@ class FileExplorerController extends ChangeNotifier {
 
   Future<void> copyToDirectory(Set<String> paths, String targetPath) async {
     if (paths.isEmpty) return;
-    final sources = paths.map(_shellQuote).join(' ');
-    final cmd =
-        "mkdir -p -- ${_shellQuote(targetPath)} && cp -a -- $sources ${_shellQuote('$targetPath/')}";
-    final result = await _runCommand(cmd, timeout: const Duration(minutes: 5));
-    if (!result.isSuccess) {
-      throw Exception(result.output.trim().isEmpty
-          ? '복사 실패 (exit=${result.exitCode})'
-          : result.output.trim());
-    }
+    await _runTrackedOperation('파일 복사', () async {
+      final sources = paths.map(_shellQuote).join(' ');
+      final cmd =
+          "mkdir -p -- ${_shellQuote(targetPath)} && cp -a -- $sources ${_shellQuote('$targetPath/')}";
+      final result =
+          await _runCommand(cmd, timeout: const Duration(minutes: 5));
+      if (!result.isSuccess) {
+        throw Exception(result.output.trim().isEmpty
+            ? '복사 실패 (exit=${result.exitCode})'
+            : result.output.trim());
+      }
+    });
   }
 
   Future<void> compressSelected(String archiveName) async {
     if (_selectedPaths.isEmpty) return;
-    final names = _selectedPaths.map((e) => p.posix.basename(e)).toList();
-    final args = names.map(_shellQuote).join(' ');
-    final cmd =
-        "cd ${_shellQuote(_currentPath)} && tar -czf ${_shellQuote(archiveName)} -- $args";
-    final result = await _runCommand(cmd, timeout: const Duration(minutes: 5));
-    if (!result.isSuccess) {
-      throw Exception(result.output.trim().isEmpty
-          ? '압축 실패 (exit=${result.exitCode})'
-          : result.output.trim());
-    }
-    clearSelection(notify: false);
-    await refresh();
+    await _runTrackedOperation('압축', () async {
+      final trimmedName = archiveName.trim();
+      if (trimmedName.isEmpty) {
+        throw Exception('압축 파일명을 입력하세요.');
+      }
+      final names = _selectedPaths.map((e) => p.posix.basename(e)).toList();
+      final args = names.map(_shellQuote).join(' ');
+      final lowerName = trimmedName.toLowerCase();
+
+      late final String cmd;
+      if (lowerName.endsWith('.zip')) {
+        cmd =
+            "cd ${_shellQuote(_currentPath)} && zip -r ${_shellQuote(trimmedName)} -- $args";
+      } else if (lowerName.endsWith('.tar')) {
+        cmd =
+            "cd ${_shellQuote(_currentPath)} && tar -cf ${_shellQuote(trimmedName)} -- $args";
+      } else if (lowerName.endsWith('.tar.gz') || lowerName.endsWith('.tgz')) {
+        cmd =
+            "cd ${_shellQuote(_currentPath)} && tar -czf ${_shellQuote(trimmedName)} -- $args";
+      } else {
+        throw Exception('지원 형식: .zip / .tar / .tar.gz / .tgz');
+      }
+
+      final result =
+          await _runCommand(cmd, timeout: const Duration(minutes: 15));
+      if (!result.isSuccess) {
+        throw Exception(result.output.trim().isEmpty
+            ? '압축 실패 (exit=${result.exitCode})'
+            : result.output.trim());
+      }
+      clearSelection(notify: false);
+      await refresh();
+    });
   }
 
   void setClipboard(Set<String> paths, {required bool cut}) {
@@ -537,28 +606,31 @@ class FileExplorerController extends ChangeNotifier {
 
   Future<void> pasteClipboardToCurrentPath() async {
     if (_clipboardPaths.isEmpty) return;
-    final sources = _clipboardPaths.map(_shellQuote).join(' ');
-    final dest = _shellQuote('$_currentPath/');
-    final command =
-        _clipboardCut ? "mv -- $sources $dest" : "cp -a -- $sources $dest";
-    final result =
-        await _runCommand(command, timeout: const Duration(minutes: 5));
-    if (!result.isSuccess) {
-      throw Exception(result.output.trim().isEmpty
-          ? '붙여넣기 실패 (exit=${result.exitCode})'
-          : result.output.trim());
-    }
-    if (_clipboardCut) {
-      clearClipboard();
-    }
-    await refresh();
+    final operationLabel = _clipboardCut ? '이동 붙여넣기' : '복사 붙여넣기';
+    await _runTrackedOperation(operationLabel, () async {
+      final sources = _clipboardPaths.map(_shellQuote).join(' ');
+      final dest = _shellQuote('$_currentPath/');
+      final command =
+          _clipboardCut ? "mv -- $sources $dest" : "cp -a -- $sources $dest";
+      final result =
+          await _runCommand(command, timeout: const Duration(minutes: 5));
+      if (!result.isSuccess) {
+        throw Exception(result.output.trim().isEmpty
+            ? '붙여넣기 실패 (exit=${result.exitCode})'
+            : result.output.trim());
+      }
+      if (_clipboardCut) {
+        clearClipboard();
+      }
+      await refresh();
+    });
   }
 
   void _clearRetryAction({bool notify = false}) {
     _retryAction = null;
     _retryFailureCount = 0;
     _retryLabel = '';
-    if (notify) notifyListeners();
+    if (notify) _notifyTransferListeners();
   }
 
   void _setRetryAction({
@@ -569,7 +641,7 @@ class FileExplorerController extends ChangeNotifier {
     _retryAction = action;
     _retryFailureCount = failureCount;
     _retryLabel = label;
-    notifyListeners();
+    _notifyTransferListeners();
   }
 
   Future<FileTransferRetrySummary?> retryFailedTransfers() async {
@@ -584,7 +656,7 @@ class FileExplorerController extends ChangeNotifier {
     if (!_isBatchBusy) return;
     _isBatchPaused = !_isBatchPaused;
     _batchMessage = _isBatchPaused ? '전송 일시정지됨' : '전송 재개 중...';
-    notifyListeners();
+    _notifyTransferListeners();
   }
 
   void cancelCurrentBatch() {
@@ -592,12 +664,13 @@ class FileExplorerController extends ChangeNotifier {
     _batchCancelRequested = true;
     _isBatchPaused = false;
     _batchMessage = '전송 취소 요청 중...';
-    notifyListeners();
+    _notifyTransferListeners();
   }
 
   void _beginBatch({
     required String initialMessage,
     required int totalItems,
+    String operationLabel = '파일 전송',
   }) {
     _clearRetryAction();
     _isBatchBusy = true;
@@ -607,7 +680,8 @@ class FileExplorerController extends ChangeNotifier {
     _batchTotalItems = totalItems;
     _batchMessage = initialMessage;
     _lastProgressEmittedAt = DateTime.fromMillisecondsSinceEpoch(0);
-    notifyListeners();
+    unawaited(_markPendingOperation(operationLabel));
+    _notifyTransferListeners();
   }
 
   void _finishBatch({required bool canceled}) {
@@ -617,7 +691,41 @@ class FileExplorerController extends ChangeNotifier {
     _batchCompletedItems = 0;
     _batchTotalItems = 0;
     _batchMessage = canceled ? '전송 취소됨' : '';
-    notifyListeners();
+    unawaited(_clearPendingOperation());
+    _notifyTransferListeners();
+  }
+
+  Future<void> _persistLastPath(String path) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_lastPathKey, path);
+  }
+
+  Future<void> _markPendingOperation(String label) async {
+    final prefs = await SharedPreferences.getInstance();
+    final trimmed = label.trim();
+    await prefs.setBool(_pendingOperationActiveKey, true);
+    await prefs.setString(
+      _pendingOperationLabelKey,
+      trimmed.isEmpty ? '파일 작업' : trimmed,
+    );
+  }
+
+  Future<void> _clearPendingOperation() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_pendingOperationActiveKey);
+    await prefs.remove(_pendingOperationLabelKey);
+  }
+
+  Future<T> _runTrackedOperation<T>(
+    String label,
+    Future<T> Function() action,
+  ) async {
+    await _markPendingOperation(label);
+    try {
+      return await action();
+    } finally {
+      await _clearPendingOperation();
+    }
   }
 
   Future<void> _waitWhilePaused() async {
@@ -709,6 +817,7 @@ class FileExplorerController extends ChangeNotifier {
     _beginBatch(
       initialMessage: '다운로드 준비 중...',
       totalItems: totalItems,
+      operationLabel: '다운로드',
     );
 
     for (var i = 0; i < targets.length; i++) {
@@ -742,7 +851,7 @@ class FileExplorerController extends ChangeNotifier {
           _batchCompletedItems += 1;
           _batchMessage =
               '${_batchPrefixForItem(i, totalItems)}압축 실패: $itemName';
-          notifyListeners();
+          _notifyTransferListeners();
           continue;
         }
         downloadTargetPath = tempArchivePath;
@@ -761,7 +870,7 @@ class FileExplorerController extends ChangeNotifier {
                   total > 0 ? (received * 100 / total).toStringAsFixed(0) : '?';
               _batchMessage =
                   '${_batchPrefixForItem(i, totalItems)}다운로드 중: $localFileName ($pct%)';
-              notifyListeners();
+              _notifyTransferListeners();
             }
           },
         );
@@ -838,6 +947,7 @@ class FileExplorerController extends ChangeNotifier {
     _beginBatch(
       initialMessage: '업로드 준비 중...',
       totalItems: totalItems,
+      operationLabel: '업로드',
     );
 
     for (var i = 0; i < targets.length; i++) {
@@ -854,7 +964,7 @@ class FileExplorerController extends ChangeNotifier {
         _batchCompletedItems += 1;
         _batchMessage =
             '${_batchPrefixForItem(i, totalItems)}스킵: ${p.basename(localPath)}';
-        notifyListeners();
+        _notifyTransferListeners();
         continue;
       }
 
@@ -872,7 +982,7 @@ class FileExplorerController extends ChangeNotifier {
                   total > 0 ? (sent * 100 / total).toStringAsFixed(0) : '?';
               _batchMessage =
                   '${_batchPrefixForItem(i, totalItems)}업로드 중: $fileName ($pct%)';
-              notifyListeners();
+              _notifyTransferListeners();
             }
           },
         );
@@ -947,6 +1057,7 @@ class FileExplorerController extends ChangeNotifier {
     _beginBatch(
       initialMessage: '폴더 업로드 준비 중...',
       totalItems: totalItems > 0 ? totalItems : 1,
+      operationLabel: '폴더 업로드',
     );
 
     try {
@@ -1004,7 +1115,7 @@ class FileExplorerController extends ChangeNotifier {
                     total > 0 ? (sent * 100 / total).toStringAsFixed(0) : '?';
                 _batchMessage =
                     '${_batchPrefixForItem(i, totalItems)}업로드 중: $relativePosix ($pct%)';
-                notifyListeners();
+                _notifyTransferListeners();
               }
             },
           );
@@ -1086,6 +1197,7 @@ class FileExplorerController extends ChangeNotifier {
     _beginBatch(
       initialMessage: '$label 준비 중...',
       totalItems: totalItems,
+      operationLabel: label,
     );
 
     for (var i = 0; i < targets.length; i++) {
@@ -1116,7 +1228,7 @@ class FileExplorerController extends ChangeNotifier {
                   total > 0 ? (sent * 100 / total).toStringAsFixed(0) : '?';
               _batchMessage =
                   '${_batchPrefixForItem(i, totalItems)}$label: ${p.basename(mapping.localPath)} ($pct%)';
-              notifyListeners();
+              _notifyTransferListeners();
             }
           },
         );
@@ -1166,5 +1278,12 @@ class FileExplorerController extends ChangeNotifier {
       remoteDirectory: remoteDirectory,
       canceled: canceled,
     );
+  }
+
+  @override
+  void dispose() {
+    _browserNotifier.dispose();
+    _transferNotifier.dispose();
+    super.dispose();
   }
 }

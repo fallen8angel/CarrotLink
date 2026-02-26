@@ -527,12 +527,17 @@ class SSHService extends ChangeNotifier {
     yield* controller.stream;
   }
 
-  Future<SSHSession> startShell() async {
+  Future<SSHSession> startShell({
+    int width = 80,
+    int height = 24,
+  }) async {
     if (!isConnected) throw Exception("Not Connected");
+    final ptyWidth = width <= 0 ? 80 : width;
+    final ptyHeight = height <= 0 ? 24 : height;
     final session = await _client!.shell(
       pty: SSHPtyConfig(
-        width: 80,
-        height: 24,
+        width: ptyWidth,
+        height: ptyHeight,
       ),
     );
     return session;

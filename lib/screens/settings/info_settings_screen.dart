@@ -16,7 +16,7 @@ class _InfoSettingsScreenState extends State<InfoSettingsScreen> {
   void _showUpdateDialog(BuildContext context) {
     showDialog(
       context: context,
-      builder: (ctx) => UpdateDialog(),
+      builder: (ctx) => const UpdateDialog(),
     );
   }
 
@@ -109,7 +109,7 @@ class _InfoSettingsScreenState extends State<InfoSettingsScreen> {
               onSelectionChanged: (Set<String> selection) {
                 updateService.setChannel(selection.first);
               },
-              style: ButtonStyle(
+              style: const ButtonStyle(
                 visualDensity: VisualDensity.compact,
               ),
             ),
