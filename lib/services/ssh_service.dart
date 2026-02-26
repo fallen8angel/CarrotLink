@@ -621,6 +621,8 @@ class SSHService extends ChangeNotifier {
     String remotePath,
     String localPath, {
     void Function(int received, int total)? onProgress,
+    bool Function()? shouldCancel,
+    Future<void> Function()? waitIfPaused,
   }) async {
     final client = await sftp;
     final remote = await client.open(remotePath);
@@ -637,6 +639,10 @@ class SSHService extends ChangeNotifier {
     try {
       final stream = total > 0 ? remote.read(length: total) : remote.read();
       await for (final chunk in stream) {
+        await waitIfPaused?.call();
+        if (shouldCancel?.call() == true) {
+          throw Exception('TRANSFER_CANCELLED');
+        }
         received += chunk.length;
         sink.add(chunk);
         onProgress?.call(received, total);
@@ -653,6 +659,8 @@ class SSHService extends ChangeNotifier {
     String localPath,
     String remotePath, {
     void Function(int sent, int total)? onProgress,
+    bool Function()? shouldCancel,
+    Future<void> Function()? waitIfPaused,
   }) async {
     final client = await sftp;
     final localFile = File(localPath);
@@ -684,6 +692,10 @@ class SSHService extends ChangeNotifier {
 
     Stream<Uint8List> progressStream() async* {
       await for (final chunk in localFile.openRead()) {
+        await waitIfPaused?.call();
+        if (shouldCancel?.call() == true) {
+          throw Exception('TRANSFER_CANCELLED');
+        }
         sent += chunk.length;
         onProgress?.call(sent, total);
         yield Uint8List.fromList(chunk);

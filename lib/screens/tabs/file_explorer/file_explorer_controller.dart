@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:dartssh2/dartssh2.dart';
@@ -16,12 +17,14 @@ class FileDownloadSummary {
   final int failed;
   final int skipped;
   final String downloadDirectory;
+  final bool canceled;
 
   const FileDownloadSummary({
     required this.success,
     required this.failed,
     required this.skipped,
     required this.downloadDirectory,
+    this.canceled = false,
   });
 }
 
@@ -30,17 +33,55 @@ class FileUploadSummary {
   final int failed;
   final int skipped;
   final String remoteDirectory;
+  final bool canceled;
 
   const FileUploadSummary({
     required this.success,
     required this.failed,
     required this.skipped,
     required this.remoteDirectory,
+    this.canceled = false,
+  });
+}
+
+class FileTransferRetrySummary {
+  final int success;
+  final int failed;
+  final int skipped;
+  final bool canceled;
+  final String label;
+
+  const FileTransferRetrySummary({
+    required this.success,
+    required this.failed,
+    required this.skipped,
+    required this.canceled,
+    required this.label,
+  });
+}
+
+class _BatchCancelledException implements Exception {
+  const _BatchCancelledException();
+
+  @override
+  String toString() => 'TRANSFER_CANCELLED';
+}
+
+class _UploadTransferMapping {
+  final String localPath;
+  final String remotePath;
+
+  const _UploadTransferMapping({
+    required this.localPath,
+    required this.remotePath,
   });
 }
 
 class FileExplorerController extends ChangeNotifier {
   static const String _bookmarkKey = 'file_bookmarks';
+  static const String _uploadIncludeRootDirectoryKey =
+      'file_upload_include_root_directory';
+  static const int _pageSize = 220;
   static const Duration _progressEmitInterval = Duration(milliseconds: 120);
 
   SSHService? _ssh;
@@ -48,9 +89,16 @@ class FileExplorerController extends ChangeNotifier {
 
   String _currentPath = CarrotConstants.openpilotPath;
   final List<SftpName> _files = [];
+  final List<SftpName> _filteredFiles = [];
   final List<SftpName> _visibleFiles = [];
+  int _visibleLimit = _pageSize;
+  bool _isLoadingMoreVisible = false;
   bool _isLoading = false;
   bool _isBatchBusy = false;
+  bool _isBatchPaused = false;
+  bool _batchCancelRequested = false;
+  int _batchCompletedItems = 0;
+  int _batchTotalItems = 0;
   String _batchMessage = '';
   bool _isSearching = false;
   String _searchQuery = '';
@@ -62,15 +110,35 @@ class FileExplorerController extends ChangeNotifier {
   bool _showHidden = false;
   FileSortMode _sortMode = FileSortMode.name;
   bool _sortAscending = true;
+  bool _includeRootDirectoryOnUpload = true;
   final Set<String> _clipboardPaths = <String>{};
   bool _clipboardCut = false;
   DateTime _lastProgressEmittedAt = DateTime.fromMillisecondsSinceEpoch(0);
+  Future<FileTransferRetrySummary> Function()? _retryAction;
+  int _retryFailureCount = 0;
+  String _retryLabel = '';
 
   SSHService? get ssh => _ssh;
   String get currentPath => _currentPath;
   List<SftpName> get visibleFiles => List.unmodifiable(_visibleFiles);
+  int get totalFilteredCount => _filteredFiles.length;
+  int get visibleCount => _visibleFiles.length;
+  bool get canLoadMoreVisible => _visibleFiles.length < _filteredFiles.length;
+  bool get isLoadingMoreVisible => _isLoadingMoreVisible;
   bool get isLoading => _isLoading;
   bool get isBatchBusy => _isBatchBusy;
+  bool get isBatchPaused => _isBatchPaused;
+  bool get canCancelBatch => _isBatchBusy;
+  double get batchProgressValue {
+    if (_batchTotalItems <= 0) return 0;
+    return (_batchCompletedItems / _batchTotalItems).clamp(0, 1);
+  }
+
+  String get batchProgressText {
+    if (_batchTotalItems <= 0) return '';
+    return '$_batchCompletedItems/$_batchTotalItems';
+  }
+
   String get batchMessage => _batchMessage;
   bool get isSearching => _isSearching;
   String get searchQuery => _searchQuery;
@@ -81,12 +149,17 @@ class FileExplorerController extends ChangeNotifier {
   bool get showHidden => _showHidden;
   FileSortMode get sortMode => _sortMode;
   bool get sortAscending => _sortAscending;
+  bool get includeRootDirectoryOnUpload => _includeRootDirectoryOnUpload;
   int get selectedCount => _selectedPaths.length;
   Set<String> get selectedPaths => Set.unmodifiable(_selectedPaths);
   bool get hasClipboard => _clipboardPaths.isNotEmpty;
   bool get clipboardIsCut => _clipboardCut;
   int get clipboardCount => _clipboardPaths.length;
   bool get isConnected => _ssh?.isConnected ?? false;
+  bool get hasRetryableFailures =>
+      !_isBatchBusy && _retryAction != null && _retryFailureCount > 0;
+  int get retryableFailureCount => _retryFailureCount;
+  String get retryLabel => _retryLabel;
 
   void bindSsh(SSHService sshService) {
     if (identical(_ssh, sshService)) return;
@@ -99,6 +172,8 @@ class FileExplorerController extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     _bookmarks = prefs.getStringList(_bookmarkKey) ??
         <String>[CarrotConstants.openpilotPath, CarrotConstants.mediaPath];
+    _includeRootDirectoryOnUpload =
+        prefs.getBool(_uploadIncludeRootDirectoryKey) ?? true;
     _applyVisibleFilter(notify: false);
     notifyListeners();
   }
@@ -115,7 +190,15 @@ class FileExplorerController extends ChangeNotifier {
     }
   }
 
-  void _applyVisibleFilter({bool notify = true}) {
+  void _applyVisibleFilter({
+    bool notify = true,
+    bool resetPagination = true,
+  }) {
+    if (resetPagination) {
+      _visibleLimit = _pageSize;
+      _isLoadingMoreVisible = false;
+    }
+
     final filtered = _files.where((item) {
       if (!_showHidden && item.filename.startsWith('.')) return false;
       if (_searchQuery.isEmpty) return true;
@@ -144,14 +227,21 @@ class FileExplorerController extends ChangeNotifier {
       return _sortAscending ? result : -result;
     });
 
-    _visibleFiles
+    _filteredFiles
       ..clear()
       ..addAll(filtered);
 
-    final visiblePathSet = _visibleFiles
+    final limit = _visibleLimit < _filteredFiles.length
+        ? _visibleLimit
+        : _filteredFiles.length;
+    _visibleFiles
+      ..clear()
+      ..addAll(_filteredFiles.take(limit));
+
+    final filteredPathSet = _filteredFiles
         .map((f) => p.posix.join(_currentPath, f.filename))
         .toSet();
-    _selectedPaths.removeWhere((path) => !visiblePathSet.contains(path));
+    _selectedPaths.removeWhere((path) => !filteredPathSet.contains(path));
     if (_selectedPaths.isEmpty) {
       _selectionMode = false;
     }
@@ -185,6 +275,33 @@ class FileExplorerController extends ChangeNotifier {
       _sortAscending = true;
     }
     _applyVisibleFilter();
+  }
+
+  Future<void> loadMoreVisibleItems() async {
+    if (!canLoadMoreVisible || _isLoadingMoreVisible) return;
+    _isLoadingMoreVisible = true;
+    notifyListeners();
+    try {
+      final next = _visibleLimit + _pageSize;
+      _visibleLimit =
+          next < _filteredFiles.length ? next : _filteredFiles.length;
+      _applyVisibleFilter(notify: false, resetPagination: false);
+    } finally {
+      _isLoadingMoreVisible = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> setIncludeRootDirectoryOnUpload(bool value) async {
+    if (_includeRootDirectoryOnUpload == value) return;
+    _includeRootDirectoryOnUpload = value;
+    notifyListeners();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_uploadIncludeRootDirectoryKey, value);
+  }
+
+  Future<void> toggleIncludeRootDirectoryOnUpload() async {
+    await setIncludeRootDirectoryOnUpload(!_includeRootDirectoryOnUpload);
   }
 
   String _shellQuote(String value) {
@@ -306,7 +423,7 @@ class FileExplorerController extends ChangeNotifier {
     _selectionMode = true;
     _selectedPaths
       ..clear()
-      ..addAll(_visibleFiles.map((item) => fullPathOf(item)));
+      ..addAll(_filteredFiles.map((item) => fullPathOf(item)));
     notifyListeners();
   }
 
@@ -437,6 +554,91 @@ class FileExplorerController extends ChangeNotifier {
     await refresh();
   }
 
+  void _clearRetryAction({bool notify = false}) {
+    _retryAction = null;
+    _retryFailureCount = 0;
+    _retryLabel = '';
+    if (notify) notifyListeners();
+  }
+
+  void _setRetryAction({
+    required Future<FileTransferRetrySummary> Function() action,
+    required int failureCount,
+    required String label,
+  }) {
+    _retryAction = action;
+    _retryFailureCount = failureCount;
+    _retryLabel = label;
+    notifyListeners();
+  }
+
+  Future<FileTransferRetrySummary?> retryFailedTransfers() async {
+    if (_isBatchBusy || _retryAction == null || _retryFailureCount <= 0) {
+      return null;
+    }
+    final action = _retryAction!;
+    return action();
+  }
+
+  void toggleBatchPause() {
+    if (!_isBatchBusy) return;
+    _isBatchPaused = !_isBatchPaused;
+    _batchMessage = _isBatchPaused ? '전송 일시정지됨' : '전송 재개 중...';
+    notifyListeners();
+  }
+
+  void cancelCurrentBatch() {
+    if (!_isBatchBusy) return;
+    _batchCancelRequested = true;
+    _isBatchPaused = false;
+    _batchMessage = '전송 취소 요청 중...';
+    notifyListeners();
+  }
+
+  void _beginBatch({
+    required String initialMessage,
+    required int totalItems,
+  }) {
+    _clearRetryAction();
+    _isBatchBusy = true;
+    _isBatchPaused = false;
+    _batchCancelRequested = false;
+    _batchCompletedItems = 0;
+    _batchTotalItems = totalItems;
+    _batchMessage = initialMessage;
+    _lastProgressEmittedAt = DateTime.fromMillisecondsSinceEpoch(0);
+    notifyListeners();
+  }
+
+  void _finishBatch({required bool canceled}) {
+    _isBatchBusy = false;
+    _isBatchPaused = false;
+    _batchCancelRequested = false;
+    _batchCompletedItems = 0;
+    _batchTotalItems = 0;
+    _batchMessage = canceled ? '전송 취소됨' : '';
+    notifyListeners();
+  }
+
+  Future<void> _waitWhilePaused() async {
+    while (_isBatchPaused && !_batchCancelRequested) {
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+    }
+    if (_batchCancelRequested) {
+      throw const _BatchCancelledException();
+    }
+  }
+
+  bool _isTransferCancelledError(Object error) {
+    if (error is _BatchCancelledException) return true;
+    return error.toString().contains('TRANSFER_CANCELLED');
+  }
+
+  String _batchPrefixForItem(int index, int total) {
+    if (total <= 0) return '';
+    return '(${index + 1}/$total) ';
+  }
+
   Future<Directory> _resolveDownloadDir() async {
     final preferred = Directory('/storage/emulated/0/CarrotLink/downloads');
     try {
@@ -496,16 +698,27 @@ class FileExplorerController extends ChangeNotifier {
     }
 
     final downloadDir = await _resolveDownloadDir();
+    final targets = remotePaths.toList(growable: false);
+    final totalItems = targets.length;
     var success = 0;
     var failed = 0;
     var skipped = 0;
+    var canceled = false;
+    final failedForRetry = <String>{};
 
-    _isBatchBusy = true;
-    _batchMessage = '다운로드 준비 중...';
-    _lastProgressEmittedAt = DateTime.fromMillisecondsSinceEpoch(0);
-    notifyListeners();
+    _beginBatch(
+      initialMessage: '다운로드 준비 중...',
+      totalItems: totalItems,
+    );
 
-    for (final remotePath in remotePaths) {
+    for (var i = 0; i < targets.length; i++) {
+      final remotePath = targets[i];
+      try {
+        await _waitWhilePaused();
+      } on _BatchCancelledException {
+        canceled = true;
+        break;
+      }
       final item = findByFullPath(remotePath);
       final isDirectory = item != null && item.attr.isDirectory;
       final itemName = p.posix.basename(remotePath);
@@ -525,6 +738,11 @@ class FileExplorerController extends ChangeNotifier {
         );
         if (!tarResult.isSuccess) {
           failed += 1;
+          failedForRetry.add(remotePath);
+          _batchCompletedItems += 1;
+          _batchMessage =
+              '${_batchPrefixForItem(i, totalItems)}압축 실패: $itemName';
+          notifyListeners();
           continue;
         }
         downloadTargetPath = tempArchivePath;
@@ -535,34 +753,66 @@ class FileExplorerController extends ChangeNotifier {
         await _ssh!.downloadBinaryFile(
           downloadTargetPath,
           localPath,
+          shouldCancel: () => _batchCancelRequested,
+          waitIfPaused: _waitWhilePaused,
           onProgress: (received, total) {
             if (_shouldEmitProgressNow()) {
               final pct =
                   total > 0 ? (received * 100 / total).toStringAsFixed(0) : '?';
-              _batchMessage = '다운로드 중: $localFileName ($pct%)';
+              _batchMessage =
+                  '${_batchPrefixForItem(i, totalItems)}다운로드 중: $localFileName ($pct%)';
               notifyListeners();
             }
           },
         );
         success += 1;
-      } catch (_) {
+      } catch (e) {
+        if (_isTransferCancelledError(e)) {
+          canceled = true;
+          try {
+            final partial = File(localPath);
+            if (partial.existsSync()) {
+              partial.deleteSync();
+            }
+          } catch (_) {}
+          break;
+        }
         failed += 1;
+        failedForRetry.add(remotePath);
       } finally {
+        _batchCompletedItems += 1;
         if (tempArchivePath != null) {
           await _runCommand("rm -f -- ${_shellQuote(tempArchivePath)}");
         }
       }
     }
 
-    _isBatchBusy = false;
-    _batchMessage = '';
-    notifyListeners();
+    _finishBatch(canceled: canceled);
+
+    if (!canceled && failedForRetry.isNotEmpty) {
+      final retryPaths = failedForRetry.toSet();
+      _setRetryAction(
+        action: () async {
+          final result = await downloadPaths(retryPaths);
+          return FileTransferRetrySummary(
+            success: result.success,
+            failed: result.failed,
+            skipped: result.skipped,
+            canceled: result.canceled,
+            label: '다운로드 재시도',
+          );
+        },
+        failureCount: retryPaths.length,
+        label: '다운로드',
+      );
+    }
 
     return FileDownloadSummary(
       success: success,
       failed: failed,
       skipped: skipped,
       downloadDirectory: downloadDir.path,
+      canceled: canceled,
     );
   }
 
@@ -577,19 +827,34 @@ class FileExplorerController extends ChangeNotifier {
       );
     }
 
+    final targets = localPaths.toList(growable: false);
+    final totalItems = targets.length;
     var success = 0;
     var failed = 0;
     var skipped = 0;
+    var canceled = false;
+    final failedLocalPaths = <String>[];
 
-    _isBatchBusy = true;
-    _batchMessage = '업로드 준비 중...';
-    _lastProgressEmittedAt = DateTime.fromMillisecondsSinceEpoch(0);
-    notifyListeners();
+    _beginBatch(
+      initialMessage: '업로드 준비 중...',
+      totalItems: totalItems,
+    );
 
-    for (final localPath in localPaths) {
+    for (var i = 0; i < targets.length; i++) {
+      final localPath = targets[i];
+      try {
+        await _waitWhilePaused();
+      } on _BatchCancelledException {
+        canceled = true;
+        break;
+      }
       final local = File(localPath);
       if (!await local.exists()) {
         skipped += 1;
+        _batchCompletedItems += 1;
+        _batchMessage =
+            '${_batchPrefixForItem(i, totalItems)}스킵: ${p.basename(localPath)}';
+        notifyListeners();
         continue;
       }
 
@@ -599,24 +864,51 @@ class FileExplorerController extends ChangeNotifier {
         await _ssh!.uploadBinaryFile(
           localPath,
           remotePath,
+          shouldCancel: () => _batchCancelRequested,
+          waitIfPaused: _waitWhilePaused,
           onProgress: (sent, total) {
             if (_shouldEmitProgressNow()) {
               final pct =
                   total > 0 ? (sent * 100 / total).toStringAsFixed(0) : '?';
-              _batchMessage = '업로드 중: $fileName ($pct%)';
+              _batchMessage =
+                  '${_batchPrefixForItem(i, totalItems)}업로드 중: $fileName ($pct%)';
               notifyListeners();
             }
           },
         );
         success += 1;
-      } catch (_) {
+      } catch (e) {
+        if (_isTransferCancelledError(e)) {
+          canceled = true;
+          await _runCommand("rm -f -- ${_shellQuote(remotePath)}");
+          break;
+        }
         failed += 1;
+        failedLocalPaths.add(localPath);
+      } finally {
+        _batchCompletedItems += 1;
       }
     }
 
-    _isBatchBusy = false;
-    _batchMessage = '';
-    notifyListeners();
+    _finishBatch(canceled: canceled);
+
+    if (!canceled && failedLocalPaths.isNotEmpty) {
+      final retryLocalPaths = List<String>.from(failedLocalPaths);
+      _setRetryAction(
+        action: () async {
+          final result = await uploadLocalFiles(retryLocalPaths);
+          return FileTransferRetrySummary(
+            success: result.success,
+            failed: result.failed,
+            skipped: result.skipped,
+            canceled: result.canceled,
+            label: '업로드 재시도',
+          );
+        },
+        failureCount: retryLocalPaths.length,
+        label: '업로드',
+      );
+    }
     await refresh();
 
     return FileUploadSummary(
@@ -624,6 +916,7 @@ class FileExplorerController extends ChangeNotifier {
       failed: failed,
       skipped: skipped,
       remoteDirectory: _currentPath,
+      canceled: canceled,
     );
   }
 
@@ -642,14 +935,19 @@ class FileExplorerController extends ChangeNotifier {
         ? p.posix.join(_currentPath, rootName)
         : _currentPath;
 
+    final entities =
+        await rootDir.list(recursive: true, followLinks: false).toList();
+    final totalItems = entities.length;
     var success = 0;
     var failed = 0;
     var skipped = 0;
+    var canceled = false;
+    final failedMappings = <_UploadTransferMapping>[];
 
-    _isBatchBusy = true;
-    _batchMessage = '폴더 업로드 준비 중...';
-    _lastProgressEmittedAt = DateTime.fromMillisecondsSinceEpoch(0);
-    notifyListeners();
+    _beginBatch(
+      initialMessage: '폴더 업로드 준비 중...',
+      totalItems: totalItems > 0 ? totalItems : 1,
+    );
 
     try {
       final mkdirRoot =
@@ -662,10 +960,17 @@ class FileExplorerController extends ChangeNotifier {
         );
       }
 
-      await for (final entity
-          in rootDir.list(recursive: true, followLinks: false)) {
+      for (var i = 0; i < entities.length; i++) {
+        final entity = entities[i];
+        try {
+          await _waitWhilePaused();
+        } on _BatchCancelledException {
+          canceled = true;
+          break;
+        }
         final relative = p.relative(entity.path, from: rootDir.path);
         if (relative == '.' || relative.isEmpty) {
+          _batchCompletedItems += 1;
           continue;
         }
         final relativePosix = relative.replaceAll('\\', '/');
@@ -677,11 +982,13 @@ class FileExplorerController extends ChangeNotifier {
           if (!mkdir.isSuccess) {
             failed += 1;
           }
+          _batchCompletedItems += 1;
           continue;
         }
 
         if (entity is! File) {
           skipped += 1;
+          _batchCompletedItems += 1;
           continue;
         }
 
@@ -689,24 +996,58 @@ class FileExplorerController extends ChangeNotifier {
           await _ssh!.uploadBinaryFile(
             entity.path,
             remotePath,
+            shouldCancel: () => _batchCancelRequested,
+            waitIfPaused: _waitWhilePaused,
             onProgress: (sent, total) {
               if (_shouldEmitProgressNow()) {
                 final pct =
                     total > 0 ? (sent * 100 / total).toStringAsFixed(0) : '?';
-                _batchMessage = '업로드 중: $relativePosix ($pct%)';
+                _batchMessage =
+                    '${_batchPrefixForItem(i, totalItems)}업로드 중: $relativePosix ($pct%)';
                 notifyListeners();
               }
             },
           );
           success += 1;
-        } catch (_) {
+        } catch (e) {
+          if (_isTransferCancelledError(e)) {
+            canceled = true;
+            await _runCommand("rm -f -- ${_shellQuote(remotePath)}");
+            break;
+          }
           failed += 1;
+          failedMappings.add(
+            _UploadTransferMapping(
+                localPath: entity.path, remotePath: remotePath),
+          );
+        } finally {
+          _batchCompletedItems += 1;
         }
       }
     } finally {
-      _isBatchBusy = false;
-      _batchMessage = '';
-      notifyListeners();
+      _finishBatch(canceled: canceled);
+    }
+
+    if (!canceled && failedMappings.isNotEmpty) {
+      final retryMappings = List<_UploadTransferMapping>.from(failedMappings);
+      _setRetryAction(
+        action: () async {
+          final result = await _uploadMappedFiles(
+            retryMappings,
+            remoteDirectory: remoteRoot,
+            label: '폴더 업로드 재시도',
+          );
+          return FileTransferRetrySummary(
+            success: result.success,
+            failed: result.failed,
+            skipped: result.skipped,
+            canceled: result.canceled,
+            label: '폴더 업로드 재시도',
+          );
+        },
+        failureCount: retryMappings.length,
+        label: '폴더 업로드',
+      );
     }
 
     await refresh();
@@ -715,6 +1056,115 @@ class FileExplorerController extends ChangeNotifier {
       failed: failed,
       skipped: skipped,
       remoteDirectory: remoteRoot,
+      canceled: canceled,
+    );
+  }
+
+  Future<FileUploadSummary> _uploadMappedFiles(
+    List<_UploadTransferMapping> mappings, {
+    required String remoteDirectory,
+    required String label,
+  }) async {
+    _assertSshReady();
+    if (mappings.isEmpty) {
+      return FileUploadSummary(
+        success: 0,
+        failed: 0,
+        skipped: 0,
+        remoteDirectory: remoteDirectory,
+      );
+    }
+
+    final targets = List<_UploadTransferMapping>.from(mappings);
+    final totalItems = targets.length;
+    var success = 0;
+    var failed = 0;
+    var skipped = 0;
+    var canceled = false;
+    final failedMappings = <_UploadTransferMapping>[];
+
+    _beginBatch(
+      initialMessage: '$label 준비 중...',
+      totalItems: totalItems,
+    );
+
+    for (var i = 0; i < targets.length; i++) {
+      final mapping = targets[i];
+      try {
+        await _waitWhilePaused();
+      } on _BatchCancelledException {
+        canceled = true;
+        break;
+      }
+
+      final local = File(mapping.localPath);
+      if (!await local.exists()) {
+        skipped += 1;
+        _batchCompletedItems += 1;
+        continue;
+      }
+
+      try {
+        await _ssh!.uploadBinaryFile(
+          mapping.localPath,
+          mapping.remotePath,
+          shouldCancel: () => _batchCancelRequested,
+          waitIfPaused: _waitWhilePaused,
+          onProgress: (sent, total) {
+            if (_shouldEmitProgressNow()) {
+              final pct =
+                  total > 0 ? (sent * 100 / total).toStringAsFixed(0) : '?';
+              _batchMessage =
+                  '${_batchPrefixForItem(i, totalItems)}$label: ${p.basename(mapping.localPath)} ($pct%)';
+              notifyListeners();
+            }
+          },
+        );
+        success += 1;
+      } catch (e) {
+        if (_isTransferCancelledError(e)) {
+          canceled = true;
+          await _runCommand("rm -f -- ${_shellQuote(mapping.remotePath)}");
+          break;
+        }
+        failed += 1;
+        failedMappings.add(mapping);
+      } finally {
+        _batchCompletedItems += 1;
+      }
+    }
+
+    _finishBatch(canceled: canceled);
+
+    if (!canceled && failedMappings.isNotEmpty) {
+      final retryMappings = List<_UploadTransferMapping>.from(failedMappings);
+      _setRetryAction(
+        action: () async {
+          final result = await _uploadMappedFiles(
+            retryMappings,
+            remoteDirectory: remoteDirectory,
+            label: label,
+          );
+          return FileTransferRetrySummary(
+            success: result.success,
+            failed: result.failed,
+            skipped: result.skipped,
+            canceled: result.canceled,
+            label: '$label 재시도',
+          );
+        },
+        failureCount: retryMappings.length,
+        label: label,
+      );
+    }
+
+    await refresh();
+    return FileUploadSummary(
+      success: success,
+      failed: failed,
+      skipped: skipped,
+      remoteDirectory: remoteDirectory,
+      canceled: canceled,
     );
   }
 }

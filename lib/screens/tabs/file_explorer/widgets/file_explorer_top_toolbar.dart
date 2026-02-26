@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../file_explorer_controller.dart';
 
+enum _UploadOptionAction { toggleFolderRoot }
+
 class FileExplorerTopToolbar extends StatelessWidget {
   final FileExplorerController controller;
   final TextEditingController searchController;
@@ -14,6 +16,11 @@ class FileExplorerTopToolbar extends StatelessWidget {
   final VoidCallback onCreateFile;
   final VoidCallback onUploadFiles;
   final VoidCallback onUploadFolder;
+  final bool includeRootDirectoryOnUpload;
+  final VoidCallback onToggleUploadRootDirectory;
+  final VoidCallback onToggleBatchPause;
+  final VoidCallback onCancelBatch;
+  final VoidCallback onRetryFailedTransfers;
   final VoidCallback onRefresh;
   final ValueChanged<FileSortMode> onSortSelected;
   final ValueChanged<String> onSearchChanged;
@@ -33,6 +40,11 @@ class FileExplorerTopToolbar extends StatelessWidget {
     required this.onCreateFile,
     required this.onUploadFiles,
     required this.onUploadFolder,
+    required this.includeRootDirectoryOnUpload,
+    required this.onToggleUploadRootDirectory,
+    required this.onToggleBatchPause,
+    required this.onCancelBatch,
+    required this.onRetryFailedTransfers,
     required this.onRefresh,
     required this.onSortSelected,
     required this.onSearchChanged,
@@ -128,6 +140,22 @@ class FileExplorerTopToolbar extends StatelessWidget {
                 tooltip: "로컬 폴더 업로드",
                 onPressed: onUploadFolder,
               ),
+              PopupMenuButton<_UploadOptionAction>(
+                tooltip: "업로드 옵션",
+                icon: const Icon(Icons.tune),
+                onSelected: (action) {
+                  if (action == _UploadOptionAction.toggleFolderRoot) {
+                    onToggleUploadRootDirectory();
+                  }
+                },
+                itemBuilder: (_) => [
+                  CheckedPopupMenuItem<_UploadOptionAction>(
+                    value: _UploadOptionAction.toggleFolderRoot,
+                    checked: includeRootDirectoryOnUpload,
+                    child: const Text("폴더 업로드 시 루트 폴더명 포함"),
+                  ),
+                ],
+              ),
               IconButton(
                 icon: const Icon(Icons.refresh),
                 tooltip: "새로고침",
@@ -154,14 +182,57 @@ class FileExplorerTopToolbar extends StatelessWidget {
           if (selectionBar != null) selectionBar!,
           if (controller.isBatchBusy) ...[
             const SizedBox(height: 6),
-            const LinearProgressIndicator(),
+            LinearProgressIndicator(
+                value: controller.batchProgressValue > 0
+                    ? controller.batchProgressValue
+                    : null),
             const SizedBox(height: 4),
             Align(
               alignment: Alignment.centerLeft,
               child: Text(
-                controller.batchMessage,
+                controller.batchProgressText.isEmpty
+                    ? controller.batchMessage
+                    : '${controller.batchProgressText}  ${controller.batchMessage}',
                 style: const TextStyle(fontSize: 12, color: Colors.grey),
               ),
+            ),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                TextButton.icon(
+                  onPressed: onToggleBatchPause,
+                  icon: Icon(controller.isBatchPaused
+                      ? Icons.play_arrow
+                      : Icons.pause),
+                  label: Text(controller.isBatchPaused ? '재개' : '일시정지'),
+                ),
+                const SizedBox(width: 8),
+                TextButton.icon(
+                  onPressed: controller.canCancelBatch ? onCancelBatch : null,
+                  icon: const Icon(Icons.stop_circle_outlined),
+                  label: const Text('취소'),
+                ),
+              ],
+            ),
+          ],
+          if (!controller.isBatchBusy && controller.hasRetryableFailures) ...[
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Text(
+                  '${controller.retryLabel} 실패 ${controller.retryableFailureCount}건',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                TextButton.icon(
+                  onPressed: onRetryFailedTransfers,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('실패 재시도'),
+                ),
+              ],
             ),
           ],
         ],

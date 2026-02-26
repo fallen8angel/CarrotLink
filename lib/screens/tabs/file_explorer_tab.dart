@@ -192,8 +192,10 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
       if (!mounted) return;
       CustomToast.show(
         context,
-        "업로드 완료: 성공 ${summary.success} / 스킵 ${summary.skipped} / 실패 ${summary.failed}",
-        isError: summary.failed > 0,
+        summary.canceled
+            ? "업로드 취소됨: 성공 ${summary.success} / 스킵 ${summary.skipped} / 실패 ${summary.failed}"
+            : "업로드 완료: 성공 ${summary.success} / 스킵 ${summary.skipped} / 실패 ${summary.failed}",
+        isError: summary.failed > 0 || summary.canceled,
       );
     } catch (e) {
       if (!mounted) return;
@@ -210,18 +212,42 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
 
       final summary = await _controller.uploadLocalDirectory(
         directoryPath,
-        includeRootDirectory: true,
+        includeRootDirectory: _controller.includeRootDirectoryOnUpload,
       );
       if (!mounted) return;
       CustomToast.show(
         context,
-        "폴더 업로드 완료: 성공 ${summary.success} / 스킵 ${summary.skipped} / 실패 ${summary.failed}",
-        isError: summary.failed > 0,
+        summary.canceled
+            ? "폴더 업로드 취소됨: 성공 ${summary.success} / 스킵 ${summary.skipped} / 실패 ${summary.failed}"
+            : "폴더 업로드 완료: 성공 ${summary.success} / 스킵 ${summary.skipped} / 실패 ${summary.failed}",
+        isError: summary.failed > 0 || summary.canceled,
       );
     } catch (e) {
       if (!mounted) return;
       CustomToast.show(context, "폴더 업로드 실패: $e", isError: true);
     }
+  }
+
+  Future<void> _toggleUploadRootDirectory() async {
+    await _controller.toggleIncludeRootDirectoryOnUpload();
+    if (!mounted) return;
+    final enabled = _controller.includeRootDirectoryOnUpload;
+    CustomToast.show(
+      context,
+      enabled ? "폴더 업로드: 루트 폴더명 포함" : "폴더 업로드: 루트 폴더명 제외",
+    );
+  }
+
+  Future<void> _retryFailedTransfers() async {
+    final result = await _controller.retryFailedTransfers();
+    if (!mounted || result == null) return;
+    CustomToast.show(
+      context,
+      result.canceled
+          ? "${result.label} 취소됨: 성공 ${result.success} / 스킵 ${result.skipped} / 실패 ${result.failed}"
+          : "${result.label} 완료: 성공 ${result.success} / 스킵 ${result.skipped} / 실패 ${result.failed}",
+      isError: result.failed > 0 || result.canceled,
+    );
   }
 
   Future<void> _showBookmarks() async {
@@ -387,8 +413,10 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
       if (!mounted) return;
       CustomToast.show(
         context,
-        "다운로드 완료: 성공 ${summary.success} / 스킵 ${summary.skipped} / 실패 ${summary.failed}",
-        isError: summary.failed > 0,
+        summary.canceled
+            ? "다운로드 취소됨: 성공 ${summary.success} / 스킵 ${summary.skipped} / 실패 ${summary.failed}"
+            : "다운로드 완료: 성공 ${summary.success} / 스킵 ${summary.skipped} / 실패 ${summary.failed}",
+        isError: summary.failed > 0 || summary.canceled,
       );
     } catch (e) {
       if (!mounted) return;
@@ -403,8 +431,10 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
       if (!mounted) return;
       CustomToast.show(
         context,
-        "다운로드 완료: 성공 ${summary.success} / 스킵 ${summary.skipped} / 실패 ${summary.failed}",
-        isError: summary.failed > 0,
+        summary.canceled
+            ? "다운로드 취소됨: 성공 ${summary.success} / 스킵 ${summary.skipped} / 실패 ${summary.failed}"
+            : "다운로드 완료: 성공 ${summary.success} / 스킵 ${summary.skipped} / 실패 ${summary.failed}",
+        isError: summary.failed > 0 || summary.canceled,
       );
     } catch (e) {
       if (!mounted) return;
@@ -609,6 +639,11 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
       onCreateFile: _createFile,
       onUploadFiles: _uploadLocalFiles,
       onUploadFolder: _uploadLocalFolder,
+      includeRootDirectoryOnUpload: _controller.includeRootDirectoryOnUpload,
+      onToggleUploadRootDirectory: _toggleUploadRootDirectory,
+      onToggleBatchPause: _controller.toggleBatchPause,
+      onCancelBatch: _controller.cancelCurrentBatch,
+      onRetryFailedTransfers: _retryFailedTransfers,
       onRefresh: _refresh,
       onSortSelected: _controller.setSortMode,
       onSearchChanged: _controller.updateSearchQuery,
