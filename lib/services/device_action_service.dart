@@ -624,7 +624,7 @@ sudo reboot
       case DeviceActionType.resetLiveParameters:
         return 'rm -f /data/params/d/LiveParameters';
       case DeviceActionType.resetCalibration:
-        return 'rm -f /data/params/d/CalibrationParams';
+        return 'rm -f /data/params/d/CalibrationParams && (sudo reboot >/dev/null 2>&1 &)';
       case DeviceActionType.deleteVideos:
         return '''
 TARGET="/data/media/0/videos"

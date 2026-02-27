@@ -6,6 +6,7 @@ import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../services/ssh_service.dart';
+import '../../widgets/connection_required_view.dart';
 import '../../services/device_action_service.dart';
 import '../../widgets/design_components.dart';
 import '../../widgets/custom_toast.dart';
@@ -1066,7 +1067,7 @@ class _GitTabState extends State<GitTab> {
             _runGitAction(
               context,
               DeviceActionType.gitCheckout,
-              "$remote/$name 브랜치로 변경됨",
+              "$name 브랜치로 변경됨",
               branch: name,
               remote: remote,
             );
@@ -1451,6 +1452,7 @@ class _GitTabState extends State<GitTab> {
 
   @override
   Widget build(BuildContext context) {
+    final connected = context.watch<SSHService>().isConnected;
     return Column(
       children: [
         Expanded(
@@ -1520,48 +1522,54 @@ class _GitTabState extends State<GitTab> {
                         ),
                         const SizedBox(height: 12),
                         Expanded(
-                          child: Container(
-                            padding: const EdgeInsets.all(8),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF1E1E1E),
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(
-                                  color: Colors.grey.withValues(alpha: 0.2)),
-                            ),
-                            child: ListView.builder(
-                              controller: _scrollController,
-                              itemCount: _logs.length,
-                              itemBuilder: (context, index) {
-                                final log = _logs[index];
-                                final isOld = log['isOld'] == 'true';
-                                return Padding(
-                                  padding:
-                                      const EdgeInsets.symmetric(vertical: 2.0),
-                                  child: RichText(
-                                    text: TextSpan(
-                                      style: TextStyle(
-                                        fontFamily: 'monospace',
-                                        fontSize: 12,
+                          child: connected
+                              ? Container(
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF1E1E1E),
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(
                                         color:
-                                            isOld ? Colors.grey : Colors.white,
-                                      ),
-                                      children: [
-                                        TextSpan(
-                                          text: "[${log['time']}] ",
-                                          style: TextStyle(
-                                            color: isOld
-                                                ? Colors.grey[600]
-                                                : Colors.greenAccent,
+                                            Colors.grey.withValues(alpha: 0.2)),
+                                  ),
+                                  child: ListView.builder(
+                                    controller: _scrollController,
+                                    itemCount: _logs.length,
+                                    itemBuilder: (context, index) {
+                                      final log = _logs[index];
+                                      final isOld = log['isOld'] == 'true';
+                                      return Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                            vertical: 2.0),
+                                        child: RichText(
+                                          text: TextSpan(
+                                            style: TextStyle(
+                                              fontFamily: 'monospace',
+                                              fontSize: 12,
+                                              color: isOld
+                                                  ? Colors.grey
+                                                  : Colors.white,
+                                            ),
+                                            children: [
+                                              TextSpan(
+                                                text: "[${log['time']}] ",
+                                                style: TextStyle(
+                                                  color: isOld
+                                                      ? Colors.grey[600]
+                                                      : Colors.greenAccent,
+                                                ),
+                                              ),
+                                              TextSpan(text: log['message']),
+                                            ],
                                           ),
                                         ),
-                                        TextSpan(text: log['message']),
-                                      ],
-                                    ),
+                                      );
+                                    },
                                   ),
-                                );
-                              },
-                            ),
-                          ),
+                                )
+                              : const ConnectionRequiredView(
+                                  description: 'Git 기능을 사용하려면 먼저 기기에 연결하세요.',
+                                ),
                         ),
                       ],
                     ),
@@ -1605,6 +1613,7 @@ class _GitTabState extends State<GitTab> {
                       Icons.list,
                       Colors.blue,
                       () => _selectBranch(context),
+                      enabled: connected,
                     ),
                     _buildActionButton(
                       context,
@@ -1616,6 +1625,7 @@ class _GitTabState extends State<GitTab> {
                         DeviceActionType.gitPull,
                         "Git Pull 완료",
                       ),
+                      enabled: connected,
                     ),
                     _buildActionButton(
                       context,
@@ -1627,6 +1637,7 @@ class _GitTabState extends State<GitTab> {
                         DeviceActionType.gitResetHardClean,
                         "Git Reset 완료",
                       ),
+                      enabled: connected,
                     ),
                     _buildActionButton(
                       context,
@@ -1634,6 +1645,7 @@ class _GitTabState extends State<GitTab> {
                       Icons.sync,
                       Colors.red,
                       () => _performGitSync(context),
+                      enabled: connected,
                     ),
                   ],
                 ),
@@ -1644,6 +1656,7 @@ class _GitTabState extends State<GitTab> {
                   Icons.restart_alt,
                   Colors.red,
                   () => _rebootDevice(context),
+                  enabled: connected,
                 ),
               ],
             ),
@@ -1654,9 +1667,10 @@ class _GitTabState extends State<GitTab> {
   }
 
   Widget _buildActionButton(BuildContext context, String label, IconData icon,
-      Color color, VoidCallback onTap) {
+      Color color, VoidCallback onTap,
+      {bool enabled = true}) {
     return FilledButton.icon(
-      onPressed: _isLoading ? null : onTap,
+      onPressed: _isLoading || !enabled ? null : onTap,
       icon: Icon(icon, size: 18),
       label: Text(label),
       style: FilledButton.styleFrom(
@@ -1701,92 +1715,266 @@ class _BranchListDialog extends StatefulWidget {
 
 class _BranchListDialogState extends State<_BranchListDialog> {
   final ScrollController _scrollController = ScrollController();
-  final TextEditingController _searchController = TextEditingController();
-  late List<_BranchListRow> _rows;
-  String _query = '';
+  String? _selectedRemote;
+  String? _currentRemoteForHighlight;
+  late List<Map<String, String>> _visibleBranches;
 
   @override
   void initState() {
     super.initState();
-    _rows = _buildRows();
-    _searchController.addListener(_handleSearchChanged);
+    _selectedRemote = _resolveInitialRemote();
+    _currentRemoteForHighlight = _resolveCurrentRemoteForHighlight();
+    _visibleBranches = _branchesForRemote(_selectedRemote);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final rowIndex = _rows.indexWhere((r) =>
-          r.branch != null &&
-          r.branch!['name'] == widget.currentBranch &&
-          ((r.branch!['remote'] ?? '') == widget.currentUpstreamRemote ||
-              widget.currentUpstreamRemote.isEmpty));
+      final rowIndex = _visibleBranches.indexWhere((branch) {
+        final name = branch['name'] ?? '';
+        if (name != widget.currentBranch) return false;
+        if (widget.currentUpstreamRemote.isEmpty) return true;
+        return _normalizedRemote(branch) == widget.currentUpstreamRemote;
+      });
       if (rowIndex != -1 && _scrollController.hasClients) {
         final offset = rowIndex * 64.0;
-        // Clamp offset to maxScrollExtent
         final maxScroll = _scrollController.position.maxScrollExtent;
         _scrollController.jumpTo(offset.clamp(0.0, maxScroll));
       }
     });
   }
 
-  void _handleSearchChanged() {
-    final next = _searchController.text.trim();
-    if (next == _query) return;
-    setState(() {
-      _query = next;
-      _rows = _buildRows(query: next);
-    });
+  List<String> _availableRemotes() {
+    final groups = _repositoryGroups();
+    return groups.keys.toList();
   }
 
-  List<_BranchListRow> _buildRows({String query = ''}) {
-    final grouped = <String, List<Map<String, String>>>{};
-    final q = query.trim().toLowerCase();
+  List<String> _orderedRemoteNames() {
+    final remotesWithBranch = <String>{};
     for (final branch in widget.branches) {
-      final remote = (branch['remote'] ?? '').trim().isEmpty
-          ? 'origin'
-          : branch['remote']!.trim();
-      final branchName = (branch['name'] ?? '').toLowerCase();
-      if (q.isNotEmpty) {
-        final remoteLabel = _remoteLabel(remote).toLowerCase();
-        final owner = (_guessOwnerFromRemoteName(remote) ?? '').toLowerCase();
-        final fullName = ('$remote/${branch['name'] ?? ''}').toLowerCase();
-        final matched = branchName.contains(q) ||
-            remote.toLowerCase().contains(q) ||
-            remoteLabel.contains(q) ||
-            owner.contains(q) ||
-            fullName.contains(q);
-        if (!matched) continue;
-      }
-      grouped.putIfAbsent(remote, () => <Map<String, String>>[]).add(branch);
+      remotesWithBranch.add(_normalizedRemote(branch));
     }
-
-    final remoteOrder = <String>[
-      ...widget.remotes.map((e) => e.name),
-      ...grouped.keys.where((k) => !widget.remotes.any((e) => e.name == k)),
-    ].toSet().toList();
-
-    final rows = <_BranchListRow>[];
-    for (final remote in remoteOrder) {
-      final entries = grouped[remote];
-      if (entries == null || entries.isEmpty) continue;
-      rows.add(_BranchListRow.header(remote));
-      for (final branch in entries) {
-        rows.add(_BranchListRow.branch(branch));
-      }
-    }
-    return rows;
+    final ordered = <String>[
+      ...widget.remotes.map((e) => e.name).where(remotesWithBranch.contains),
+      ...remotesWithBranch.where(
+          (name) => !widget.remotes.any((remote) => remote.name == name)),
+    ];
+    return ordered.toSet().toList();
   }
 
-  String _remoteLabel(String remote) {
+  Map<String, List<String>> _repositoryGroups() {
+    final groups = <String, List<String>>{};
+    for (final remote in _orderedRemoteNames()) {
+      final id = _repositoryIdForRemoteName(remote);
+      final list = groups.putIfAbsent(id, () => <String>[]);
+      if (!list.contains(remote)) {
+        list.add(remote);
+      }
+    }
+    return groups;
+  }
+
+  String _repositoryIdForBranch(Map<String, String> branch) {
+    return _repositoryIdForRemoteName(_normalizedRemote(branch));
+  }
+
+  String _repositoryIdForRemoteName(String remoteName) {
     GitRemoteInfo? info;
     for (final remoteInfo in widget.remotes) {
-      if (remoteInfo.name == remote) {
+      if (remoteInfo.name == remoteName) {
         info = remoteInfo;
         break;
       }
     }
-    if (info == null) return remote;
-    final url = info.fetchUrl;
-    final owner = _guessOwner(url);
-    if (owner == null || owner.isEmpty) return remote;
-    if (owner == remote) return owner;
-    return '$remote ($owner)';
+
+    final rawUrl = ((info?.fetchUrl ?? '').trim().isNotEmpty)
+        ? info!.fetchUrl
+        : (info?.pushUrl ?? '');
+    final repoKey = _hostOwnerRepoKey(rawUrl);
+    if (repoKey != null && repoKey.isNotEmpty) {
+      return 'repo:$repoKey';
+    }
+    final owner = _guessOwner(rawUrl);
+    if (owner != null && owner.isNotEmpty) {
+      return 'owner:${owner.toLowerCase()}';
+    }
+    if (remoteName == 'origin' || remoteName == 'upstream') {
+      return 'repo:default';
+    }
+    return 'remote:$remoteName';
+  }
+
+  int _remotePriority(String remoteName) {
+    if (widget.currentUpstreamRemote.isNotEmpty &&
+        remoteName == widget.currentUpstreamRemote) {
+      return -2;
+    }
+    if (remoteName == 'origin') return -1;
+    final ordered = _orderedRemoteNames();
+    final idx = ordered.indexOf(remoteName);
+    if (idx >= 0) return idx;
+    return ordered.length + 50;
+  }
+
+  String? _hostOwnerRepoKey(String url) {
+    final normalized = url.trim();
+    if (normalized.isEmpty) return null;
+
+    final scpLike =
+        RegExp(r'^[^@]+@([^:]+):([^/]+)/([^/]+?)(?:\.git)?$').firstMatch(
+      normalized,
+    );
+    if (scpLike != null) {
+      final host = scpLike.group(1)!.toLowerCase();
+      final owner = scpLike.group(2)!.toLowerCase();
+      final repo = scpLike.group(3)!.toLowerCase();
+      return '$host/$owner/$repo';
+    }
+
+    final sshUri = Uri.tryParse(normalized);
+    if (sshUri != null &&
+        sshUri.scheme == 'ssh' &&
+        sshUri.host.isNotEmpty &&
+        sshUri.pathSegments.length >= 2) {
+      final owner = sshUri.pathSegments[0].toLowerCase();
+      var repo = sshUri.pathSegments[1].toLowerCase();
+      if (repo.endsWith('.git')) repo = repo.substring(0, repo.length - 4);
+      return '${sshUri.host.toLowerCase()}/$owner/$repo';
+    }
+
+    final uri = Uri.tryParse(normalized);
+    if (uri != null && uri.host.isNotEmpty && uri.pathSegments.length >= 2) {
+      final owner = uri.pathSegments[0].toLowerCase();
+      var repo = uri.pathSegments[1].toLowerCase();
+      if (repo.endsWith('.git')) repo = repo.substring(0, repo.length - 4);
+      return '${uri.host.toLowerCase()}/$owner/$repo';
+    }
+    return null;
+  }
+
+  String? _guessOwnerRepo(String url) {
+    final key = _hostOwnerRepoKey(url);
+    if (key == null || key.isEmpty) return null;
+    final parts = key.split('/');
+    if (parts.length < 3) return null;
+    return '${parts[1]}/${parts[2]}';
+  }
+
+  String? _resolveInitialRemote() {
+    final repositories = _availableRemotes();
+    if (repositories.isEmpty) return null;
+    if (widget.currentUpstreamRemote.isNotEmpty &&
+        repositories.contains(
+            _repositoryIdForRemoteName(widget.currentUpstreamRemote))) {
+      return _repositoryIdForRemoteName(widget.currentUpstreamRemote);
+    }
+    final originRepo = _repositoryIdForRemoteName('origin');
+    if (repositories.contains(originRepo)) return originRepo;
+    return repositories.first;
+  }
+
+  List<Map<String, String>> _branchesForRemote(String? remote) {
+    if (remote == null || remote.isEmpty) return const [];
+    final selectedByName = <String, Map<String, String>>{};
+    for (final branch in widget.branches) {
+      if (_repositoryIdForBranch(branch) != remote) continue;
+      final name = (branch['name'] ?? '').trim();
+      if (name.isEmpty) continue;
+
+      final current = selectedByName[name];
+      if (current == null) {
+        selectedByName[name] = branch;
+        continue;
+      }
+
+      final nextPriority = _remotePriority(_normalizedRemote(branch));
+      final currentPriority = _remotePriority(_normalizedRemote(current));
+      if (nextPriority < currentPriority) {
+        selectedByName[name] = branch;
+      }
+    }
+    return selectedByName.values.toList();
+  }
+
+  String? _resolveCurrentRemoteForHighlight() {
+    if (widget.currentUpstreamRemote.isNotEmpty) {
+      return _repositoryIdForRemoteName(widget.currentUpstreamRemote);
+    }
+
+    final candidates = <String>[];
+    for (final remote in _availableRemotes()) {
+      final hasCurrentBranch = _branchesForRemote(remote).any(
+        (branch) => (branch['name'] ?? '') == widget.currentBranch,
+      );
+      if (hasCurrentBranch) {
+        candidates.add(remote);
+      }
+    }
+
+    if (candidates.length == 1) {
+      return candidates.first;
+    }
+    return null;
+  }
+
+  String _normalizedRemote(Map<String, String> branch) {
+    final remote = (branch['remote'] ?? '').trim();
+    return remote.isEmpty ? 'origin' : remote;
+  }
+
+  String _repositoryLabel(String repositoryId, List<String> groupedRemotes) {
+    GitRemoteInfo? info;
+    for (final remote in groupedRemotes) {
+      for (final remoteInfo in widget.remotes) {
+        if (remoteInfo.name == remote) {
+          info = remoteInfo;
+          break;
+        }
+      }
+      if (info != null) {
+        final candidateUrl =
+            info.fetchUrl.trim().isNotEmpty ? info.fetchUrl : info.pushUrl;
+        if (candidateUrl.trim().isNotEmpty) {
+          break;
+        }
+      }
+    }
+
+    String rawUrl = '';
+    if (info != null) {
+      rawUrl = info.fetchUrl.trim().isNotEmpty ? info.fetchUrl : info.pushUrl;
+    }
+    final ownerRepo = _guessOwnerRepo(rawUrl);
+    if (ownerRepo != null && ownerRepo.isNotEmpty) return ownerRepo;
+
+    final owner = _guessOwner(rawUrl);
+    if (owner != null && owner.isNotEmpty) return owner;
+    if (groupedRemotes.contains('origin')) return '기본 저장소';
+    if (groupedRemotes.isNotEmpty) return groupedRemotes.first;
+    return repositoryId;
+  }
+
+  Map<String, String> _repositoryLabels(
+    List<String> repositories,
+    Map<String, List<String>> groups,
+  ) {
+    final labels = <String, String>{};
+    final counts = <String, int>{};
+
+    for (final repository in repositories) {
+      final label =
+          _repositoryLabel(repository, groups[repository] ?? const <String>[]);
+      labels[repository] = label;
+      counts[label] = (counts[label] ?? 0) + 1;
+    }
+
+    for (final repository in repositories) {
+      final label = labels[repository] ?? repository;
+      if ((counts[label] ?? 0) > 1) {
+        final remotes = groups[repository] ?? const <String>[];
+        final suffix = remotes.contains('origin')
+            ? 'origin'
+            : (remotes.isNotEmpty ? remotes.first : '');
+        labels[repository] = suffix.isEmpty ? label : '$label ($suffix)';
+      }
+    }
+    return labels;
   }
 
   String? _guessOwner(String url) {
@@ -1795,15 +1983,6 @@ class _BranchListDialogState extends State<_BranchListDialog> {
     final uri = Uri.tryParse(url);
     if (uri != null && uri.pathSegments.length >= 2) {
       return uri.pathSegments[0];
-    }
-    return null;
-  }
-
-  String? _guessOwnerFromRemoteName(String remoteName) {
-    for (final remote in widget.remotes) {
-      if (remote.name == remoteName) {
-        return _guessOwner(remote.fetchUrl);
-      }
     }
     return null;
   }
@@ -1831,17 +2010,124 @@ class _BranchListDialogState extends State<_BranchListDialog> {
     return null;
   }
 
+  void _changeRemote(String? remote) {
+    if (remote == null || remote == _selectedRemote) return;
+    setState(() {
+      _selectedRemote = remote;
+      _visibleBranches = _branchesForRemote(remote);
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      _scrollController.jumpTo(0);
+    });
+  }
+
+  Map<String, int> _branchCountByRepository() {
+    final counts = <String, int>{};
+    for (final branch in widget.branches) {
+      final repoId = _repositoryIdForBranch(branch);
+      counts[repoId] = (counts[repoId] ?? 0) + 1;
+    }
+    return counts;
+  }
+
+  Future<void> _showRepositoryPicker({
+    required List<String> repositories,
+    required Map<String, String> repositoryLabels,
+    required Map<String, List<String>> repositoryGroups,
+    required Map<String, int> branchCounts,
+  }) async {
+    if (repositories.isEmpty) return;
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '저장소 선택',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Flexible(
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: repositories.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (_, index) {
+                    final repoId = repositories[index];
+                    final isSelected = repoId == _selectedRemote;
+                    final label = repositoryLabels[repoId] ?? repoId;
+                    final aliases =
+                        repositoryGroups[repoId] ?? const <String>[];
+                    final branchCount = branchCounts[repoId] ?? 0;
+                    final subtitle = aliases.isEmpty
+                        ? '$branchCount개 브랜치'
+                        : '원격 ${aliases.join(', ')} · $branchCount개 브랜치';
+                    return ListTile(
+                      dense: true,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 2,
+                      ),
+                      title: Text(
+                        label,
+                        style: TextStyle(
+                          fontWeight:
+                              isSelected ? FontWeight.w700 : FontWeight.w500,
+                        ),
+                      ),
+                      subtitle: Text(
+                        subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      trailing: isSelected
+                          ? Icon(
+                              Icons.check_circle,
+                              color: Theme.of(context).colorScheme.primary,
+                            )
+                          : null,
+                      onTap: () => Navigator.pop(sheetContext, repoId),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (!mounted || picked == null) return;
+    _changeRemote(picked);
+  }
+
   @override
   void dispose() {
-    _searchController
-      ..removeListener(_handleSearchChanged)
-      ..dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final repositories = _availableRemotes();
+    final repositoryGroups = _repositoryGroups();
+    final remoteLabels = _repositoryLabels(repositories, repositoryGroups);
+    final branchCounts = _branchCountByRepository();
+    final selectedRemote = _selectedRemote;
+    final selectedRemoteLabel = selectedRemote == null
+        ? '-'
+        : (remoteLabels[selectedRemote] ?? selectedRemote);
+
     return AlertDialog(
       title: Text(widget.title),
       content: SizedBox(
@@ -1849,154 +2135,240 @@ class _BranchListDialogState extends State<_BranchListDialog> {
         height: 480,
         child: Column(
           children: [
-            TextField(
-              controller: _searchController,
-              decoration: InputDecoration(
-                prefixIcon: const Icon(Icons.search, size: 18),
-                hintText: "브랜치/제작자(remote) 검색",
-                isDense: true,
-                suffixIcon: _query.isEmpty
-                    ? null
-                    : IconButton(
-                        tooltip: "지우기",
-                        onPressed: _searchController.clear,
-                        icon: const Icon(Icons.close, size: 18),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.call_split, size: 16),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      '현재 브랜치: ${widget.currentBranch}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
                       ),
-                border: const OutlineInputBorder(),
+                    ),
+                  ),
+                  Text(
+                    '${_visibleBranches.length}개',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
               ),
             ),
             const SizedBox(height: 10),
+            Material(
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(12),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () => _showRepositoryPicker(
+                  repositories: repositories,
+                  repositoryLabels: remoteLabels,
+                  repositoryGroups: repositoryGroups,
+                  branchCounts: branchCounts,
+                ),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.account_tree_outlined, size: 18),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '저장소',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .onSurfaceVariant,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              selectedRemoteLabel,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w700),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Icon(Icons.expand_more, size: 18),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            if (selectedRemote != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    '선택 저장소: $selectedRemoteLabel',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ),
             Expanded(
-              child: _rows.isEmpty
+              child: _visibleBranches.isEmpty
                   ? const Center(
                       child: Text(
-                        "검색 결과가 없습니다.",
+                        "선택한 저장소에 브랜치가 없습니다.",
                         style: TextStyle(fontSize: 12, color: Colors.grey),
                       ),
                     )
-                  : ListView.builder(
-                      controller: _scrollController,
-                      shrinkWrap: true,
-                      itemCount: _rows.length,
-                      itemBuilder: (ctx, index) {
-                        final row = _rows[index];
-                        if (row.isHeader) {
-                          final remote = row.header!;
+                  : ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: ListView.builder(
+                        controller: _scrollController,
+                        shrinkWrap: true,
+                        padding: const EdgeInsets.symmetric(vertical: 2),
+                        clipBehavior: Clip.hardEdge,
+                        itemCount: _visibleBranches.length,
+                        itemBuilder: (ctx, index) {
+                          final branch = _visibleBranches[index];
+                          final name = branch['name']!;
+                          final remote = _normalizedRemote(branch);
+                          final date = branch['date']!;
+                          final hash = branch['hash']!;
+                          final isDefault = name == widget.defaultBranch;
+                          final isCurrent = name == widget.currentBranch &&
+                              _currentRemoteForHighlight != null &&
+                              _currentRemoteForHighlight ==
+                                  _repositoryIdForBranch(branch);
+
+                          bool hasUpdate = false;
+                          if (widget.localRefs.containsKey(name)) {
+                            if (widget.localRefs[name] != hash) {
+                              hasUpdate = true;
+                            }
+                          }
+
                           return Padding(
-                            padding: const EdgeInsets.fromLTRB(4, 10, 4, 6),
-                            child: Row(
-                              children: [
-                                Icon(Icons.account_tree_outlined,
-                                    size: 16,
-                                    color:
-                                        Theme.of(context).colorScheme.primary),
-                                const SizedBox(width: 6),
-                                Text(
-                                  _remoteLabel(remote),
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w700,
-                                    color:
-                                        Theme.of(context).colorScheme.primary,
-                                  ),
+                            key: ValueKey('$remote/$name'),
+                            padding: const EdgeInsets.symmetric(vertical: 2),
+                            child: Material(
+                              color: isCurrent
+                                  ? Theme.of(context)
+                                      .colorScheme
+                                      .secondaryContainer
+                                      .withValues(alpha: 0.72)
+                                  : Colors.transparent,
+                              borderRadius: BorderRadius.circular(10),
+                              clipBehavior: Clip.antiAlias,
+                              child: ListTile(
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10),
                                 ),
-                              ],
+                                contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 2),
+                                leading: const Icon(Icons.alt_route, size: 18),
+                                title: Row(
+                                  children: [
+                                    Text(name,
+                                        style: TextStyle(
+                                            fontWeight: isDefault
+                                                ? FontWeight.bold
+                                                : FontWeight.normal)),
+                                    if (isDefault) ...[
+                                      const SizedBox(width: 8),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 6, vertical: 2),
+                                        decoration: BoxDecoration(
+                                          color: Colors.blue.withOpacity(0.2),
+                                          borderRadius:
+                                              BorderRadius.circular(4),
+                                        ),
+                                        child: const Text("Default",
+                                            style: TextStyle(
+                                                fontSize: 10,
+                                                color: Colors.blue)),
+                                      ),
+                                    ],
+                                    if (isCurrent) ...[
+                                      const SizedBox(width: 8),
+                                      const Icon(Icons.check,
+                                          size: 16, color: Colors.green),
+                                    ],
+                                  ],
+                                ),
+                                subtitle: Text(date,
+                                    style: const TextStyle(
+                                        fontSize: 12, color: Colors.grey)),
+                                trailing: hasUpdate
+                                    ? IconButton(
+                                        icon: const Icon(Icons.priority_high,
+                                            color: Colors.red, size: 20),
+                                        tooltip: "업데이트 가능",
+                                        onPressed: () async {
+                                          if (widget.repoUrl.isNotEmpty) {
+                                            final baseUrl =
+                                                _browserRepoUrlForRemote(
+                                                    remote);
+                                            if (baseUrl == null ||
+                                                baseUrl.isEmpty) {
+                                              return;
+                                            }
+                                            final url =
+                                                "$baseUrl/commits/$name";
+                                            final uri = Uri.parse(url);
+                                            if (await canLaunchUrl(uri)) {
+                                              await launchUrl(uri,
+                                                  mode: LaunchMode
+                                                      .externalApplication);
+                                            } else {
+                                              if (context.mounted) {
+                                                showDialog(
+                                                  context: context,
+                                                  builder: (_) => AlertDialog(
+                                                    title: const Text("커밋 내역"),
+                                                    content:
+                                                        SelectableText(url),
+                                                    actions: [
+                                                      TextButton(
+                                                          onPressed: () =>
+                                                              Navigator.pop(
+                                                                  context),
+                                                          child:
+                                                              const Text("닫기"))
+                                                    ],
+                                                  ),
+                                                );
+                                              }
+                                            }
+                                          }
+                                        },
+                                      )
+                                    : null,
+                                onTap: () => widget.onSelect(remote, name),
+                              ),
                             ),
                           );
-                        }
-
-                        final branch = row.branch!;
-                        final name = branch['name']!;
-                        final remote = branch['remote'] ?? 'origin';
-                        final date = branch['date']!;
-                        final hash = branch['hash']!;
-                        final isDefault = name == widget.defaultBranch;
-                        final isCurrent = name == widget.currentBranch &&
-                            (widget.currentUpstreamRemote.isEmpty ||
-                                widget.currentUpstreamRemote == remote);
-
-                        bool hasUpdate = false;
-                        if (widget.localRefs.containsKey(name)) {
-                          if (widget.localRefs[name] != hash) {
-                            hasUpdate = true;
-                          }
-                        }
-
-                        return ListTile(
-                          tileColor: isCurrent
-                              ? Theme.of(context).colorScheme.secondaryContainer
-                              : null,
-                          title: Row(
-                            children: [
-                              Text(name,
-                                  style: TextStyle(
-                                      fontWeight: isDefault
-                                          ? FontWeight.bold
-                                          : FontWeight.normal)),
-                              if (isDefault) ...[
-                                const SizedBox(width: 8),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 6, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    color: Colors.blue.withOpacity(0.2),
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                  child: const Text("Default",
-                                      style: TextStyle(
-                                          fontSize: 10, color: Colors.blue)),
-                                ),
-                              ],
-                              if (isCurrent) ...[
-                                const SizedBox(width: 8),
-                                const Icon(Icons.check,
-                                    size: 16, color: Colors.green),
-                              ],
-                            ],
-                          ),
-                          subtitle: Text(date,
-                              style: const TextStyle(
-                                  fontSize: 12, color: Colors.grey)),
-                          trailing: hasUpdate
-                              ? IconButton(
-                                  icon: const Icon(Icons.priority_high,
-                                      color: Colors.red, size: 20),
-                                  tooltip: "업데이트 가능",
-                                  onPressed: () async {
-                                    if (widget.repoUrl.isNotEmpty) {
-                                      final baseUrl =
-                                          _browserRepoUrlForRemote(remote);
-                                      if (baseUrl == null || baseUrl.isEmpty)
-                                        return;
-                                      final url = "$baseUrl/commits/$name";
-                                      final uri = Uri.parse(url);
-                                      if (await canLaunchUrl(uri)) {
-                                        await launchUrl(uri,
-                                            mode:
-                                                LaunchMode.externalApplication);
-                                      } else {
-                                        if (context.mounted) {
-                                          showDialog(
-                                            context: context,
-                                            builder: (_) => AlertDialog(
-                                              title: const Text("커밋 내역"),
-                                              content: SelectableText(url),
-                                              actions: [
-                                                TextButton(
-                                                    onPressed: () =>
-                                                        Navigator.pop(context),
-                                                    child: const Text("닫기"))
-                                              ],
-                                            ),
-                                          );
-                                        }
-                                      }
-                                    }
-                                  },
-                                )
-                              : null,
-                          onTap: () => widget.onSelect(remote, name),
-                        );
-                      },
+                        },
+                      ),
                     ),
             ),
           ],
@@ -2010,21 +2382,4 @@ class _BranchListDialogState extends State<_BranchListDialog> {
       ],
     );
   }
-}
-
-class _BranchListRow {
-  final String? header;
-  final Map<String, String>? branch;
-
-  const _BranchListRow._({
-    this.header,
-    this.branch,
-  });
-
-  const _BranchListRow.header(String value)
-      : this._(header: value, branch: null);
-  const _BranchListRow.branch(Map<String, String> value)
-      : this._(header: null, branch: value);
-
-  bool get isHeader => header != null;
 }

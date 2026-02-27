@@ -3,7 +3,6 @@ import 'dart:io';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path/path.dart' as path;
@@ -11,6 +10,7 @@ import 'package:googleapis/drive/v3.dart' as drive;
 import '../../services/ssh_service.dart';
 import '../../services/google_drive_service.dart';
 import '../../services/backup_service.dart';
+import '../../services/carrot_server_settings_service.dart';
 
 class BackupManagerScreen extends StatefulWidget {
   const BackupManagerScreen({super.key});
@@ -21,6 +21,10 @@ class BackupManagerScreen extends StatefulWidget {
 
 class _BackupManagerScreenState extends State<BackupManagerScreen>
     with SingleTickerProviderStateMixin {
+  static const int _paramsChunkSize = 80;
+  final CarrotServerSettingsService _carrotServer =
+      CarrotServerSettingsService();
+
   late TabController _tabController;
 
   // Local Backups State
@@ -98,18 +102,8 @@ class _BackupManagerScreenState extends State<BackupManagerScreen>
   Future<void> _loadLocalBackups() async {
     if (_localBackups.isEmpty) setState(() => _isLocalLoading = true);
     try {
-      final dir = await getApplicationDocumentsDirectory();
-      if (!dir.existsSync()) dir.createSync();
-      final files = dir.listSync();
-      // Allow 12 to 14 digits for timestamp (minutes or seconds precision)
-      final newFormatRegex = RegExp(r'^\d{12,14}\(.*\)(_auto)?\.json$');
-
-      _localBackups = files.where((f) {
-        final basename = path.basename(f.path);
-        return (basename.startsWith('backup_') && basename.endsWith('.json')) ||
-            newFormatRegex.hasMatch(basename);
-      }).toList();
-
+      final backupService = Provider.of<BackupService>(context, listen: false);
+      _localBackups = await backupService.listLocalBackupFiles();
       _sortLocalBackups();
     } catch (e) {
       print("Error loading local backups: $e");
@@ -422,39 +416,32 @@ class _BackupManagerScreenState extends State<BackupManagerScreen>
           .showSnackBar(const SnackBar(content: Text("연결되지 않음")));
       return;
     }
+    final host = _resolveTargetHost(ssh);
+    if (host == null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text("대상 IP를 확인할 수 없습니다.")));
+      return;
+    }
 
     setState(() => _comparingFile = file);
 
     try {
       final content = await file.readAsString();
-      final Map<String, dynamic> backupParams = jsonDecode(content);
-      final Map<String, String> currentParams = {};
-
-      final result = await ssh.executeCommand("grep -r . /data/params/d/");
-
-      if (!result.startsWith("Error")) {
-        final lines = result.split('\n');
-        for (final line in lines) {
-          final parts = line.split(':');
-          if (parts.length >= 2) {
-            final path = parts[0];
-            final val = parts.sublist(1).join(':');
-            final key = path.split('/').last;
-            currentParams[key] = val.trim();
-          }
-        }
-      }
+      final Map<String, dynamic> backupParams =
+          Map<String, dynamic>.from(jsonDecode(content) as Map);
+      final keys = backupParams.keys.toList();
+      final currentParams = await _fetchCurrentParamsInChunks(host, keys);
 
       final List<Map<String, String>> diffs = [];
-      for (final key in backupParams.keys) {
-        final backupVal = backupParams[key].toString();
-        final currentVal = currentParams[key] ?? "(없음)";
+      for (final key in keys) {
+        final backupVal = backupParams[key];
+        final currentVal = currentParams[key];
 
-        if (backupVal != currentVal) {
+        if (!_isSameValue(backupVal, currentVal)) {
           diffs.add({
             'key': key,
-            'backup': backupVal,
-            'current': currentVal,
+            'backup': _displayValue(backupVal),
+            'current': _displayValue(currentVal),
           });
         }
       }
@@ -474,7 +461,12 @@ class _BackupManagerScreenState extends State<BackupManagerScreen>
               diffs: diffs,
               onRestore: (selectedKeys) async {
                 Navigator.pop(context);
-                await _performRestore(backupParams, selectedKeys);
+                await _performRestore(
+                  backupParams,
+                  selectedKeys,
+                  host: host,
+                  restoredPath: file.path,
+                );
               }),
         );
       }
@@ -488,21 +480,22 @@ class _BackupManagerScreenState extends State<BackupManagerScreen>
   }
 
   Future<void> _performRestore(
-      Map<String, dynamic> backupParams, List<String> keysToRestore) async {
-    final ssh = Provider.of<SSHService>(context, listen: false);
+      Map<String, dynamic> backupParams, List<String> keysToRestore,
+      {required String host, String? restoredPath}) async {
     ScaffoldMessenger.of(context)
         .showSnackBar(const SnackBar(content: Text("복원 시작...")));
 
     try {
       int successCount = 0;
       for (final key in keysToRestore) {
+        if (!backupParams.containsKey(key)) continue;
         final value = backupParams[key];
-        await ssh.executeCommand('echo -n "$value" > /data/params/d/$key');
+        await _carrotServer.setParam(host, name: key, value: value);
         successCount++;
       }
 
-      if (_comparingFile != null) {
-        await _setLastRestored(_comparingFile!.path);
+      if (restoredPath != null && restoredPath.isNotEmpty) {
+        await _setLastRestored(restoredPath);
       }
 
       if (mounted) {
@@ -515,6 +508,63 @@ class _BackupManagerScreenState extends State<BackupManagerScreen>
             .showSnackBar(SnackBar(content: Text("복원 실패: $e")));
       }
     }
+  }
+
+  String? _resolveTargetHost(SSHService ssh) {
+    final connected = ssh.connectedIp?.trim();
+    if (connected != null && connected.isNotEmpty) {
+      return connected;
+    }
+    final target = ssh.targetIp?.trim();
+    if (target != null && target.isNotEmpty) {
+      return target;
+    }
+    return null;
+  }
+
+  Future<Map<String, dynamic>> _fetchCurrentParamsInChunks(
+      String host, List<String> keys) async {
+    if (keys.isEmpty) return const {};
+    final out = <String, dynamic>{};
+    for (var i = 0; i < keys.length; i += _paramsChunkSize) {
+      final end = (i + _paramsChunkSize > keys.length)
+          ? keys.length
+          : i + _paramsChunkSize;
+      final chunk = keys.sublist(i, end);
+      final values = await _carrotServer.fetchParamsBulk(host, chunk);
+      out.addAll(values);
+    }
+    return out;
+  }
+
+  bool _isSameValue(dynamic a, dynamic b) {
+    return _normalizeValue(a) == _normalizeValue(b);
+  }
+
+  String _normalizeValue(dynamic value) {
+    if (value == null) return '';
+    final raw = value.toString().trim();
+    if (raw.isEmpty) return '';
+
+    final lower = raw.toLowerCase();
+    if (lower == 'true') return '1';
+    if (lower == 'false') return '0';
+
+    final asNum = num.tryParse(raw);
+    if (asNum != null) {
+      if (asNum == asNum.roundToDouble()) {
+        return asNum.toInt().toString();
+      }
+      return asNum.toString();
+    }
+    return raw;
+  }
+
+  String _displayValue(dynamic value) {
+    if (value == null) return "(없음)";
+    final text = value.toString();
+    if (text.trim().isEmpty) return "(빈값)";
+    return text;
   }
 
   Future<void> _uploadToDrive(File file) async {
@@ -593,11 +643,13 @@ class _BackupManagerScreenState extends State<BackupManagerScreen>
   Future<void> _downloadFromDrive(String fileId, String fileName) async {
     final driveService =
         Provider.of<GoogleDriveService>(context, listen: false);
+    final backupService = Provider.of<BackupService>(context, listen: false);
     ScaffoldMessenger.of(context)
         .showSnackBar(const SnackBar(content: Text("다운로드 중...")));
     try {
-      final dir = await getApplicationDocumentsDirectory();
-      await driveService.downloadFile(fileId, '${dir.path}/$fileName');
+      final savePath =
+          await backupService.buildLocalBackupPathForFileName(fileName);
+      await driveService.downloadFile(fileId, savePath);
       await _loadLocalBackups();
       if (mounted)
         ScaffoldMessenger.of(context)
@@ -659,17 +711,27 @@ class _BackupManagerScreenState extends State<BackupManagerScreen>
         if (parts.length > 3) branchName = parts.sublist(3).join('_');
       }
     } else {
+      // New format: branch-yyyymmddHHmm(.json)
+      final branchRegex = RegExp(r'^(.+)-(\d{12,14})(?:-\d+)?$');
+      final branchMatch = branchRegex.firstMatch(nameForParsing);
+      if (branchMatch != null) {
+        branchName = branchMatch.group(1)!;
+        dateStr = branchMatch.group(2)!;
+      }
+
       // Match 12 or 14 digits
-      final regex = RegExp(r'^(\d{12,14})\((.*)\)$');
-      final match = regex.firstMatch(nameForParsing);
-      if (match != null) {
-        dateStr = match.group(1)!;
-        branchName = match.group(2)!;
-      } else {
-        final dateRegex = RegExp(r'^(\d{12,14})');
-        final dateMatch = dateRegex.firstMatch(nameForParsing);
-        if (dateMatch != null) {
-          dateStr = dateMatch.group(1)!;
+      if (dateStr.isEmpty) {
+        final regex = RegExp(r'^(\d{12,14})\((.*)\)$');
+        final match = regex.firstMatch(nameForParsing);
+        if (match != null) {
+          dateStr = match.group(1)!;
+          branchName = match.group(2)!;
+        } else {
+          final dateRegex = RegExp(r'^(\d{12,14})');
+          final dateMatch = dateRegex.firstMatch(nameForParsing);
+          if (dateMatch != null) {
+            dateStr = dateMatch.group(1)!;
+          }
         }
       }
     }

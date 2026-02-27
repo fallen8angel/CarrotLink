@@ -3,6 +3,7 @@ import 'dart:collection';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
+import 'package:carrot_pilot_manager/widgets/connection_required_view.dart';
 
 import '../file_explorer_controller.dart';
 
@@ -501,6 +502,12 @@ class _FileExplorerFileListViewState extends State<FileExplorerFileListView> {
     _resetFolderCountCacheIfNeeded();
     final controller = widget.controller;
     final visibleFiles = controller.visibleFiles;
+
+    if (!controller.isConnected) {
+      return const ConnectionRequiredView(
+        description: '파일 탐색기를 사용하려면 먼저 기기에 연결하세요.',
+      );
+    }
 
     if (controller.isLoading && visibleFiles.isEmpty) {
       return const Center(child: CircularProgressIndicator());

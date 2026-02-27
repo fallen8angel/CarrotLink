@@ -19,8 +19,7 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
   }
 
   Future<void> _runGuidedDiscovery() async {
-    final ready = await _ensureOpenpilotReady(interactive: true);
-    if (!ready || !mounted) return;
+    if (!mounted) return;
     Provider.of<SSHService>(context, listen: false).resumeAutoReconnect();
     _setStateSafe(() {
       _lockDiscoveryIpOverwrite = false;
@@ -46,11 +45,6 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
     bool toastOnStart = false,
   }) async {
     try {
-      if (!_isOpenpilotReady) {
-        debugPrint(
-            '[Settings] Discovery skipped - Openpilot prerequisites not ready');
-        return;
-      }
       final ssh = Provider.of<SSHService>(context, listen: false);
       final started = await ssh.startDiscovery(
         forceRestart: forceRestart,
@@ -137,10 +131,16 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
   }
 
   Future<void> _connect() async {
-    final ready = await _ensureOpenpilotReady(interactive: true);
-    if (!ready) return;
-
     final ssh = Provider.of<SSHService>(context, listen: false);
+    if (ssh.isConnecting) {
+      CustomToast.show(context, "이미 연결 시도 중입니다.");
+      return;
+    }
+    if (ssh.isConnected) {
+      CustomToast.show(context, "이미 연결되어 있습니다.");
+      return;
+    }
+
     ssh.resumeAutoReconnect();
     final ipToSave = _ipController.text.trim();
     const usernameToSave = _ConnectionSettingsScreenState._fixedSshUsername;
@@ -157,9 +157,16 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
     }
 
     try {
-      final privateKey = _currentPrivateKey;
-      if (privateKey == null || privateKey.isEmpty) {
-        CustomToast.show(context, "활성화된 SSH 키가 없습니다.", isError: true);
+      final privateKey = _currentPrivateKey?.trim();
+      final savedPassword = _passwordController.text.trim();
+      final authKey =
+          (privateKey != null && privateKey.isNotEmpty) ? privateKey : null;
+      final authPassword = authKey == null
+          ? (savedPassword.isNotEmpty ? savedPassword : null)
+          : null;
+
+      if (authKey == null && authPassword == null) {
+        CustomToast.show(context, "SSH 키 또는 비밀번호를 준비하세요.", isError: true);
         return;
       }
 
@@ -167,14 +174,17 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
         ipToSave,
         usernameToSave,
         port: port,
-        password: null,
-        privateKey: privateKey,
+        password: authPassword,
+        privateKey: authKey,
       );
 
       // 성공한 연결 정보만 저장
       await _storage.write(key: 'ssh_ip', value: ipToSave);
       await _storage.write(key: 'ssh_username', value: usernameToSave);
       await _storage.write(key: 'ssh_port', value: port.toString());
+      if (authPassword != null) {
+        await _storage.write(key: 'ssh_password', value: authPassword);
+      }
       _lockDiscoveryIpOverwrite = true;
       _autoFilledIp = null;
       ssh.stopDiscovery();
@@ -207,9 +217,11 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
   }
 
   Future<void> _disconnect() async {
-    await Provider.of<SSHService>(context, listen: false).disconnect();
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    final wasConnecting = ssh.isConnecting && !ssh.isConnected;
+    await ssh.disconnect();
     if (mounted) {
-      CustomToast.show(context, '연결 해제됨');
+      CustomToast.show(context, wasConnecting ? '연결 시도 취소됨' : '연결 해제됨');
     }
   }
 

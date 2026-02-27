@@ -105,7 +105,10 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
     _discoveryStatusTimer?.cancel();
     try {
       final ssh = Provider.of<SSHService>(context, listen: false);
-      ssh.stopDiscovery();
+      if (ssh.discoverySource == 'settings_manual' ||
+          ssh.discoverySource == 'settings_auto') {
+        ssh.stopDiscovery();
+      }
     } catch (e) {
       debugPrint('Failed to stop discovery: $e');
     }

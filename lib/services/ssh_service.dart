@@ -50,35 +50,124 @@ class SSHService extends ChangeNotifier {
   void _initServiceListener() {
     final service = FlutterBackgroundService();
 
-    service.on('connectionState').listen((event) {
-      if (event != null) {
-        final isServiceConnected = event['isConnected'] == true;
-        // Do not force-close foreground connection on a transient background hiccup.
-        // Foreground heartbeat remains the source of truth for foreground session health.
-        if (!isServiceConnected &&
-            !isConnected &&
-            _connectionStatus != "Disconnected") {
+    service.on('connectionState').listen((event) async {
+      if (event == null) return;
+      final isServiceConnected = event['isConnected'] == true;
+      final serviceIp = event['ip']?.toString();
+      _serviceConnectedIp =
+          (serviceIp != null && _isValidIpv4(serviceIp)) ? serviceIp : null;
+
+      if (!isServiceConnected) {
+        if (!isConnected && _connectionStatus != "Disconnected") {
           _handleDisconnect(notifyService: false, reason: "background");
         }
+        notifyListeners();
+        return;
       }
+
+      if (_manualDisconnectRequested || isConnected || _isConnecting) {
+        notifyListeners();
+        return;
+      }
+
+      if (_serviceConnectedIp != null) {
+        await _reconnectFromStorage(preferredIp: _serviceConnectedIp);
+      } else {
+        await _reconnectFromStorage();
+      }
+      notifyListeners();
+    });
+
+    service.on('candidateIp').listen((event) {
+      if (event == null) return;
+      final ip = event['ip']?.toString();
+      if (ip == null || !_isValidIpv4(ip)) return;
+      _serviceCandidateIp = ip;
+      final tsRaw = event['ts'];
+      if (tsRaw is int && tsRaw > 0) {
+        _serviceCandidateSeenAt =
+            DateTime.fromMillisecondsSinceEpoch(tsRaw, isUtc: false);
+      } else {
+        _serviceCandidateSeenAt = DateTime.now();
+      }
+      _emitDiscoveredIp(ip);
+      notifyListeners();
+    });
+
+    service.on('discoveryState').listen((event) {
+      if (event == null) return;
+      _serviceDiscoveryListening = event['listening'] == true;
+      final source = event['source']?.toString();
+      if (source != null && source.isNotEmpty) {
+        _serviceDiscoverySource = source;
+      }
+      final candidate = event['candidateIp']?.toString();
+      if (candidate != null && _isValidIpv4(candidate)) {
+        _serviceCandidateIp = candidate;
+      }
+      final ageRaw = event['candidateAgeMs'];
+      if (ageRaw is int && _serviceCandidateIp != null) {
+        _serviceCandidateSeenAt = DateTime.now().subtract(
+          Duration(milliseconds: ageRaw.clamp(0, 3600000)),
+        );
+      }
+      final connected = event['connectedIp']?.toString();
+      _serviceConnectedIp =
+          (connected != null && _isValidIpv4(connected)) ? connected : null;
+      notifyListeners();
     });
 
     service.on('status').listen((event) async {
-      if (_manualDisconnectRequested) return;
-      if (event != null && event['isConnected'] == true) {
-        if (!isConnected && !_isConnecting) {
-          print(
-              "Background service is connected. Attempting to sync foreground...");
-          await _reconnectFromStorage();
-        }
+      if (event == null) return;
+      _serviceDiscoveryListening = event['listening'] == true;
+      final candidate = event['candidateIp']?.toString();
+      if (candidate != null && _isValidIpv4(candidate)) {
+        _serviceCandidateIp = candidate;
       }
+      final tsRaw = event['candidateSeenAt'];
+      if (tsRaw is int && tsRaw > 0) {
+        _serviceCandidateSeenAt =
+            DateTime.fromMillisecondsSinceEpoch(tsRaw, isUtc: false);
+      }
+      final ip = event['ip']?.toString();
+      _serviceConnectedIp = (ip != null && _isValidIpv4(ip)) ? ip : null;
+
+      if (_manualDisconnectRequested) {
+        notifyListeners();
+        return;
+      }
+      if (event['isConnected'] == true && !isConnected && !_isConnecting) {
+        await _reconnectFromStorage(preferredIp: _serviceConnectedIp);
+      }
+      notifyListeners();
     });
 
-    // Ask for status on init
+    unawaited(_syncAutoConnectProfileToService());
+    service.invoke('ensureDiscovery');
     service.invoke('getStatus');
   }
 
-  Future<void> _reconnectFromStorage() async {
+  Future<void> _syncAutoConnectProfileToService(
+      {bool resumeAutoReconnect = false}) async {
+    final ip = await _storage.read(key: 'ssh_ip');
+    final username = await _storage.read(key: 'ssh_username');
+    final password = await _storage.read(key: 'ssh_password');
+    final portStr = await _storage.read(key: 'ssh_port');
+    final privateKey = await _storage.read(key: 'current_private_key');
+    final port = int.tryParse(portStr ?? '') ?? _defaultSshPort;
+
+    FlutterBackgroundService().invoke('configureAutoConnect', {
+      'ip': ip,
+      'username': username ?? 'comma',
+      'password': password,
+      'privateKey': privateKey,
+      'port': port,
+      'autoReconnectEnabled': true,
+      'resumeAutoReconnect': resumeAutoReconnect,
+    });
+  }
+
+  Future<void> _reconnectFromStorage({String? preferredIp}) async {
     final ip = await _storage.read(key: 'ssh_ip');
     final username = await _storage.read(key: 'ssh_username');
     final password = await _storage.read(key: 'ssh_password');
@@ -88,13 +177,18 @@ class SSHService extends ChangeNotifier {
     // 새로운 키 저장 구조에서 로드
     final privateKey = await _storage.read(key: 'current_private_key');
 
-    print(
-        '[SSHService] Reconnect from storage - IP: $ip, Username: $username, Port: $port');
-    _diag.info('ssh', 'Reconnect from storage target=$ip:$port user=$username');
+    final targetIp = preferredIp != null && _isValidIpv4(preferredIp)
+        ? preferredIp
+        : (ip ?? _serviceCandidateIp);
 
-    if (ip != null && username != null) {
+    print(
+        '[SSHService] Reconnect from storage - IP: $targetIp, Username: $username, Port: $port');
+    _diag.info(
+        'ssh', 'Reconnect from storage target=$targetIp:$port user=$username');
+
+    if (targetIp != null && username != null) {
       // Reconnect using standard flow
-      await connect(ip, username,
+      await connect(targetIp, username,
           port: port, password: password, privateKey: privateKey);
     }
   }
@@ -112,6 +206,17 @@ class SSHService extends ChangeNotifier {
   int? _targetPort;
   int? get targetPort => _targetPort;
 
+  bool _serviceDiscoveryListening = false;
+  bool get serviceDiscoveryListening => _serviceDiscoveryListening;
+  String _serviceDiscoverySource = 'none';
+  String get serviceDiscoverySource => _serviceDiscoverySource;
+  String? _serviceCandidateIp;
+  String? get serviceCandidateIp => _serviceCandidateIp;
+  DateTime? _serviceCandidateSeenAt;
+  DateTime? get serviceCandidateSeenAt => _serviceCandidateSeenAt;
+  String? _serviceConnectedIp;
+  String? get serviceConnectedIp => _serviceConnectedIp;
+
   // IP Discovery
   StreamController<String>? _ipDiscoveryController;
   Stream<String> get ipDiscoveryStream {
@@ -119,7 +224,6 @@ class SSHService extends ChangeNotifier {
     return _ipDiscoveryController!.stream;
   }
 
-  RawDatagramSocket? _udpSocket;
   Timer? _discoveryStopTimer;
   Timer? _heartbeatTimer;
   bool _isDiscoveryActive = false;
@@ -144,7 +248,7 @@ class SSHService extends ChangeNotifier {
   int _heartbeatFailureCount = 0;
   bool _manualDisconnectRequested = false;
   DateTime? _manualDisconnectUntil;
-  static const Duration _manualDisconnectCooldown = Duration(minutes: 2);
+  static const Duration _manualDisconnectCooldown = Duration(seconds: 20);
   bool get manualDisconnectRequested {
     if (!_manualDisconnectRequested) return false;
     final until = _manualDisconnectUntil;
@@ -725,6 +829,8 @@ class SSHService extends ChangeNotifier {
   void resumeAutoReconnect() {
     _manualDisconnectRequested = false;
     _manualDisconnectUntil = null;
+    FlutterBackgroundService().invoke('resumeAutoReconnect');
+    unawaited(_syncAutoConnectProfileToService(resumeAutoReconnect: true));
     notifyListeners();
   }
 
@@ -742,6 +848,7 @@ class SSHService extends ChangeNotifier {
       await _storage.write(key: 'ssh_password', value: password);
     if (keyPath != null)
       await _storage.write(key: 'ssh_key_path', value: keyPath);
+    await _syncAutoConnectProfileToService();
   }
 
   // Helper methods for Dashboard
@@ -820,35 +927,10 @@ class SSHService extends ChangeNotifier {
       _ipDiscoveryController = StreamController<String>.broadcast();
     }
 
-    // 1. Start UDP Listener (Passive)
-    try {
-      _udpSocket?.close();
-      _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 7705);
-      _udpSocket!.listen((RawSocketEvent event) {
-        if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
-        if (event == RawSocketEvent.read) {
-          final datagram = _udpSocket!.receive();
-          if (datagram != null) {
-            try {
-              final message = utf8.decode(datagram.data);
-              final data = json.decode(message);
-              if (data is Map<String, dynamic> && data.containsKey('ip')) {
-                final ip = data['ip'];
-                if (ip is String && _isValidIpv4(ip)) {
-                  _emitDiscoveredIp(ip);
-                }
-              }
-            } catch (e) {
-              // Ignore malformed messages
-            }
-          }
-        }
-      }, onError: (e) {
-        print("UDP listen error: $e");
-      });
-    } catch (e) {
-      print("Error binding UDP socket: $e");
-    }
+    // Passive discovery is now owned by background service.
+    final service = FlutterBackgroundService();
+    service.invoke('ensureDiscovery');
+    unawaited(_syncAutoConnectProfileToService());
 
     _discoveryStopTimer?.cancel();
     _discoveryStopTimer = Timer(timeout, () {
@@ -944,8 +1026,6 @@ class SSHService extends ChangeNotifier {
     _discoverySessionEndsAt = null;
     _discoveryStopTimer?.cancel();
     _discoveryStopTimer = null;
-    _udpSocket?.close();
-    _udpSocket = null;
     _diag.info('discovery', 'Stop source=$prevSource');
   }
 

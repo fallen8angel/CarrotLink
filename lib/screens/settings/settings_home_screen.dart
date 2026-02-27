@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 
 import '../permission_screen.dart';
 import '../diagnostics_screen.dart';
-import 'backup_settings_screen.dart';
 import 'connection_settings_screen.dart';
 import 'info_settings_screen.dart';
 import 'share_settings_screen.dart';
@@ -24,16 +23,6 @@ class SettingsScreen extends StatelessWidget {
                 context,
                 MaterialPageRoute(
                     builder: (_) => const ConnectionSettingsScreen())),
-          ),
-          const Divider(),
-          ListTile(
-            leading: const Icon(Icons.backup),
-            title: const Text('백업'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (_) => const BackupSettingsScreen())),
           ),
           const Divider(),
           ListTile(

@@ -26,6 +26,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
   bool _isRefreshingCar = false;
   String? _error;
   String _query = '';
+  final TextEditingController _groupSearchController = TextEditingController();
   String? _activeHost;
   int _loadEpoch = 0;
 
@@ -36,12 +37,21 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _groupSearchController.addListener(_onGroupSearchChanged);
   }
 
   @override
   void dispose() {
+    _groupSearchController.removeListener(_onGroupSearchChanged);
+    _groupSearchController.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  void _onGroupSearchChanged() {
+    final next = _groupSearchController.text.trim();
+    if (next == _query) return;
+    setState(() => _query = next);
   }
 
   @override
@@ -165,44 +175,6 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
     }
   }
 
-  Future<void> _showGroupSearchDialog() async {
-    final controller = TextEditingController(text: _query);
-    final submitted = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('설정 검색'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          textInputAction: TextInputAction.search,
-          decoration: const InputDecoration(
-            hintText: '그룹/설정 이름 검색',
-            prefixIcon: Icon(Icons.search),
-            border: OutlineInputBorder(),
-            isDense: true,
-          ),
-          onSubmitted: (value) => Navigator.of(context).pop(value),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(''),
-            child: const Text('초기화'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('취소'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(controller.text),
-            child: const Text('검색'),
-          ),
-        ],
-      ),
-    );
-    if (!mounted || submitted == null) return;
-    setState(() => _query = submitted.trim());
-  }
-
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -211,16 +183,19 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
     _scheduleLoadForHost(host);
 
     if (host == null || host.isEmpty) {
-      return _buildNoHostState(ssh);
+      return _buildNoHostState();
     }
 
     return RefreshIndicator(
       onRefresh: () => _refreshAll(),
       child: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+        padding: EdgeInsets.fromLTRB(
+          16,
+          16,
+          16,
+          24 + MediaQuery.of(context).padding.bottom,
+        ),
         children: [
-          _buildConnectionHeader(ssh, host),
-          const SizedBox(height: 12),
           _buildCarCard(),
           const SizedBox(height: 12),
           if (_isLoading && _bundle == null)
@@ -238,7 +213,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
     );
   }
 
-  Widget _buildNoHostState(SSHService ssh) {
+  Widget _buildNoHostState() {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -246,19 +221,24 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const DesignSectionHeader(
-                icon: Icons.settings_suggest_outlined,
-                title: '콤마 설정',
-                subtitle: 'carrot_server(7000) 연결이 필요합니다.',
-                marginBottom: 12,
+              const Row(
+                children: [
+                  Icon(Icons.settings_suggest_outlined),
+                  SizedBox(width: 8),
+                  Text(
+                    '기기 연결 필요',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ],
               ),
+              const SizedBox(height: 8),
               Text(
-                ssh.connectionStatus,
+                'carrot_server(7000) 연결이 필요합니다.',
                 style: TextStyle(
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 12),
               FilledButton.tonalIcon(
                 onPressed: () => CustomToast.show(context, '먼저 기기에 연결하세요.'),
                 icon: const Icon(Icons.link),
@@ -271,131 +251,59 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
     );
   }
 
-  Widget _buildConnectionHeader(SSHService ssh, String host) {
-    final connected = ssh.isConnected && ssh.connectedIp == host;
-    return Row(
-      children: [
-        Expanded(
-          child: Text(
-            '콤마 설정',
-            style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                  fontWeight: FontWeight.w700,
-                ),
-          ),
-        ),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-            color: (connected ? Colors.green : Colors.orange).withOpacity(0.14),
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(
-              color:
-                  (connected ? Colors.green : Colors.orange).withOpacity(0.35),
-            ),
-          ),
-          child: Text(
-            '$host:7000',
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
-              color: connected ? Colors.green.shade700 : Colors.orange.shade800,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
   Widget _buildCarCard() {
     final carLabel = (_currentCar == null || _currentCar!.trim().isEmpty)
-        ? '현재 차량 미확인'
+        ? '차량 선택'
         : _currentCar!;
-    return DesignCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
+    final disabled = _bundle == null || _isLoading;
+    final borderColor = Theme.of(context).colorScheme.outline.withOpacity(0.45);
+    final textColor = Theme.of(context).colorScheme.onSurface;
+
+    return Material(
+      color: disabled
+          ? Theme.of(context).colorScheme.surfaceContainerHighest
+          : Theme.of(context).colorScheme.surface,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: disabled ? null : _openCarSelector,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: borderColor),
+          ),
+          child: Row(
             children: [
-              Icon(Icons.directions_car_filled_outlined,
-                  color: Theme.of(context).colorScheme.primary),
-              const SizedBox(width: 10),
+              const Icon(Icons.directions_car_filled_outlined, size: 18),
+              const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  '차량 선택',
-                  style: Theme.of(context)
-                      .textTheme
-                      .titleMedium
-                      ?.copyWith(fontWeight: FontWeight.w700),
+                  carLabel,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: textColor,
+                        fontWeight: FontWeight.w600,
+                      ),
                 ),
               ),
+              const SizedBox(width: 8),
+              if (_isRefreshingCar)
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              else
+                Icon(
+                  Icons.expand_more,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
             ],
           ),
-          const SizedBox(height: 8),
-          Material(
-            color: Theme.of(context).colorScheme.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(14),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(14),
-              onTap: (_bundle == null || _isLoading) ? null : _openCarSelector,
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '현재 차량',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .onSurfaceVariant,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            carLabel,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context)
-                                .textTheme
-                                .titleSmall
-                                ?.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    if (_isRefreshingCar)
-                      const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    else
-                      Icon(
-                        Icons.chevron_right,
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            '차량 칸을 눌러 바로 선택할 수 있습니다. 변경 후 일부 설정은 재부팅 후 적용될 수 있습니다.',
-            style: TextStyle(
-              fontSize: 12,
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -465,16 +373,39 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
                   ],
                 ),
               ),
-              if (_query.isNotEmpty)
-                IconButton(
-                  tooltip: '검색 초기화',
-                  onPressed: () => setState(() => _query = ''),
-                  icon: const Icon(Icons.close),
+              SizedBox(
+                width: 150,
+                child: SizedBox(
+                  height: 38,
+                  child: TextField(
+                    controller: _groupSearchController,
+                    textInputAction: TextInputAction.search,
+                    style: const TextStyle(fontSize: 13),
+                    decoration: InputDecoration(
+                      hintText: '설정 검색',
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 8,
+                      ),
+                      prefixIcon: const Icon(Icons.search, size: 16),
+                      prefixIconConstraints: const BoxConstraints(
+                        minWidth: 34,
+                        minHeight: 34,
+                      ),
+                      suffixIcon: _query.isEmpty
+                          ? null
+                          : IconButton(
+                              tooltip: '검색 초기화',
+                              onPressed: _groupSearchController.clear,
+                              icon: const Icon(Icons.close, size: 16),
+                            ),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                  ),
                 ),
-              IconButton(
-                tooltip: '검색',
-                onPressed: _showGroupSearchDialog,
-                icon: const Icon(Icons.search),
               ),
             ],
           ),
@@ -573,6 +504,8 @@ class _CarrotSettingsGroupScreenState
   String? _error;
   String _query = '';
   final Set<String> _savingNames = <String>{};
+  final Map<String, int> _stepByName = <String, int>{};
+  final Map<String, double> _sliderDraftByName = <String, double>{};
 
   List<CarrotSettingItemMeta> get _items =>
       widget.bundle.itemsByGroup[widget.group.group] ??
@@ -665,6 +598,36 @@ class _CarrotSettingsGroupScreenState
     return unit <= 0 ? 1 : unit;
   }
 
+  List<int> _unitCycleValues() {
+    final cleaned = widget.bundle.unitCycle.where((e) => e > 0).toSet().toList()
+      ..sort();
+    if (cleaned.isEmpty) return const [1, 2, 5, 10, 50, 100];
+    return cleaned;
+  }
+
+  int _defaultStepFor(CarrotSettingItemMeta item) {
+    final cycle = _unitCycleValues();
+    final preferred = _quickStep(item);
+    if (cycle.contains(preferred)) return preferred;
+    for (final c in cycle) {
+      if (c >= preferred) return c;
+    }
+    return cycle.last;
+  }
+
+  int _stepFor(CarrotSettingItemMeta item) {
+    return _stepByName[item.name] ?? _defaultStepFor(item);
+  }
+
+  void _cycleStep(CarrotSettingItemMeta item) {
+    final cycle = _unitCycleValues();
+    if (cycle.isEmpty) return;
+    final current = _stepFor(item);
+    final idx = cycle.indexOf(current);
+    final next = idx < 0 ? cycle.first : cycle[(idx + 1) % cycle.length];
+    setState(() => _stepByName[item.name] = next);
+  }
+
   num? _asNumValue(dynamic value) {
     if (value is num) return value;
     if (value is String) return num.tryParse(value.trim());
@@ -686,15 +649,75 @@ class _CarrotSettingsGroupScreenState
   }
 
   Future<void> _adjustValueByStep(
-      CarrotSettingItemMeta item, int deltaSign) async {
+    CarrotSettingItemMeta item,
+    int deltaSign, {
+    int? stepOverride,
+  }) async {
     if (item.isBooleanLike || _savingNames.contains(item.name)) return;
     final cur = _asNumValue(_effectiveValue(item)) ??
         _asNumValue(item.defaultValue) ??
         item.min ??
         0;
-    final step = _quickStep(item) * deltaSign;
+    final step = (stepOverride ?? _stepFor(item)) * deltaSign;
     final next = _normalizeNumericValue(item, cur + step);
     await _setValue(item, next);
+  }
+
+  double _quantizeSliderValue(
+    CarrotSettingItemMeta item,
+    double value, {
+    int? stepOverride,
+  }) {
+    if (item.min == null || item.max == null) return value;
+    final min = item.min!.toDouble();
+    final max = item.max!.toDouble();
+    final clamped = value.clamp(min, max).toDouble();
+    final step = (stepOverride ?? _stepFor(item)).abs();
+    if (step <= 0) return clamped;
+    final ticks = ((clamped - min) / step).round();
+    final snapped = min + (ticks * step);
+    return snapped.clamp(min, max).toDouble();
+  }
+
+  int? _sliderDivisions(CarrotSettingItemMeta item, int step) {
+    if (item.min == null || item.max == null || step <= 0) return null;
+    final range = (item.max!.toDouble() - item.min!.toDouble()).abs();
+    if (range <= 0) return null;
+    final divisions = (range / step).round();
+    if (divisions <= 0) return 1;
+    return divisions > 1000 ? 1000 : divisions;
+  }
+
+  double? _sliderValueFor(CarrotSettingItemMeta item, dynamic currentValue) {
+    if (!item.supportsSlider || item.min == null || item.max == null) {
+      return null;
+    }
+    final raw = _sliderDraftByName[item.name] ?? _asNumValue(currentValue);
+    if (raw == null) return null;
+    return _quantizeSliderValue(item, raw.toDouble());
+  }
+
+  void _onSliderChanged(
+    CarrotSettingItemMeta item,
+    double value, {
+    int? stepOverride,
+  }) {
+    if (_savingNames.contains(item.name)) return;
+    final snapped =
+        _quantizeSliderValue(item, value, stepOverride: stepOverride);
+    setState(() => _sliderDraftByName[item.name] = snapped);
+  }
+
+  Future<void> _onSliderChangeEnd(
+    CarrotSettingItemMeta item,
+    double value, {
+    int? stepOverride,
+  }) async {
+    if (_savingNames.contains(item.name)) return;
+    setState(() => _sliderDraftByName.remove(item.name));
+    final snapped =
+        _quantizeSliderValue(item, value, stepOverride: stepOverride);
+    await _setValue(item, _normalizeNumericValue(item, snapped));
   }
 
   Future<void> _showQuickValueInput(CarrotSettingItemMeta item) async {
@@ -759,6 +782,7 @@ class _CarrotSettingsGroupScreenState
   @override
   Widget build(BuildContext context) {
     final items = _filteredItems();
+    final bottomInset = MediaQuery.of(context).padding.bottom;
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.group.displayName),
@@ -773,23 +797,35 @@ class _CarrotSettingsGroupScreenState
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-            child: TextField(
-              controller: _searchController,
-              decoration: InputDecoration(
-                hintText: '항목 검색',
-                prefixIcon: const Icon(Icons.search),
-                suffixIcon: _query.isEmpty
-                    ? null
-                    : IconButton(
-                        onPressed: () => _searchController.clear(),
-                        icon: const Icon(Icons.close),
-                      ),
-                filled: true,
-                isDense: true,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
-                  borderSide: BorderSide.none,
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+            child: SizedBox(
+              height: 38,
+              child: TextField(
+                controller: _searchController,
+                style: const TextStyle(fontSize: 13),
+                decoration: InputDecoration(
+                  hintText: '항목 검색',
+                  prefixIcon: const Icon(Icons.search, size: 16),
+                  prefixIconConstraints: const BoxConstraints(
+                    minWidth: 34,
+                    minHeight: 34,
+                  ),
+                  suffixIcon: _query.isEmpty
+                      ? null
+                      : IconButton(
+                          onPressed: () => _searchController.clear(),
+                          icon: const Icon(Icons.close, size: 16),
+                        ),
+                  filled: true,
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide.none,
+                  ),
                 ),
               ),
             ),
@@ -819,34 +855,64 @@ class _CarrotSettingsGroupScreenState
               child: _loading && _values.isEmpty
                   ? const Center(child: CircularProgressIndicator())
                   : ListView.separated(
-                      padding: const EdgeInsets.fromLTRB(12, 4, 12, 20),
+                      padding: EdgeInsets.fromLTRB(12, 4, 12, 20 + bottomInset),
                       itemCount: items.length,
                       separatorBuilder: (_, __) => const SizedBox(height: 8),
                       itemBuilder: (context, index) {
                         final item = items[index];
-                        final value = _effectiveValue(item);
+                        final effectiveValue = _effectiveValue(item);
+                        final sliderValue =
+                            _sliderValueFor(item, effectiveValue);
+                        final value = sliderValue ?? effectiveValue;
                         final isSaving = _savingNames.contains(item.name);
+                        final step = item.isBooleanLike ? null : _stepFor(item);
                         return _SettingRowCard(
                           item: item,
                           value: value,
                           isSaving: isSaving,
-                          quickStep:
-                              item.isBooleanLike ? null : _quickStep(item),
+                          quickStep: step,
                           onBooleanChanged: item.isBooleanLike
                               ? (next) => _setValue(item, next ? 1 : 0)
                               : null,
-                          onTap: item.isBooleanLike
-                              ? null
-                              : () => _openEditor(item),
+                          onTap: null,
                           onDecrement: item.isBooleanLike
                               ? null
-                              : () => _adjustValueByStep(item, -1),
+                              : () => _adjustValueByStep(item, -1,
+                                  stepOverride: step),
                           onIncrement: item.isBooleanLike
                               ? null
-                              : () => _adjustValueByStep(item, 1),
+                              : () => _adjustValueByStep(item, 1,
+                                  stepOverride: step),
                           onQuickInput: item.isBooleanLike
                               ? null
                               : () => _showQuickValueInput(item),
+                          onStepTap: item.isBooleanLike
+                              ? null
+                              : () => _cycleStep(item),
+                          sliderValue: sliderValue,
+                          sliderMin: item.min?.toDouble(),
+                          sliderMax: item.max?.toDouble(),
+                          sliderDivisions: step == null
+                              ? null
+                              : _sliderDivisions(item, step),
+                          onSliderChanged:
+                              item.isBooleanLike || sliderValue == null
+                                  ? null
+                                  : (v) => _onSliderChanged(
+                                        item,
+                                        v,
+                                        stepOverride: step,
+                                      ),
+                          onSliderChangeEnd:
+                              item.isBooleanLike || sliderValue == null
+                                  ? null
+                                  : (v) => unawaited(
+                                        _onSliderChangeEnd(
+                                          item,
+                                          v,
+                                          stepOverride: step,
+                                        ),
+                                      ),
                           onResetDefault: () =>
                               _setValue(item, item.defaultValue),
                         );
@@ -870,6 +936,13 @@ class _SettingRowCard extends StatelessWidget {
   final VoidCallback? onDecrement;
   final VoidCallback? onIncrement;
   final VoidCallback? onQuickInput;
+  final VoidCallback? onStepTap;
+  final double? sliderValue;
+  final double? sliderMin;
+  final double? sliderMax;
+  final int? sliderDivisions;
+  final ValueChanged<double>? onSliderChanged;
+  final ValueChanged<double>? onSliderChangeEnd;
   final VoidCallback onResetDefault;
 
   const _SettingRowCard({
@@ -882,6 +955,13 @@ class _SettingRowCard extends StatelessWidget {
     required this.onDecrement,
     required this.onIncrement,
     required this.onQuickInput,
+    required this.onStepTap,
+    required this.sliderValue,
+    required this.sliderMin,
+    required this.sliderMax,
+    required this.sliderDivisions,
+    required this.onSliderChanged,
+    required this.onSliderChangeEnd,
     required this.onResetDefault,
   });
 
@@ -932,8 +1012,6 @@ class _SettingRowCard extends StatelessWidget {
                     const SizedBox(height: 4),
                     Text(
                       item.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontSize: 11,
                         fontFamily: 'monospace',
@@ -944,8 +1022,6 @@ class _SettingRowCard extends StatelessWidget {
                     if (subtitleParts.isNotEmpty)
                       Text(
                         subtitleParts.join(' · '),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           fontSize: 12,
                           color: Theme.of(context).colorScheme.onSurfaceVariant,
@@ -960,33 +1036,6 @@ class _SettingRowCard extends StatelessWidget {
                           fontWeight: FontWeight.w800,
                           color: Theme.of(context).colorScheme.primary,
                         ),
-                      )
-                    else
-                      Wrap(
-                        spacing: 6,
-                        runSpacing: 6,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          _InlineActionButton(
-                            icon: Icons.remove,
-                            onTap: isSaving ? null : onDecrement,
-                          ),
-                          _ValuePill(
-                            text: _displaySettingValue(value),
-                            onTap: isSaving ? null : onQuickInput,
-                          ),
-                          _InlineActionButton(
-                            icon: Icons.add,
-                            onTap: isSaving ? null : onIncrement,
-                          ),
-                          if (quickStep != null)
-                            _TinyInfoPill(text: '단위 ${quickStep!}'),
-                          _TinyInfoPill(
-                            text: '고급',
-                            icon: Icons.tune,
-                            onTap: isSaving ? null : onTap,
-                          ),
-                        ],
                       ),
                   ],
                 ),
@@ -998,7 +1047,88 @@ class _SettingRowCard extends StatelessWidget {
                   onChanged: isSaving ? null : onBooleanChanged,
                 )
               else
-                const SizedBox(width: 0),
+                SizedBox(
+                  width: 172,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _ValuePill(
+                              text: _displaySettingValue(value),
+                              onTap: isSaving ? null : onQuickInput,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          _TinyInfoPill(
+                            text: '단위 ${quickStep ?? 1}',
+                            onTap: isSaving ? null : onStepTap,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      if (sliderValue != null &&
+                          sliderMin != null &&
+                          sliderMax != null)
+                        Row(
+                          children: [
+                            _InlineActionButton(
+                              icon: Icons.remove,
+                              onTap: isSaving ? null : onDecrement,
+                            ),
+                            const SizedBox(width: 2),
+                            Expanded(
+                              child: SliderTheme(
+                                data: SliderTheme.of(context).copyWith(
+                                  trackHeight: 7,
+                                  thumbShape: const RoundSliderThumbShape(
+                                    enabledThumbRadius: 11,
+                                  ),
+                                  overlayShape: const RoundSliderOverlayShape(
+                                    overlayRadius: 18,
+                                  ),
+                                ),
+                                child: SizedBox(
+                                  height: 42,
+                                  child: Slider(
+                                    value: sliderValue!,
+                                    min: sliderMin!,
+                                    max: sliderMax!,
+                                    divisions: sliderDivisions,
+                                    onChanged:
+                                        isSaving ? null : onSliderChanged,
+                                    onChangeEnd:
+                                        isSaving ? null : onSliderChangeEnd,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 2),
+                            _InlineActionButton(
+                              icon: Icons.add,
+                              onTap: isSaving ? null : onIncrement,
+                            ),
+                          ],
+                        )
+                      else
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            _InlineActionButton(
+                              icon: Icons.remove,
+                              onTap: isSaving ? null : onDecrement,
+                            ),
+                            const SizedBox(width: 6),
+                            _InlineActionButton(
+                              icon: Icons.add,
+                              onTap: isSaving ? null : onIncrement,
+                            ),
+                          ],
+                        ),
+                    ],
+                  ),
+                ),
             ],
           ),
         ),
@@ -1017,14 +1147,14 @@ class _InlineActionButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return Material(
       color: Theme.of(context).colorScheme.surfaceContainerHighest,
-      borderRadius: BorderRadius.circular(10),
+      borderRadius: BorderRadius.circular(8),
       child: InkWell(
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(8),
         onTap: onTap,
         child: SizedBox(
-          width: 34,
-          height: 34,
-          child: Icon(icon, size: 18),
+          width: 26,
+          height: 26,
+          child: Icon(icon, size: 14),
         ),
       ),
     );
@@ -1066,12 +1196,10 @@ class _ValuePill extends StatelessWidget {
 
 class _TinyInfoPill extends StatelessWidget {
   final String text;
-  final IconData? icon;
   final VoidCallback? onTap;
 
   const _TinyInfoPill({
     required this.text,
-    this.icon,
     this.onTap,
   });
 
@@ -1082,10 +1210,6 @@ class _TinyInfoPill extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (icon != null) ...[
-            Icon(icon, size: 14),
-            const SizedBox(width: 4),
-          ],
           Text(
             text,
             style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
@@ -1215,7 +1339,9 @@ class _SettingEditSheetState extends State<_SettingEditSheet> {
         left: 16,
         right: 16,
         top: 16,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        bottom: MediaQuery.of(context).viewInsets.bottom +
+            MediaQuery.of(context).viewPadding.bottom +
+            16,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -1522,38 +1648,7 @@ class _CarSelectorScreenState extends State<_CarSelectorScreen> {
       await widget.service
           .setParam(widget.host, name: 'CarSelected3', value: option.fullLine);
       if (!mounted) return;
-      CustomToast.show(context, '차량 설정 저장됨: ${option.modelOnly}');
-
-      final rebootNow = await showDialog<bool>(
-            context: context,
-            builder: (context) => AlertDialog(
-              title: const Text('재부팅'),
-              content: const Text('지금 재부팅할까요?\n(나중에 재부팅해도 됩니다)'),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context, false),
-                  child: const Text('나중에'),
-                ),
-                FilledButton(
-                  onPressed: () => Navigator.pop(context, true),
-                  child: const Text('지금 재부팅'),
-                ),
-              ],
-            ),
-          ) ??
-          false;
-
-      if (rebootNow) {
-        try {
-          await widget.service.reboot(widget.host);
-          if (mounted) CustomToast.show(context, '재부팅 요청됨');
-        } catch (e) {
-          if (mounted) {
-            CustomToast.show(context, '재부팅 요청 실패: $e', isError: true);
-          }
-        }
-      }
-
+      CustomToast.show(context, '차량 선택이 완료되었습니다: ${option.modelOnly}');
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
       if (mounted) {

@@ -152,7 +152,7 @@ class _SystemTabState extends State<SystemTab> {
             "캘리브레이션 초기화 (Calibration)",
             Icons.camera_alt,
             DeviceActionType.resetCalibration,
-            "카메라 캘리브레이션을 초기화하시겠습니까?",
+            "카메라 캘리브레이션을 초기화하고 재부팅하시겠습니까?",
             Colors.grey,
           ),
           _buildActionButton(

@@ -1,22 +1,19 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
-// Notification Channel ID
 const String notificationChannelId = 'carrot_link_service';
 const int notificationId = 888;
-
-// Actions
 const String actionDisconnect = 'disconnect';
 
 Future<void> initializeService() async {
   final service = FlutterBackgroundService();
 
-  // Android Notification Channel Setup
   const AndroidNotificationChannel channel = AndroidNotificationChannel(
     notificationChannelId,
     'CarrotLink Service',
@@ -28,10 +25,8 @@ Future<void> initializeService() async {
   final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
       FlutterLocalNotificationsPlugin();
 
-  // Initialize Notifications with Actions
   const AndroidInitializationSettings initializationSettingsAndroid =
-      AndroidInitializationSettings(
-          '@mipmap/launcher_icon'); // Ensure icon exists
+      AndroidInitializationSettings('@mipmap/launcher_icon');
   const InitializationSettings initializationSettings =
       InitializationSettings(android: initializationSettingsAndroid);
 
@@ -78,12 +73,114 @@ Future<bool> onIosBackground(ServiceInstance service) async {
 void onStart(ServiceInstance service) async {
   SSHClient? sshClient;
   Timer? heartbeatTimer;
+  Timer? reconnectTimer;
+  Timer? discoveryRetryTimer;
+  RawDatagramSocket? discoverySocket;
+
+  bool connectInFlight = false;
+  bool discoveryListening = false;
+  bool stopping = false;
+  bool autoReconnectEnabled = true;
+
+  String? connectedIp;
+  int? connectedPort;
+  String? candidateIp;
+  DateTime? candidateSeenAt;
+  DateTime? lastCandidateBroadcastAt;
+
+  String? profileUsername;
+  String? profilePassword;
+  String? profilePrivateKey;
+  int profilePort = 22;
+  String? preferredIp;
+
+  bool manualDisconnectRequested = false;
+  DateTime? manualDisconnectUntil;
+  int reconnectAttempt = 0;
+  late Future<void> Function(
+    String, {
+    required String reason,
+    bool updatePreferred,
+  }) connectTo;
+  late Future<void> Function() startDiscoveryListener;
+
   String currentTitle = 'CarrotLink';
   String currentContent = '연결 대기 중...';
 
-  // Helper to update notification
-  Future<void> updateNotification(
-      {String? title, String? content, bool isConnected = false}) async {
+  bool isValidIpv4(String ip) {
+    final parsed = InternetAddress.tryParse(ip);
+    return parsed != null && parsed.type == InternetAddressType.IPv4;
+  }
+
+  bool hasConnectProfile() {
+    final usernameReady =
+        profileUsername != null && profileUsername!.isNotEmpty;
+    final hasKey = profilePrivateKey != null && profilePrivateKey!.isNotEmpty;
+    final hasPassword = profilePassword != null && profilePassword!.isNotEmpty;
+    return usernameReady && (hasKey || hasPassword);
+  }
+
+  bool canAutoReconnect() {
+    if (!autoReconnectEnabled) return false;
+    if (!manualDisconnectRequested) return true;
+    final until = manualDisconnectUntil;
+    if (until == null) return false;
+    if (DateTime.now().isBefore(until)) return false;
+    manualDisconnectRequested = false;
+    manualDisconnectUntil = null;
+    return true;
+  }
+
+  int reconnectBackoffSeconds(int attempt) {
+    const seq = [2, 4, 8, 16, 30];
+    if (attempt < 0) return seq.first;
+    if (attempt >= seq.length) return seq.last;
+    return seq[attempt];
+  }
+
+  String? pickReconnectTarget() {
+    if (candidateIp != null &&
+        candidateSeenAt != null &&
+        DateTime.now().difference(candidateSeenAt!) <=
+            const Duration(seconds: 12)) {
+      return candidateIp;
+    }
+    return preferredIp;
+  }
+
+  void emitConnectionState({
+    required bool isConnected,
+    String? reason,
+    String? error,
+    String? ip,
+    int? port,
+  }) {
+    service.invoke('connectionState', {
+      'isConnected': isConnected,
+      'reason': reason ?? '',
+      'error': error ?? '',
+      'ip': ip ?? connectedIp,
+      'port': port ?? connectedPort,
+    });
+  }
+
+  void emitDiscoveryState({String source = 'service'}) {
+    final ageMs = candidateSeenAt == null
+        ? null
+        : DateTime.now().difference(candidateSeenAt!).inMilliseconds;
+    service.invoke('discoveryState', {
+      'source': source,
+      'listening': discoveryListening,
+      'candidateIp': candidateIp,
+      'candidateAgeMs': ageMs,
+      'autoReconnectEnabled': autoReconnectEnabled,
+      'manualDisconnectRequested': manualDisconnectRequested,
+      'connectedIp': connectedIp,
+      'preferredIp': preferredIp,
+    });
+  }
+
+  Future<void> updateNotification({String? title, String? content}) async {
     if (title != null) currentTitle = title;
     if (content != null) currentContent = content;
 
@@ -98,88 +195,316 @@ void onStart(ServiceInstance service) async {
     }
   }
 
-  // Initial Notification Update
-  await updateNotification(
-    title: 'CarrotLink',
-    content: '연결 대기 중...',
-    isConnected: false,
-  );
+  Future<void> closeClient() async {
+    heartbeatTimer?.cancel();
+    heartbeatTimer = null;
+    try {
+      sshClient?.close();
+    } catch (_) {}
+    sshClient = null;
+    connectedIp = null;
+    connectedPort = null;
+  }
 
-  // Connect SSH
-  service.on('connect').listen((event) async {
-    if (event == null) return;
-    final ip = event['ip'];
-    final portRaw = event['port'];
-    final port = portRaw is int
-        ? portRaw
-        : int.tryParse(portRaw?.toString() ?? '') ?? 22;
-    final username = event['username'];
-    final password = event['password'];
-    final privateKey = event['privateKey'];
+  void clearReconnectTimer() {
+    reconnectTimer?.cancel();
+    reconnectTimer = null;
+  }
+
+  Future<void> handleDisconnected(String reason, {bool manual = false}) async {
+    final wasConnected = connectedIp != null;
+    await closeClient();
+    if (manual) {
+      manualDisconnectRequested = true;
+      manualDisconnectUntil = DateTime.now().add(const Duration(minutes: 2));
+    }
+    emitConnectionState(isConnected: false, reason: reason);
+    emitDiscoveryState(source: reason);
+    if (manual) {
+      await updateNotification(title: 'CarrotLink: 연결 해제됨', content: '대기 중...');
+      return;
+    }
+    if (wasConnected) {
+      await updateNotification(
+          title: 'CarrotLink: 연결 끊김', content: '재연결 대기 중...');
+    }
+  }
+
+  void scheduleReconnect(String reason) {
+    if (stopping || !canAutoReconnect() || !hasConnectProfile()) return;
+    if (connectInFlight || (sshClient != null && !sshClient!.isClosed)) return;
+    final target = pickReconnectTarget();
+    if (target == null || target.isEmpty) return;
+    if (reconnectTimer?.isActive == true) return;
+
+    final delaySec = reconnectBackoffSeconds(reconnectAttempt);
+    reconnectAttempt = reconnectAttempt < 10 ? reconnectAttempt + 1 : 10;
+    reconnectTimer = Timer(Duration(seconds: delaySec), () {
+      if (stopping) return;
+      unawaited(connectTo(target, reason: reason, updatePreferred: false));
+    });
+  }
+
+  connectTo =
+      (String ip, {required String reason, bool updatePreferred = true}) async {
+    if (stopping || connectInFlight) return;
+    if (!isValidIpv4(ip) || !hasConnectProfile()) return;
+
+    connectInFlight = true;
+    clearReconnectTimer();
+    await closeClient();
+
+    await updateNotification(title: 'CarrotLink: 연결 중...', content: 'IP: $ip');
 
     try {
-      heartbeatTimer?.cancel();
-      sshClient?.close();
-      sshClient = null;
+      final username = profileUsername!;
+      final socket = await SSHSocket.connect(
+        ip,
+        profilePort,
+        timeout: const Duration(seconds: 8),
+      );
 
-      await updateNotification(
-          title: 'CarrotLink: 연결 중...', content: 'IP: $ip');
-
-      final socket = await SSHSocket.connect(ip, port,
-          timeout: const Duration(seconds: 10));
-
-      if (privateKey != null) {
-        final keys = SSHKeyPair.fromPem(privateKey);
+      if (profilePrivateKey != null && profilePrivateKey!.isNotEmpty) {
+        final keys = SSHKeyPair.fromPem(profilePrivateKey!);
+        if (keys.isEmpty) {
+          throw Exception('No valid keys in private key');
+        }
         sshClient = SSHClient(socket, username: username, identities: keys);
       } else {
-        sshClient = SSHClient(socket,
-            username: username, onPasswordRequest: () => password);
+        sshClient = SSHClient(
+          socket,
+          username: username,
+          onPasswordRequest: () => profilePassword,
+        );
       }
 
-      await sshClient!.authenticated;
+      await sshClient!.authenticated.timeout(const Duration(seconds: 10));
 
-      // Set Title to IP as requested
-      await updateNotification(
-          title: 'IP: $ip', content: '백업 확인 준비 중...', isConnected: true);
+      connectedIp = ip;
+      connectedPort = profilePort;
+      if (updatePreferred) preferredIp = ip;
+      reconnectAttempt = 0;
 
-      // Notify UI
-      service.invoke('connectionState', {'isConnected': true, 'ip': ip});
+      emitConnectionState(
+        isConnected: true,
+        reason: reason,
+        ip: connectedIp,
+        port: connectedPort,
+      );
+      emitDiscoveryState(source: reason);
 
-      // Start Heartbeat
+      await updateNotification(title: 'IP: $ip', content: '백업 확인 준비 중...');
+
       heartbeatTimer?.cancel();
-      // Check every 5 seconds
       heartbeatTimer =
           Timer.periodic(const Duration(seconds: 5), (timer) async {
         if (sshClient == null || sshClient!.isClosed) {
           timer.cancel();
-          await updateNotification(
-              title: 'CarrotLink: 연결 끊김', content: '재연결 대기 중...');
-          service.invoke('connectionState', {'isConnected': false});
+          await handleDisconnected('heartbeat_closed');
+          scheduleReconnect('heartbeat_closed');
           return;
         }
         try {
-          // Use a short timeout (2s) to detect dead connections quickly
           await sshClient!.run('true').timeout(const Duration(seconds: 2));
         } catch (e) {
-          debugPrint("Background Heartbeat failed: $e");
-          sshClient?.close();
-          // Force update notification immediately
-          await updateNotification(
-              title: 'CarrotLink: 연결 끊김', content: '재연결 대기 중...');
-          service.invoke('connectionState', {'isConnected': false});
+          debugPrint('Background heartbeat failed: $e');
+          timer.cancel();
+          await handleDisconnected('heartbeat_failed');
+          scheduleReconnect('heartbeat_failed');
         }
       });
     } catch (e) {
+      await handleDisconnected('connect_failed');
+      emitConnectionState(
+          isConnected: false,
+          reason: 'connect_failed',
+          error: e.toString(),
+          ip: ip,
+          port: profilePort);
       await updateNotification(
           title: 'CarrotLink: 연결 실패', content: '오류: ${e.toString()}');
-      service.invoke(
-          'connectionState', {'isConnected': false, 'error': e.toString()});
-      sshClient?.close();
-      sshClient = null;
+      scheduleReconnect('connect_failed');
+    } finally {
+      connectInFlight = false;
+    }
+  };
+
+  void onCandidateIp(String ip, {String source = 'udp'}) {
+    if (!isValidIpv4(ip)) return;
+    final now = DateTime.now();
+    final changed = candidateIp != ip;
+    candidateIp = ip;
+    candidateSeenAt = now;
+    emitDiscoveryState(source: source);
+
+    if (changed ||
+        lastCandidateBroadcastAt == null ||
+        now.difference(lastCandidateBroadcastAt!) >
+            const Duration(seconds: 2)) {
+      lastCandidateBroadcastAt = now;
+      service.invoke('candidateIp', {
+        'ip': ip,
+        'source': source,
+        'ts': now.millisecondsSinceEpoch,
+      });
+    }
+
+    if ((sshClient == null || sshClient!.isClosed) &&
+        canAutoReconnect() &&
+        hasConnectProfile()) {
+      unawaited(connectTo(ip, reason: 'candidate_udp'));
+    }
+  }
+
+  void scheduleDiscoveryRetry() {
+    if (stopping) return;
+    discoveryRetryTimer?.cancel();
+    discoveryRetryTimer = Timer(const Duration(seconds: 3), () {
+      if (stopping) return;
+      discoverySocket?.close();
+      discoverySocket = null;
+      unawaited(startDiscoveryListener());
+    });
+  }
+
+  startDiscoveryListener = () async {
+    if (stopping) return;
+    if (discoverySocket != null) return;
+    try {
+      discoverySocket =
+          await RawDatagramSocket.bind(InternetAddress.anyIPv4, 7705);
+      discoveryListening = true;
+      emitDiscoveryState(source: 'udp_bound');
+      discoverySocket!.listen(
+        (event) {
+          if (event == RawSocketEvent.read) {
+            final datagram = discoverySocket!.receive();
+            if (datagram == null) return;
+            try {
+              final message = utf8.decode(datagram.data);
+              final decoded = json.decode(message);
+              if (decoded is Map<String, dynamic>) {
+                final ip = decoded['ip'];
+                if (ip is String) {
+                  onCandidateIp(ip, source: 'udp_broadcast');
+                }
+              }
+            } catch (_) {}
+          } else if (event == RawSocketEvent.closed) {
+            discoveryListening = false;
+            emitDiscoveryState(source: 'udp_closed');
+            discoverySocket = null;
+            scheduleDiscoveryRetry();
+          }
+        },
+        onError: (e) {
+          debugPrint('Discovery socket error: $e');
+          discoveryListening = false;
+          emitDiscoveryState(source: 'udp_error');
+          discoverySocket = null;
+          scheduleDiscoveryRetry();
+        },
+      );
+    } catch (e) {
+      debugPrint('Failed to bind UDP discovery socket: $e');
+      discoveryListening = false;
+      emitDiscoveryState(source: 'udp_bind_failed');
+      scheduleDiscoveryRetry();
+    }
+  };
+
+  await updateNotification(title: 'CarrotLink', content: '연결 대기 중...');
+  await startDiscoveryListener();
+  emitDiscoveryState(source: 'service_start');
+
+  service.on('connect').listen((event) async {
+    if (event == null) return;
+    final ip = event['ip']?.toString() ?? '';
+    final portRaw = event['port'];
+    final port = portRaw is int
+        ? portRaw
+        : int.tryParse(portRaw?.toString() ?? '') ?? 22;
+    profileUsername = event['username']?.toString();
+    final pw = event['password'];
+    final key = event['privateKey'];
+    profilePassword = pw is String && pw.isNotEmpty ? pw : null;
+    profilePrivateKey = key is String && key.isNotEmpty ? key : null;
+    profilePort = port;
+    preferredIp = isValidIpv4(ip) ? ip : preferredIp;
+    autoReconnectEnabled = true;
+    manualDisconnectRequested = false;
+    manualDisconnectUntil = null;
+    emitDiscoveryState(source: 'manual_connect');
+    if (isValidIpv4(ip)) {
+      await connectTo(ip, reason: 'manual_connect');
     }
   });
 
-  // Execute Command
+  service.on('configureAutoConnect').listen((event) async {
+    if (event == null) return;
+    final username = event['username']?.toString();
+    if (username != null && username.isNotEmpty) {
+      profileUsername = username;
+    }
+    final pw = event['password'];
+    final key = event['privateKey'];
+    profilePassword = pw is String && pw.isNotEmpty ? pw : null;
+    profilePrivateKey = key is String && key.isNotEmpty ? key : null;
+
+    final portRaw = event['port'];
+    final parsedPort =
+        portRaw is int ? portRaw : int.tryParse(portRaw?.toString() ?? '');
+    if (parsedPort != null && parsedPort > 0 && parsedPort < 65536) {
+      profilePort = parsedPort;
+    }
+
+    final ip = event['ip']?.toString();
+    if (ip != null && isValidIpv4(ip)) {
+      preferredIp = ip;
+    }
+
+    final auto = event['autoReconnectEnabled'];
+    if (auto is bool) {
+      autoReconnectEnabled = auto;
+    }
+    if (event['resumeAutoReconnect'] == true) {
+      manualDisconnectRequested = false;
+      manualDisconnectUntil = null;
+    }
+
+    emitDiscoveryState(source: 'configure');
+    if ((sshClient == null || sshClient!.isClosed) &&
+        canAutoReconnect() &&
+        hasConnectProfile()) {
+      final target = pickReconnectTarget() ?? preferredIp;
+      if (target != null) {
+        unawaited(
+            connectTo(target, reason: 'profile_sync', updatePreferred: false));
+      }
+    }
+  });
+
+  service.on('resumeAutoReconnect').listen((event) {
+    manualDisconnectRequested = false;
+    manualDisconnectUntil = null;
+    autoReconnectEnabled = true;
+    emitDiscoveryState(source: 'resume_auto_reconnect');
+    if ((sshClient == null || sshClient!.isClosed) && hasConnectProfile()) {
+      final target = pickReconnectTarget() ?? preferredIp;
+      if (target != null) {
+        unawaited(connectTo(target, reason: 'resume_auto_reconnect'));
+      }
+    }
+  });
+
+  service.on('ensureDiscovery').listen((event) {
+    if (discoverySocket == null) {
+      unawaited(startDiscoveryListener());
+    } else {
+      emitDiscoveryState(source: 'ensure_discovery');
+    }
+  });
+
   service.on('execute').listen((event) async {
     if (event == null) return;
     final id = event['id'];
@@ -199,36 +524,47 @@ void onStart(ServiceInstance service) async {
     }
   });
 
-  // Get Status
   service.on('getStatus').listen((event) {
     service.invoke('status', {
       'isConnected': sshClient != null && !sshClient!.isClosed,
+      'ip': connectedIp,
+      'port': connectedPort,
+      'candidateIp': candidateIp,
+      'candidateSeenAt': candidateSeenAt?.millisecondsSinceEpoch,
+      'listening': discoveryListening,
+      'autoReconnectEnabled': autoReconnectEnabled,
+      'manualDisconnectRequested': manualDisconnectRequested,
+      'preferredIp': preferredIp,
     });
+    emitDiscoveryState(source: 'status');
   });
 
-  // Disconnect SSH
   service.on('disconnect').listen((event) async {
-    heartbeatTimer?.cancel();
-    sshClient?.close();
-    sshClient = null;
-    await updateNotification(title: 'CarrotLink: 연결 해제됨', content: '대기 중...');
+    await handleDisconnected('manual_disconnect', manual: true);
+    clearReconnectTimer();
   });
 
   service.on('stopService').listen((event) {
+    stopping = true;
+    clearReconnectTimer();
+    discoveryRetryTimer?.cancel();
+    discoveryRetryTimer = null;
     heartbeatTimer?.cancel();
-    sshClient?.close();
-
-    // Stopping the background service should not forcibly close the app UI.
-    // This can otherwise look like an unexpected app restart when returning.
+    heartbeatTimer = null;
+    try {
+      discoverySocket?.close();
+    } catch (_) {}
+    discoverySocket = null;
+    discoveryListening = false;
+    unawaited(closeClient());
     service.stopSelf();
   });
 
   service.on('updateContent').listen((event) async {
     if (event != null) {
       await updateNotification(
-        title: event['title'], // Can be null, will use currentTitle
-        content: event['content'], // Can be null, will use currentContent
-        isConnected: sshClient != null && !sshClient!.isClosed,
+        title: event['title'],
+        content: event['content'],
       );
     }
   });

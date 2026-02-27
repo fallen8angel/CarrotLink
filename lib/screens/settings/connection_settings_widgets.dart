@@ -46,29 +46,26 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
       body: ListView(
         padding: EdgeInsets.fromLTRB(16, 16, 16, bottomPadding),
         children: [
-          Text("기기 연결", style: Theme.of(context).textTheme.titleMedium),
+          Text("1. 기기 연결", style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 12),
-          _buildFeatureGate(
-            enabled: featuresEnabled,
-            child: _buildConnectionSection(ssh),
-          ),
+          _buildConnectionSection(ssh),
           if (!featuresEnabled) ...[
             const SizedBox(height: 12),
             _buildLoginRequiredNotice(),
           ],
           const SizedBox(height: _sectionSpacing),
-          Text("GitHub 연동", style: Theme.of(context).textTheme.titleMedium),
+          Text("2. GitHub 연동", style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 12),
           _buildGitHubSection(),
           const SizedBox(height: _sectionSpacing),
-          Text("SSH Key", style: Theme.of(context).textTheme.titleMedium),
+          Text("3. SSH Key", style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 12),
           _buildFeatureGate(
             enabled: featuresEnabled,
             child: _buildManualKeySection(),
           ),
           const SizedBox(height: _sectionSpacing),
-          Text("GitHub SSH 키 관리",
+          Text("4. GitHub SSH 키 관리",
               style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 12),
           _buildFeatureGate(
@@ -101,12 +98,12 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
       ),
       child: Row(
         children: [
-          Icon(Icons.lock_outline,
+          Icon(Icons.info_outline,
               color: Theme.of(context).colorScheme.primary, size: 18),
           const SizedBox(width: 8),
           const Expanded(
             child: Text(
-              "GitHub 로그인 후 사용 가능합니다.",
+              "GitHub 로그인 시 키 자동관리/자동연결 기능이 활성화됩니다.",
               style: TextStyle(fontSize: 12),
             ),
           ),
@@ -116,6 +113,12 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
   }
 
   Widget _buildConnectionSection(SSHService ssh) {
+    final isConnecting = ssh.isConnecting;
+    final isConnected = ssh.isConnected;
+    final statusColor = isConnected
+        ? Colors.green
+        : (isConnecting ? Colors.orange : Colors.grey);
+
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -157,11 +160,36 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
               suffixIcon: IconButton(
                 icon: const Icon(Icons.search),
                 tooltip: '자동 검색',
-                onPressed: () async => _runGuidedDiscovery(),
+                onPressed:
+                    isConnecting ? null : () async => _runGuidedDiscovery(),
               ),
             ),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Icon(Icons.circle, size: 10, color: statusColor),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  ssh.connectionStatus,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Colors.grey[700],
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (isConnecting)
+                const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+            ],
+          ),
+          const SizedBox(height: 4),
           Text(
             _manualDiscoverySession
                 ? "검색 상태: 수동 / $_discoveryStatus"
@@ -177,7 +205,7 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
               Expanded(
                 child: ElevatedButton(
                   style: _primaryButtonStyle(),
-                  onPressed: ssh.isConnected ? null : _connect,
+                  onPressed: (isConnected || isConnecting) ? null : _connect,
                   child: const Text('연결'),
                 ),
               ),
@@ -185,7 +213,7 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
               Expanded(
                 child: ElevatedButton(
                   style: _primaryButtonStyle(),
-                  onPressed: ssh.isConnected ? _disconnect : null,
+                  onPressed: (isConnected || isConnecting) ? _disconnect : null,
                   child: const Text('연결 해제'),
                 ),
               ),

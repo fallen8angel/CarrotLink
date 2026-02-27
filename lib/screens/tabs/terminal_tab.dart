@@ -8,6 +8,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/ssh_service.dart';
 import '../../services/macro_service.dart';
+import '../../widgets/connection_required_view.dart';
 import '../../widgets/custom_toast.dart';
 import '../../widgets/section_tab_bar.dart';
 import 'file_explorer_tab.dart';
@@ -128,6 +129,7 @@ class _TerminalScreenState extends State<TerminalScreen>
   Timer? _terminalOutputFlushTimer;
   int _sessionGeneration = 0;
   bool _terminalContextMenuOpen = false;
+  bool _hasTerminalSelection = false;
 
   @override
   bool get wantKeepAlive => true;
@@ -153,6 +155,7 @@ class _TerminalScreenState extends State<TerminalScreen>
         session.resizeTerminal(width, height, pixelWidth, pixelHeight);
       } catch (_) {}
     };
+    _terminalController.addListener(_onTerminalSelectionChanged);
     // _startTerminal(); // Auto-connect removed
   }
 
@@ -201,6 +204,7 @@ class _TerminalScreenState extends State<TerminalScreen>
   @override
   void dispose() {
     _sshService?.removeListener(_onSshChanged);
+    _terminalController.removeListener(_onTerminalSelectionChanged);
     _sessionGeneration += 1;
     _terminalOutputFlushTimer?.cancel();
     _flushPendingTerminalOutput();
@@ -213,6 +217,16 @@ class _TerminalScreenState extends State<TerminalScreen>
     _stderrSub = null;
     _session = null;
     super.dispose();
+  }
+
+  void _onTerminalSelectionChanged() {
+    final hasSelection = _terminalController.selection != null;
+    if (_hasTerminalSelection == hasSelection) return;
+    if (!mounted) {
+      _hasTerminalSelection = hasSelection;
+      return;
+    }
+    setState(() => _hasTerminalSelection = hasSelection);
   }
 
   void _writeTerminal(String text) {
@@ -274,55 +288,49 @@ class _TerminalScreenState extends State<TerminalScreen>
   Future<void> _showTerminalContextMenu({Offset? globalPosition}) async {
     if (!mounted || _terminalContextMenuOpen) return;
     final hasSelection = _terminalController.selection != null;
+
+    PopupMenuItem<String> menuItem(
+      String value,
+      IconData icon,
+      String label, {
+      bool enabled = true,
+    }) {
+      return PopupMenuItem<String>(
+        value: value,
+        enabled: enabled,
+        child: Row(
+          children: [
+            Icon(icon, size: 18),
+            const SizedBox(width: 8),
+            Text(label),
+          ],
+        ),
+      );
+    }
+
     _terminalContextMenuOpen = true;
     try {
       final action = await showMenu<String>(
         context: context,
         position: _menuPositionForGlobalOffset(globalPosition),
         items: [
-          PopupMenuItem<String>(
-            value: 'copy',
-            enabled: hasSelection,
-            child: const Text('복사'),
-          ),
-          const PopupMenuItem<String>(
-            value: 'paste',
-            child: Text('붙여넣기'),
-          ),
-          PopupMenuItem<String>(
-            value: 'clear_selection',
-            enabled: hasSelection,
-            child: const Text('선택 해제'),
-          ),
+          menuItem('copy', Icons.copy, '복사', enabled: hasSelection),
+          menuItem('paste', Icons.paste, '붙여넣기'),
+          menuItem('select_all', Icons.select_all, '전체 선택'),
+          menuItem('clear_selection', Icons.deselect, '선택 해제',
+              enabled: hasSelection),
           const PopupMenuDivider(),
-          const PopupMenuItem<String>(
-            value: 'cursor_up',
-            child: Text('커서 ↑'),
-          ),
-          const PopupMenuItem<String>(
-            value: 'cursor_down',
-            child: Text('커서 ↓'),
-          ),
-          const PopupMenuItem<String>(
-            value: 'cursor_left',
-            child: Text('커서 ←'),
-          ),
-          const PopupMenuItem<String>(
-            value: 'cursor_right',
-            child: Text('커서 →'),
-          ),
-          const PopupMenuItem<String>(
-            value: 'enter',
-            child: Text('엔터'),
-          ),
-          const PopupMenuItem<String>(
-            value: 'ctrl_c',
-            child: Text('CTRL+C'),
-          ),
+          menuItem('cursor_up', Icons.keyboard_arrow_up, '커서 ↑'),
+          menuItem('cursor_down', Icons.keyboard_arrow_down, '커서 ↓'),
+          menuItem('cursor_left', Icons.keyboard_arrow_left, '커서 ←'),
+          menuItem('cursor_right', Icons.keyboard_arrow_right, '커서 →'),
+          menuItem('enter', Icons.keyboard_return, '엔터'),
+          menuItem('ctrl_c', Icons.cancel_presentation, 'CTRL+C'),
           const PopupMenuDivider(),
-          PopupMenuItem<String>(
-            value: 'toggle_virtual_keys',
-            child: Text(_showVirtualKeys ? '가상키 숨기기' : '가상키 보기'),
+          menuItem(
+            'toggle_virtual_keys',
+            _showVirtualKeys ? Icons.keyboard_hide : Icons.keyboard,
+            _showVirtualKeys ? '가상키 숨기기' : '가상키 보기',
           ),
         ],
       );
@@ -335,6 +343,9 @@ class _TerminalScreenState extends State<TerminalScreen>
           break;
         case 'paste':
           await _paste();
+          break;
+        case 'select_all':
+          _selectAllTerminalText();
           break;
         case 'clear_selection':
           _terminalController.clearSelection();
@@ -547,6 +558,80 @@ class _TerminalScreenState extends State<TerminalScreen>
     }
   }
 
+  void _selectAllTerminalText() {
+    final width = _terminal.viewWidth <= 0 ? 80 : _terminal.viewWidth;
+    final height = _terminal.viewHeight <= 0 ? 24 : _terminal.viewHeight;
+    final lastRow = _terminal.buffer.height - 1;
+    if (lastRow < 0) return;
+    final firstRow = (lastRow - height + 1).clamp(0, lastRow);
+    _terminalController.setSelection(
+      _terminal.buffer.createAnchor(0, firstRow),
+      _terminal.buffer.createAnchor(width, lastRow),
+      mode: xterm.SelectionMode.line,
+    );
+  }
+
+  Widget _buildSelectionActionBar() {
+    return Material(
+      color: Theme.of(context).colorScheme.surface,
+      elevation: 3,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color:
+                Theme.of(context).colorScheme.outline.withValues(alpha: 0.35),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(width: 6),
+            Icon(
+              Icons.text_fields,
+              size: 16,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              '선택',
+              style: TextStyle(
+                fontSize: 12,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+            IconButton(
+              tooltip: "복사",
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.copy, size: 18),
+              onPressed: _copySelection,
+            ),
+            IconButton(
+              tooltip: "붙여넣기",
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.paste, size: 18),
+              onPressed: _paste,
+            ),
+            IconButton(
+              tooltip: "전체 선택",
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.select_all, size: 18),
+              onPressed: _selectAllTerminalText,
+            ),
+            IconButton(
+              tooltip: "선택 해제",
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.close, size: 18),
+              onPressed: _terminalController.clearSelection,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildVirtualKey(String label, String code) {
     return InkWell(
       onTap: () => _sendKey(code),
@@ -568,6 +653,7 @@ class _TerminalScreenState extends State<TerminalScreen>
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    final connected = context.watch<SSHService>().isConnected;
     final macros = Provider.of<MacroService>(context).macros;
 
     return Column(
@@ -641,16 +727,32 @@ class _TerminalScreenState extends State<TerminalScreen>
           ),
         ),
         Expanded(
-          child: xterm.TerminalView(
-            _terminal,
-            controller: _terminalController,
-            textStyle: xterm.TerminalStyle(
-                fontSize: _fontSize, fontFamily: 'monospace'),
-            onTapUp: (details, _) => _handleTerminalTapUp(details),
-            onSecondaryTapUp: (details, _) =>
-                _handleTerminalSecondaryTapUp(details),
-            readOnly: false,
-          ),
+          child: (!connected && !_isSessionActive)
+              ? const ConnectionRequiredView(
+                  description: '터미널을 사용하려면 먼저 기기에 연결하세요.',
+                )
+              : Stack(
+                  children: [
+                    Positioned.fill(
+                      child: xterm.TerminalView(
+                        _terminal,
+                        controller: _terminalController,
+                        textStyle: xterm.TerminalStyle(
+                            fontSize: _fontSize, fontFamily: 'monospace'),
+                        onTapUp: (details, _) => _handleTerminalTapUp(details),
+                        onSecondaryTapUp: (details, _) =>
+                            _handleTerminalSecondaryTapUp(details),
+                        readOnly: false,
+                      ),
+                    ),
+                    if (_hasTerminalSelection)
+                      Positioned(
+                        top: 10,
+                        right: 10,
+                        child: _buildSelectionActionBar(),
+                      ),
+                  ],
+                ),
         ),
 
         // Fixed Bottom Area (Virtual Keys + Macros)

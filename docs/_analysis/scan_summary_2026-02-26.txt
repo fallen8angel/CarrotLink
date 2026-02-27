@@ -1,0 +1,62 @@
+root=D:\CarrotLink\CarrotLink-dev
+files_total=17801
+size_total_bytes=3840021970
+text_files=9368
+binary_files=8433
+todo_total=10
+fixme_total=0
+elapsed_seconds=116.94
+
+top_dirs:
+  build: 17200
+  .git: 179
+  .dart_tool: 83
+  android: 82
+  windows: 65
+  lib: 56
+  ios: 51
+  macos: 30
+  .idea: 11
+  linux: 10
+  docs: 8
+  web: 7
+  tools: 3
+  scripts: 3
+  test: 2
+  assets: 2
+  README.md: 1
+  pubspec.yaml: 1
+  logs: 1
+  process_icon.py: 1
+
+top_extensions:
+  .xml: 4586
+  .flat: 3972
+  .json: 2010
+  .png: 1440
+  .class: 1310
+  .h: 1292
+  .txt: 601
+  .dex: 484
+  (noext): 448
+  .jar: 214
+  .bin: 148
+  .tlog: 118
+  .properties: 107
+  .len: 66
+  .dart: 61
+  .1: 48
+  .aar: 47
+  .stamp: 44
+  .cmake: 43
+  .log: 42
+  .so: 38
+  .kotlin_module: 34
+  .vcxproj: 31
+  .filters: 28
+  .d: 25
+  .tab: 24
+  .rule: 23
+  .obj: 23
+  .at: 22
+  .keystream: 22

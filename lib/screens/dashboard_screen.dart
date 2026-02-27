@@ -18,7 +18,7 @@ import '../../widgets/custom_toast.dart';
 import '../../widgets/update_dialog.dart';
 import 'tabs/home_tab.dart';
 import 'tabs/git_management_tab.dart';
-import 'tabs/carrot_settings_tab.dart';
+import 'tabs/device_settings_tab.dart';
 import 'tabs/terminal_tab.dart';
 import 'tabs/logs_tab.dart';
 import 'settings_screen.dart';
@@ -38,8 +38,6 @@ class _DashboardScreenState extends State<DashboardScreen>
   StreamSubscription<String>? _discoverySubscription;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   Timer? _connectivityDebounceTimer;
-  DateTime? _lastDiscoveryTime;
-  static const _discoveryCooldown = Duration(minutes: 5);
   static const _defaultSshPort = 22;
   static const _baseReconnectDelay = Duration(seconds: 2);
   static const _maxReconnectDelay = Duration(seconds: 45);
@@ -54,9 +52,13 @@ class _DashboardScreenState extends State<DashboardScreen>
   final GlobalKey<TerminalTabState> _terminalTabKey =
       GlobalKey<TerminalTabState>();
 
+  void _dismissKeyboard() {
+    FocusManager.instance.primaryFocus?.unfocus();
+  }
+
   late final List<Widget> _tabs = [
     const HomeTab(),
-    const CarrotSettingsTab(),
+    const DeviceSettingsTab(),
     const GitManagementTab(),
     TerminalTab(key: _terminalTabKey),
     const LogsTab(),
@@ -82,6 +84,10 @@ class _DashboardScreenState extends State<DashboardScreen>
 
       // Start monitoring immediately. The service handles connection checks internally.
       backupService.startMonitoring(ssh, driveService);
+      backupService.requestEventSync(
+        reason: 'dashboard_start',
+        debounce: const Duration(seconds: 2),
+      );
 
       _checkUpdate();
       unawaited(_showOpenpilotSetupPromptIfNeeded());
@@ -146,6 +152,12 @@ class _DashboardScreenState extends State<DashboardScreen>
       if (hasNetwork &&
           (!hadNetwork ||
               !_connectivityListsEqual(_lastConnectivity, results))) {
+        final backupService =
+            Provider.of<BackupService>(context, listen: false);
+        backupService.requestEventSync(
+          reason: 'network_reconnected',
+          debounce: const Duration(seconds: 6),
+        );
         final ssh = Provider.of<SSHService>(context, listen: false);
 
         // 연결이 끊어진 상태면 즉시 재연결 시도
@@ -169,7 +181,10 @@ class _DashboardScreenState extends State<DashboardScreen>
     final ssh = Provider.of<SSHService>(context, listen: false);
     _discoverySubscription = ssh.ipDiscoveryStream.listen((discoveredIp) async {
       if (!mounted) return;
-      if (ssh.discoverySource != 'dashboard_auto') return;
+      if (ssh.discoverySource == 'settings_manual' ||
+          ssh.discoverySource == 'settings_auto') {
+        return;
+      }
 
       if (!await _hasOpenpilotPrerequisites()) {
         return;
@@ -220,15 +235,6 @@ class _DashboardScreenState extends State<DashboardScreen>
           password: authPassword,
           privateKey: authKey,
         );
-
-        final verified = await _verifyConnectedDevice(ssh);
-        if (!verified) {
-          _diag.warn(
-              'autoconnect', 'Rejected non-openpilot candidate: $discoveredIp');
-          await ssh.disconnect();
-          _markReconnectFailure();
-          return;
-        }
 
         // 성공한 IP만 저장
         await storage.write(key: 'ssh_ip', value: discoveredIp);
@@ -301,21 +307,11 @@ class _DashboardScreenState extends State<DashboardScreen>
     if (ssh.manualDisconnectRequested) {
       return;
     }
-
-    final now = DateTime.now();
-    if (!force &&
-        _lastDiscoveryTime != null &&
-        now.difference(_lastDiscoveryTime!) < _discoveryCooldown) {
-      debugPrint('[Dashboard] Discovery skipped - cooldown active');
-      return;
-    }
-
-    _lastDiscoveryTime = now;
     debugPrint('[Dashboard] Starting IP discovery...');
     unawaited(
       ssh.startDiscovery(
         forceRestart: force,
-        timeout: const Duration(seconds: 25),
+        timeout: const Duration(seconds: 45),
         source: 'dashboard_auto',
         manualSession: false,
       ),
@@ -325,8 +321,14 @@ class _DashboardScreenState extends State<DashboardScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      _dismissKeyboard();
       // App came to foreground, check connection
       final ssh = Provider.of<SSHService>(context, listen: false);
+      final backupService = Provider.of<BackupService>(context, listen: false);
+      backupService.requestEventSync(
+        reason: 'app_resume',
+        debounce: const Duration(seconds: 2),
+      );
       if (!ssh.isConnected) {
         print("App resumed: Connection lost, trying to reconnect...");
         _tryAutoConnect(reason: 'resume');
@@ -476,16 +478,6 @@ class _DashboardScreenState extends State<DashboardScreen>
             privateKey: authKey,
           );
 
-          final verified = await _verifyConnectedDevice(ssh);
-          if (!verified) {
-            _diag.warn(
-                'autoconnect', 'Connected but not openpilot target=$ip:$port');
-            await ssh.disconnect();
-            _markReconnectFailure();
-            _startDiscoveryIfNeeded(force: force);
-            return;
-          }
-
           _markReconnectSuccess();
           if (mounted && !silent) {
             CustomToast.show(context, '자동 연결됨: $ip');
@@ -524,21 +516,6 @@ class _DashboardScreenState extends State<DashboardScreen>
       }
     }
     return true;
-  }
-
-  Future<bool> _verifyConnectedDevice(SSHService ssh) async {
-    try {
-      final output = await ssh.executeCommand(
-        "if [ -d /data/openpilot ] || [ -d /home/comma/openpilot ]; then echo OP_OK; fi; "
-        "if [ -f /data/params/d/GithubSshKeys ] || [ -f /data/params/d/GithubUsername ]; then echo PARAM_OK; fi",
-      );
-      final normalized = output.trim();
-      return normalized.contains('OP_OK') || normalized.contains('PARAM_OK');
-    } catch (e) {
-      debugPrint('[Dashboard] Device verification failed: $e');
-      _diag.warn('autoconnect', 'Device verification error: $e');
-      return false;
-    }
   }
 
   Future<bool> _handleNestedBackStack() async {
@@ -580,6 +557,7 @@ class _DashboardScreenState extends State<DashboardScreen>
             IconButton(
               icon: const Icon(Icons.settings),
               onPressed: () {
+                _dismissKeyboard();
                 Navigator.push(
                   context,
                   MaterialPageRoute(
@@ -589,15 +567,22 @@ class _DashboardScreenState extends State<DashboardScreen>
             ),
           ],
         ),
-        body: IndexedStack(
-          index: _currentIndex,
-          children: _tabs,
+        body: Column(
+          children: [
+            Expanded(
+              child: IndexedStack(
+                index: _currentIndex,
+                children: _tabs,
+              ),
+            ),
+          ],
         ),
         bottomNavigationBar: Consumer<SSHService>(
           builder: (context, ssh, child) {
             return NavigationBar(
               selectedIndex: _currentIndex,
               onDestinationSelected: (idx) {
+                _dismissKeyboard();
                 setState(() => _currentIndex = idx);
                 unawaited(_persistLastTabIndex(idx));
                 if (idx == 2) ssh.checkGitUpdates();

@@ -14,6 +14,7 @@ class StorageLayoutService {
     'logs',
     'fleet',
     'app',
+    'backups',
     'tmp',
   ];
 
@@ -23,6 +24,7 @@ class StorageLayoutService {
   static String get logsPath => folderPath('logs');
   static String get fleetPath => folderPath('fleet');
   static String get appPath => folderPath('app');
+  static String get backupsPath => folderPath('backups');
   static String get tmpPath => folderPath('tmp');
 
   Future<bool> ensureBaseFolders() async {

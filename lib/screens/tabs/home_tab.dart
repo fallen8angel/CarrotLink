@@ -1,14 +1,13 @@
 import 'dart:async';
-import 'package:intl/intl.dart';
-import 'package:carrot_pilot_manager/screens/backup_manager_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:provider/provider.dart';
 import '../../services/ssh_service.dart';
-import '../../services/google_drive_service.dart';
-import '../../services/backup_service.dart';
 import '../../services/github_service.dart';
+import '../../services/native_overlay_hud_service.dart';
 import '../../widgets/custom_toast.dart';
+import '../../widgets/home_hud_preview_card.dart';
+import '../../widgets/webrtc_drive_screen.dart';
 
 import 'package:carrot_pilot_manager/widgets/design_components.dart';
 
@@ -19,35 +18,38 @@ class HomeTab extends StatefulWidget {
   State<HomeTab> createState() => _HomeTabState();
 }
 
-class _HomeTabState extends State<HomeTab> {
+class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   String _branch = "--";
   String _commit = "--";
   String _dongleId = "--";
   String _serial = "--";
   bool _hasGitHubLogin = false;
   bool _hasActiveSshKey = false;
+  bool _overlayPermissionGranted = false;
+  bool _overlayRunning = false;
+  bool _overlayBusy = false;
+  String? _overlaySyncedHost;
+  DateTime? _overlayLastProbeAt;
   Timer? _statusTimer;
   Timer? _prereqTimer;
-  final GlobalKey _backupChipKey = GlobalKey();
-  final LayerLink _layerLink = LayerLink();
-  OverlayEntry? _tooltipEntry;
+  Timer? _overlaySyncTimer;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _refreshStatus();
     _statusTimer =
         Timer.periodic(const Duration(seconds: 30), (_) => _refreshStatus());
     _prereqTimer = Timer.periodic(
         const Duration(seconds: 2), (_) => _refreshConnectionPrerequisites());
-
-    // Start auto-backup monitor
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final ssh = Provider.of<SSHService>(context, listen: false);
-      final drive = Provider.of<GoogleDriveService>(context, listen: false);
-      final backup = Provider.of<BackupService>(context, listen: false);
-      backup.startMonitoring(ssh, drive);
-    });
+    if (NativeOverlayHudService.isSupported) {
+      unawaited(_refreshOverlayState(syncEndpoint: true));
+      _overlaySyncTimer = Timer.periodic(
+        const Duration(seconds: 5),
+        (_) => unawaited(_syncOverlayEndpoint()),
+      );
+    }
   }
 
   @override
@@ -62,14 +64,24 @@ class _HomeTabState extends State<HomeTab> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _statusTimer?.cancel();
     _prereqTimer?.cancel();
-    _tooltipEntry?.remove();
+    _overlaySyncTimer?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed &&
+        NativeOverlayHudService.isSupported) {
+      unawaited(_refreshOverlayState(syncEndpoint: true));
+    }
   }
 
   Future<void> _refreshStatus() async {
     await _refreshConnectionPrerequisites();
+    if (!mounted) return;
 
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (ssh.isConnected) {
@@ -89,8 +101,9 @@ class _HomeTabState extends State<HomeTab> {
             _serial = results[3];
           });
         }
+        await _syncOverlayEndpoint();
       } catch (e) {
-        print("Status refresh failed: $e");
+        debugPrint("Status refresh failed: $e");
       }
     }
   }
@@ -135,35 +148,119 @@ class _HomeTabState extends State<HomeTab> {
     return Theme.of(context).colorScheme.primary;
   }
 
-  void _showBackupTooltip(BuildContext context, BackupService backup) {
-    if (_tooltipEntry != null) {
-      _tooltipEntry!.remove();
-      _tooltipEntry = null;
-      return;
+  String? _currentDeviceHost(SSHService ssh) {
+    return NativeOverlayHudService.normalizeHost(
+        ssh.connectedIp ?? ssh.targetIp);
+  }
+
+  Future<void> _refreshOverlayState({bool syncEndpoint = false}) async {
+    final hasPermission = await NativeOverlayHudService.hasPermission();
+    final running = await NativeOverlayHudService.isRunning();
+    if (!mounted) return;
+    setState(() {
+      _overlayPermissionGranted = hasPermission;
+      _overlayRunning = running;
+    });
+    if (syncEndpoint) {
+      await _syncOverlayEndpoint();
+    }
+  }
+
+  Future<void> _syncOverlayEndpoint({bool forceProbe = false}) async {
+    if (!mounted) return;
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    final host = _currentDeviceHost(ssh);
+
+    if (_overlayRunning && host != null && host != _overlaySyncedHost) {
+      await NativeOverlayHudService.updateEndpoint(host);
+      _overlaySyncedHost = host;
     }
 
-    _tooltipEntry = OverlayEntry(
-      builder: (context) => Positioned(
-        width: 150, // Fixed width or calculate based on content
-        child: CompositedTransformFollower(
-          link: _layerLink,
-          showWhenUnlinked: false,
-          offset: const Offset(0, -50), // Position above the chip
-          child: Material(
-            color: Colors.transparent,
-            child: _BackupTimerTooltip(
-              targetTime: backup.nextCheckTime,
-              onClose: () {
-                _tooltipEntry?.remove();
-                _tooltipEntry = null;
-              },
-            ),
-          ),
-        ),
+    final now = DateTime.now();
+    final shouldProbe = forceProbe ||
+        _overlayLastProbeAt == null ||
+        now.difference(_overlayLastProbeAt!) >= const Duration(seconds: 5);
+    if (!shouldProbe) return;
+
+    _overlayLastProbeAt = now;
+    final running = await NativeOverlayHudService.isRunning();
+    if (!mounted) return;
+    if (running != _overlayRunning) {
+      setState(() => _overlayRunning = running);
+    }
+    if (running && host != null && host != _overlaySyncedHost) {
+      await NativeOverlayHudService.updateEndpoint(host);
+      _overlaySyncedHost = host;
+    }
+  }
+
+  Future<void> _startOverlayHud(SSHService ssh) async {
+    if (_overlayBusy) return;
+    setState(() => _overlayBusy = true);
+    try {
+      var hasPermission = await NativeOverlayHudService.hasPermission();
+      if (!hasPermission) {
+        await NativeOverlayHudService.requestPermission();
+        if (mounted) {
+          CustomToast.show(context, '시스템 설정에서 오버레이 권한을 허용하세요.');
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 350));
+        hasPermission = await NativeOverlayHudService.hasPermission();
+      }
+      if (!hasPermission) return;
+
+      final host = _currentDeviceHost(ssh);
+      if (host == null) {
+        if (mounted) {
+          CustomToast.show(context, '연결된 기기 IP가 없어 시작할 수 없습니다.', isError: true);
+        }
+        return;
+      }
+
+      final started = await NativeOverlayHudService.start(host);
+      if (!mounted) return;
+      if (!started) {
+        CustomToast.show(context, 'HUD 오버레이 시작 실패', isError: true);
+        return;
+      }
+      _overlaySyncedHost = host;
+      CustomToast.show(context, 'HUD 오버레이 시작됨');
+    } finally {
+      if (mounted) {
+        setState(() => _overlayBusy = false);
+      }
+      await _refreshOverlayState(syncEndpoint: true);
+    }
+  }
+
+  Future<void> _stopOverlayHud() async {
+    if (_overlayBusy) return;
+    setState(() => _overlayBusy = true);
+    try {
+      await NativeOverlayHudService.stop();
+      if (mounted) {
+        CustomToast.show(context, 'HUD 오버레이 중지됨');
+      }
+      _overlaySyncedHost = null;
+    } finally {
+      if (mounted) {
+        setState(() => _overlayBusy = false);
+      }
+      await _refreshOverlayState(syncEndpoint: false);
+    }
+  }
+
+  void _openWebRtcView(SSHService ssh) {
+    final host = (ssh.connectedIp ?? ssh.targetIp ?? '').trim();
+    if (host.isEmpty) {
+      CustomToast.show(context, '연결 IP를 먼저 확인하세요.', isError: true);
+      return;
+    }
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => WebRtcDriveScreen(hostIp: host),
       ),
     );
-
-    Overlay.of(context).insert(_tooltipEntry!);
   }
 
   @override
@@ -185,7 +282,7 @@ class _HomeTabState extends State<HomeTab> {
                           color: (ssh.isConnected
                                   ? Theme.of(context).colorScheme.primary
                                   : Colors.grey)
-                              .withOpacity(0.1),
+                              .withValues(alpha: 0.1),
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Icon(
@@ -281,139 +378,155 @@ class _HomeTabState extends State<HomeTab> {
                 ],
               ),
             ),
-
-            // Quick Actions Grid Removed
-            const SizedBox(height: 24),
-            _buildBackupSection(context),
-            const SizedBox(height: 150), // Bottom padding for SnackBar
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _buildBackupSection(BuildContext context) {
-    final driveService = Provider.of<GoogleDriveService>(context);
-    final isSignedIn = driveService.currentUser != null;
-
-    return DesignCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const DesignSectionHeader(
-            icon: Icons.cloud_sync_outlined,
-            title: "당근 백업/복원",
-            subtitle: "설정값을 날짜별로 백업하고, 변경된 부분만 선택하여 복원할 수 있습니다.",
-          ),
-          const SizedBox(height: 16),
-
-          // Status Chips
-          Consumer<BackupService>(
-            builder: (context, backup, child) {
-              final checkTime = backup.lastCheckTime != null
-                  ? DateFormat('MM.dd HH:mm:ss').format(backup.lastCheckTime!)
-                  : "--";
-              final backupTime = backup.lastBackupTime != null
-                  ? DateFormat('MM.dd HH:mm:ss').format(backup.lastBackupTime!)
-                  : "--";
-
-              return Row(
+            const SizedBox(height: 12),
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => _openWebRtcView(ssh),
+              child: Column(
                 children: [
-                  Expanded(
-                    child: CompositedTransformTarget(
-                      link: _layerLink,
-                      child: DesignStatusChip(
-                        key: _backupChipKey,
-                        icon: Icons.sync,
-                        label: "백업 확인",
-                        value: checkTime,
-                        color: Theme.of(context).colorScheme.secondaryContainer,
-                        onTap: () => _showBackupTooltip(context, backup),
-                      ),
-                    ),
+                  HomeHudPreviewCard(
+                    deviceIp: ssh.connectedIp ?? ssh.targetIp,
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: DesignStatusChip(
-                      icon: Icons.save_outlined,
-                      label: "최근 백업",
-                      value: backupTime,
-                      color: Theme.of(context).colorScheme.tertiaryContainer,
-                    ),
+                  const SizedBox(height: 6),
+                  Text(
+                    '탭해서 WebRTC 주행화면 열기',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
                   ),
                 ],
-              );
-            },
-          ),
-
-          const SizedBox(height: 20),
-          Row(
-            children: [
-              Expanded(
-                child: FilledButton.tonalIcon(
-                  onPressed: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                          builder: (context) => const BackupManagerScreen()),
-                    );
-                  },
-                  icon: const Icon(Icons.history),
-                  label: const Text("관리"),
-                ),
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: () async {
-                    if (isSignedIn) {
-                      final confirm = await showDialog<bool>(
-                        context: context,
-                        builder: (context) => AlertDialog(
-                          title: const Text("구글 드라이브 연동 해제"),
-                          content: const Text("구글 드라이브 연동을 해제하시겠습니까?"),
-                          actions: [
-                            TextButton(
-                                onPressed: () => Navigator.pop(context, false),
-                                child: const Text("취소")),
-                            TextButton(
-                                onPressed: () => Navigator.pop(context, true),
-                                child: const Text("해제")),
-                          ],
+            ),
+            if (NativeOverlayHudService.isSupported) ...[
+              const SizedBox(height: 12),
+              DesignCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.layers_outlined,
+                          color: Theme.of(context).colorScheme.primary,
                         ),
-                      );
-                      if (confirm == true) {
-                        await driveService.signOut();
-                      }
-                    } else {
-                      try {
-                        await driveService.signIn();
-                      } catch (e) {
-                        if (context.mounted) {
-                          CustomToast.show(context, "Google Sign-In Failed: $e",
-                              isError: true);
-                        }
-                      }
-                    }
-                  },
-                  icon: Icon(
-                    isSignedIn ? Icons.check_circle : Icons.cloud_off,
-                    color: isSignedIn ? Colors.green : null,
-                    size: 18,
-                  ),
-                  label: Text(isSignedIn ? "연동됨" : "구글 연동"),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: isSignedIn ? Colors.green : null,
-                    side: isSignedIn
-                        ? const BorderSide(color: Colors.green)
-                        : null,
-                  ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            '네이티브 HUD 오버레이',
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleMedium
+                                ?.copyWith(
+                                  fontWeight: FontWeight.bold,
+                                ),
+                          ),
+                        ),
+                        if (_overlayBusy)
+                          const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      _overlayPermissionGranted
+                          ? (_overlayRunning ? '상태: 실행 중' : '상태: 중지됨')
+                          : '상태: 오버레이 권한 필요',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      _currentDeviceHost(ssh) == null
+                          ? '대상 IP: 없음'
+                          : '대상 IP: ${_currentDeviceHost(ssh)}',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color:
+                                Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        if (!_overlayPermissionGranted)
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: _overlayBusy
+                                  ? null
+                                  : () async {
+                                      await NativeOverlayHudService
+                                          .requestPermission();
+                                      if (!context.mounted) return;
+                                      CustomToast.show(
+                                        context,
+                                        '권한 화면에서 "다른 앱 위에 표시"를 허용하세요.',
+                                      );
+                                      await Future<void>.delayed(
+                                          const Duration(milliseconds: 350));
+                                      await _refreshOverlayState(
+                                          syncEndpoint: true);
+                                    },
+                              icon: const Icon(Icons.security_outlined),
+                              label: const Text('권한 요청'),
+                            ),
+                          )
+                        else
+                          Expanded(
+                            child: FilledButton.icon(
+                              onPressed: _overlayBusy
+                                  ? null
+                                  : _overlayRunning
+                                      ? _stopOverlayHud
+                                      : () => _startOverlayHud(ssh),
+                              icon: Icon(
+                                _overlayRunning
+                                    ? Icons.stop_circle_outlined
+                                    : Icons.play_circle_outline,
+                              ),
+                              label: Text(_overlayRunning ? '중지' : '시작'),
+                            ),
+                          ),
+                        const SizedBox(width: 8),
+                        IconButton(
+                          onPressed: (_overlayBusy || !_overlayRunning)
+                              ? null
+                              : () async {
+                                  await NativeOverlayHudService.resetPosition();
+                                  await _refreshOverlayState(syncEndpoint: true);
+                                  if (context.mounted) {
+                                    CustomToast.show(context, 'HUD 위치 초기화됨');
+                                  }
+                                },
+                          icon: const Icon(Icons.my_location),
+                          tooltip: 'HUD 위치 초기화',
+                        ),
+                        const SizedBox(width: 4),
+                        IconButton(
+                          onPressed: _overlayBusy
+                              ? null
+                              : () async {
+                                  await _refreshOverlayState(
+                                      syncEndpoint: true);
+                                  if (context.mounted) {
+                                    CustomToast.show(context, '오버레이 상태 갱신됨');
+                                  }
+                                },
+                          icon: const Icon(Icons.refresh),
+                          tooltip: '오버레이 상태 갱신',
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
             ],
-          ),
-        ],
-      ),
+
+            // Quick Actions Grid Removed
+            const SizedBox(height: 120),
+          ],
+        );
+      },
     );
   }
 
@@ -437,122 +550,4 @@ class _HomeTabState extends State<HomeTab> {
       ],
     );
   }
-}
-
-class _BackupTimerTooltip extends StatefulWidget {
-  final DateTime? targetTime;
-  final VoidCallback onClose;
-
-  const _BackupTimerTooltip({
-    required this.targetTime,
-    required this.onClose,
-  });
-
-  @override
-  State<_BackupTimerTooltip> createState() => _BackupTimerTooltipState();
-}
-
-class _BackupTimerTooltipState extends State<_BackupTimerTooltip>
-    with SingleTickerProviderStateMixin {
-  late Timer _timer;
-  String _timeLeft = "";
-  late AnimationController _controller;
-  late Animation<double> _opacity;
-
-  @override
-  void initState() {
-    super.initState();
-    _updateTime();
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) => _updateTime());
-
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 200),
-    );
-    _opacity = Tween<double>(begin: 0.0, end: 1.0).animate(_controller);
-    _controller.forward();
-
-    // Auto close after 5 seconds
-    Future.delayed(const Duration(seconds: 5), () {
-      if (mounted) {
-        _controller.reverse().then((_) => widget.onClose());
-      }
-    });
-  }
-
-  void _updateTime() {
-    if (widget.targetTime == null) {
-      setState(() => _timeLeft = "예정 없음");
-      return;
-    }
-
-    final now = DateTime.now();
-    final diff = widget.targetTime!.difference(now);
-
-    if (diff.isNegative) {
-      setState(() => _timeLeft = "확인 중...");
-    } else {
-      final min = diff.inMinutes;
-      final sec = diff.inSeconds % 60;
-      setState(() => _timeLeft = "다음 확인: $min분 $sec초");
-    }
-  }
-
-  @override
-  void dispose() {
-    _timer.cancel();
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return FadeTransition(
-      opacity: _opacity,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            decoration: BoxDecoration(
-              color: Colors.black87,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(
-              _timeLeft,
-              style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 12,
-                  fontWeight: FontWeight.bold),
-              textAlign: TextAlign.center,
-            ),
-          ),
-          CustomPaint(
-            painter: _TrianglePainter(color: Colors.black87),
-            size: const Size(10, 6),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _TrianglePainter extends CustomPainter {
-  final Color color;
-
-  _TrianglePainter({required this.color});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = color;
-    final path = Path();
-    path.moveTo(0, 0);
-    path.lineTo(size.width / 2, size.height);
-    path.lineTo(size.width, 0);
-    path.close();
-    canvas.drawPath(path, paint);
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
