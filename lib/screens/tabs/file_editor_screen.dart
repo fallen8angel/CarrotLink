@@ -1,150 +1,201 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:re_editor/re_editor.dart';
+import 'package:re_highlight/languages/bash.dart';
+import 'package:re_highlight/languages/cmake.dart';
+import 'package:re_highlight/languages/cpp.dart';
+import 'package:re_highlight/languages/dart.dart';
+import 'package:re_highlight/languages/diff.dart';
+import 'package:re_highlight/languages/go.dart';
+import 'package:re_highlight/languages/ini.dart';
+import 'package:re_highlight/languages/java.dart';
+import 'package:re_highlight/languages/javascript.dart';
+import 'package:re_highlight/languages/json.dart';
+import 'package:re_highlight/languages/kotlin.dart';
+import 'package:re_highlight/languages/lua.dart';
+import 'package:re_highlight/languages/makefile.dart';
+import 'package:re_highlight/languages/markdown.dart';
+import 'package:re_highlight/languages/nginx.dart';
+import 'package:re_highlight/languages/plaintext.dart';
+import 'package:re_highlight/languages/properties.dart';
+import 'package:re_highlight/languages/python.dart';
+import 'package:re_highlight/languages/rust.dart';
+import 'package:re_highlight/languages/shell.dart';
+import 'package:re_highlight/languages/sql.dart';
+import 'package:re_highlight/languages/typescript.dart';
+import 'package:re_highlight/languages/xml.dart';
+import 'package:re_highlight/languages/yaml.dart';
+import 'package:re_highlight/re_highlight.dart' show Mode;
+import 'package:re_highlight/styles/stackoverflow-light.dart';
+import 'package:re_highlight/styles/tokyo-night-dark.dart';
+
 import '../../services/ssh_service.dart';
 import '../../widgets/custom_toast.dart';
 
 class FileEditorScreen extends StatefulWidget {
   final String filePath;
   final String initialContent;
+  final bool initialReadOnly;
+  final bool lockReadOnly;
+  final bool largeReadOnlyMode;
+  final int? fileSizeBytes;
 
   const FileEditorScreen({
     super.key,
     required this.filePath,
     required this.initialContent,
+    this.initialReadOnly = true,
+    this.lockReadOnly = false,
+    this.largeReadOnlyMode = false,
+    this.fileSizeBytes,
   });
 
   @override
   State<FileEditorScreen> createState() => _FileEditorScreenState();
 }
 
+class _SyntaxLanguageSpec {
+  final String key;
+  final Mode mode;
+
+  const _SyntaxLanguageSpec(this.key, this.mode);
+}
+
 class _FileEditorScreenState extends State<FileEditorScreen> {
-  late TextEditingController _controller;
-  late FocusNode _focusNode;
-  late ScrollController _scrollController;
+  static const int _maxHighlightedTextBytes = 2 * 1024 * 1024;
+
+  late final CodeLineEditingController _editorController;
+  late final CodeFindController _findController;
+
   bool _isDirty = false;
-  bool _showFind = false;
-  final TextEditingController _findController = TextEditingController();
-  final TextEditingController _replaceController = TextEditingController();
-  double _fontSize = 13.0;
+  bool _readOnly = true;
+  bool _wordWrap = false;
+  double _fontSize = 13;
   int _currentLine = 1;
   int _currentColumn = 1;
+
+  String get _originalContent => widget.initialContent;
+  String get _fileName {
+    final parts = widget.filePath.split('/');
+    return parts.isEmpty ? widget.filePath : parts.last;
+  }
 
   @override
   void initState() {
     super.initState();
-    _controller = TextEditingController(text: widget.initialContent);
-    _focusNode = FocusNode();
-    _scrollController = ScrollController();
-    
-    _controller.addListener(_onTextChanged);
-  }
-
-  void _onTextChanged() {
-    if (!_isDirty) {
-      setState(() => _isDirty = true);
-    }
-    _updateCursorPosition();
-  }
-
-  void _updateCursorPosition() {
-    final text = _controller.text;
-    final cursorPos = _controller.selection.baseOffset;
-    
-    if (cursorPos < 0 || cursorPos > text.length) {
-      setState(() {
-        _currentLine = 1;
-        _currentColumn = 1;
-      });
-      return;
-    }
-    
-    final textBeforeCursor = text.substring(0, cursorPos);
-    final lines = textBeforeCursor.split('\n');
-    
-    setState(() {
-      _currentLine = lines.length;
-      _currentColumn = lines.last.length + 1;
-    });
+    _editorController =
+        CodeLineEditingController.fromText(widget.initialContent);
+    _findController = CodeFindController(_editorController);
+    _readOnly = widget.initialReadOnly || widget.lockReadOnly;
+    _editorController.addListener(_handleEditorChanged);
+    _syncCursorPosition();
   }
 
   @override
   void dispose() {
-    _controller.removeListener(_onTextChanged);
-    _controller.dispose();
-    _focusNode.dispose();
-    _scrollController.dispose();
+    _editorController.removeListener(_handleEditorChanged);
     _findController.dispose();
-    _replaceController.dispose();
+    _editorController.dispose();
     super.dispose();
   }
 
-  Future<bool> _onWillPop() async {
+  void _handleEditorChanged() {
+    if (!mounted) return;
+    final dirtyNow = _editorController.text != _originalContent;
+    final selection = _editorController.selection;
+    final line = selection.extentIndex >= 0 ? selection.extentIndex + 1 : 1;
+    final column = selection.extentOffset >= 0 ? selection.extentOffset + 1 : 1;
+
+    if (_isDirty == dirtyNow &&
+        _currentLine == line &&
+        _currentColumn == column) {
+      return;
+    }
+
+    setState(() {
+      _isDirty = dirtyNow;
+      _currentLine = line;
+      _currentColumn = column;
+    });
+  }
+
+  void _syncCursorPosition() {
+    final selection = _editorController.selection;
+    _currentLine = selection.extentIndex >= 0 ? selection.extentIndex + 1 : 1;
+    _currentColumn =
+        selection.extentOffset >= 0 ? selection.extentOffset + 1 : 1;
+  }
+
+  Future<bool> _confirmCloseIfDirty() async {
     if (!_isDirty) return true;
-    
-    final result = await showDialog<bool>(
+
+    final action = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text("저장하지 않은 변경사항"),
-        content: const Text("변경사항을 저장하지 않고 나가시겠습니까?"),
+      builder: (ctx) => AlertDialog(
+        title: const Text('저장하지 않은 변경사항'),
+        content: const Text('변경사항을 저장하지 않고 나가시겠습니까?'),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text("취소"),
+            onPressed: () => Navigator.pop(ctx, 'cancel'),
+            child: const Text('취소'),
           ),
           TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text("저장 안 함"),
+            onPressed: () => Navigator.pop(ctx, 'discard'),
+            child: const Text('저장 안 함'),
           ),
           FilledButton(
-            onPressed: () async {
-              Navigator.pop(context, false);
-              await _save();
-              if (mounted && !_isDirty) {
-                Navigator.pop(context);
-              }
-            },
-            child: const Text("저장"),
+            onPressed: () => Navigator.pop(ctx, 'save'),
+            child: const Text('저장'),
           ),
         ],
       ),
     );
-    return result ?? false;
+
+    if (action == 'discard') return true;
+    if (action != 'save') return false;
+
+    await _save();
+    return !_isDirty;
   }
 
   Future<void> _save() async {
-    bool createBackup = false;
-    
+    if (_readOnly) {
+      CustomToast.show(context, '읽기 전용 모드입니다. 편집 모드를 켜세요.');
+      return;
+    }
+
+    var createBackup = false;
     final shouldSave = await showDialog<bool>(
       context: context,
-      builder: (context) {
+      builder: (ctx) {
         return StatefulBuilder(
-          builder: (context, setState) {
+          builder: (context, setStateDialog) {
             return AlertDialog(
-              title: const Text("파일 저장"),
+              title: const Text('파일 저장'),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Text("변경 사항을 저장하시겠습니까?"),
-                  const SizedBox(height: 16),
+                  const Text('변경 사항을 저장하시겠습니까?'),
+                  const SizedBox(height: 12),
                   CheckboxListTile(
-                    title: const Text("백업본 만들기 (.backup)"),
                     value: createBackup,
                     onChanged: (value) {
-                      setState(() => createBackup = value ?? false);
+                      setStateDialog(() => createBackup = value ?? false);
                     },
-                    controlAffinity: ListTileControlAffinity.leading,
                     contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    title: const Text('백업본 만들기 (.backup)'),
                   ),
                 ],
               ),
               actions: [
                 TextButton(
-                  onPressed: () => Navigator.of(context).pop(false),
-                  child: const Text("취소"),
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('취소'),
                 ),
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(true),
-                  child: const Text("저장"),
+                FilledButton(
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: const Text('저장'),
                 ),
               ],
             );
@@ -154,411 +205,587 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
     );
 
     if (shouldSave != true) return;
+    if (!mounted) return;
 
     final ssh = Provider.of<SSHService>(context, listen: false);
     try {
-      await ssh.writeTextFile(widget.filePath, _controller.text);
-      
+      final content = _editorController.text;
+      await ssh.writeTextFile(widget.filePath, content);
       if (createBackup) {
-        await ssh.writeTextFile("${widget.filePath}.backup", _controller.text);
+        await ssh.writeTextFile('${widget.filePath}.backup', content);
       }
-
+      if (!mounted) return;
       setState(() => _isDirty = false);
-      if (mounted) {
-        CustomToast.show(context, createBackup ? "저장 및 백업 완료" : "저장되었습니다.");
-      }
+      CustomToast.show(context, createBackup ? '저장 및 백업 완료' : '저장되었습니다.');
     } catch (e) {
-      if (mounted) {
-        CustomToast.show(context, "저장 실패: $e", isError: true);
-      }
+      if (!mounted) return;
+      CustomToast.show(context, '저장 실패: $e', isError: true);
     }
   }
 
-  void _findNext() {
-    final text = _controller.text;
-    final query = _findController.text;
-    if (query.isEmpty) return;
-
-    final currentPos = _controller.selection.baseOffset;
-    int index = text.indexOf(query, currentPos + 1);
-    
-    if (index == -1) {
-      index = text.indexOf(query);
-    }
-
-    if (index != -1) {
-      _controller.selection = TextSelection(
-        baseOffset: index,
-        extentOffset: index + query.length,
-      );
-      _focusNode.requestFocus();
-    } else {
-      CustomToast.show(context, "찾을 수 없습니다.", isError: true);
-    }
-  }
-
-  void _replace() {
-    final text = _controller.text;
-    final query = _findController.text;
-    final replacement = _replaceController.text;
-    
-    if (query.isEmpty) return;
-
-    final selection = _controller.selection;
-    if (selection.isValid && selection.textInside(text) == query) {
-      final newText = text.replaceRange(selection.start, selection.end, replacement);
-      _controller.value = TextEditingValue(
-        text: newText,
-        selection: TextSelection.collapsed(offset: selection.start + replacement.length),
-      );
-      _findNext();
-    } else {
-      _findNext();
-    }
-  }
-
-  void _replaceAll() {
-    final text = _controller.text;
-    final query = _findController.text;
-    final replacement = _replaceController.text;
-    
-    if (query.isEmpty) return;
-
-    final newText = text.replaceAll(query, replacement);
-    if (newText != text) {
-      _controller.text = newText;
-      CustomToast.show(context, "모두 바꾸기 완료");
-    }
-  }
-
-  void _goToLine() async {
-    final lineCount = _controller.text.split('\n').length;
-    final controller = TextEditingController();
-    
-    final result = await showDialog<int>(
+  Future<void> _goToLine() async {
+    final input = TextEditingController();
+    final lineText = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text("줄 이동"),
+      builder: (ctx) => AlertDialog(
+        title: const Text('줄 이동'),
         content: TextField(
-          controller: controller,
+          controller: input,
           keyboardType: TextInputType.number,
-          decoration: InputDecoration(
-            hintText: "1 - $lineCount",
-            border: const OutlineInputBorder(),
-          ),
           autofocus: true,
-          onSubmitted: (value) {
-            final line = int.tryParse(value);
-            Navigator.pop(context, line);
-          },
+          decoration: InputDecoration(
+            border: const OutlineInputBorder(),
+            hintText: '1 - ${_editorController.lineCount}',
+          ),
+          onSubmitted: (value) => Navigator.pop(ctx, value.trim()),
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text("취소"),
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('취소'),
           ),
           FilledButton(
-            onPressed: () {
-              final line = int.tryParse(controller.text);
-              Navigator.pop(context, line);
-            },
-            child: const Text("이동"),
+            onPressed: () => Navigator.pop(ctx, input.text.trim()),
+            child: const Text('이동'),
           ),
         ],
       ),
     );
-    
-    if (result != null && result >= 1 && result <= lineCount) {
-      final lines = _controller.text.split('\n');
-      int offset = 0;
-      for (int i = 0; i < result - 1; i++) {
-        offset += lines[i].length + 1;
-      }
-      _controller.selection = TextSelection.collapsed(offset: offset);
-      _focusNode.requestFocus();
+
+    final line = int.tryParse((lineText ?? '').trim());
+    if (line == null) return;
+    final target = line.clamp(1, _editorController.lineCount) - 1;
+    _editorController.selectLine(target);
+    _editorController.makeCursorCenterIfInvisible();
+  }
+
+  void _toggleReadOnly() {
+    if (widget.lockReadOnly && _readOnly) {
+      CustomToast.show(context, '대용량 파일은 읽기 전용으로만 열립니다.');
+      return;
     }
+    setState(() {
+      _readOnly = !_readOnly;
+    });
+    if (!_readOnly) {
+      CustomToast.show(context, '편집 모드');
+    }
+  }
+
+  void _changeFontSize(double delta) {
+    setState(() {
+      _fontSize = (_fontSize + delta).clamp(10, 24).toDouble();
+    });
+  }
+
+  _SyntaxLanguageSpec _resolveSyntaxSpec(String path) {
+    final lower = path.toLowerCase();
+    final fileName = lower.split('/').last;
+    final ext = fileName.contains('.') ? '.${fileName.split('.').last}' : '';
+
+    if (fileName == 'makefile' || fileName.startsWith('makefile.')) {
+      return _SyntaxLanguageSpec('makefile', langMakefile);
+    }
+    if (fileName == 'cmakelists.txt') {
+      return _SyntaxLanguageSpec('cmake', langCmake);
+    }
+    if (fileName.endsWith('.bashrc') ||
+        fileName.endsWith('.zshrc') ||
+        fileName.endsWith('.profile') ||
+        fileName.endsWith('.sh')) {
+      return _SyntaxLanguageSpec('bash', langBash);
+    }
+
+    switch (ext) {
+      case '.dart':
+        return _SyntaxLanguageSpec('dart', langDart);
+      case '.json':
+        return _SyntaxLanguageSpec('json', langJson);
+      case '.yaml':
+      case '.yml':
+        return _SyntaxLanguageSpec('yaml', langYaml);
+      case '.xml':
+      case '.html':
+      case '.svg':
+        return _SyntaxLanguageSpec('xml', langXml);
+      case '.js':
+      case '.mjs':
+      case '.cjs':
+        return _SyntaxLanguageSpec('javascript', langJavascript);
+      case '.ts':
+      case '.tsx':
+        return _SyntaxLanguageSpec('typescript', langTypescript);
+      case '.java':
+        return _SyntaxLanguageSpec('java', langJava);
+      case '.kt':
+      case '.kts':
+        return _SyntaxLanguageSpec('kotlin', langKotlin);
+      case '.py':
+        return _SyntaxLanguageSpec('python', langPython);
+      case '.c':
+      case '.cc':
+      case '.cpp':
+      case '.cxx':
+      case '.h':
+      case '.hpp':
+        return _SyntaxLanguageSpec('cpp', langCpp);
+      case '.sql':
+        return _SyntaxLanguageSpec('sql', langSql);
+      case '.md':
+      case '.markdown':
+        return _SyntaxLanguageSpec('markdown', langMarkdown);
+      case '.ini':
+      case '.cfg':
+      case '.conf':
+        return _SyntaxLanguageSpec('ini', langIni);
+      case '.properties':
+        return _SyntaxLanguageSpec('properties', langProperties);
+      case '.diff':
+      case '.patch':
+        return _SyntaxLanguageSpec('diff', langDiff);
+      case '.go':
+        return _SyntaxLanguageSpec('go', langGo);
+      case '.rs':
+        return _SyntaxLanguageSpec('rust', langRust);
+      case '.lua':
+        return _SyntaxLanguageSpec('lua', langLua);
+      case '.nginx':
+        return _SyntaxLanguageSpec('nginx', langNginx);
+      case '.sh':
+      case '.zsh':
+      case '.bash':
+        return _SyntaxLanguageSpec('shell', langShell);
+      default:
+        return _SyntaxLanguageSpec('plaintext', langPlaintext);
+    }
+  }
+
+  CodeHighlightTheme _buildCodeTheme(BuildContext context) {
+    final spec = _resolveSyntaxSpec(widget.filePath);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return CodeHighlightTheme(
+      languages: {
+        spec.key: CodeHighlightThemeMode(
+          mode: spec.mode,
+          maxSize: _maxHighlightedTextBytes,
+          maxLineLength: 256 * 1024,
+        ),
+      },
+      theme: isDark ? tokyoNightDarkTheme : stackoverflowLightTheme,
+    );
+  }
+
+  Widget _buildEditor(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return CodeEditor(
+      controller: _editorController,
+      findController: _findController,
+      readOnly: _readOnly,
+      wordWrap: _wordWrap,
+      autofocus: true,
+      style: CodeEditorStyle(
+        fontSize: _fontSize,
+        fontFamily: 'monospace',
+        backgroundColor: colors.surface,
+        textColor: colors.onSurface,
+        cursorLineColor: colors.primary.withValues(alpha: 0.08),
+        selectionColor: colors.primary.withValues(alpha: 0.20),
+        highlightColor: colors.tertiary.withValues(alpha: 0.20),
+        codeTheme: _buildCodeTheme(context),
+      ),
+      border: Border.all(
+        color: Theme.of(context).dividerColor.withValues(alpha: 0.6),
+      ),
+      borderRadius: const BorderRadius.all(Radius.circular(10)),
+      verticalScrollbarWidth: 6,
+      horizontalScrollbarHeight: 0,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      indicatorBuilder:
+          (context, editingController, chunkController, notifier) {
+        return Row(
+          children: [
+            DefaultCodeLineNumber(
+              controller: editingController,
+              notifier: notifier,
+            ),
+            DefaultCodeChunkIndicator(
+              width: 16,
+              controller: chunkController,
+              notifier: notifier,
+            ),
+          ],
+        );
+      },
+      findBuilder: (context, controller, readOnly) {
+        return _EditorFindPanel(
+          controller: controller,
+          readOnly: readOnly,
+        );
+      },
+      onChanged: (_) {
+        // Listener handles dirty/cursor sync. This callback keeps editor shortcut
+        // behavior intact and avoids accidental omission of future hooks.
+      },
+    );
+  }
+
+  Widget _buildStatusBar(BuildContext context) {
+    final text = _editorController.text;
+    final lineCount = _editorController.lineCount;
+    final charCount = text.length;
+    final codeUnitCount = text.codeUnits.length;
+    final colors = Theme.of(context).colorScheme;
+    final style = Theme.of(context).textTheme.bodySmall;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerHighest.withValues(alpha: 0.45),
+        border: Border(top: BorderSide(color: Theme.of(context).dividerColor)),
+      ),
+      child: Wrap(
+        spacing: 12,
+        runSpacing: 4,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Text(
+            widget.largeReadOnlyMode
+                ? '대용량 읽기 전용'
+                : (_readOnly ? '읽기 전용' : '편집 모드'),
+            style: style,
+          ),
+          Text('Ln $_currentLine, Col $_currentColumn', style: style),
+          Text('줄 $lineCount', style: style),
+          Text('문자 $charCount', style: style),
+          Text('코드단위 ${_formatBytes(codeUnitCount)}', style: style),
+          if (widget.fileSizeBytes != null)
+            Text('파일 ${_formatBytes(widget.fileSizeBytes!)}', style: style),
+          if (_isDirty)
+            Text(
+              '미저장 변경',
+              style: style?.copyWith(color: colors.error),
+            ),
+        ],
+      ),
+    );
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    const units = ['KB', 'MB', 'GB'];
+    var value = bytes.toDouble();
+    var unitIndex = -1;
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex += 1;
+    }
+    final fixed = value >= 100 ? 0 : (value >= 10 ? 1 : 2);
+    return '${value.toStringAsFixed(fixed)} ${units[unitIndex]}';
   }
 
   @override
   Widget build(BuildContext context) {
-    final lines = _controller.text.split('\n');
-    final lineCount = lines.length;
-    final lineHeight = _fontSize * 1.5;
-    final lineNumberWidth = (lineCount.toString().length * 10.0 + 24).clamp(40.0, 80.0);
-    
-    // 하단 네비바 높이 + 상태바 높이 계산
-    final bottomPadding = MediaQuery.of(context).padding.bottom + 80;
-
     return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (didPop, result) async {
+      canPop: !_isDirty,
+      onPopInvokedWithResult: (didPop, _) async {
+        final navigator = Navigator.of(context);
         if (didPop) return;
-        final shouldPop = await _onWillPop();
-        if (shouldPop && mounted) {
-          Navigator.of(context).pop();
-        }
+        final canLeave = await _confirmCloseIfDirty();
+        if (!mounted || !canLeave) return;
+        navigator.pop();
       },
       child: Scaffold(
         appBar: AppBar(
+          titleSpacing: 8,
           title: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                widget.filePath.split('/').last,
-                style: const TextStyle(fontSize: 16),
+                _fileName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
               ),
               Text(
-                "줄 $_currentLine, 열 $_currentColumn",
-                style: TextStyle(
-                  fontSize: 11,
-                  color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6),
-                ),
+                widget.filePath,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context)
+                    .textTheme
+                    .labelSmall
+                    ?.copyWith(color: Theme.of(context).hintColor),
               ),
             ],
           ),
-          leading: IconButton(
-            icon: const Icon(Icons.arrow_back),
-            onPressed: () async {
-              final shouldPop = await _onWillPop();
-              if (shouldPop && mounted) {
-                Navigator.of(context).pop();
-              }
-            },
-          ),
           actions: [
             IconButton(
-              icon: const Icon(Icons.text_decrease, size: 20),
-              onPressed: () => setState(() => _fontSize = (_fontSize - 1).clamp(8.0, 24.0)),
-              tooltip: "글자 작게",
+              tooltip: '찾기',
+              icon: const Icon(Icons.search),
+              onPressed: _findController.findMode,
             ),
             IconButton(
-              icon: const Icon(Icons.text_increase, size: 20),
-              onPressed: () => setState(() => _fontSize = (_fontSize + 1).clamp(8.0, 24.0)),
-              tooltip: "글자 크게",
+              tooltip: '바꾸기',
+              icon: const Icon(Icons.find_replace),
+              onPressed: _readOnly ? null : _findController.replaceMode,
             ),
             IconButton(
-              icon: const Icon(Icons.format_list_numbered, size: 20),
-              onPressed: _goToLine,
-              tooltip: "줄 이동",
+              tooltip: _wordWrap ? '줄바꿈 해제' : '줄바꿈',
+              icon: Icon(_wordWrap ? Icons.wrap_text : Icons.notes),
+              onPressed: () => setState(() => _wordWrap = !_wordWrap),
             ),
-            IconButton(
-              icon: Icon(_showFind ? Icons.search_off : Icons.search, size: 20),
-              onPressed: () => setState(() => _showFind = !_showFind),
-              tooltip: "찾기/바꾸기",
-            ),
-            IconButton(
-              icon: Icon(Icons.save, size: 20, color: _isDirty ? Colors.orange : null),
-              onPressed: _isDirty ? _save : null,
-              tooltip: "저장",
+            PopupMenuButton<String>(
+              tooltip: '옵션',
+              onSelected: (value) async {
+                switch (value) {
+                  case 'edit_mode':
+                    _toggleReadOnly();
+                    break;
+                  case 'save':
+                    await _save();
+                    break;
+                  case 'find':
+                    _findController.findMode();
+                    break;
+                  case 'replace':
+                    if (!_readOnly) _findController.replaceMode();
+                    break;
+                  case 'goto':
+                    await _goToLine();
+                    break;
+                  case 'font_up':
+                    _changeFontSize(1);
+                    break;
+                  case 'font_down':
+                    _changeFontSize(-1);
+                    break;
+                }
+              },
+              itemBuilder: (context) => [
+                PopupMenuItem<String>(
+                  value: 'edit_mode',
+                  enabled: !(widget.lockReadOnly && _readOnly),
+                  child: Text(
+                    widget.lockReadOnly && _readOnly
+                        ? '읽기 전용(고정)'
+                        : (_readOnly ? '편집 모드' : '읽기 전용 전환'),
+                  ),
+                ),
+                PopupMenuItem<String>(
+                  value: 'save',
+                  enabled: !_readOnly && _isDirty,
+                  child: const Text('저장'),
+                ),
+                const PopupMenuDivider(),
+                const PopupMenuItem<String>(
+                  value: 'goto',
+                  child: Text('줄 이동'),
+                ),
+                const PopupMenuItem<String>(
+                  value: 'font_up',
+                  child: Text('글자 크게'),
+                ),
+                const PopupMenuItem<String>(
+                  value: 'font_down',
+                  child: Text('글자 작게'),
+                ),
+              ],
             ),
           ],
         ),
-        body: Column(
-          children: [
-            // 찾기/바꾸기 패널
-            if (_showFind)
-              Container(
-                padding: const EdgeInsets.all(12.0),
-                decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                  border: Border(bottom: BorderSide(color: Theme.of(context).dividerColor)),
-                ),
-                child: Column(
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _findController,
-                            decoration: InputDecoration(
-                              hintText: "찾기",
-                              isDense: true,
-                              prefixIcon: const Icon(Icons.search, size: 18),
-                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                            ),
-                            style: const TextStyle(fontSize: 14),
-                            onSubmitted: (_) => _findNext(),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        IconButton.filledTonal(
-                          icon: const Icon(Icons.arrow_downward, size: 18),
-                          onPressed: _findNext,
-                          tooltip: "다음 찾기",
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _replaceController,
-                            decoration: InputDecoration(
-                              hintText: "바꾸기",
-                              isDense: true,
-                              prefixIcon: const Icon(Icons.find_replace, size: 18),
-                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                            ),
-                            style: const TextStyle(fontSize: 14),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        TextButton(onPressed: _replace, child: const Text("바꾸기")),
-                        TextButton(onPressed: _replaceAll, child: const Text("모두")),
-                      ],
-                    ),
-                  ],
+        body: SafeArea(
+          top: false,
+          child: Column(
+            children: [
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+                  child: _buildEditor(context),
                 ),
               ),
-            
-            // 에디터 본체 - CustomScrollView 사용으로 동기화 문제 해결
-            Expanded(
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  return SingleChildScrollView(
-                    controller: _scrollController,
-                    child: Padding(
-                      // 하단에 여유 공간 추가 (네비바에 가려지지 않도록)
-                      padding: EdgeInsets.only(bottom: bottomPadding),
-                      child: IntrinsicHeight(
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            // 줄 번호 (같은 스크롤 컨테이너 안에 있으므로 자동 동기화)
-                            Container(
-                              width: lineNumberWidth,
-                              decoration: BoxDecoration(
-                                color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                                border: Border(
-                                  right: BorderSide(
-                                    color: Theme.of(context).dividerColor,
-                                  ),
-                                ),
-                              ),
-                              child: Column(
-                                children: List.generate(lineCount, (index) {
-                                  final isCurrentLine = index + 1 == _currentLine;
-                                  return Container(
-                                    height: lineHeight,
-                                    alignment: Alignment.centerRight,
-                                    padding: const EdgeInsets.only(right: 8, left: 4),
-                                    decoration: isCurrentLine ? BoxDecoration(
-                                      color: Theme.of(context).colorScheme.primary.withOpacity(0.1),
-                                    ) : null,
-                                    child: Text(
-                                      '${index + 1}',
-                                      style: TextStyle(
-                                        fontFamily: 'monospace',
-                                        fontSize: _fontSize,
-                                        height: 1.5,
-                                        color: isCurrentLine 
-                                            ? Theme.of(context).colorScheme.primary
-                                            : Theme.of(context).colorScheme.onSurface.withOpacity(0.5),
-                                        fontWeight: isCurrentLine ? FontWeight.bold : FontWeight.normal,
-                                      ),
-                                    ),
-                                  );
-                                }),
-                              ),
-                            ),
-                            // 텍스트 에디터
-                            Expanded(
-                              child: SingleChildScrollView(
-                                scrollDirection: Axis.horizontal,
-                                child: ConstrainedBox(
-                                  constraints: BoxConstraints(
-                                    minWidth: constraints.maxWidth - lineNumberWidth,
-                                  ),
-                                  child: IntrinsicWidth(
-                                    child: TextField(
-                                      controller: _controller,
-                                      focusNode: _focusNode,
-                                      maxLines: null,
-                                      keyboardType: TextInputType.multiline,
-                                      style: TextStyle(
-                                        fontFamily: 'monospace',
-                                        fontSize: _fontSize,
-                                        height: 1.5,
-                                      ),
-                                      decoration: const InputDecoration(
-                                        contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 0),
-                                        border: InputBorder.none,
-                                        isDense: true,
-                                      ),
-                                      onTap: _updateCursorPosition,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-            
-            // 상태바 (항상 화면 하단에 고정)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                border: Border(top: BorderSide(color: Theme.of(context).dividerColor)),
-              ),
-              child: SafeArea(
-                top: false,
-                child: Row(
-                  children: [
-                    Icon(Icons.description_outlined, size: 14, color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6)),
-                    const SizedBox(width: 6),
-                    Text(
-                      "줄 $lineCount",
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Theme.of(context).colorScheme.onSurface.withOpacity(0.7),
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    Icon(Icons.text_fields, size: 14, color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6)),
-                    const SizedBox(width: 6),
-                    Text(
-                      "${_controller.text.length}자",
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Theme.of(context).colorScheme.onSurface.withOpacity(0.7),
-                      ),
-                    ),
-                    const Spacer(),
-                    if (_isDirty)
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: Colors.orange.withOpacity(0.2),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.circle, size: 8, color: Colors.orange),
-                            SizedBox(width: 4),
-                            Text(
-                              "수정됨",
-                              style: TextStyle(fontSize: 11, color: Colors.orange, fontWeight: FontWeight.w500),
-                            ),
-                          ],
-                        ),
-                      ),
-                  ],
+              _buildStatusBar(context),
+            ],
+          ),
+        ),
+        floatingActionButton: (!_readOnly && _isDirty)
+            ? FloatingActionButton.small(
+                onPressed: _save,
+                tooltip: '저장',
+                child: const Icon(Icons.save),
+              )
+            : null,
+      ),
+    );
+  }
+}
+
+class _EditorFindPanel extends StatelessWidget implements PreferredSizeWidget {
+  final CodeFindController controller;
+  final bool readOnly;
+
+  const _EditorFindPanel({
+    required this.controller,
+    required this.readOnly,
+  });
+
+  @override
+  Size get preferredSize {
+    final state = controller.value;
+    if (state == null) return Size.zero;
+    return Size.fromHeight(state.replaceMode ? 92 : 52);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = controller.value;
+    if (state == null) return const SizedBox.shrink();
+
+    final result = state.result;
+    final resultText = result == null
+        ? '0/0'
+        : '${result.matches.isEmpty ? 0 : result.index + 1}/${result.matches.length}';
+
+    final panelColor = Theme.of(context).colorScheme.surfaceContainerHighest;
+
+    Widget actionIcon({
+      required IconData icon,
+      required String tooltip,
+      required VoidCallback? onPressed,
+    }) {
+      return IconButton(
+        visualDensity: VisualDensity.compact,
+        iconSize: 18,
+        tooltip: tooltip,
+        onPressed: onPressed,
+        icon: Icon(icon),
+      );
+    }
+
+    Widget textInput({
+      required TextEditingController textController,
+      required FocusNode focusNode,
+      required String hint,
+    }) {
+      return TextField(
+        controller: textController,
+        focusNode: focusNode,
+        maxLines: 1,
+        decoration: InputDecoration(
+          hintText: hint,
+          isDense: true,
+          border: const OutlineInputBorder(),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+        ),
+      );
+    }
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+      padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
+      decoration: BoxDecoration(
+        color: panelColor,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: Theme.of(context).dividerColor.withValues(alpha: 0.7),
+        ),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: textInput(
+                  textController: controller.findInputController,
+                  focusNode: controller.findInputFocusNode,
+                  hint: '찾기',
                 ),
               ),
+              const SizedBox(width: 8),
+              Text(resultText, style: Theme.of(context).textTheme.bodySmall),
+              TextButton(
+                onPressed: controller.toggleCaseSensitive,
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  minimumSize: Size.zero,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: Text(
+                  'Aa',
+                  style: TextStyle(
+                    fontWeight: state.option.caseSensitive
+                        ? FontWeight.w700
+                        : FontWeight.w400,
+                  ),
+                ),
+              ),
+              TextButton(
+                onPressed: controller.toggleRegex,
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  minimumSize: Size.zero,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: Text(
+                  '.*',
+                  style: TextStyle(
+                    fontWeight:
+                        state.option.regex ? FontWeight.w700 : FontWeight.w400,
+                  ),
+                ),
+              ),
+              actionIcon(
+                icon: Icons.keyboard_arrow_up,
+                tooltip: '이전',
+                onPressed: result == null ? null : controller.previousMatch,
+              ),
+              actionIcon(
+                icon: Icons.keyboard_arrow_down,
+                tooltip: '다음',
+                onPressed: result == null ? null : controller.nextMatch,
+              ),
+              actionIcon(
+                icon:
+                    state.replaceMode ? Icons.expand_less : Icons.find_replace,
+                tooltip: state.replaceMode ? '바꾸기 닫기' : '바꾸기',
+                onPressed: readOnly ? null : controller.toggleMode,
+              ),
+              actionIcon(
+                icon: Icons.close,
+                tooltip: '닫기',
+                onPressed: controller.close,
+              ),
+            ],
+          ),
+          if (state.replaceMode) ...[
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Expanded(
+                  child: textInput(
+                    textController: controller.replaceInputController,
+                    focusNode: controller.replaceInputFocusNode,
+                    hint: '바꿀 내용',
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton.tonal(
+                  onPressed: result == null ? null : controller.replaceMatch,
+                  child: const Text('바꾸기'),
+                ),
+                const SizedBox(width: 6),
+                FilledButton(
+                  onPressed:
+                      result == null ? null : controller.replaceAllMatches,
+                  child: const Text('모두'),
+                ),
+              ],
             ),
           ],
-        ),
+        ],
       ),
     );
   }

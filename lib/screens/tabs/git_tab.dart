@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -5,9 +6,38 @@ import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../services/ssh_service.dart';
-import '../../constants.dart';
+import '../../widgets/connection_required_view.dart';
+import '../../services/device_action_service.dart';
 import '../../widgets/design_components.dart';
 import '../../widgets/custom_toast.dart';
+
+enum _GitToolsMenuAction {
+  quickSetupFromLink,
+  showDetails,
+  clearLogs,
+  advancedSettings,
+  changeOrigin,
+  setRepoPath,
+  clearRepoPath,
+  addRemote,
+  editRemote,
+  deleteRemote,
+  setUpstream,
+}
+
+class _RepoLinkSpec {
+  final String repoUrl;
+  final String? branch;
+  final String owner;
+  final String repo;
+
+  const _RepoLinkSpec({
+    required this.repoUrl,
+    required this.owner,
+    required this.repo,
+    this.branch,
+  });
+}
 
 class GitTab extends StatefulWidget {
   const GitTab({super.key});
@@ -17,19 +47,42 @@ class GitTab extends StatefulWidget {
 }
 
 class _GitTabState extends State<GitTab> {
+  static const String _gitLogsPrefKey = 'git_logs';
+  static const String _gitRepoPathPrefKey = 'git_repo_path_override';
+
   bool _isLoading = false;
+  bool _isLoadingSourceInfo = false;
   List<Map<String, String>> _logs = [];
   final ScrollController _scrollController = ScrollController();
+  final DeviceActionService _actionService = DeviceActionService();
+  GitBranchSnapshot? _gitSnapshot;
+  String _repoPathOverride = '';
+
+  String? get _preferredRepoPath {
+    final trimmed = _repoPathOverride.trim();
+    return trimmed.isEmpty ? null : trimmed;
+  }
 
   @override
   void initState() {
     super.initState();
-    _loadLogs();
+    unawaited(_loadLogs());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        unawaited(_initializeGitSourceSettings());
+      }
+    });
+  }
+
+  Future<void> _initializeGitSourceSettings() async {
+    await _loadGitRepoPathOverride();
+    if (!mounted) return;
+    await _refreshGitSourceInfo(silent: true);
   }
 
   Future<void> _loadLogs() async {
     final prefs = await SharedPreferences.getInstance();
-    final String? storedLogs = prefs.getString('git_logs');
+    final String? storedLogs = prefs.getString(_gitLogsPrefKey);
     if (storedLogs != null) {
       try {
         final List<dynamic> decoded = jsonDecode(storedLogs);
@@ -43,7 +96,8 @@ class _GitTabState extends State<GitTab> {
         // Scroll to bottom after loading
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (_scrollController.hasClients) {
-            _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+            _scrollController
+                .jumpTo(_scrollController.position.maxScrollExtent);
           }
         });
       } catch (e) {
@@ -63,7 +117,7 @@ class _GitTabState extends State<GitTab> {
     // So we should strip 'isOld' before saving, or just save as is and override on load.
     // Let's save as is.
     final String encoded = jsonEncode(_logs);
-    await prefs.setString('git_logs', encoded);
+    await prefs.setString(_gitLogsPrefKey, encoded);
   }
 
   void _addLog(String message) {
@@ -88,10 +142,793 @@ class _GitTabState extends State<GitTab> {
       _logs.clear();
     });
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('git_logs');
+    await prefs.remove(_gitLogsPrefKey);
   }
 
-  Future<void> _runGitCommand(BuildContext context, String command, String successMessage) async {
+  Future<void> _loadGitRepoPathOverride() async {
+    final prefs = await SharedPreferences.getInstance();
+    final value = (prefs.getString(_gitRepoPathPrefKey) ?? '').trim();
+    if (!mounted) return;
+    setState(() {
+      _repoPathOverride = value;
+    });
+  }
+
+  Future<void> _saveGitRepoPathOverride(String value) async {
+    final normalized = value.trim();
+    final prefs = await SharedPreferences.getInstance();
+    if (normalized.isEmpty) {
+      await prefs.remove(_gitRepoPathPrefKey);
+    } else {
+      await prefs.setString(_gitRepoPathPrefKey, normalized);
+    }
+    if (!mounted) return;
+    setState(() {
+      _repoPathOverride = normalized;
+    });
+  }
+
+  bool _looksLikeOpenpilotRepoUrl(String url) {
+    return url.toLowerCase().contains('openpilot');
+  }
+
+  String _remoteDisplayName(String remoteName, String url) {
+    final owner = _guessOwnerFromGitUrl(url);
+    if (owner == null || owner.isEmpty) return remoteName;
+    if (remoteName == owner) return owner;
+    return '$remoteName ($owner)';
+  }
+
+  String? _guessOwnerFromGitUrl(String url) {
+    final normalized = url.trim();
+    if (normalized.isEmpty) return null;
+    final sshMatch = RegExp(r'^[^@]+@[^:]+:([^/]+)/').firstMatch(normalized);
+    if (sshMatch != null) return sshMatch.group(1);
+    final sshScheme =
+        RegExp(r'^ssh://[^@]+@[^/]+/([^/]+)/').firstMatch(normalized);
+    if (sshScheme != null) return sshScheme.group(1);
+    final httpUri = Uri.tryParse(normalized);
+    if (httpUri != null && httpUri.pathSegments.length >= 2) {
+      return httpUri.pathSegments[0];
+    }
+    return null;
+  }
+
+  String? _toBrowserRepoUrl(String url) {
+    final raw = url.trim();
+    if (raw.isEmpty) return null;
+    if (raw.startsWith('http://') || raw.startsWith('https://')) {
+      return raw.endsWith('.git') ? raw.substring(0, raw.length - 4) : raw;
+    }
+    final sshMatch = RegExp(r'^[^@]+@([^:]+):(.+)$').firstMatch(raw);
+    if (sshMatch != null) {
+      final host = sshMatch.group(1)!;
+      var path = sshMatch.group(2)!;
+      if (path.endsWith('.git')) path = path.substring(0, path.length - 4);
+      return 'https://$host/$path';
+    }
+    final sshUri = Uri.tryParse(raw);
+    if (sshUri != null &&
+        sshUri.scheme == 'ssh' &&
+        sshUri.host.isNotEmpty &&
+        sshUri.pathSegments.length >= 2) {
+      final owner = sshUri.pathSegments[0];
+      var repo = sshUri.pathSegments[1];
+      if (repo.endsWith('.git')) repo = repo.substring(0, repo.length - 4);
+      return 'https://${sshUri.host}/$owner/$repo';
+    }
+    return null;
+  }
+
+  _RepoLinkSpec? _parseRepoLink(String input) {
+    var raw = input.trim();
+    if (raw.isEmpty) return null;
+
+    if (RegExp(r'^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$').hasMatch(raw)) {
+      raw = 'https://github.com/$raw';
+    }
+
+    final sshMatch =
+        RegExp(r'^[^@]+@([^:]+):([^/]+)/([^/]+?)(?:\.git)?$').firstMatch(raw);
+    if (sshMatch != null) {
+      final host = sshMatch.group(1)!;
+      final owner = sshMatch.group(2)!;
+      final repo = sshMatch.group(3)!;
+      return _RepoLinkSpec(
+        repoUrl: 'https://$host/$owner/$repo',
+        owner: owner,
+        repo: repo,
+      );
+    }
+
+    final uri = Uri.tryParse(raw);
+    if (uri == null || uri.host.isEmpty) return null;
+    if (uri.pathSegments.length < 2) return null;
+
+    final owner = uri.pathSegments[0];
+    var repo = uri.pathSegments[1];
+    if (repo.endsWith('.git')) {
+      repo = repo.substring(0, repo.length - 4);
+    }
+    if (owner.isEmpty || repo.isEmpty) return null;
+
+    String? branch;
+    if (uri.pathSegments.length >= 4 && uri.pathSegments[2] == 'tree') {
+      final branchSegments = uri.pathSegments.sublist(3);
+      if (branchSegments.isNotEmpty) {
+        branch = branchSegments.join('/');
+      }
+    }
+
+    return _RepoLinkSpec(
+      repoUrl: 'https://${uri.host}/$owner/$repo',
+      owner: owner,
+      repo: repo,
+      branch: (branch ?? '').trim().isEmpty ? null : branch,
+    );
+  }
+
+  String _makeRemoteNameCandidate(String owner) {
+    var value = owner.trim().toLowerCase();
+    value = value.replaceAll(RegExp(r'[^a-z0-9._-]'), '_');
+    if (value.isEmpty) value = 'remote';
+    if (value == 'origin') value = 'origin_alt';
+    return value;
+  }
+
+  String _pickBranchForRemote(
+    GitBranchSnapshot snapshot,
+    String remoteName, {
+    String? preferredBranch,
+  }) {
+    final remoteBranches = snapshot.branches
+        .where((b) => (b['remote'] ?? '') == remoteName)
+        .map((b) => (b['name'] ?? '').trim())
+        .where((name) => name.isNotEmpty)
+        .toList();
+    if (remoteBranches.isEmpty) return '';
+
+    final preferred = (preferredBranch ?? '').trim();
+    if (preferred.isNotEmpty && remoteBranches.contains(preferred)) {
+      return preferred;
+    }
+
+    final current = snapshot.currentBranch.trim();
+    if (current.isNotEmpty && remoteBranches.contains(current)) {
+      return current;
+    }
+
+    final defaultBranch = snapshot.defaultBranch.trim();
+    if (defaultBranch.isNotEmpty && remoteBranches.contains(defaultBranch)) {
+      return defaultBranch;
+    }
+
+    return remoteBranches.first;
+  }
+
+  Future<void> _quickSetupFromRepoLink() async {
+    final initial = (_gitSnapshot?.originUrl.isNotEmpty ?? false)
+        ? _gitSnapshot!.originUrl
+        : ((_gitSnapshot?.repoUrl ?? '').trim());
+    final controller = TextEditingController(text: initial);
+    final input = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("소스 링크 자동 설정"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              "기본 소스(origin)는 유지하고, 링크 저장소를 추가 소스로 등록합니다.\n브랜치 링크(/tree/...)면 해당 브랜치 전환/업데이트 기준 설정도 자동 시도합니다.",
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              maxLines: 3,
+              minLines: 1,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: "GitHub 링크",
+                hintText: "https://github.com/jominki354/openpilot",
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("취소"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text("자동 설정"),
+          ),
+        ],
+      ),
+    );
+
+    final raw = (input ?? '').trim();
+    if (raw.isEmpty) return;
+
+    final spec = _parseRepoLink(raw);
+    if (spec == null) {
+      if (!mounted) return;
+      CustomToast.show(context, "지원하지 않는 링크 형식입니다.", isError: true);
+      return;
+    }
+
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    if (!ssh.isConnected) {
+      if (!mounted) return;
+      CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
+      return;
+    }
+
+    if (!_looksLikeOpenpilotRepoUrl(spec.repoUrl)) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text("확인 필요"),
+          content: const Text("입력한 링크가 openpilot 저장소로 보이지 않습니다. 계속할까요?"),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("취소"),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text("계속"),
+            ),
+          ],
+        ),
+      );
+      if (ok != true) return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _isLoading = true;
+        _isLoadingSourceInfo = true;
+      });
+    }
+
+    try {
+      final remoteName = _makeRemoteNameCandidate(spec.owner);
+      _addLog("소스 자동 추가 시작: ${spec.repoUrl} (remote=$remoteName)");
+
+      final remoteResult = await _actionService.upsertGitRemote(
+        ssh,
+        remoteName: remoteName,
+        remoteUrl: spec.repoUrl,
+        preferredRepoPath: _preferredRepoPath,
+      );
+      final remoteOutput = [remoteResult.stdout, remoteResult.stderr]
+          .where((e) => e.trim().isNotEmpty)
+          .join('\n');
+      if (remoteOutput.trim().isNotEmpty) {
+        _addLog(remoteOutput.trim());
+      }
+      if (!remoteResult.ok) {
+        throw Exception("소스 추가/수정 실패");
+      }
+
+      var snapshot = await _actionService.loadGitBranchSnapshot(
+        ssh,
+        preferredRepoPath: _preferredRepoPath,
+      );
+      if (!mounted) return;
+      setState(() {
+        _gitSnapshot = snapshot;
+      });
+
+      // 브랜치 링크일 때만 자동 전환 시도. 일반 저장소 링크는 소스 추가만 수행.
+      final targetBranch = spec.branch == null
+          ? ''
+          : _pickBranchForRemote(
+              snapshot,
+              remoteName,
+              preferredBranch: spec.branch,
+            );
+
+      if (targetBranch.isNotEmpty) {
+        final checkoutResult = await _actionService.runAction(
+          ssh,
+          DeviceActionType.gitCheckout,
+          branch: targetBranch,
+          remote: remoteName,
+          repoPathOverride: _preferredRepoPath,
+        );
+        if (checkoutResult.output.trim().isNotEmpty) {
+          _addLog(checkoutResult.output.trim());
+        }
+        if (!checkoutResult.ok) {
+          throw Exception("브랜치 전환 실패: $remoteName/$targetBranch");
+        }
+
+        final upstreamResult = await _actionService.setCurrentBranchUpstream(
+          ssh,
+          remoteName: remoteName,
+          remoteBranch: targetBranch,
+          preferredRepoPath: _preferredRepoPath,
+        );
+        if (upstreamResult.output.trim().isNotEmpty) {
+          _addLog(upstreamResult.output.trim());
+        }
+
+        snapshot = await _actionService.loadGitBranchSnapshot(
+          ssh,
+          preferredRepoPath: _preferredRepoPath,
+        );
+        if (mounted) {
+          setState(() {
+            _gitSnapshot = snapshot;
+          });
+        }
+        if (!mounted) return;
+        CustomToast.show(
+          context,
+          "소스 추가 완료: $remoteName / 브랜치 전환: $remoteName/$targetBranch",
+        );
+      } else {
+        if (!mounted) return;
+        CustomToast.show(context, "소스 추가 완료: $remoteName (origin 유지)");
+      }
+    } catch (e) {
+      if (!mounted) return;
+      _addLog("자동 설정 실패: $e");
+      CustomToast.show(context, "자동 설정 실패: $e", isError: true);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _isLoadingSourceInfo = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _showAdvancedGitSettingsSheet() async {
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: false,
+      builder: (sheetCtx) {
+        Future<void> run(_GitToolsMenuAction action) async {
+          Navigator.pop(sheetCtx);
+          if (!mounted) return;
+          await _handleGitToolsMenuAction(action);
+        }
+
+        return SafeArea(
+          top: false,
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              const ListTile(
+                dense: true,
+                title: Text(
+                  "고급 Git 설정",
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.link),
+                title: const Text("기본 소스 변경"),
+                subtitle: const Text("origin URL 변경"),
+                onTap: () => run(_GitToolsMenuAction.changeOrigin),
+              ),
+              ListTile(
+                leading: const Icon(Icons.folder_open),
+                title: const Text("코드 폴더 위치"),
+                subtitle: const Text("openpilot 외 저장소 경로 지정"),
+                onTap: () => run(_GitToolsMenuAction.setRepoPath),
+              ),
+              if (_repoPathOverride.trim().isNotEmpty)
+                ListTile(
+                  leading: const Icon(Icons.refresh),
+                  title: const Text("코드 폴더 자동탐색"),
+                  subtitle: const Text("수동 경로 설정 해제"),
+                  onTap: () => run(_GitToolsMenuAction.clearRepoPath),
+                ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.add_link),
+                title: const Text("소스 추가"),
+                onTap: () => run(_GitToolsMenuAction.addRemote),
+              ),
+              ListTile(
+                leading: const Icon(Icons.edit_outlined),
+                title: const Text("소스 수정"),
+                onTap: () => run(_GitToolsMenuAction.editRemote),
+              ),
+              ListTile(
+                leading: const Icon(Icons.link_off),
+                title: const Text("소스 삭제"),
+                onTap: () => run(_GitToolsMenuAction.deleteRemote),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                leading: const Icon(Icons.call_split),
+                title: const Text("업데이트 기준 변경"),
+                subtitle: const Text("현재 브랜치의 upstream 지정"),
+                onTap: () => run(_GitToolsMenuAction.setUpstream),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _showGitDetailsSheet() async {
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    if (!ssh.isConnected) {
+      if (!mounted) return;
+      CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
+      return;
+    }
+
+    if (_gitSnapshot == null && !_isLoadingSourceInfo) {
+      await _refreshGitSourceInfo();
+    }
+    if (!mounted) return;
+    final snapshot = _gitSnapshot;
+    if (snapshot == null) {
+      CustomToast.show(context, "Git 상세정보를 불러오지 못했습니다.", isError: true);
+      return;
+    }
+
+    final effectiveUrl =
+        (snapshot.originUrl.isNotEmpty ? snapshot.originUrl : snapshot.repoUrl)
+            .trim();
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (sheetCtx) {
+        final color = Theme.of(sheetCtx).colorScheme;
+        return SafeArea(
+          top: false,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(sheetCtx).size.height * 0.78,
+            ),
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+              children: [
+                const Text(
+                  "현재 Git 상세정보",
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 10),
+                _detailTile("기본 소스(origin)",
+                    snapshot.originUrl.isEmpty ? "-" : snapshot.originUrl),
+                _detailTile(
+                    "현재 브랜치",
+                    snapshot.currentBranch.isEmpty
+                        ? "-"
+                        : snapshot.currentBranch),
+                _detailTile("업데이트 기준",
+                    snapshot.upstreamRef.isEmpty ? "-" : snapshot.upstreamRef),
+                _detailTile("코드 폴더", snapshot.repoPath),
+                _detailTile(
+                  "설정한 폴더",
+                  _repoPathOverride.trim().isEmpty
+                      ? "(자동탐색)"
+                      : _repoPathOverride.trim(),
+                ),
+                _detailTile(
+                  "탐색 결과",
+                  snapshot.repoPathSource.isEmpty
+                      ? "-"
+                      : snapshot.repoPathSource,
+                ),
+                if (!snapshot.hasOriginRemote)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      "origin이 없어 '${snapshot.primaryRemoteName.isEmpty ? '첫 번째 소스' : snapshot.primaryRemoteName}' 기준으로 표시 중",
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: color.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                const SizedBox(height: 4),
+                Text(
+                  "소스 목록 (${snapshot.remotes.length})",
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: color.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                if (snapshot.remotes.isEmpty)
+                  const Text(
+                    "소스 없음",
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  )
+                else
+                  ...snapshot.remotes.map(
+                    (remote) => ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        remote.name == 'origin'
+                            ? Icons.link
+                            : Icons.link_outlined,
+                        size: 18,
+                      ),
+                      title: Text(
+                        _remoteDisplayName(remote.name, remote.fetchUrl),
+                        style: const TextStyle(fontSize: 13),
+                      ),
+                      subtitle: Text(
+                        (remote.fetchUrl.isNotEmpty
+                                    ? remote.fetchUrl
+                                    : remote.pushUrl)
+                                .isEmpty
+                            ? "-"
+                            : (remote.fetchUrl.isNotEmpty
+                                ? remote.fetchUrl
+                                : remote.pushUrl),
+                        style: const TextStyle(fontSize: 11),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ),
+                if (effectiveUrl.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: () async {
+                          Navigator.pop(sheetCtx);
+                          if (!mounted) return;
+                          await _openCurrentRepoInBrowser();
+                        },
+                        icon: const Icon(Icons.open_in_new, size: 16),
+                        label: const Text("소스 열기"),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () async {
+                          Navigator.pop(sheetCtx);
+                          if (!mounted) return;
+                          await _refreshGitSourceInfo();
+                        },
+                        icon: const Icon(Icons.refresh, size: 16),
+                        label: const Text("새로고침"),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _detailTile(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(fontSize: 11, color: Colors.grey),
+          ),
+          const SizedBox(height: 2),
+          SelectableText(
+            value,
+            style: const TextStyle(fontSize: 13),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _refreshGitSourceInfo({bool silent = false}) async {
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    if (!ssh.isConnected) {
+      if (!silent && mounted) {
+        CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
+      }
+      return;
+    }
+
+    if (mounted) {
+      setState(() => _isLoadingSourceInfo = true);
+    }
+    try {
+      final snapshot = await _actionService.loadGitBranchSnapshot(
+        ssh,
+        preferredRepoPath: _preferredRepoPath,
+      );
+      if (!mounted) return;
+      setState(() {
+        _gitSnapshot = snapshot;
+      });
+      if (!snapshot.hasOriginRemote && !silent) {
+        CustomToast.show(
+          context,
+          "origin 리모트가 없어 첫 번째 리모트를 기준으로 표시합니다.",
+          isError: true,
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      if (!silent) {
+        CustomToast.show(context, "Git 정보 로드 실패: $e", isError: true);
+      }
+      _addLog("Git 정보 로드 실패: $e");
+    } finally {
+      if (mounted) {
+        setState(() => _isLoadingSourceInfo = false);
+      }
+    }
+  }
+
+  Future<void> _openCurrentRepoInBrowser() async {
+    final snapshot = _gitSnapshot;
+    if (snapshot == null) return;
+    final raw =
+        (snapshot.originUrl.isNotEmpty ? snapshot.originUrl : snapshot.repoUrl)
+            .trim();
+    final browserUrl = _toBrowserRepoUrl(raw);
+    if (browserUrl == null) {
+      CustomToast.show(context, "브라우저로 열 수 없는 URL 형식입니다.", isError: true);
+      return;
+    }
+    final uri = Uri.tryParse(browserUrl);
+    if (uri == null) {
+      CustomToast.show(context, "브라우저 URL 생성 실패", isError: true);
+      return;
+    }
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+      return;
+    }
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text("원격 저장소 URL"),
+        content: SelectableText(browserUrl),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("닫기"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _changeOriginRemoteUrl() async {
+    final snapshot = _gitSnapshot;
+    final initialUrl = snapshot == null
+        ? ''
+        : (snapshot.originUrl.isNotEmpty
+            ? snapshot.originUrl
+            : snapshot.repoUrl);
+    final controller = TextEditingController(text: initialUrl);
+    final value = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("원격 저장소(origin) 변경"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              "예: https://github.com/ajouatom/openpilot 또는 git@github.com:ajouatom/openpilot.git",
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              maxLines: 3,
+              minLines: 1,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: "origin URL",
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("취소"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text("적용"),
+          ),
+        ],
+      ),
+    );
+
+    final nextUrl = (value ?? '').trim();
+    if (nextUrl.isEmpty || nextUrl == initialUrl.trim()) return;
+
+    if (!_looksLikeOpenpilotRepoUrl(nextUrl)) {
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text("확인 필요"),
+          content: const Text(
+            "입력한 URL이 openpilot 저장소로 보이지 않습니다.\n그래도 origin으로 설정할까요?",
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("취소"),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text("계속"),
+            ),
+          ],
+        ),
+      );
+      if (confirm != true) return;
+    }
+
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    if (!ssh.isConnected) {
+      CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
+      return;
+    }
+
+    setState(() => _isLoadingSourceInfo = true);
+    try {
+      final result = await _actionService.setGitOriginRemote(
+        ssh,
+        nextUrl,
+        preferredRepoPath: _preferredRepoPath,
+      );
+      _addLog("origin 변경: ${result.effectiveOriginUrl}");
+      if (result.stdout.trim().isNotEmpty) _addLog(result.stdout.trim());
+      if (result.stderr.trim().isNotEmpty) _addLog(result.stderr.trim());
+      if (!mounted) return;
+      if (!result.ok) {
+        CustomToast.show(context, "origin 변경 실패", isError: true);
+      } else {
+        CustomToast.show(context, "origin 변경 완료 (원격 반영은 Git Sync 실행)");
+      }
+      await _refreshGitSourceInfo(silent: true);
+    } catch (e) {
+      if (!mounted) return;
+      _addLog("origin 변경 실패: $e");
+      CustomToast.show(context, "origin 변경 실패: $e", isError: true);
+    } finally {
+      if (mounted) {
+        setState(() => _isLoadingSourceInfo = false);
+      }
+    }
+  }
+
+  Future<void> _runGitAction(
+    BuildContext context,
+    DeviceActionType action,
+    String successMessage, {
+    String? branch,
+    String? remote,
+  }) async {
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
       CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
@@ -99,16 +936,49 @@ class _GitTabState extends State<GitTab> {
     }
 
     setState(() => _isLoading = true);
-    _addLog("명령어 실행: $command");
+    final actionLabel = successMessage.replaceAll(' 완료', '').trim();
+    _addLog("명령 실행: $actionLabel");
 
-        final result = await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && $command'");
+    try {
+      final result = await _actionService.runAction(
+        ssh,
+        action,
+        branch: branch,
+        remote: remote,
+        repoPathOverride: _preferredRepoPath,
+      );
+      if (!mounted) return;
+
+      if (result.output.trim().isNotEmpty) {
+        _addLog(result.output.trim());
+      }
+      if (result.ok && result.output.trim().isEmpty) {
+        _addLog("완료");
+      }
+
+      if (result.ok) {
+        CustomToast.show(context, successMessage);
+        if (action == DeviceActionType.gitCheckout ||
+            action == DeviceActionType.gitPull ||
+            action == DeviceActionType.gitSync ||
+            action == DeviceActionType.gitResetHardClean) {
+          unawaited(_refreshGitSourceInfo(silent: true));
+        }
+      } else {
+        CustomToast.show(
+          context,
+          "${successMessage.replaceAll("완료", "실패")} (code: ${result.exitCode})",
+          isError: true,
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      _addLog("오류: $e");
+      CustomToast.show(context, "명령 실행 실패: $e", isError: true);
+    }
 
     if (mounted) {
       setState(() => _isLoading = false);
-      _addLog(result.trim());
-      if (result.isNotEmpty) {
-         CustomToast.show(context, successMessage);
-      }
     }
   }
 
@@ -125,7 +995,9 @@ class _GitTabState extends State<GitTab> {
         title: const Text("기기 재부팅"),
         content: const Text("기기를 재부팅하시겠습니까?"),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("취소")),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("취소")),
           ElevatedButton(
             onPressed: () => Navigator.pop(ctx, true),
             style: ElevatedButton.styleFrom(
@@ -140,8 +1012,11 @@ class _GitTabState extends State<GitTab> {
 
     if (confirmed == true && mounted) {
       _addLog("기기 재부팅 중...");
-      await ssh.executeCommand("sudo reboot");
-      CustomToast.show(context, "재부팅 명령을 전송했습니다.");
+      await _runGitAction(
+        context,
+        DeviceActionType.reboot,
+        "재부팅 명령을 전송했습니다.",
+      );
     }
   }
 
@@ -154,95 +1029,42 @@ class _GitTabState extends State<GitTab> {
 
     setState(() => _isLoading = true);
     _addLog("브랜치 목록 가져오는 중...");
-    
+
     try {
-      // Fetch latest info from remote with prune to remove stale branches
-      await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git fetch --all --prune'");
-
-      // Get Repo URL
-      String repoUrl = "";
-      try {
-        final urlOutput = await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git config --get remote.origin.url'");
-        repoUrl = urlOutput.trim();
-        if (repoUrl.endsWith('.git')) {
-          repoUrl = repoUrl.substring(0, repoUrl.length - 4);
-        }
-      } catch (_) {}
-
-      // Get default branch
-      String defaultBranch = "";
-      try {
-        final remoteShow = await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git remote show origin'");
-        final match = RegExp(r"HEAD branch: (.*)").firstMatch(remoteShow);
-        if (match != null) {
-          defaultBranch = match.group(1)?.trim() ?? "";
-        }
-      } catch (_) {}
-
-      // Get current branch
-      String currentBranch = "";
-      try {
-        currentBranch = (await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git rev-parse --abbrev-ref HEAD'")).trim();
-      } catch (_) {}
-
-      // Get all branches with date and commit hash
-      final output = await ssh.executeCommand(
-        "bash -l -c 'cd ${CarrotConstants.openpilotPath} && git for-each-ref --sort=-committerdate --format=\"%(refname:short)|%(committerdate:relative)|%(objectname)\" refs/remotes/origin'"
+      final snapshot = await _actionService.loadGitBranchSnapshot(
+        ssh,
+        preferredRepoPath: _preferredRepoPath,
       );
-      
+
       setState(() => _isLoading = false);
 
       if (!mounted) return;
-
-      final branches = output.split('\n')
-          .map((e) => e.trim())
-          .where((e) => e.isNotEmpty && !e.contains('->'))
-          .map((e) {
-            final parts = e.split('|');
-            final fullName = parts[0];
-            // Remove 'origin/' prefix - handle multiple possible formats
-            String name = fullName;
-            if (name.startsWith('origin/')) {
-              name = name.substring(7);
-            } else if (name.contains('/')) {
-              // For cases like refs/remotes/origin/branch
-              final lastSlash = name.lastIndexOf('/');
-              name = name.substring(lastSlash + 1);
-            }
-            final date = parts.length > 1 ? parts[1] : "";
-            final hash = parts.length > 2 ? parts[2] : "";
-            return {'name': name, 'date': date, 'hash': hash, 'fullName': fullName};
-          })
-          .where((b) => b['name'] != 'HEAD' && b['name'] != 'origin' && b['name']!.isNotEmpty) // Filter out HEAD, origin and empty names
-          .toList();
-
-      // Check for updates (ahead count) for each branch relative to local
-      // This is expensive to do one by one. 
-      // Instead, we can check if the remote hash is different from local hash for the *current* branch at least.
-      // Or for all local branches.
-      // Let's just check for the current branch for now to be fast, or maybe all if we can get local refs easily.
-      
-      // Get local refs
-      final localRefsOutput = await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git for-each-ref --format=\"%(refname:short)|%(objectname)\" refs/heads'");
-      final localRefs = <String, String>{};
-      for (final line in localRefsOutput.split('\n')) {
-        final parts = line.trim().split('|');
-        if (parts.length == 2) {
-          localRefs[parts[0]] = parts[1];
-        }
-      }
+      setState(() {
+        _gitSnapshot = snapshot;
+      });
+      final branches = snapshot.branches;
+      final localRefs = snapshot.localRefs;
 
       showDialog(
         context: context,
         builder: (ctx) => _BranchListDialog(
+          title: "브랜치 선택",
           branches: branches,
-          defaultBranch: defaultBranch,
-          currentBranch: currentBranch,
+          defaultBranch: snapshot.defaultBranch,
+          currentBranch: snapshot.currentBranch,
           localRefs: localRefs,
-          repoUrl: repoUrl,
-          onSelect: (name) {
+          repoUrl: snapshot.repoUrl,
+          remotes: snapshot.remotes,
+          currentUpstreamRemote: snapshot.upstreamRemote,
+          onSelect: (remote, name) {
             Navigator.pop(ctx);
-            _runGitCommand(context, "git checkout $name", "$name 브랜치로 변경됨");
+            _runGitAction(
+              context,
+              DeviceActionType.gitCheckout,
+              "$name 브랜치로 변경됨",
+              branch: name,
+              remote: remote,
+            );
           },
         ),
       );
@@ -252,7 +1074,266 @@ class _GitTabState extends State<GitTab> {
     }
   }
 
-  Future<void> _performGitSync(BuildContext context) async {
+  Future<void> _configureRepoPath() async {
+    final controller = TextEditingController(text: _repoPathOverride);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("저장소 경로 설정"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              "openpilot 외 저장소를 쓰는 경우 .git 폴더가 있는 경로를 입력하세요.\n예: /data/openpilot 또는 /data/myrepo",
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: "저장소 경로",
+                hintText: "/data/openpilot",
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("취소"),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ''),
+            child: const Text("자동탐색"),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text("저장"),
+          ),
+        ],
+      ),
+    );
+
+    if (result == null) return;
+    final normalized = result.trim();
+    if (normalized.isNotEmpty && !normalized.startsWith('/')) {
+      if (!mounted) return;
+      CustomToast.show(context, "리눅스 절대경로(/...) 형식으로 입력하세요.", isError: true);
+      return;
+    }
+    if (normalized == _repoPathOverride.trim()) return;
+
+    await _saveGitRepoPathOverride(normalized);
+    if (!mounted) return;
+    _addLog(
+      normalized.isEmpty ? "저장소 경로 설정: 자동탐색" : "저장소 경로 설정: $normalized",
+    );
+    CustomToast.show(
+        context, normalized.isEmpty ? "저장소 경로 자동탐색으로 변경" : "저장소 경로 저장됨");
+    await _refreshGitSourceInfo();
+  }
+
+  Future<void> _addOrEditRemote({GitRemoteInfo? existing}) async {
+    final nameController = TextEditingController(text: existing?.name ?? '');
+    final urlController = TextEditingController(
+      text: existing == null
+          ? ''
+          : (existing.fetchUrl.isNotEmpty
+              ? existing.fetchUrl
+              : existing.pushUrl),
+    );
+    final payload = await showDialog<({String name, String url})>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(existing == null ? "리모트 추가" : "리모트 수정"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameController,
+              autofocus: existing == null,
+              enabled: existing == null,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: "리모트 이름",
+                hintText: "origin / jominki354",
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: urlController,
+              autofocus: existing != null,
+              minLines: 1,
+              maxLines: 3,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: "리모트 URL",
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text("취소"),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(
+                ctx,
+                (
+                  name: nameController.text.trim(),
+                  url: urlController.text.trim(),
+                ),
+              );
+            },
+            child: const Text("적용"),
+          ),
+        ],
+      ),
+    );
+    if (payload == null) return;
+
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    if (!ssh.isConnected) {
+      CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
+      return;
+    }
+
+    setState(() => _isLoadingSourceInfo = true);
+    try {
+      final result = await _actionService.upsertGitRemote(
+        ssh,
+        remoteName: payload.name,
+        remoteUrl: payload.url,
+        preferredRepoPath: _preferredRepoPath,
+      );
+      _addLog("${existing == null ? '리모트 추가' : '리모트 수정'}: ${payload.name}");
+      if (result.output.trim().isNotEmpty) _addLog(result.output.trim());
+      if (!mounted) return;
+      if (result.ok) {
+        CustomToast.show(context, "리모트 ${existing == null ? '추가' : '수정'} 완료");
+      } else {
+        CustomToast.show(context, "리모트 ${existing == null ? '추가' : '수정'} 실패",
+            isError: true);
+      }
+      await _refreshGitSourceInfo(silent: true);
+    } catch (e) {
+      if (!mounted) return;
+      _addLog("리모트 ${existing == null ? '추가' : '수정'} 실패: $e");
+      CustomToast.show(context, "리모트 설정 실패: $e", isError: true);
+    } finally {
+      if (mounted) setState(() => _isLoadingSourceInfo = false);
+    }
+  }
+
+  Future<void> _removeRemote() async {
+    final snapshot = _gitSnapshot;
+    if (snapshot == null || snapshot.remotes.isEmpty) {
+      CustomToast.show(context, "삭제할 리모트가 없습니다.", isError: true);
+      return;
+    }
+    final target = await showDialog<GitRemoteInfo>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text("리모트 삭제"),
+        children: [
+          for (final remote in snapshot.remotes)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, remote),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(remote.name,
+                      style: const TextStyle(fontWeight: FontWeight.w700)),
+                  if (remote.fetchUrl.isNotEmpty)
+                    Text(remote.fetchUrl,
+                        style:
+                            const TextStyle(fontSize: 12, color: Colors.grey)),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+    if (target == null) return;
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("리모트 삭제"),
+        content: Text("'${target.name}' 리모트를 삭제할까요?"),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("취소")),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text("삭제")),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    if (!ssh.isConnected) {
+      CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
+      return;
+    }
+    setState(() => _isLoadingSourceInfo = true);
+    try {
+      final result = await _actionService.removeGitRemote(
+        ssh,
+        remoteName: target.name,
+        preferredRepoPath: _preferredRepoPath,
+      );
+      _addLog("리모트 삭제: ${target.name}");
+      if (result.output.trim().isNotEmpty) _addLog(result.output.trim());
+      if (!mounted) return;
+      CustomToast.show(context, result.ok ? "리모트 삭제 완료" : "리모트 삭제 실패",
+          isError: !result.ok);
+      await _refreshGitSourceInfo(silent: true);
+    } catch (e) {
+      if (!mounted) return;
+      _addLog("리모트 삭제 실패: $e");
+      CustomToast.show(context, "리모트 삭제 실패: $e", isError: true);
+    } finally {
+      if (mounted) setState(() => _isLoadingSourceInfo = false);
+    }
+  }
+
+  Future<void> _selectRemoteToEdit() async {
+    final snapshot = _gitSnapshot;
+    if (snapshot == null || snapshot.remotes.isEmpty) {
+      await _addOrEditRemote();
+      return;
+    }
+    final picked = await showDialog<GitRemoteInfo?>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text("리모트 수정"),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, null),
+            child: const Text("+ 새 리모트 추가"),
+          ),
+          ...snapshot.remotes.map(
+            (remote) => SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, remote),
+              child: Text(_remoteDisplayName(remote.name, remote.fetchUrl)),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    await _addOrEditRemote(existing: picked);
+  }
+
+  Future<void> _setUpstreamForCurrentBranch() async {
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
       CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
@@ -260,116 +1341,235 @@ class _GitTabState extends State<GitTab> {
     }
 
     setState(() => _isLoading = true);
-    _addLog("Git Sync 시작...");
-
     try {
-      // 1. Get current branch
-      final branchResult = await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git rev-parse --abbrev-ref HEAD'");
-      final currentBranch = branchResult.trim();
-      
-      if (currentBranch.isEmpty || currentBranch.contains("fatal")) {
-        throw Exception("브랜치 정보를 가져올 수 없습니다: $branchResult");
-      }
-      _addLog("현재 브랜치: $currentBranch");
+      final snapshot = await _actionService.loadGitBranchSnapshot(
+        ssh,
+        preferredRepoPath: _preferredRepoPath,
+      );
+      if (!mounted) return;
+      setState(() {
+        _gitSnapshot = snapshot;
+        _isLoading = false;
+      });
 
-      // 2. Fetch all
-      _addLog("원격 저장소 동기화 중 (Fetch)...");
-      await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git fetch --all'");
-
-      // 3. Reset hard to origin/branch
-      _addLog("강제 리셋 중 (Reset --hard origin/$currentBranch)...");
-      final resetResult = await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git reset --hard origin/$currentBranch && git clean -fd'");
-      
-      _addLog(resetResult.trim());
-      CustomToast.show(context, "Git Sync 완료");
+      await showDialog(
+        context: context,
+        builder: (ctx) => _BranchListDialog(
+          title: "업스트림 지정",
+          branches: snapshot.branches,
+          defaultBranch: snapshot.defaultBranch,
+          currentBranch: snapshot.currentBranch,
+          currentUpstreamRemote: snapshot.upstreamRemote,
+          localRefs: snapshot.localRefs,
+          repoUrl: snapshot.repoUrl,
+          remotes: snapshot.remotes,
+          onSelect: (remote, name) async {
+            Navigator.pop(ctx);
+            setState(() => _isLoadingSourceInfo = true);
+            try {
+              final result = await _actionService.setCurrentBranchUpstream(
+                ssh,
+                remoteName: remote,
+                remoteBranch: name,
+                preferredRepoPath: _preferredRepoPath,
+              );
+              _addLog("업스트림 지정: ${snapshot.currentBranch} -> $remote/$name");
+              if (result.output.trim().isNotEmpty)
+                _addLog(result.output.trim());
+              if (!mounted) return;
+              CustomToast.show(context, result.ok ? "업스트림 지정 완료" : "업스트림 지정 실패",
+                  isError: !result.ok);
+              await _refreshGitSourceInfo(silent: true);
+            } catch (e) {
+              if (!mounted) return;
+              _addLog("업스트림 지정 실패: $e");
+              CustomToast.show(context, "업스트림 지정 실패: $e", isError: true);
+            } finally {
+              if (mounted) setState(() => _isLoadingSourceInfo = false);
+            }
+          },
+        ),
+      );
     } catch (e) {
-      _addLog("오류 발생: $e");
-      CustomToast.show(context, "Git Sync 실패", isError: true);
-    } finally {
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
+      if (!mounted) return;
+      setState(() => _isLoading = false);
+      _addLog("업스트림 지정용 브랜치 목록 실패: $e");
+      CustomToast.show(context, "브랜치 목록 로드 실패: $e", isError: true);
     }
+  }
+
+  Future<void> _handleGitToolsMenuAction(_GitToolsMenuAction action) async {
+    switch (action) {
+      case _GitToolsMenuAction.quickSetupFromLink:
+        await _quickSetupFromRepoLink();
+        break;
+      case _GitToolsMenuAction.showDetails:
+        await _showGitDetailsSheet();
+        break;
+      case _GitToolsMenuAction.clearLogs:
+        await _clearLogs();
+        break;
+      case _GitToolsMenuAction.advancedSettings:
+        await _showAdvancedGitSettingsSheet();
+        break;
+      case _GitToolsMenuAction.changeOrigin:
+        await _changeOriginRemoteUrl();
+        break;
+      case _GitToolsMenuAction.setRepoPath:
+        await _configureRepoPath();
+        break;
+      case _GitToolsMenuAction.clearRepoPath:
+        await _saveGitRepoPathOverride('');
+        if (!mounted) return;
+        _addLog("저장소 경로 설정: 자동탐색");
+        CustomToast.show(context, "저장소 경로 자동탐색으로 변경");
+        await _refreshGitSourceInfo();
+        break;
+      case _GitToolsMenuAction.addRemote:
+        await _addOrEditRemote();
+        break;
+      case _GitToolsMenuAction.editRemote:
+        await _selectRemoteToEdit();
+        break;
+      case _GitToolsMenuAction.deleteRemote:
+        await _removeRemote();
+        break;
+      case _GitToolsMenuAction.setUpstream:
+        await _setUpstreamForCurrentBranch();
+        break;
+    }
+  }
+
+  Future<void> _performGitSync(BuildContext context) async {
+    await _runGitAction(context, DeviceActionType.gitSync, "Git Sync 완료");
   }
 
   @override
   Widget build(BuildContext context) {
+    final connected = context.watch<SSHService>().isConnected;
     return Column(
       children: [
-        // Top Section: Logs
         Expanded(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-            child: DesignCard(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    children: [
-                      const DesignSectionHeader(
-                        icon: Icons.terminal, 
-                        title: "Git 로그",
-                        marginBottom: 0,
-                      ),
-                      const Spacer(),
-                      if (_isLoading)
-                        const Padding(
-                          padding: EdgeInsets.only(right: 8.0),
-                          child: SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                        ),
-                      IconButton(
-                        icon: const Icon(Icons.delete_outline, size: 20),
-                        onPressed: _clearLogs,
-                        tooltip: "로그 지우기",
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Expanded(
-                    child: Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF1E1E1E),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: Colors.grey.withOpacity(0.2)),
-                      ),
-                      child: ListView.builder(
-                        controller: _scrollController,
-                        itemCount: _logs.length,
-                        itemBuilder: (context, index) {
-                          final log = _logs[index];
-                          final isOld = log['isOld'] == 'true';
-                          return Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 2.0),
-                            child: RichText(
-                              text: TextSpan(
-                                style: TextStyle(
-                                  fontFamily: 'monospace', 
-                                  fontSize: 12, 
-                                  color: isOld ? Colors.grey : Colors.white
-                                ),
-                                children: [
-                                  TextSpan(
-                                    text: "[${log['time']}] ",
-                                    style: TextStyle(color: isOld ? Colors.grey[600] : Colors.greenAccent),
-                                  ),
-                                  TextSpan(text: log['message']),
-                                ],
-                              ),
+            child: Column(
+              children: [
+                Expanded(
+                  child: DesignCard(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.terminal,
+                              size: 18,
+                              color: Theme.of(context).colorScheme.primary,
                             ),
-                          );
-                        },
-                      ),
+                            const SizedBox(width: 8),
+                            Text(
+                              "Git 로그",
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .titleSmall
+                                  ?.copyWith(fontWeight: FontWeight.w700),
+                            ),
+                            const Spacer(),
+                            if (_isLoading)
+                              const Padding(
+                                padding: EdgeInsets.only(right: 8.0),
+                                child: SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child:
+                                      CircularProgressIndicator(strokeWidth: 2),
+                                ),
+                              ),
+                            PopupMenuButton<_GitToolsMenuAction>(
+                              tooltip: "Git 옵션",
+                              enabled: !(_isLoading || _isLoadingSourceInfo),
+                              icon: const Icon(Icons.settings, size: 20),
+                              onSelected: _handleGitToolsMenuAction,
+                              itemBuilder: (_) => [
+                                const PopupMenuItem(
+                                  value: _GitToolsMenuAction.quickSetupFromLink,
+                                  child: Text("소스 링크 자동 설정"),
+                                ),
+                                const PopupMenuDivider(),
+                                const PopupMenuItem(
+                                  value: _GitToolsMenuAction.showDetails,
+                                  child: Text("현재 Git 상세정보"),
+                                ),
+                                const PopupMenuDivider(),
+                                const PopupMenuItem(
+                                  value: _GitToolsMenuAction.clearLogs,
+                                  child: Text("로그 지우기"),
+                                ),
+                                const PopupMenuDivider(),
+                                const PopupMenuItem(
+                                  value: _GitToolsMenuAction.advancedSettings,
+                                  child: Text("고급 Git 설정"),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        Expanded(
+                          child: connected
+                              ? Container(
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF1E1E1E),
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(
+                                        color:
+                                            Colors.grey.withValues(alpha: 0.2)),
+                                  ),
+                                  child: ListView.builder(
+                                    controller: _scrollController,
+                                    itemCount: _logs.length,
+                                    itemBuilder: (context, index) {
+                                      final log = _logs[index];
+                                      final isOld = log['isOld'] == 'true';
+                                      return Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                            vertical: 2.0),
+                                        child: RichText(
+                                          text: TextSpan(
+                                            style: TextStyle(
+                                              fontFamily: 'monospace',
+                                              fontSize: 12,
+                                              color: isOld
+                                                  ? Colors.grey
+                                                  : Colors.white,
+                                            ),
+                                            children: [
+                                              TextSpan(
+                                                text: "[${log['time']}] ",
+                                                style: TextStyle(
+                                                  color: isOld
+                                                      ? Colors.grey[600]
+                                                      : Colors.greenAccent,
+                                                ),
+                                              ),
+                                              TextSpan(text: log['message']),
+                                            ],
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                )
+                              : const ConnectionRequiredView(
+                                  description: 'Git 기능을 사용하려면 먼저 기기에 연결하세요.',
+                                ),
+                        ),
+                      ],
                     ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),
@@ -407,20 +1607,31 @@ class _GitTabState extends State<GitTab> {
                       Icons.list,
                       Colors.blue,
                       () => _selectBranch(context),
+                      enabled: connected,
                     ),
                     _buildActionButton(
                       context,
                       "Git Pull",
                       Icons.download,
                       Colors.green,
-                      () => _runGitCommand(context, "git pull", "Git Pull 완료"),
+                      () => _runGitAction(
+                        context,
+                        DeviceActionType.gitPull,
+                        "Git Pull 완료",
+                      ),
+                      enabled: connected,
                     ),
                     _buildActionButton(
                       context,
                       "Git Reset",
                       Icons.restore,
                       Colors.orange,
-                      () => _runGitCommand(context, "git reset --hard HEAD && git clean -fd", "Git Reset 완료"),
+                      () => _runGitAction(
+                        context,
+                        DeviceActionType.gitResetHardClean,
+                        "Git Reset 완료",
+                      ),
+                      enabled: connected,
                     ),
                     _buildActionButton(
                       context,
@@ -428,6 +1639,7 @@ class _GitTabState extends State<GitTab> {
                       Icons.sync,
                       Colors.red,
                       () => _performGitSync(context),
+                      enabled: connected,
                     ),
                   ],
                 ),
@@ -438,6 +1650,7 @@ class _GitTabState extends State<GitTab> {
                   Icons.restart_alt,
                   Colors.red,
                   () => _rebootDevice(context),
+                  enabled: connected,
                 ),
               ],
             ),
@@ -447,9 +1660,11 @@ class _GitTabState extends State<GitTab> {
     );
   }
 
-  Widget _buildActionButton(BuildContext context, String label, IconData icon, Color color, VoidCallback onTap) {
+  Widget _buildActionButton(BuildContext context, String label, IconData icon,
+      Color color, VoidCallback onTap,
+      {bool enabled = true}) {
     return FilledButton.icon(
-      onPressed: _isLoading ? null : onTap,
+      onPressed: _isLoading || !enabled ? null : onTap,
       icon: Icon(icon, size: 18),
       label: Text(label),
       style: FilledButton.styleFrom(
@@ -466,19 +1681,25 @@ class _GitTabState extends State<GitTab> {
 }
 
 class _BranchListDialog extends StatefulWidget {
+  final String title;
   final List<Map<String, String>> branches;
   final String defaultBranch;
   final String currentBranch;
+  final String currentUpstreamRemote;
   final Map<String, String> localRefs;
   final String repoUrl;
-  final Function(String) onSelect;
+  final List<GitRemoteInfo> remotes;
+  final void Function(String remote, String branch) onSelect;
 
   const _BranchListDialog({
+    required this.title,
     required this.branches,
     required this.defaultBranch,
     required this.currentBranch,
+    required this.currentUpstreamRemote,
     required this.localRefs,
     required this.repoUrl,
+    required this.remotes,
     required this.onSelect,
   });
 
@@ -488,20 +1709,400 @@ class _BranchListDialog extends StatefulWidget {
 
 class _BranchListDialogState extends State<_BranchListDialog> {
   final ScrollController _scrollController = ScrollController();
+  String? _selectedRemote;
+  String? _currentRemoteForHighlight;
+  late List<Map<String, String>> _visibleBranches;
 
   @override
   void initState() {
     super.initState();
+    _selectedRemote = _resolveInitialRemote();
+    _currentRemoteForHighlight = _resolveCurrentRemoteForHighlight();
+    _visibleBranches = _branchesForRemote(_selectedRemote);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final index = widget.branches.indexWhere((b) => b['name'] == widget.currentBranch);
-      if (index != -1 && _scrollController.hasClients) {
-        // Estimate item height ~72.0
-        final offset = index * 72.0;
-        // Clamp offset to maxScrollExtent
+      final rowIndex = _visibleBranches.indexWhere((branch) {
+        final name = branch['name'] ?? '';
+        if (name != widget.currentBranch) return false;
+        if (widget.currentUpstreamRemote.isEmpty) return true;
+        return _normalizedRemote(branch) == widget.currentUpstreamRemote;
+      });
+      if (rowIndex != -1 && _scrollController.hasClients) {
+        final offset = rowIndex * 64.0;
         final maxScroll = _scrollController.position.maxScrollExtent;
         _scrollController.jumpTo(offset.clamp(0.0, maxScroll));
       }
     });
+  }
+
+  List<String> _availableRemotes() {
+    final groups = _repositoryGroups();
+    return groups.keys.toList();
+  }
+
+  List<String> _orderedRemoteNames() {
+    final remotesWithBranch = <String>{};
+    for (final branch in widget.branches) {
+      remotesWithBranch.add(_normalizedRemote(branch));
+    }
+    final ordered = <String>[
+      ...widget.remotes.map((e) => e.name).where(remotesWithBranch.contains),
+      ...remotesWithBranch.where(
+          (name) => !widget.remotes.any((remote) => remote.name == name)),
+    ];
+    return ordered.toSet().toList();
+  }
+
+  Map<String, List<String>> _repositoryGroups() {
+    final groups = <String, List<String>>{};
+    for (final remote in _orderedRemoteNames()) {
+      final id = _repositoryIdForRemoteName(remote);
+      final list = groups.putIfAbsent(id, () => <String>[]);
+      if (!list.contains(remote)) {
+        list.add(remote);
+      }
+    }
+    return groups;
+  }
+
+  String _repositoryIdForBranch(Map<String, String> branch) {
+    return _repositoryIdForRemoteName(_normalizedRemote(branch));
+  }
+
+  String _repositoryIdForRemoteName(String remoteName) {
+    GitRemoteInfo? info;
+    for (final remoteInfo in widget.remotes) {
+      if (remoteInfo.name == remoteName) {
+        info = remoteInfo;
+        break;
+      }
+    }
+
+    final rawUrl = ((info?.fetchUrl ?? '').trim().isNotEmpty)
+        ? info!.fetchUrl
+        : (info?.pushUrl ?? '');
+    final repoKey = _hostOwnerRepoKey(rawUrl);
+    if (repoKey != null && repoKey.isNotEmpty) {
+      return 'repo:$repoKey';
+    }
+    final owner = _guessOwner(rawUrl);
+    if (owner != null && owner.isNotEmpty) {
+      return 'owner:${owner.toLowerCase()}';
+    }
+    if (remoteName == 'origin' || remoteName == 'upstream') {
+      return 'repo:default';
+    }
+    return 'remote:$remoteName';
+  }
+
+  int _remotePriority(String remoteName) {
+    if (widget.currentUpstreamRemote.isNotEmpty &&
+        remoteName == widget.currentUpstreamRemote) {
+      return -2;
+    }
+    if (remoteName == 'origin') return -1;
+    final ordered = _orderedRemoteNames();
+    final idx = ordered.indexOf(remoteName);
+    if (idx >= 0) return idx;
+    return ordered.length + 50;
+  }
+
+  String? _hostOwnerRepoKey(String url) {
+    final normalized = url.trim();
+    if (normalized.isEmpty) return null;
+
+    final scpLike =
+        RegExp(r'^[^@]+@([^:]+):([^/]+)/([^/]+?)(?:\.git)?$').firstMatch(
+      normalized,
+    );
+    if (scpLike != null) {
+      final host = scpLike.group(1)!.toLowerCase();
+      final owner = scpLike.group(2)!.toLowerCase();
+      final repo = scpLike.group(3)!.toLowerCase();
+      return '$host/$owner/$repo';
+    }
+
+    final sshUri = Uri.tryParse(normalized);
+    if (sshUri != null &&
+        sshUri.scheme == 'ssh' &&
+        sshUri.host.isNotEmpty &&
+        sshUri.pathSegments.length >= 2) {
+      final owner = sshUri.pathSegments[0].toLowerCase();
+      var repo = sshUri.pathSegments[1].toLowerCase();
+      if (repo.endsWith('.git')) repo = repo.substring(0, repo.length - 4);
+      return '${sshUri.host.toLowerCase()}/$owner/$repo';
+    }
+
+    final uri = Uri.tryParse(normalized);
+    if (uri != null && uri.host.isNotEmpty && uri.pathSegments.length >= 2) {
+      final owner = uri.pathSegments[0].toLowerCase();
+      var repo = uri.pathSegments[1].toLowerCase();
+      if (repo.endsWith('.git')) repo = repo.substring(0, repo.length - 4);
+      return '${uri.host.toLowerCase()}/$owner/$repo';
+    }
+    return null;
+  }
+
+  String? _guessOwnerRepo(String url) {
+    final key = _hostOwnerRepoKey(url);
+    if (key == null || key.isEmpty) return null;
+    final parts = key.split('/');
+    if (parts.length < 3) return null;
+    return '${parts[1]}/${parts[2]}';
+  }
+
+  String? _resolveInitialRemote() {
+    final repositories = _availableRemotes();
+    if (repositories.isEmpty) return null;
+    if (widget.currentUpstreamRemote.isNotEmpty &&
+        repositories.contains(
+            _repositoryIdForRemoteName(widget.currentUpstreamRemote))) {
+      return _repositoryIdForRemoteName(widget.currentUpstreamRemote);
+    }
+    final originRepo = _repositoryIdForRemoteName('origin');
+    if (repositories.contains(originRepo)) return originRepo;
+    return repositories.first;
+  }
+
+  List<Map<String, String>> _branchesForRemote(String? remote) {
+    if (remote == null || remote.isEmpty) return const [];
+    final selectedByName = <String, Map<String, String>>{};
+    for (final branch in widget.branches) {
+      if (_repositoryIdForBranch(branch) != remote) continue;
+      final name = (branch['name'] ?? '').trim();
+      if (name.isEmpty) continue;
+
+      final current = selectedByName[name];
+      if (current == null) {
+        selectedByName[name] = branch;
+        continue;
+      }
+
+      final nextPriority = _remotePriority(_normalizedRemote(branch));
+      final currentPriority = _remotePriority(_normalizedRemote(current));
+      if (nextPriority < currentPriority) {
+        selectedByName[name] = branch;
+      }
+    }
+    return selectedByName.values.toList();
+  }
+
+  String? _resolveCurrentRemoteForHighlight() {
+    if (widget.currentUpstreamRemote.isNotEmpty) {
+      return _repositoryIdForRemoteName(widget.currentUpstreamRemote);
+    }
+
+    final candidates = <String>[];
+    for (final remote in _availableRemotes()) {
+      final hasCurrentBranch = _branchesForRemote(remote).any(
+        (branch) => (branch['name'] ?? '') == widget.currentBranch,
+      );
+      if (hasCurrentBranch) {
+        candidates.add(remote);
+      }
+    }
+
+    if (candidates.length == 1) {
+      return candidates.first;
+    }
+    return null;
+  }
+
+  String _normalizedRemote(Map<String, String> branch) {
+    final remote = (branch['remote'] ?? '').trim();
+    return remote.isEmpty ? 'origin' : remote;
+  }
+
+  String _repositoryLabel(String repositoryId, List<String> groupedRemotes) {
+    GitRemoteInfo? info;
+    for (final remote in groupedRemotes) {
+      for (final remoteInfo in widget.remotes) {
+        if (remoteInfo.name == remote) {
+          info = remoteInfo;
+          break;
+        }
+      }
+      if (info != null) {
+        final candidateUrl =
+            info.fetchUrl.trim().isNotEmpty ? info.fetchUrl : info.pushUrl;
+        if (candidateUrl.trim().isNotEmpty) {
+          break;
+        }
+      }
+    }
+
+    String rawUrl = '';
+    if (info != null) {
+      rawUrl = info.fetchUrl.trim().isNotEmpty ? info.fetchUrl : info.pushUrl;
+    }
+    final ownerRepo = _guessOwnerRepo(rawUrl);
+    if (ownerRepo != null && ownerRepo.isNotEmpty) return ownerRepo;
+
+    final owner = _guessOwner(rawUrl);
+    if (owner != null && owner.isNotEmpty) return owner;
+    if (groupedRemotes.contains('origin')) return '기본 저장소';
+    if (groupedRemotes.isNotEmpty) return groupedRemotes.first;
+    return repositoryId;
+  }
+
+  Map<String, String> _repositoryLabels(
+    List<String> repositories,
+    Map<String, List<String>> groups,
+  ) {
+    final labels = <String, String>{};
+    final counts = <String, int>{};
+
+    for (final repository in repositories) {
+      final label =
+          _repositoryLabel(repository, groups[repository] ?? const <String>[]);
+      labels[repository] = label;
+      counts[label] = (counts[label] ?? 0) + 1;
+    }
+
+    for (final repository in repositories) {
+      final label = labels[repository] ?? repository;
+      if ((counts[label] ?? 0) > 1) {
+        final remotes = groups[repository] ?? const <String>[];
+        final suffix = remotes.contains('origin')
+            ? 'origin'
+            : (remotes.isNotEmpty ? remotes.first : '');
+        labels[repository] = suffix.isEmpty ? label : '$label ($suffix)';
+      }
+    }
+    return labels;
+  }
+
+  String? _guessOwner(String url) {
+    final sshMatch = RegExp(r'^[^@]+@[^:]+:([^/]+)/').firstMatch(url);
+    if (sshMatch != null) return sshMatch.group(1);
+    final uri = Uri.tryParse(url);
+    if (uri != null && uri.pathSegments.length >= 2) {
+      return uri.pathSegments[0];
+    }
+    return null;
+  }
+
+  String? _browserRepoUrlForRemote(String remote) {
+    GitRemoteInfo? remoteInfo;
+    for (final info in widget.remotes) {
+      if (info.name == remote) {
+        remoteInfo = info;
+        break;
+      }
+    }
+    final raw = remoteInfo?.fetchUrl ?? widget.repoUrl;
+    if (raw.isEmpty) return null;
+    if (raw.startsWith('http://') || raw.startsWith('https://')) {
+      return raw.endsWith('.git') ? raw.substring(0, raw.length - 4) : raw;
+    }
+    final sshMatch = RegExp(r'^[^@]+@([^:]+):(.+)$').firstMatch(raw);
+    if (sshMatch != null) {
+      final host = sshMatch.group(1)!;
+      var path = sshMatch.group(2)!;
+      if (path.endsWith('.git')) path = path.substring(0, path.length - 4);
+      return 'https://$host/$path';
+    }
+    return null;
+  }
+
+  void _changeRemote(String? remote) {
+    if (remote == null || remote == _selectedRemote) return;
+    setState(() {
+      _selectedRemote = remote;
+      _visibleBranches = _branchesForRemote(remote);
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      _scrollController.jumpTo(0);
+    });
+  }
+
+  Map<String, int> _branchCountByRepository() {
+    final counts = <String, int>{};
+    for (final branch in widget.branches) {
+      final repoId = _repositoryIdForBranch(branch);
+      counts[repoId] = (counts[repoId] ?? 0) + 1;
+    }
+    return counts;
+  }
+
+  Future<void> _showRepositoryPicker({
+    required List<String> repositories,
+    required Map<String, String> repositoryLabels,
+    required Map<String, List<String>> repositoryGroups,
+    required Map<String, int> branchCounts,
+  }) async {
+    if (repositories.isEmpty) return;
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '저장소 선택',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Flexible(
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: repositories.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (_, index) {
+                    final repoId = repositories[index];
+                    final isSelected = repoId == _selectedRemote;
+                    final label = repositoryLabels[repoId] ?? repoId;
+                    final aliases =
+                        repositoryGroups[repoId] ?? const <String>[];
+                    final branchCount = branchCounts[repoId] ?? 0;
+                    final subtitle = aliases.isEmpty
+                        ? '$branchCount개 브랜치'
+                        : '원격 ${aliases.join(', ')} · $branchCount개 브랜치';
+                    return ListTile(
+                      dense: true,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 2,
+                      ),
+                      title: Text(
+                        label,
+                        style: TextStyle(
+                          fontWeight:
+                              isSelected ? FontWeight.w700 : FontWeight.w500,
+                        ),
+                      ),
+                      subtitle: Text(
+                        subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      trailing: isSelected
+                          ? Icon(
+                              Icons.check_circle,
+                              color: Theme.of(context).colorScheme.primary,
+                            )
+                          : null,
+                      onTap: () => Navigator.pop(sheetContext, repoId),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (!mounted || picked == null) return;
+    _changeRemote(picked);
   }
 
   @override
@@ -512,83 +2113,267 @@ class _BranchListDialogState extends State<_BranchListDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final repositories = _availableRemotes();
+    final repositoryGroups = _repositoryGroups();
+    final remoteLabels = _repositoryLabels(repositories, repositoryGroups);
+    final branchCounts = _branchCountByRepository();
+    final selectedRemote = _selectedRemote;
+    final selectedRemoteLabel = selectedRemote == null
+        ? '-'
+        : (remoteLabels[selectedRemote] ?? selectedRemote);
+
     return AlertDialog(
-      title: const Text("브랜치 선택"),
+      title: Text(widget.title),
       content: SizedBox(
         width: double.maxFinite,
-        child: ListView.builder(
-          controller: _scrollController,
-          shrinkWrap: true,
-          itemCount: widget.branches.length,
-          itemBuilder: (ctx, index) {
-            final branch = widget.branches[index];
-            final name = branch['name']!;
-            final date = branch['date']!;
-            final hash = branch['hash']!;
-            final isDefault = name == widget.defaultBranch;
-            final isCurrent = name == widget.currentBranch;
-            
-            bool hasUpdate = false;
-            if (widget.localRefs.containsKey(name)) {
-              if (widget.localRefs[name] != hash) {
-                hasUpdate = true;
-              }
-            }
-
-            return ListTile(
-              tileColor: isCurrent ? Theme.of(context).colorScheme.secondaryContainer : null,
-              title: Row(
+        height: 480,
+        child: Column(
+          children: [
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
                 children: [
-                  Text(name, style: TextStyle(fontWeight: isDefault ? FontWeight.bold : FontWeight.normal)),
-                  if (isDefault) ...[
-                    const SizedBox(width: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: Colors.blue.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(4),
+                  const Icon(Icons.call_split, size: 16),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      '현재 브랜치: ${widget.currentBranch}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
                       ),
-                      child: const Text("Default", style: TextStyle(fontSize: 10, color: Colors.blue)),
                     ),
-                  ],
-                  if (isCurrent) ...[
-                    const SizedBox(width: 8),
-                    const Icon(Icons.check, size: 16, color: Colors.green),
-                  ],
+                  ),
+                  Text(
+                    '${_visibleBranches.length}개',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
                 ],
               ),
-              subtitle: Text(date, style: const TextStyle(fontSize: 12, color: Colors.grey)),
-              trailing: hasUpdate 
-                ? IconButton(
-                    icon: const Icon(Icons.priority_high, color: Colors.red, size: 20),
-                    tooltip: "업데이트 가능",
-                    onPressed: () async {
-                        if (widget.repoUrl.isNotEmpty) {
-                          final url = "${widget.repoUrl}/commits/$name";
-                          final uri = Uri.parse(url);
-                          if (await canLaunchUrl(uri)) {
-                            await launchUrl(uri, mode: LaunchMode.externalApplication);
-                          } else {
-                            if (context.mounted) {
-                              showDialog(
-                                context: context,
-                                builder: (_) => AlertDialog(
-                                  title: const Text("커밋 내역"),
-                                  content: SelectableText(url),
-                                  actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text("닫기"))],
-                                ),
-                              );
+            ),
+            const SizedBox(height: 10),
+            Material(
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(12),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () => _showRepositoryPicker(
+                  repositories: repositories,
+                  repositoryLabels: remoteLabels,
+                  repositoryGroups: repositoryGroups,
+                  branchCounts: branchCounts,
+                ),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.account_tree_outlined, size: 18),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '저장소',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .onSurfaceVariant,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              selectedRemoteLabel,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w700),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Icon(Icons.expand_more, size: 18),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            if (selectedRemote != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    '선택 저장소: $selectedRemoteLabel',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ),
+            Expanded(
+              child: _visibleBranches.isEmpty
+                  ? const Center(
+                      child: Text(
+                        "선택한 저장소에 브랜치가 없습니다.",
+                        style: TextStyle(fontSize: 12, color: Colors.grey),
+                      ),
+                    )
+                  : ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: ListView.builder(
+                        controller: _scrollController,
+                        shrinkWrap: true,
+                        padding: const EdgeInsets.symmetric(vertical: 2),
+                        clipBehavior: Clip.hardEdge,
+                        itemCount: _visibleBranches.length,
+                        itemBuilder: (ctx, index) {
+                          final branch = _visibleBranches[index];
+                          final name = branch['name']!;
+                          final remote = _normalizedRemote(branch);
+                          final date = branch['date']!;
+                          final hash = branch['hash']!;
+                          final isDefault = name == widget.defaultBranch;
+                          final isCurrent = name == widget.currentBranch &&
+                              _currentRemoteForHighlight != null &&
+                              _currentRemoteForHighlight ==
+                                  _repositoryIdForBranch(branch);
+
+                          bool hasUpdate = false;
+                          if (widget.localRefs.containsKey(name)) {
+                            if (widget.localRefs[name] != hash) {
+                              hasUpdate = true;
                             }
                           }
-                        }
-                    },
-                  ) 
-                : null,
-              onTap: () => widget.onSelect(name),
-            );
-          },
+
+                          return Padding(
+                            key: ValueKey('$remote/$name'),
+                            padding: const EdgeInsets.symmetric(vertical: 2),
+                            child: Material(
+                              color: isCurrent
+                                  ? Theme.of(context)
+                                      .colorScheme
+                                      .secondaryContainer
+                                      .withValues(alpha: 0.72)
+                                  : Colors.transparent,
+                              borderRadius: BorderRadius.circular(10),
+                              clipBehavior: Clip.antiAlias,
+                              child: ListTile(
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 2),
+                                leading: const Icon(Icons.alt_route, size: 18),
+                                title: Row(
+                                  children: [
+                                    Text(name,
+                                        style: TextStyle(
+                                            fontWeight: isDefault
+                                                ? FontWeight.bold
+                                                : FontWeight.normal)),
+                                    if (isDefault) ...[
+                                      const SizedBox(width: 8),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 6, vertical: 2),
+                                        decoration: BoxDecoration(
+                                          color: Colors.blue.withOpacity(0.2),
+                                          borderRadius:
+                                              BorderRadius.circular(4),
+                                        ),
+                                        child: const Text("Default",
+                                            style: TextStyle(
+                                                fontSize: 10,
+                                                color: Colors.blue)),
+                                      ),
+                                    ],
+                                    if (isCurrent) ...[
+                                      const SizedBox(width: 8),
+                                      const Icon(Icons.check,
+                                          size: 16, color: Colors.green),
+                                    ],
+                                  ],
+                                ),
+                                subtitle: Text(date,
+                                    style: const TextStyle(
+                                        fontSize: 12, color: Colors.grey)),
+                                trailing: hasUpdate
+                                    ? IconButton(
+                                        icon: const Icon(Icons.priority_high,
+                                            color: Colors.red, size: 20),
+                                        tooltip: "업데이트 가능",
+                                        onPressed: () async {
+                                          if (widget.repoUrl.isNotEmpty) {
+                                            final baseUrl =
+                                                _browserRepoUrlForRemote(
+                                                    remote);
+                                            if (baseUrl == null ||
+                                                baseUrl.isEmpty) {
+                                              return;
+                                            }
+                                            final url =
+                                                "$baseUrl/commits/$name";
+                                            final uri = Uri.parse(url);
+                                            if (await canLaunchUrl(uri)) {
+                                              await launchUrl(uri,
+                                                  mode: LaunchMode
+                                                      .externalApplication);
+                                            } else {
+                                              if (context.mounted) {
+                                                showDialog(
+                                                  context: context,
+                                                  builder: (_) => AlertDialog(
+                                                    title: const Text("커밋 내역"),
+                                                    content:
+                                                        SelectableText(url),
+                                                    actions: [
+                                                      TextButton(
+                                                          onPressed: () =>
+                                                              Navigator.pop(
+                                                                  context),
+                                                          child:
+                                                              const Text("닫기"))
+                                                    ],
+                                                  ),
+                                                );
+                                              }
+                                            }
+                                          }
+                                        },
+                                      )
+                                    : null,
+                                onTap: () => widget.onSelect(remote, name),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+            ),
+          ],
         ),
       ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text("닫기"),
+        ),
+      ],
     );
   }
 }

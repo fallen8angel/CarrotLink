@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,7 +8,10 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/ssh_service.dart';
 import '../../services/macro_service.dart';
+import '../../widgets/connection_required_view.dart';
 import '../../widgets/custom_toast.dart';
+import '../../widgets/section_tab_bar.dart';
+import 'file_explorer_tab.dart';
 import 'macro_tab.dart';
 // import 'system_tab.dart'; // Removed
 
@@ -15,43 +19,80 @@ class TerminalTab extends StatefulWidget {
   const TerminalTab({super.key});
 
   @override
-  State<TerminalTab> createState() => _TerminalTabState();
+  State<TerminalTab> createState() => TerminalTabState();
 }
 
-class _TerminalTabState extends State<TerminalTab> with SingleTickerProviderStateMixin {
+class TerminalTabState extends State<TerminalTab>
+    with SingleTickerProviderStateMixin {
+  static const String _lastTerminalSubTabIndexKey =
+      'terminal_last_sub_tab_index';
   late TabController _tabController;
+  final GlobalKey<FileExplorerTabState> _fileExplorerTabKey =
+      GlobalKey<FileExplorerTabState>();
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    _tabController = TabController(length: 3, vsync: this);
+    _tabController.addListener(_handleSubTabChanged);
+    unawaited(_restoreLastSubTabIndex());
   }
 
   @override
   void dispose() {
+    _tabController.removeListener(_handleSubTabChanged);
     _tabController.dispose();
     super.dispose();
+  }
+
+  void _handleSubTabChanged() {
+    if (_tabController.indexIsChanging) return;
+    unawaited(_persistLastSubTabIndex(_tabController.index));
+  }
+
+  Future<void> _restoreLastSubTabIndex() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getInt(_lastTerminalSubTabIndexKey);
+    if (saved == null || saved < 0 || saved >= _tabController.length) return;
+    if (!mounted) return;
+    _tabController.index = saved;
+  }
+
+  Future<void> _persistLastSubTabIndex(int index) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_lastTerminalSubTabIndexKey, index);
+  }
+
+  Future<bool> handleSystemBack() async {
+    if (!mounted) return false;
+    final animationValue = _tabController.animation?.value;
+    final fileTabVisibleOrTransitioning = _tabController.index == 2 ||
+        (_tabController.indexIsChanging &&
+            (_tabController.index == 2 || _tabController.previousIndex == 2)) ||
+        (animationValue != null && (animationValue - 2).abs() < 0.6);
+    if (!fileTabVisibleOrTransitioning) return false;
+    return await _fileExplorerTabKey.currentState?.handleSystemBack() ?? false;
   }
 
   @override
   Widget build(BuildContext context) {
     return Column(
       children: [
-        TabBar(
+        SectionTabBar(
           controller: _tabController,
-          labelColor: Theme.of(context).colorScheme.primary,
-          unselectedLabelColor: Colors.grey,
           tabs: const [
             Tab(text: "터미널", icon: Icon(Icons.terminal)),
-            Tab(text: "매크로 관리", icon: Icon(Icons.edit_note)),
+            Tab(text: "매크로", icon: Icon(Icons.edit_note)),
+            Tab(text: "파일", icon: Icon(Icons.folder_outlined)),
           ],
         ),
         Expanded(
           child: TabBarView(
             controller: _tabController,
-            children: const [
-              TerminalScreen(),
-              MacroTab(),
+            children: [
+              const TerminalScreen(),
+              const MacroTab(),
+              FileExplorerTab(key: _fileExplorerTabKey),
             ],
           ),
         ),
@@ -67,13 +108,28 @@ class TerminalScreen extends StatefulWidget {
   State<TerminalScreen> createState() => _TerminalScreenState();
 }
 
-class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAliveClientMixin {
+class _TerminalScreenState extends State<TerminalScreen>
+    with AutomaticKeepAliveClientMixin {
+  static const Duration _terminalOutputFlushInterval =
+      Duration(milliseconds: 16);
   late final xterm.Terminal _terminal;
-  final xterm.TerminalController _terminalController = xterm.TerminalController();
+  final xterm.TerminalController _terminalController =
+      xterm.TerminalController();
   SSHSession? _session;
+  SSHService? _sshService;
+  StreamSubscription<List<int>>? _stdoutSub;
+  StreamSubscription<List<int>>? _stderrSub;
   bool _isSessionActive = false;
+  bool _isStartingTerminal = false;
+  bool _manualSessionClose = false;
+  bool _shouldAutoReattach = false;
   double _fontSize = 14.0;
   bool _showVirtualKeys = false;
+  final StringBuffer _pendingTerminalOutput = StringBuffer();
+  Timer? _terminalOutputFlushTimer;
+  int _sessionGeneration = 0;
+  bool _terminalContextMenuOpen = false;
+  bool _hasTerminalSelection = false;
 
   @override
   bool get wantKeepAlive => true;
@@ -85,6 +141,21 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
     _terminal = xterm.Terminal(
       maxLines: 10000,
     );
+    _terminal.onOutput = (data) {
+      final session = _session;
+      if (session == null) return;
+      try {
+        session.write(utf8.encode(data));
+      } catch (_) {}
+    };
+    _terminal.onResize = (width, height, pixelWidth, pixelHeight) {
+      final session = _session;
+      if (session == null || !_isSessionActive) return;
+      try {
+        session.resizeTerminal(width, height, pixelWidth, pixelHeight);
+      } catch (_) {}
+    };
+    _terminalController.addListener(_onTerminalSelectionChanged);
     // _startTerminal(); // Auto-connect removed
   }
 
@@ -103,66 +174,350 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
   }
 
   void _sendMacro(String command) {
-    if (_session != null) {
-      _session!.write(utf8.encode("$command\n"));
-      _terminal.write("\r\n> $command\r\n");
+    final session = _session;
+    if (session != null) {
+      session.write(utf8.encode("$command\n"));
+      _writeTerminal("\r\n> $command\r\n");
     } else {
       CustomToast.show(context, "터미널이 연결되지 않았습니다.", isError: true);
     }
   }
 
   void _sendKey(String key) {
-    if (_session != null) {
-      _session!.write(utf8.encode(key));
+    final session = _session;
+    if (session != null) {
+      session.write(utf8.encode(key));
     }
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // Auto-connect removed
+    final ssh = Provider.of<SSHService>(context);
+    if (!identical(_sshService, ssh)) {
+      _sshService?.removeListener(_onSshChanged);
+      _sshService = ssh;
+      _sshService?.addListener(_onSshChanged);
+    }
   }
 
   @override
   void dispose() {
-    _session?.close();
+    _sshService?.removeListener(_onSshChanged);
+    _terminalController.removeListener(_onTerminalSelectionChanged);
+    _sessionGeneration += 1;
+    _terminalOutputFlushTimer?.cancel();
+    _flushPendingTerminalOutput();
+    unawaited(_stdoutSub?.cancel());
+    unawaited(_stderrSub?.cancel());
+    try {
+      _session?.close();
+    } catch (_) {}
+    _stdoutSub = null;
+    _stderrSub = null;
+    _session = null;
     super.dispose();
   }
 
-  Future<void> _startTerminal() async {
-    final ssh = Provider.of<SSHService>(context, listen: false);
+  void _onTerminalSelectionChanged() {
+    final hasSelection = _terminalController.selection != null;
+    if (_hasTerminalSelection == hasSelection) return;
+    if (!mounted) {
+      _hasTerminalSelection = hasSelection;
+      return;
+    }
+    setState(() => _hasTerminalSelection = hasSelection);
+  }
+
+  void _writeTerminal(String text) {
+    if (text.isEmpty) return;
+    _pendingTerminalOutput.write(text);
+    if (_terminalOutputFlushTimer != null) return;
+    _terminalOutputFlushTimer = Timer(_terminalOutputFlushInterval, () {
+      _terminalOutputFlushTimer = null;
+      _flushPendingTerminalOutput();
+    });
+  }
+
+  void _flushPendingTerminalOutput() {
+    if (_pendingTerminalOutput.isEmpty) return;
+    final chunk = _pendingTerminalOutput.toString();
+    _pendingTerminalOutput.clear();
+    _terminal.write(chunk);
+  }
+
+  Future<void> _cancelSessionStreams() async {
+    try {
+      await _stdoutSub?.cancel();
+    } catch (_) {}
+    try {
+      await _stderrSub?.cancel();
+    } catch (_) {}
+    _stdoutSub = null;
+    _stderrSub = null;
+  }
+
+  Future<void> _syncRemoteTerminalSize([SSHSession? session]) async {
+    final target = session ?? _session;
+    if (target == null) return;
+    final width = _terminal.viewWidth <= 0 ? 80 : _terminal.viewWidth;
+    final height = _terminal.viewHeight <= 0 ? 24 : _terminal.viewHeight;
+    try {
+      target.resizeTerminal(width, height);
+    } catch (_) {}
+  }
+
+  RelativeRect _menuPositionForGlobalOffset(Offset? globalPosition) {
+    final overlay = Overlay.of(context, rootOverlay: true);
+    final renderBox = overlay.context.findRenderObject() as RenderBox;
+    final local = globalPosition == null
+        ? Offset(renderBox.size.width / 2, renderBox.size.height * 0.62)
+        : renderBox.globalToLocal(globalPosition);
+    final dx =
+        (local.dx.clamp(12.0, renderBox.size.width - 12.0) as num).toDouble();
+    final dy =
+        (local.dy.clamp(12.0, renderBox.size.height - 12.0) as num).toDouble();
+    return RelativeRect.fromLTRB(
+      dx,
+      dy,
+      renderBox.size.width - dx,
+      renderBox.size.height - dy,
+    );
+  }
+
+  Future<void> _showTerminalContextMenu({Offset? globalPosition}) async {
+    if (!mounted || _terminalContextMenuOpen) return;
+    final hasSelection = _terminalController.selection != null;
+
+    PopupMenuItem<String> menuItem(
+      String value,
+      IconData icon,
+      String label, {
+      bool enabled = true,
+    }) {
+      return PopupMenuItem<String>(
+        value: value,
+        enabled: enabled,
+        child: Row(
+          children: [
+            Icon(icon, size: 18),
+            const SizedBox(width: 8),
+            Text(label),
+          ],
+        ),
+      );
+    }
+
+    _terminalContextMenuOpen = true;
+    try {
+      final action = await showMenu<String>(
+        context: context,
+        position: _menuPositionForGlobalOffset(globalPosition),
+        items: [
+          menuItem('copy', Icons.copy, '복사', enabled: hasSelection),
+          menuItem('paste', Icons.paste, '붙여넣기'),
+          menuItem('select_all', Icons.select_all, '전체 선택'),
+          menuItem('clear_selection', Icons.deselect, '선택 해제',
+              enabled: hasSelection),
+          const PopupMenuDivider(),
+          menuItem('cursor_up', Icons.keyboard_arrow_up, '커서 ↑'),
+          menuItem('cursor_down', Icons.keyboard_arrow_down, '커서 ↓'),
+          menuItem('cursor_left', Icons.keyboard_arrow_left, '커서 ←'),
+          menuItem('cursor_right', Icons.keyboard_arrow_right, '커서 →'),
+          menuItem('enter', Icons.keyboard_return, '엔터'),
+          menuItem('ctrl_c', Icons.cancel_presentation, 'CTRL+C'),
+          const PopupMenuDivider(),
+          menuItem(
+            'toggle_virtual_keys',
+            _showVirtualKeys ? Icons.keyboard_hide : Icons.keyboard,
+            _showVirtualKeys ? '가상키 숨기기' : '가상키 보기',
+          ),
+        ],
+      );
+
+      if (!mounted || action == null) return;
+
+      switch (action) {
+        case 'copy':
+          await _copySelection();
+          break;
+        case 'paste':
+          await _paste();
+          break;
+        case 'select_all':
+          _selectAllTerminalText();
+          break;
+        case 'clear_selection':
+          _terminalController.clearSelection();
+          break;
+        case 'cursor_up':
+          _sendKey('\x1b[A');
+          break;
+        case 'cursor_down':
+          _sendKey('\x1b[B');
+          break;
+        case 'cursor_left':
+          _sendKey('\x1b[D');
+          break;
+        case 'cursor_right':
+          _sendKey('\x1b[C');
+          break;
+        case 'enter':
+          _sendKey('\r');
+          break;
+        case 'ctrl_c':
+          _sendKey('\x03');
+          break;
+        case 'toggle_virtual_keys':
+          setState(() => _showVirtualKeys = !_showVirtualKeys);
+          break;
+      }
+    } finally {
+      _terminalContextMenuOpen = false;
+    }
+  }
+
+  void _handleTerminalTapUp(TapUpDetails details) {
+    if (_terminalController.selection == null) return;
+    unawaited(_showTerminalContextMenu(globalPosition: details.globalPosition));
+  }
+
+  void _handleTerminalSecondaryTapUp(TapUpDetails details) {
+    unawaited(_showTerminalContextMenu(globalPosition: details.globalPosition));
+  }
+
+  void _onSshChanged() {
+    final ssh = _sshService;
+    if (!mounted || ssh == null) return;
+
     if (!ssh.isConnected) {
-      _terminal.write('SSH 연결 대기 중...\r\n');
+      if (_isSessionActive) {
+        _writeTerminal('\r\n[SSH 연결 끊김]\r\n');
+      }
+      _sessionGeneration += 1;
+      _isStartingTerminal = false;
+      unawaited(_cancelSessionStreams());
+      setState(() {
+        _isSessionActive = false;
+      });
+      _session = null;
       return;
     }
 
-    if (_isSessionActive) return;
+    if (_shouldAutoReattach && !_isSessionActive && !_isStartingTerminal) {
+      _writeTerminal('\r\n[SSH 재연결 감지: 터미널 자동 복구 시도]\r\n');
+      unawaited(_startTerminal(autoReconnect: true));
+    }
+  }
+
+  Future<void> _startTerminal({bool autoReconnect = false}) async {
+    final ssh = _sshService ?? Provider.of<SSHService>(context, listen: false);
+    if (!ssh.isConnected) {
+      if (!autoReconnect) {
+        _writeTerminal('SSH 연결 대기 중...\r\n');
+      }
+      return;
+    }
+
+    if (_isSessionActive || _isStartingTerminal) return;
+    final generation = ++_sessionGeneration;
 
     try {
-      _terminal.write('터미널 세션 시작 중...\r\n');
-      _session = await ssh.startShell();
+      _isStartingTerminal = true;
+      if (!autoReconnect) {
+        _writeTerminal('터미널 세션 시작 중...\r\n');
+      }
+      final session = await ssh.startShell(
+        width: _terminal.viewWidth <= 0 ? 80 : _terminal.viewWidth,
+        height: _terminal.viewHeight <= 0 ? 24 : _terminal.viewHeight,
+      );
+      if (!mounted || generation != _sessionGeneration) {
+        try {
+          session.close();
+        } catch (_) {}
+        return;
+      }
+      _session = session;
       setState(() => _isSessionActive = true);
+      _manualSessionClose = false;
+      _shouldAutoReattach = true;
+      await _cancelSessionStreams();
+      unawaited(_syncRemoteTerminalSize(session));
 
-      _terminal.onOutput = (data) {
-        _session?.write(utf8.encode(data));
-      };
+      _stdoutSub = session.stdout.listen(
+        (data) {
+          if (generation != _sessionGeneration) return;
+          _writeTerminal(utf8.decode(data, allowMalformed: true));
+        },
+        onError: (error) {
+          if (generation != _sessionGeneration) return;
+          _writeTerminal('\r\n[stdout 오류] $error\r\n');
+        },
+      );
 
-      _session!.stdout.listen((data) {
-        _terminal.write(utf8.decode(data));
-      });
+      _stderrSub = session.stderr.listen(
+        (data) {
+          if (generation != _sessionGeneration) return;
+          _writeTerminal(utf8.decode(data, allowMalformed: true));
+        },
+        onError: (error) {
+          if (generation != _sessionGeneration) return;
+          _writeTerminal('\r\n[stderr 오류] $error\r\n');
+        },
+      );
 
-      _session!.stderr.listen((data) {
-        _terminal.write(utf8.decode(data));
-      });
-
-      _session!.done.then((_) {
+      session.done.then((_) {
+        if (generation != _sessionGeneration) return;
+        final manualClose = _manualSessionClose;
+        _manualSessionClose = false;
+        _session = null;
         if (mounted) {
           setState(() => _isSessionActive = false);
-          _terminal.write('\r\n세션이 종료되었습니다.\r\n');
+          _writeTerminal('\r\n세션이 종료되었습니다.\r\n');
+        }
+
+        if (!manualClose &&
+            mounted &&
+            (_sshService?.isConnected ?? false) &&
+            _shouldAutoReattach) {
+          Future.delayed(const Duration(seconds: 1), () {
+            if (!mounted) return;
+            if (generation != _sessionGeneration) return;
+            if ((_sshService?.isConnected ?? false) &&
+                !_isSessionActive &&
+                !_isStartingTerminal &&
+                _shouldAutoReattach) {
+              _writeTerminal('[세션 자동 복구 시도]\r\n');
+              unawaited(_startTerminal(autoReconnect: true));
+            }
+          });
         }
       });
     } catch (e) {
-      _terminal.write('오류 발생: $e\r\n');
+      if (generation == _sessionGeneration) {
+        _writeTerminal('오류 발생: $e\r\n');
+      }
+    } finally {
+      if (generation == _sessionGeneration) {
+        _isStartingTerminal = false;
+      }
+    }
+  }
+
+  Future<void> _stopTerminal({bool manual = true}) async {
+    if (manual) {
+      _shouldAutoReattach = false;
+    }
+    _manualSessionClose = manual;
+    _sessionGeneration += 1;
+    _isStartingTerminal = false;
+    await _cancelSessionStreams();
+    try {
+      _session?.close();
+    } catch (_) {}
+    _session = null;
+    if (mounted) {
+      setState(() => _isSessionActive = false);
     }
   }
 
@@ -178,20 +533,103 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
         _terminalController.clearSelection();
       }
     } else {
-       if (mounted) {
-          CustomToast.show(context, "선택된 텍스트가 없습니다.", isError: true);
-        }
+      if (mounted) {
+        CustomToast.show(context, "선택된 텍스트가 없습니다.", isError: true);
+      }
     }
   }
 
   Future<void> _paste() async {
+    final session = _session;
+    if (session == null) {
+      if (mounted) {
+        CustomToast.show(context, "터미널이 연결되지 않았습니다.", isError: true);
+      }
+      return;
+    }
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     if (data?.text != null) {
-      _session?.write(utf8.encode(data!.text!));
+      session.write(utf8.encode(data!.text!));
       if (mounted) {
         CustomToast.show(context, "붙여넣기 완료");
       }
+    } else if (mounted) {
+      CustomToast.show(context, "클립보드에 텍스트가 없습니다.", isError: true);
     }
+  }
+
+  void _selectAllTerminalText() {
+    final width = _terminal.viewWidth <= 0 ? 80 : _terminal.viewWidth;
+    final height = _terminal.viewHeight <= 0 ? 24 : _terminal.viewHeight;
+    final lastRow = _terminal.buffer.height - 1;
+    if (lastRow < 0) return;
+    final firstRow = (lastRow - height + 1).clamp(0, lastRow);
+    _terminalController.setSelection(
+      _terminal.buffer.createAnchor(0, firstRow),
+      _terminal.buffer.createAnchor(width, lastRow),
+      mode: xterm.SelectionMode.line,
+    );
+  }
+
+  Widget _buildSelectionActionBar() {
+    return Material(
+      color: Theme.of(context).colorScheme.surface,
+      elevation: 3,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color:
+                Theme.of(context).colorScheme.outline.withValues(alpha: 0.35),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(width: 6),
+            Icon(
+              Icons.text_fields,
+              size: 16,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              '선택',
+              style: TextStyle(
+                fontSize: 12,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+            IconButton(
+              tooltip: "복사",
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.copy, size: 18),
+              onPressed: _copySelection,
+            ),
+            IconButton(
+              tooltip: "붙여넣기",
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.paste, size: 18),
+              onPressed: _paste,
+            ),
+            IconButton(
+              tooltip: "전체 선택",
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.select_all, size: 18),
+              onPressed: _selectAllTerminalText,
+            ),
+            IconButton(
+              tooltip: "선택 해제",
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.close, size: 18),
+              onPressed: _terminalController.clearSelection,
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _buildVirtualKey(String label, String code) {
@@ -202,7 +640,7 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
         decoration: BoxDecoration(
           color: Theme.of(context).colorScheme.surface,
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.grey.withOpacity(0.3)),
+          border: Border.all(color: Colors.grey.withValues(alpha: 0.3)),
         ),
         child: Text(
           label,
@@ -215,6 +653,7 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    final connected = context.watch<SSHService>().isConnected;
     final macros = Provider.of<MacroService>(context).macros;
 
     return Column(
@@ -239,7 +678,7 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
               Container(
                 height: 24,
                 width: 1,
-                color: Colors.grey.withOpacity(0.5),
+                color: Colors.grey.withValues(alpha: 0.5),
                 margin: const EdgeInsets.symmetric(horizontal: 8),
               ),
               IconButton(
@@ -253,55 +692,76 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
                 tooltip: "붙여넣기",
               ),
               IconButton(
-                icon: Icon(_showVirtualKeys ? Icons.keyboard_hide : Icons.keyboard),
-                onPressed: () => setState(() => _showVirtualKeys = !_showVirtualKeys),
+                icon: Icon(
+                    _showVirtualKeys ? Icons.keyboard_hide : Icons.keyboard),
+                onPressed: () =>
+                    setState(() => _showVirtualKeys = !_showVirtualKeys),
                 tooltip: "가상 키보드",
               ),
               const Spacer(),
               if (!_isSessionActive)
                 ElevatedButton.icon(
-                  onPressed: _startTerminal,
+                  onPressed: () => _startTerminal(),
                   icon: const Icon(Icons.refresh, size: 16),
                   label: const Text("연결"),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.green,
                     foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   ),
                 )
               else
                 ElevatedButton.icon(
-                  onPressed: () {
-                    _session?.close();
-                    setState(() => _isSessionActive = false);
-                  },
+                  onPressed: () => _stopTerminal(manual: true),
                   icon: const Icon(Icons.close, size: 16),
                   label: const Text("끊기"),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.red,
                     foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   ),
                 ),
             ],
           ),
         ),
         Expanded(
-          child: xterm.TerminalView(
-            _terminal,
-            controller: _terminalController,
-            textStyle: xterm.TerminalStyle(fontSize: _fontSize, fontFamily: 'monospace'),
-            readOnly: false,
-          ),
+          child: (!connected && !_isSessionActive)
+              ? const ConnectionRequiredView(
+                  description: '터미널을 사용하려면 먼저 기기에 연결하세요.',
+                )
+              : Stack(
+                  children: [
+                    Positioned.fill(
+                      child: xterm.TerminalView(
+                        _terminal,
+                        controller: _terminalController,
+                        textStyle: xterm.TerminalStyle(
+                            fontSize: _fontSize, fontFamily: 'monospace'),
+                        onTapUp: (details, _) => _handleTerminalTapUp(details),
+                        onSecondaryTapUp: (details, _) =>
+                            _handleTerminalSecondaryTapUp(details),
+                        readOnly: false,
+                      ),
+                    ),
+                    if (_hasTerminalSelection)
+                      Positioned(
+                        top: 10,
+                        right: 10,
+                        child: _buildSelectionActionBar(),
+                      ),
+                  ],
+                ),
         ),
-        
+
         // Fixed Bottom Area (Virtual Keys + Macros)
         Container(
           decoration: BoxDecoration(
             color: Theme.of(context).colorScheme.surface,
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(0.2),
+                color: Colors.black.withValues(alpha: 0.2),
                 offset: const Offset(0, -2),
                 blurRadius: 4,
               ),
@@ -342,7 +802,7 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
                       ),
                     ),
                   ),
-                
+
                 // Quick Macros
                 if (macros.isNotEmpty)
                   Container(
@@ -359,7 +819,8 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
                           child: ElevatedButton(
                             onPressed: () => _sendMacro(macro.command),
                             style: ElevatedButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(horizontal: 12),
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 12),
                               minimumSize: const Size(0, 36),
                             ),
                             child: Text(macro.name),
@@ -376,4 +837,3 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
     );
   }
 }
-

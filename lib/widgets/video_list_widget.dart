@@ -44,7 +44,7 @@ class _VideoListWidgetState extends State<VideoListWidget> {
       // Assuming videos are in /data/media/0/videos
       // If this path doesn't exist, we might need to check /data/media/0/realdata or similar
       const videoPath = "/data/media/0/videos";
-      
+
       // Check if directory exists first (optional, but good practice)
       // For now, just try to list
       List<SftpName> files;
@@ -55,7 +55,7 @@ class _VideoListWidgetState extends State<VideoListWidget> {
         // But user might not have created it yet.
         // Let's just return empty list for now to avoid ugly error
         if (e.toString().contains("No such file")) {
-           setState(() {
+          setState(() {
             _videos = [];
             _isLoading = false;
             _error = "영상 폴더가 없습니다 (/data/media/0/videos)";
@@ -64,18 +64,22 @@ class _VideoListWidgetState extends State<VideoListWidget> {
         }
         rethrow;
       }
-      
+
       // Filter for video files (e.g., .mp4, .mkv, .hevc)
       // Openpilot often uses .hevc which might not play natively in all players without conversion
       // But let's assume standard formats or that the player can handle it.
       // If the user specifically asked for "recordings", they might be .mp4 exports.
       final videoFiles = files.where((f) {
         final name = f.filename.toLowerCase();
-        return name.endsWith('.mp4') || name.endsWith('.mkv') || name.endsWith('.avi') || name.endsWith('.mov');
+        return name.endsWith('.mp4') ||
+            name.endsWith('.mkv') ||
+            name.endsWith('.avi') ||
+            name.endsWith('.mov');
       }).toList();
 
       // Sort by modification time (newest first)
-      videoFiles.sort((a, b) => (b.attr.modifyTime ?? 0).compareTo(a.attr.modifyTime ?? 0));
+      videoFiles.sort(
+          (a, b) => (b.attr.modifyTime ?? 0).compareTo(a.attr.modifyTime ?? 0));
 
       setState(() {
         _videos = videoFiles;
@@ -106,41 +110,8 @@ class _VideoListWidgetState extends State<VideoListWidget> {
       // Download if not exists or maybe always overwrite to be safe?
       // For caching, we could check if it exists.
       if (!await localFile.exists()) {
-        final sftp = await ssh.sftp;
         final remotePath = "/data/media/0/videos/${file.filename}";
-        final remoteFile = await sftp.open(remotePath);
-        final content = remoteFile.read(length: (await remoteFile.stat()).size ?? 0);
-        // This read might be too memory intensive for large files.
-        // Better to stream to file.
-        
-        // Using a simpler download approach if available or stream
-        // dartssh2 sftp doesn't have a simple 'download' method, we have to read/write.
-        // Reading all into memory is bad for large videos.
-        // Let's read in chunks.
-        
-        final openFile = await localFile.open(mode: FileMode.write);
-        // Read in 1MB chunks
-        const chunkSize = 1024 * 1024;
-        int offset = 0;
-        final fileSize = (await remoteFile.stat()).size ?? 0;
-        
-        while (offset < fileSize) {
-          // This is a simplified read loop. 
-          // In dartssh2, read returns Stream<List<int>> or similar?
-          // Wait, remoteFile.read returns Stream<Uint8List> in some versions or List<int> in others.
-          // Let's check dartssh2 documentation or usage.
-          // Actually, sftp.open returns SftpFile.
-          // SftpFile.read returns Stream<Uint8List>.
-          
-          // Correct way to download:
-          final stream = remoteFile.read();
-          await for (final chunk in stream) {
-            await openFile.writeFrom(chunk);
-          }
-          break; // read() returns the whole file stream
-        }
-        await openFile.close();
-        await remoteFile.close();
+        await ssh.downloadBinaryFile(remotePath, localPath);
       }
 
       if (context.mounted) {
@@ -173,7 +144,8 @@ class _VideoListWidgetState extends State<VideoListWidget> {
     }
 
     if (_videos.isEmpty) {
-      return const Center(child: Text("No videos found in /data/media/0/videos"));
+      return const Center(
+          child: Text("No videos found in /data/media/0/videos"));
     }
 
     return SizedBox(
@@ -191,36 +163,36 @@ class _VideoListWidgetState extends State<VideoListWidget> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                  Expanded(
-                    child: Container(
-                      color: Colors.black12,
-                      child: const Center(
-                        child: Icon(Icons.play_circle_outline, size: 48),
+                    Expanded(
+                      child: Container(
+                        color: Colors.black12,
+                        child: const Center(
+                          child: Icon(Icons.play_circle_outline, size: 48),
+                        ),
                       ),
                     ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.all(8.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          video.filename,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                        Text(
-                          _formatSize(video.attr.size ?? 0),
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ],
+                    Padding(
+                      padding: const EdgeInsets.all(8.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            video.filename,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          Text(
+                            _formatSize(video.attr.size ?? 0),
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
-          ),
           );
         },
       ),
@@ -256,14 +228,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   Future<void> _initializePlayer() async {
     _videoPlayerController = VideoPlayerController.file(widget.videoFile);
     await _videoPlayerController.initialize();
-    
+
     _chewieController = ChewieController(
       videoPlayerController: _videoPlayerController,
       autoPlay: true,
       looping: false,
       aspectRatio: _videoPlayerController.value.aspectRatio,
     );
-    
+
     setState(() {});
   }
 
@@ -279,7 +251,8 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text("Video Player")),
       body: Center(
-        child: _chewieController != null && _videoPlayerController.value.isInitialized
+        child: _chewieController != null &&
+                _videoPlayerController.value.isInitialized
             ? Chewie(controller: _chewieController!)
             : const CircularProgressIndicator(),
       ),

@@ -13,8 +13,8 @@ class UpdateService extends ChangeNotifier {
   double _downloadProgress = 0.0;
   String? _downloadedFilePath;
   Map<String, dynamic>? _latestRelease;
-  String _currentVersion = "";  // 표시용 (예: 1.1007.2)
-  String _currentVersionFull = "";  // 비교용 (예: 1.1007.2+19)
+  String _currentVersion = ""; // 표시용 (예: 1.1007.2)
+  String _currentVersionFull = ""; // 비교용 (예: 1.1007.2+19)
   String _statusMessage = "";
   String _channel = "stable"; // stable or dev
 
@@ -38,8 +38,8 @@ class UpdateService extends ChangeNotifier {
     // 표시용: 버전만 (예: 1.1007.2)
     _currentVersion = info.version;
     // 비교용: 버전+빌드번호 (예: 1.1007.2+19)
-    _currentVersionFull = info.buildNumber.isNotEmpty 
-        ? "${info.version}+${info.buildNumber}" 
+    _currentVersionFull = info.buildNumber.isNotEmpty
+        ? "${info.version}+${info.buildNumber}"
         : info.version;
     notifyListeners();
   }
@@ -57,7 +57,7 @@ class UpdateService extends ChangeNotifier {
     await prefs.setString('update_channel', _channel);
     notifyListeners();
     // Optionally check for update immediately when channel changes
-    // checkForUpdate(); 
+    // checkForUpdate();
   }
 
   Future<bool> checkForUpdate({bool silent = false}) async {
@@ -83,14 +83,16 @@ class UpdateService extends ChangeNotifier {
       Map<String, dynamic>? releaseData;
 
       if (_channel == 'stable') {
-        final url = Uri.parse('https://api.github.com/repos/jominki354/CarrotLink/releases/latest');
+        final url = Uri.parse(
+            'https://api.github.com/repos/jominki354/CarrotLink/releases/latest');
         final response = await http.get(url);
         if (response.statusCode == 200) {
           releaseData = jsonDecode(response.body);
         }
       } else {
         // Dev channel: Get list of releases and pick the first one (latest by date)
-        final url = Uri.parse('https://api.github.com/repos/jominki354/CarrotLink/releases?per_page=1');
+        final url = Uri.parse(
+            'https://api.github.com/repos/jominki354/CarrotLink/releases?per_page=1');
         final response = await http.get(url);
         if (response.statusCode == 200) {
           final List list = jsonDecode(response.body);
@@ -108,10 +110,10 @@ class UpdateService extends ChangeNotifier {
         // Compare versions (including build number if present)
         if (_isNewer(latestVersion, _currentVersionFull)) {
           _latestRelease = releaseData;
-          
+
           // Check if file already exists
           await _checkExistingFile(releaseData);
-          
+
           _isChecking = false;
           notifyListeners();
           return true;
@@ -131,23 +133,31 @@ class UpdateService extends ChangeNotifier {
       // 빌드 메타데이터 (+숫자) 제거
       final remoteBase = remote.split('+')[0];
       final currentBase = current.split('+')[0];
-      
-      List<int> rParts = remoteBase.split('.').map((e) => int.parse(e)).toList();
-      List<int> cParts = currentBase.split('.').map((e) => int.parse(e)).toList();
+
+      List<int> rParts =
+          remoteBase.split('.').map((e) => int.parse(e)).toList();
+      List<int> cParts =
+          currentBase.split('.').map((e) => int.parse(e)).toList();
 
       // Pad with zeros if lengths differ (e.g. 1.0 vs 1.0.0)
-      while (rParts.length < 3) rParts.add(0);
-      while (cParts.length < 3) cParts.add(0);
+      while (rParts.length < 3) {
+        rParts.add(0);
+      }
+      while (cParts.length < 3) {
+        cParts.add(0);
+      }
 
       for (int i = 0; i < 3; i++) {
         if (rParts[i] > cParts[i]) return true;
         if (rParts[i] < cParts[i]) return false;
       }
-      
+
       // 버전이 같으면 빌드 번호 비교 (있는 경우)
-      final remoteBuild = remote.contains('+') ? int.tryParse(remote.split('+')[1]) ?? 0 : 0;
-      final currentBuild = current.contains('+') ? int.tryParse(current.split('+')[1]) ?? 0 : 0;
-      
+      final remoteBuild =
+          remote.contains('+') ? int.tryParse(remote.split('+')[1]) ?? 0 : 0;
+      final currentBuild =
+          current.contains('+') ? int.tryParse(current.split('+')[1]) ?? 0 : 0;
+
       return remoteBuild > currentBuild;
     } catch (e) {
       // Fallback to string comparison if parsing fails
@@ -158,7 +168,8 @@ class UpdateService extends ChangeNotifier {
 
   Future<void> _checkExistingFile(Map<String, dynamic> releaseData) async {
     final tagName = releaseData['tag_name'];
-    final dir = await getExternalStorageDirectory() ?? await getApplicationDocumentsDirectory();
+    final dir = await getExternalStorageDirectory() ??
+        await getApplicationDocumentsDirectory();
     final filePath = "${dir.path}/update_$tagName.apk";
     final file = File(filePath);
     if (await file.exists()) {
@@ -191,7 +202,8 @@ class UpdateService extends ChangeNotifier {
 
     try {
       final tagName = _latestRelease!['tag_name'];
-      final dir = await getExternalStorageDirectory() ?? await getApplicationDocumentsDirectory();
+      final dir = await getExternalStorageDirectory() ??
+          await getApplicationDocumentsDirectory();
       final filePath = "${dir.path}/update_$tagName.apk";
       final file = File(filePath);
 
@@ -199,9 +211,9 @@ class UpdateService extends ChangeNotifier {
       final response = await http.Client().send(request);
       final total = response.contentLength ?? 0;
       int received = 0;
-      
+
       final List<int> bytes = [];
-      
+
       response.stream.listen(
         (value) {
           bytes.addAll(value);

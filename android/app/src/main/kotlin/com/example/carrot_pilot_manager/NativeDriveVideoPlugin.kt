@@ -1,0 +1,740 @@
+package com.example.carrot_pilot_manager
+
+import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Typeface
+import android.media.MediaCodec
+import android.media.MediaFormat
+import android.net.Uri
+import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.Looper
+import android.util.Log
+import android.view.Surface
+import android.view.SurfaceHolder
+import android.view.SurfaceView
+import android.view.View
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import io.flutter.plugin.common.BinaryMessenger
+import io.flutter.plugin.common.EventChannel
+import io.flutter.plugin.common.MethodCall
+import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.StandardMessageCodec
+import io.flutter.plugin.platform.PlatformView
+import io.flutter.plugin.platform.PlatformViewFactory
+import io.flutter.plugin.platform.PlatformViewRegistry
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import okio.ByteString
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.util.ArrayDeque
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+
+private const val NATIVE_VIDEO_TAG = "CarrotNativeVideo"
+
+class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChannel.StreamHandler {
+  companion object {
+    private const val EVENT_CHANNEL = "carrotlink/native_drive_video_events"
+    private const val CONTROL_CHANNEL = "carrotlink/native_drive_video_control"
+
+    @Volatile private var eventSink: EventChannel.EventSink? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val views = ConcurrentHashMap<Int, NativeDriveVideoView>()
+
+    fun emit(event: Map<String, Any?>) {
+      mainHandler.post {
+        eventSink?.success(event)
+      }
+    }
+
+    fun registerView(viewId: Int, view: NativeDriveVideoView) {
+      views[viewId] = view
+    }
+
+    fun unregisterView(viewId: Int) {
+      views.remove(viewId)
+    }
+
+    fun updateOverlay(viewId: Int, overlay: Map<String, Any?>?): Boolean {
+      val view = views[viewId] ?: return false
+      return view.updateOverlay(overlay)
+    }
+
+    fun clearOverlay(viewId: Int): Boolean {
+      val view = views[viewId] ?: return false
+      return view.clearOverlay()
+    }
+  }
+
+  private var controlChannel: MethodChannel? = null
+
+  fun register(context: Context, registry: PlatformViewRegistry) {
+    registry.registerViewFactory(
+        "carrotlink/native_drive_video",
+        NativeDriveVideoViewFactory(context)
+    )
+    EventChannel(messenger, EVENT_CHANNEL).setStreamHandler(this)
+    controlChannel =
+        MethodChannel(messenger, CONTROL_CHANNEL).apply {
+          setMethodCallHandler { call: MethodCall, result: MethodChannel.Result ->
+            when (call.method) {
+              "updateOverlay" -> {
+                val viewId = (call.argument<Number>("viewId") ?: -1).toInt()
+                @Suppress("UNCHECKED_CAST")
+                val overlay = call.argument<Map<String, Any?>>("overlay")
+                result.success(updateOverlay(viewId, overlay))
+              }
+
+              "clearOverlay" -> {
+                val viewId = (call.argument<Number>("viewId") ?: -1).toInt()
+                result.success(clearOverlay(viewId))
+              }
+
+              else -> result.notImplemented()
+            }
+          }
+        }
+  }
+
+  override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+    eventSink = events
+  }
+
+  override fun onCancel(arguments: Any?) {
+    eventSink = null
+  }
+}
+
+private class NativeDriveVideoViewFactory(private val context: Context) :
+    PlatformViewFactory(StandardMessageCodec.INSTANCE) {
+  override fun create(
+      context: Context?,
+      viewId: Int,
+      args: Any?
+  ): PlatformView {
+    @Suppress("UNCHECKED_CAST")
+    val params = (args as? Map<String, Any?>) ?: emptyMap()
+    val wsUrl = params["wsUrl"]?.toString()?.trim().orEmpty()
+    return NativeDriveVideoView(this.context, viewId, wsUrl)
+  }
+}
+
+class NativeDriveVideoView(
+    context: Context,
+    private val viewId: Int,
+    private val wsUrl: String
+) : PlatformView, SurfaceHolder.Callback {
+
+  private val rootView = FrameLayout(context)
+  private val surfaceView: SurfaceView = SurfaceView(context)
+  private val overlayView = NativeDriveOverlayView(context)
+  private val reconnectHandler = Handler(Looper.getMainLooper())
+  private val decodeThread = HandlerThread("CarrotNativeDecode-$viewId").apply { start() }
+  private val decodeHandler = Handler(decodeThread.looper)
+  private val okHttpClient =
+      OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).build()
+
+  @Volatile private var webSocket: WebSocket? = null
+  @Volatile private var surface: Surface? = null
+  @Volatile private var codec: MediaCodec? = null
+  @Volatile private var codecConfigured = false
+  @Volatile private var waitingKeyFrame = true
+  @Volatile private var closed = false
+  @Volatile private var lastFrameId = -1
+  @Volatile private var currentWidth = 0
+  @Volatile private var currentHeight = 0
+  @Volatile private var connectAttempts = 0
+  private val pendingFrameIds: ArrayDeque<Int> = ArrayDeque()
+
+  private var reconnectRunnable: Runnable? = null
+  private val cameraName: String = parseCameraName(wsUrl)
+
+  init {
+    rootView.addView(
+        surfaceView,
+        FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        ),
+    )
+    rootView.addView(
+        overlayView,
+        FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        ),
+    )
+    surfaceView.holder.addCallback(this)
+    NativeDriveVideoPlugin.registerView(viewId, this)
+    emitState("init")
+  }
+
+  override fun getView(): View = rootView
+
+  override fun dispose() {
+    closed = true
+    clearReconnect()
+    closeSocket()
+    releaseDecoder()
+    clearOverlay()
+    try {
+      decodeThread.quitSafely()
+    } catch (_: Throwable) {
+    }
+    NativeDriveVideoPlugin.unregisterView(viewId)
+    emitState("disposed")
+  }
+
+  override fun surfaceCreated(holder: SurfaceHolder) {
+    surface = holder.surface
+    emitState("surface_created")
+    connect()
+  }
+
+  override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+    // no-op
+  }
+
+  override fun surfaceDestroyed(holder: SurfaceHolder) {
+    surface = null
+    emitState("surface_destroyed")
+    closeSocket()
+    releaseDecoder()
+  }
+
+  private fun connect() {
+    if (closed) return
+    if (surface == null || !surface!!.isValid) return
+    if (wsUrl.isBlank()) {
+      emitError("invalid_ws_url")
+      return
+    }
+    closeSocket()
+    connectAttempts += 1
+    emitState("connecting")
+    val request = Request.Builder().url(wsUrl).build()
+    webSocket =
+        okHttpClient.newWebSocket(
+            request,
+            object : WebSocketListener() {
+              override fun onOpen(webSocket: WebSocket, response: Response) {
+                emitState("connected")
+              }
+
+              override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                val copy = bytes.toByteArray()
+                decodeHandler.post { handlePacket(copy) }
+              }
+
+              override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                emitError("socket_failure:${t.message ?: "unknown"}")
+                scheduleReconnect(900)
+              }
+
+              override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                emitState("closed:$code")
+                scheduleReconnect(900)
+              }
+            },
+        )
+  }
+
+  private fun scheduleReconnect(delayMs: Long) {
+    if (closed) return
+    if (surface == null || !surface!!.isValid) return
+    clearReconnect()
+    reconnectRunnable =
+        Runnable {
+          reconnectRunnable = null
+          connect()
+        }
+    reconnectHandler.postDelayed(reconnectRunnable!!, delayMs)
+  }
+
+  private fun clearReconnect() {
+    reconnectRunnable?.let {
+      reconnectHandler.removeCallbacks(it)
+    }
+    reconnectRunnable = null
+  }
+
+  private fun closeSocket() {
+    val ws = webSocket
+    webSocket = null
+    try {
+      ws?.close(1000, "dispose")
+    } catch (_: Throwable) {
+    }
+  }
+
+  fun updateOverlay(overlay: Map<String, Any?>?): Boolean {
+    if (closed) return false
+    overlayView.updateOverlay(overlay)
+    return true
+  }
+
+  fun clearOverlay(): Boolean {
+    overlayView.clearOverlay()
+    return true
+  }
+
+  private fun releaseDecoder() {
+    codecConfigured = false
+    waitingKeyFrame = true
+    lastFrameId = -1
+    pendingFrameIds.clear()
+    val c = codec
+    codec = null
+    if (c != null) {
+      try {
+        c.stop()
+      } catch (_: Throwable) {
+      }
+      try {
+        c.release()
+      } catch (_: Throwable) {
+      }
+    }
+  }
+
+  private data class ParsedPacket(
+      val meta: JSONObject,
+      val payload: ByteArray,
+  )
+
+  private fun handlePacket(packet: ByteArray) {
+    if (closed) return
+    if (surface == null || !surface!!.isValid) return
+
+    val parsed = parsePacket(packet) ?: return
+    val meta = parsed.meta
+    val frameId = meta.optInt("frameId", -1)
+    if (frameId >= 0 && lastFrameId >= 0 && frameId <= lastFrameId) {
+      return
+    }
+    if (frameId >= 0) {
+      lastFrameId = frameId
+    }
+
+    val width = meta.optInt("width", 0).coerceAtLeast(0)
+    val height = meta.optInt("height", 0).coerceAtLeast(0)
+    if (width > 0 && height > 0 && (width != currentWidth || height != currentHeight)) {
+      currentWidth = width
+      currentHeight = height
+      emitMeta(width, height)
+    }
+
+    val keyByMeta =
+        meta.optBoolean("keyFrame", false) || ((meta.optInt("flags", 0) and 0x8) != 0)
+    val annexb = toAnnexB(parsed.payload, keyByMeta) ?: return
+
+    if (!codecConfigured) {
+      if (!keyByMeta) return
+      val w = if (width > 0) width else 1928
+      val h = if (height > 0) height else 1208
+      if (!configureDecoder(w, h)) {
+        emitError("decoder_init_failed")
+        return
+      }
+    }
+
+    val isKey = keyByMeta
+    if (waitingKeyFrame && !isKey) return
+    waitingKeyFrame = false
+
+    val ts =
+        when {
+          meta.has("timestampEof") -> meta.optLong("timestampEof")
+          meta.has("timestampSof") -> meta.optLong("timestampSof")
+          else -> System.nanoTime()
+        }
+    val ptsUs = if (ts > 0L) ts / 1000L else (System.nanoTime() / 1000L)
+    queueFrame(annexb, ptsUs, frameId)
+  }
+
+  private fun configureDecoder(width: Int, height: Int): Boolean {
+    releaseDecoder()
+    val s = surface ?: return false
+    return try {
+      val localCodec = MediaCodec.createDecoderByType("video/avc")
+      val format = MediaFormat.createVideoFormat("video/avc", width, height)
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+      }
+      format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, width * height)
+      localCodec.configure(format, s, null, 0)
+      localCodec.start()
+      codec = localCodec
+      codecConfigured = true
+      waitingKeyFrame = true
+      emitState("decoder_configured_${width}x$height")
+      true
+    } catch (t: Throwable) {
+      Log.w(NATIVE_VIDEO_TAG, "configureDecoder failed", t)
+      releaseDecoder()
+      false
+    }
+  }
+
+  private fun queueFrame(frame: ByteArray, ptsUs: Long, frameId: Int) {
+    val localCodec = codec ?: return
+    try {
+      val inputIndex = localCodec.dequeueInputBuffer(0)
+      if (inputIndex < 0) return
+      val input = localCodec.getInputBuffer(inputIndex) ?: return
+      input.clear()
+      input.put(frame)
+      localCodec.queueInputBuffer(inputIndex, 0, frame.size, ptsUs, 0)
+      if (frameId >= 0) {
+        pendingFrameIds.addLast(frameId)
+      }
+      drainOutput(localCodec)
+    } catch (t: Throwable) {
+      emitError("decoder_queue_failed:${t.message ?: "unknown"}")
+      releaseDecoder()
+    }
+  }
+
+  private fun drainOutput(localCodec: MediaCodec) {
+    val info = MediaCodec.BufferInfo()
+    while (true) {
+      val outIndex = localCodec.dequeueOutputBuffer(info, 0)
+      when {
+        outIndex >= 0 -> {
+          val renderedFrameId = if (pendingFrameIds.isEmpty()) -1 else pendingFrameIds.removeFirst()
+          if (renderedFrameId >= 0) {
+            emitFrame(renderedFrameId)
+          }
+          localCodec.releaseOutputBuffer(outIndex, true)
+        }
+
+        outIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> return
+        outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+          val format = localCodec.outputFormat
+          val w = format.getInteger(MediaFormat.KEY_WIDTH)
+          val h = format.getInteger(MediaFormat.KEY_HEIGHT)
+          emitMeta(w, h)
+        }
+
+        else -> return
+      }
+    }
+  }
+
+  private fun parsePacket(packet: ByteArray): ParsedPacket? {
+    if (packet.size < 6) return null
+    val metaLen =
+        ((packet[0].toInt() and 0xFF) shl 24) or
+            ((packet[1].toInt() and 0xFF) shl 16) or
+            ((packet[2].toInt() and 0xFF) shl 8) or
+            (packet[3].toInt() and 0xFF)
+    if (metaLen <= 1 || metaLen > 65536) return null
+    val offset = 4 + metaLen
+    if (offset >= packet.size) return null
+    return try {
+      val metaText = String(packet, 4, metaLen, Charsets.UTF_8)
+      val meta = JSONObject(metaText)
+      val payload = packet.copyOfRange(offset, packet.size)
+      ParsedPacket(meta, payload)
+    } catch (_: Throwable) {
+      null
+    }
+  }
+
+  private fun hasStartCode(data: ByteArray): Boolean {
+    var i = 0
+    while (i + 3 < data.size) {
+      if (data[i] == 0.toByte() && data[i + 1] == 0.toByte()) {
+        if (data[i + 2] == 1.toByte()) return true
+        if (i + 3 < data.size && data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte()) return true
+      }
+      i += 1
+    }
+    return false
+  }
+
+  private fun toAnnexB(data: ByteArray, isKeyFrame: Boolean): ByteArray? {
+    if (data.isEmpty()) return null
+    if (hasStartCode(data)) return data
+    if (isKeyFrame && data[0].toInt() == 1) {
+      val cfg = avcConfigToAnnexB(data)
+      if (cfg != null && cfg.isNotEmpty()) return cfg
+    }
+    val converted = avccPayloadToAnnexB(data, 4)
+    return converted ?: data
+  }
+
+  private fun avcConfigToAnnexB(data: ByteArray): ByteArray? {
+    if (data.size < 7) return null
+    if (data[0].toInt() != 1) return null
+    val lengthSize = ((data[4].toInt() and 0x03) + 1).coerceIn(1, 4)
+    var off = 5
+    val out = ByteArrayOutputStream(data.size + 64)
+
+    val spsCount = data[off].toInt() and 0x1F
+    off += 1
+    for (i in 0 until spsCount) {
+      if (off + 2 > data.size) return null
+      val len = ((data[off].toInt() and 0xFF) shl 8) or (data[off + 1].toInt() and 0xFF)
+      off += 2
+      if (len <= 0 || off + len > data.size) return null
+      out.write(byteArrayOf(0, 0, 0, 1))
+      out.write(data, off, len)
+      off += len
+    }
+
+    if (off + 1 > data.size) return null
+    val ppsCount = data[off].toInt() and 0xFF
+    off += 1
+    for (i in 0 until ppsCount) {
+      if (off + 2 > data.size) return null
+      val len = ((data[off].toInt() and 0xFF) shl 8) or (data[off + 1].toInt() and 0xFF)
+      off += 2
+      if (len <= 0 || off + len > data.size) return null
+      out.write(byteArrayOf(0, 0, 0, 1))
+      out.write(data, off, len)
+      off += len
+    }
+
+    if (off < data.size) {
+      val remain = data.copyOfRange(off, data.size)
+      val payload = avccPayloadToAnnexB(remain, lengthSize)
+      if (payload != null && payload.isNotEmpty()) {
+        out.write(payload)
+      }
+    }
+    return out.toByteArray()
+  }
+
+  private fun avccPayloadToAnnexB(data: ByteArray, lengthSize: Int): ByteArray? {
+    val ls = lengthSize.coerceIn(1, 4)
+    var off = 0
+    val out = ByteArrayOutputStream(data.size + 64)
+    while (off + ls <= data.size) {
+      var nalLen = 0
+      for (i in 0 until ls) {
+        nalLen = (nalLen shl 8) or (data[off + i].toInt() and 0xFF)
+      }
+      off += ls
+      if (nalLen <= 0 || off + nalLen > data.size) return null
+      out.write(byteArrayOf(0, 0, 0, 1))
+      out.write(data, off, nalLen)
+      off += nalLen
+    }
+    if (off != data.size) return null
+    return out.toByteArray()
+  }
+
+  private fun emitMeta(width: Int, height: Int) {
+    NativeDriveVideoPlugin.emit(
+        mapOf(
+            "viewId" to viewId,
+            "type" to "camera_meta",
+            "camera" to cameraName,
+            "width" to width,
+            "height" to height,
+        ))
+  }
+
+  private fun emitFrame(frameId: Int) {
+    NativeDriveVideoPlugin.emit(
+        mapOf(
+            "viewId" to viewId,
+            "type" to "camera_frame",
+            "camera" to cameraName,
+            "frameId" to frameId,
+        ))
+  }
+
+  private fun emitError(reason: String) {
+    NativeDriveVideoPlugin.emit(
+        mapOf(
+            "viewId" to viewId,
+            "type" to "camera_error",
+            "camera" to cameraName,
+            "reason" to reason,
+        ))
+  }
+
+  private fun emitState(state: String) {
+    NativeDriveVideoPlugin.emit(
+        mapOf(
+            "viewId" to viewId,
+            "type" to "camera_state",
+            "camera" to cameraName,
+            "state" to state,
+            "attempt" to connectAttempts,
+        ))
+  }
+
+  private fun parseCameraName(url: String): String {
+    val fallback = "road"
+    return try {
+      val path = Uri.parse(url).path.orEmpty()
+      when {
+        path.endsWith("/wideRoad", ignoreCase = true) -> "wideRoad"
+        path.endsWith("/road", ignoreCase = true) -> "road"
+        else -> fallback
+      }
+    } catch (_: Throwable) {
+      fallback
+    }
+  }
+}
+
+private class NativeDriveOverlayView(context: Context) : View(context) {
+  private data class OverlayPolygon(
+      val points: FloatArray,
+      val fillColor: Int,
+      val strokeColor: Int?,
+      val strokeWidth: Float,
+  )
+
+  private data class OverlayLabel(
+      val x: Float,
+      val y: Float,
+      val text: String,
+      val color: Int,
+      val size: Float,
+  )
+
+  @Volatile private var polygons: List<OverlayPolygon> = emptyList()
+  @Volatile private var labels: List<OverlayLabel> = emptyList()
+  @Volatile private var payloadCanvasWidth: Float = 0f
+  @Volatile private var payloadCanvasHeight: Float = 0f
+  private val reusablePath = android.graphics.Path()
+  private val fillPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+    style = android.graphics.Paint.Style.FILL
+  }
+  private val strokePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+    style = android.graphics.Paint.Style.STROKE
+  }
+  private val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+    style = android.graphics.Paint.Style.FILL
+    textAlign = android.graphics.Paint.Align.LEFT
+    typeface = Typeface.MONOSPACE
+  }
+
+  fun updateOverlay(payload: Map<String, Any?>?) {
+    if (payload == null) {
+      clearOverlay()
+      return
+    }
+    payloadCanvasWidth = ((payload["canvasWidth"] as? Number)?.toFloat() ?: 0f)
+    payloadCanvasHeight = ((payload["canvasHeight"] as? Number)?.toFloat() ?: 0f)
+    val rawPolygons = payload["polygons"] as? List<*> ?: run {
+      clearOverlay()
+      return
+    }
+    val parsed = ArrayList<OverlayPolygon>(rawPolygons.size)
+    for (raw in rawPolygons) {
+      val item = raw as? Map<*, *> ?: continue
+      val pointsRaw = item["points"] as? List<*> ?: continue
+      if (pointsRaw.size < 6 || pointsRaw.size % 2 != 0) continue
+      val pts = FloatArray(pointsRaw.size)
+      var ok = true
+      for (i in pointsRaw.indices) {
+        val n = pointsRaw[i] as? Number
+        if (n == null) {
+          ok = false
+          break
+        }
+        pts[i] = n.toFloat()
+      }
+      if (!ok) continue
+
+      val fillColor = (item["fillColor"] as? Number)?.toInt() ?: Color.TRANSPARENT
+      val strokeColor = (item["strokeColor"] as? Number)?.toInt()
+      val strokeWidth = ((item["strokeWidth"] as? Number)?.toFloat() ?: 0f).coerceAtLeast(0f)
+      parsed.add(
+          OverlayPolygon(
+              points = pts,
+              fillColor = fillColor,
+              strokeColor = strokeColor,
+              strokeWidth = strokeWidth,
+          ))
+    }
+    val rawLabels = payload["labels"] as? List<*>
+    val parsedLabels =
+        if (rawLabels.isNullOrEmpty()) {
+          emptyList()
+        } else {
+          val out = ArrayList<OverlayLabel>(rawLabels.size)
+          for (raw in rawLabels) {
+            val item = raw as? Map<*, *> ?: continue
+            val x = (item["x"] as? Number)?.toFloat() ?: continue
+            val y = (item["y"] as? Number)?.toFloat() ?: continue
+            val text = item["text"]?.toString()?.trim().orEmpty()
+            if (text.isEmpty()) continue
+            val color = (item["color"] as? Number)?.toInt() ?: Color.WHITE
+            val size = ((item["size"] as? Number)?.toFloat() ?: 10f).coerceAtLeast(7f)
+            out.add(
+                OverlayLabel(
+                    x = x,
+                    y = y,
+                    text = text,
+                    color = color,
+                    size = size,
+                ))
+          }
+          out
+        }
+
+    polygons = parsed
+    labels = parsedLabels
+    postInvalidateOnAnimation()
+  }
+
+  fun clearOverlay() {
+    polygons = emptyList()
+    labels = emptyList()
+    payloadCanvasWidth = 0f
+    payloadCanvasHeight = 0f
+    postInvalidateOnAnimation()
+  }
+
+  override fun onDraw(canvas: Canvas) {
+    super.onDraw(canvas)
+    if (polygons.isEmpty() && labels.isEmpty()) return
+    val drawWidth = width.toFloat()
+    val drawHeight = height.toFloat()
+    if (drawWidth <= 1f || drawHeight <= 1f) return
+    val srcWidth = if (payloadCanvasWidth > 1f) payloadCanvasWidth else drawWidth
+    val srcHeight = if (payloadCanvasHeight > 1f) payloadCanvasHeight else drawHeight
+    val scaleX = if (srcWidth > 1f) drawWidth / srcWidth else 1f
+    val scaleY = if (srcHeight > 1f) drawHeight / srcHeight else 1f
+    val strokeScale = ((scaleX + scaleY) * 0.5f).coerceAtLeast(0.5f)
+    for (poly in polygons) {
+      if (poly.points.size < 6) continue
+      reusablePath.reset()
+      reusablePath.moveTo(poly.points[0] * scaleX, poly.points[1] * scaleY)
+      var i = 2
+      while (i + 1 < poly.points.size) {
+        reusablePath.lineTo(poly.points[i] * scaleX, poly.points[i + 1] * scaleY)
+        i += 2
+      }
+      reusablePath.close()
+      fillPaint.color = poly.fillColor
+      canvas.drawPath(reusablePath, fillPaint)
+      if (poly.strokeColor != null && poly.strokeWidth > 0f) {
+        strokePaint.color = poly.strokeColor
+        strokePaint.strokeWidth = (poly.strokeWidth * strokeScale).coerceAtLeast(1f)
+        canvas.drawPath(reusablePath, strokePaint)
+      }
+    }
+    for (label in labels) {
+      textPaint.color = label.color
+      textPaint.textSize = (label.size * strokeScale).coerceIn(8f, 28f)
+      textPaint.setShadowLayer(3f, 0f, 0f, Color.BLACK)
+      canvas.drawText(label.text, label.x * scaleX, label.y * scaleY, textPaint)
+    }
+  }
+}

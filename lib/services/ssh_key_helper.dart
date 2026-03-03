@@ -14,31 +14,35 @@ class SSHKeyHelper {
   /// Generates a new RSA key pair, saves it securely, and returns the public key.
   Future<Map<String, String>> generateAndSaveKey() async {
     final keyPair = await compute(_generateRSAKeyPairIsolate, null);
-    
+
     // 개인키와 공개키 모두 저장
     await _storage.write(key: 'user_private_key', value: keyPair['private']);
     await _storage.write(key: 'user_public_key', value: keyPair['public']);
-    
+
     // 저장 확인 로그
     final savedPrivate = await _storage.read(key: 'user_private_key');
     final savedPublic = await _storage.read(key: 'user_public_key');
     debugPrint("=== KEY SAVE CHECK ===");
-    debugPrint("Private key saved: ${savedPrivate != null ? 'YES (${savedPrivate.length} chars)' : 'NO'}");
-    debugPrint("Private key starts with: ${savedPrivate?.substring(0, 50) ?? 'null'}");
-    debugPrint("Public key saved: ${savedPublic != null ? 'YES (${savedPublic.length} chars)' : 'NO'}");
+    debugPrint(
+        "Private key saved: ${savedPrivate != null ? 'YES (${savedPrivate.length} chars)' : 'NO'}");
+    debugPrint(
+        "Private key starts with: ${savedPrivate?.substring(0, 50) ?? 'null'}");
+    debugPrint(
+        "Public key saved: ${savedPublic != null ? 'YES (${savedPublic.length} chars)' : 'NO'}");
     debugPrint("Public key: ${savedPublic ?? 'null'}");
     debugPrint("======================");
-    
+
     return keyPair;
   }
-  
+
   Future<String?> getStoredPublicKey() async {
     return await _storage.read(key: 'user_public_key');
   }
 
   static Map<String, String> _generateRSAKeyPairIsolate(_) {
     final secureRandom = SecureRandom('Fortuna')
-      ..seed(KeyParameter(Uint8List.fromList(List.generate(32, (_) => Random.secure().nextInt(255)))));
+      ..seed(KeyParameter(Uint8List.fromList(
+          List.generate(32, (_) => Random.secure().nextInt(255)))));
 
     final keyGen = RSAKeyGenerator()
       ..init(ParametersWithRandom(
@@ -68,7 +72,7 @@ class SSHKeyHelper {
     var qInv = q.modInverse(p);
 
     var bytes = <int>[];
-    
+
     // Sequence content
     var content = <int>[];
     content.addAll(_encodeASN1Integer(version));
@@ -82,14 +86,14 @@ class SSHKeyHelper {
     content.addAll(_encodeASN1Integer(qInv));
 
     // Sequence header
-    bytes.add(0x30); 
+    bytes.add(0x30);
     _writeASN1Length(bytes, content.length);
     bytes.addAll(content);
 
     var base64Data = base64.encode(bytes);
     var pem = "-----BEGIN RSA PRIVATE KEY-----\n";
     for (var i = 0; i < base64Data.length; i += 64) {
-      pem += base64Data.substring(i, min(i + 64, base64Data.length)) + "\n";
+      pem += "${base64Data.substring(i, min(i + 64, base64Data.length))}\n";
     }
     pem += "-----END RSA PRIVATE KEY-----";
     return pem;
@@ -119,7 +123,7 @@ class SSHKeyHelper {
   }
 
   static String _encodePublicKeyToSsh(RSAPublicKey publicKey) {
-    final keyType = 'ssh-rsa';
+    const keyType = 'ssh-rsa';
     final e = publicKey.publicExponent!;
     final n = publicKey.modulus!;
 
@@ -149,13 +153,13 @@ class SSHKeyHelper {
     _writeInt(buffer, bytes.length);
     buffer.addAll(bytes);
   }
-  
+
   static List<int> _encodeBigInt(BigInt number) {
     if (number == BigInt.zero) return [0];
 
     var hex = number.toRadixString(16);
     if (hex.length % 2 != 0) hex = '0$hex';
-    
+
     var bytes = <int>[];
     for (var i = 0; i < hex.length; i += 2) {
       bytes.add(int.parse(hex.substring(i, i + 2), radix: 16));
@@ -169,24 +173,27 @@ class SSHKeyHelper {
   }
 
   /// Connects using password, appends the public key to authorized_keys, and verifies connection.
-  Future<Map<String, dynamic>> installKey(String ip, int port, String username, String password, String publicKey) async {
+  Future<Map<String, dynamic>> installKey(String ip, int port, String username,
+      String password, String publicKey) async {
     SSHClient? client;
     try {
-      final socket = await SSHSocket.connect(ip, port, timeout: const Duration(seconds: 10));
-      
+      final socket = await SSHSocket.connect(ip, port,
+          timeout: const Duration(seconds: 10));
+
       client = SSHClient(
         socket,
         username: username,
         onPasswordRequest: () => password,
       );
-      
+
       // 인증 대기
       await client.authenticated.timeout(const Duration(seconds: 15));
 
       // Script to install key in multiple locations for compatibility
       // openpilot uses /data/params/d/GithubSshKeys (read by sshd via AuthorizedKeysCommand)
       // Also install to ~/.ssh/authorized_keys as fallback
-      final escapedKey = publicKey.replaceAll('"', '\\"').replaceAll("'", "'\\''");
+      final escapedKey =
+          publicKey.replaceAll('"', '\\"').replaceAll("'", "'\\''");
       final cmd = '''
 # Ensure directories exist
 mkdir -p /data/params/d 2>/dev/null || true
@@ -219,24 +226,35 @@ chmod 700 ~/.ssh 2>/dev/null || true
 
 echo "INSTALL_OK"
 ''';
-      
+
       final result = await client.run(cmd);
       final output = utf8.decode(result);
-      
+
       if (output.contains('INSTALL_OK')) {
         return {'success': true, 'message': 'Key installed successfully'};
       } else {
-        return {'success': false, 'message': 'Installation may have issues: $output'};
+        return {
+          'success': false,
+          'message': 'Installation may have issues: $output'
+        };
       }
     } on SSHAuthFailError catch (e) {
       print("SSH Auth Error: $e");
-      return {'success': false, 'message': '인증 실패 - 비밀번호 "comma"가 맞는지 확인하세요', 'error': e.toString()};
+      return {
+        'success': false,
+        'message': '인증 실패 - 비밀번호 "comma"가 맞는지 확인하세요',
+        'error': e.toString()
+      };
     } on SSHAuthAbortError catch (e) {
       print("SSH Auth Abort: $e");
       return {'success': false, 'message': '인증 중단됨', 'error': e.toString()};
     } on SocketException catch (e) {
       print("Socket Error: $e");
-      return {'success': false, 'message': '연결 실패 - IP/네트워크 확인', 'error': e.toString()};
+      return {
+        'success': false,
+        'message': '연결 실패 - IP/네트워크 확인',
+        'error': e.toString()
+      };
     } on TimeoutException catch (e) {
       print("Timeout: $e");
       return {'success': false, 'message': '연결 시간 초과', 'error': e.toString()};
@@ -247,30 +265,32 @@ echo "INSTALL_OK"
       client?.close();
     }
   }
-  
+
   /// Test SSH key authentication
-  Future<Map<String, dynamic>> testKeyAuth(String ip, int port, String username, String privateKey) async {
+  Future<Map<String, dynamic>> testKeyAuth(
+      String ip, int port, String username, String privateKey) async {
     SSHClient? client;
     try {
-      final socket = await SSHSocket.connect(ip, port, timeout: const Duration(seconds: 10));
-      
+      final socket = await SSHSocket.connect(ip, port,
+          timeout: const Duration(seconds: 10));
+
       final keys = SSHKeyPair.fromPem(privateKey);
       if (keys.isEmpty) {
         return {'success': false, 'message': '유효하지 않은 개인키'};
       }
-      
+
       client = SSHClient(
         socket,
         username: username,
         identities: keys,
       );
-      
+
       await client.authenticated.timeout(const Duration(seconds: 15));
-      
+
       // Try a simple command
       final result = await client.run('echo OK');
       final output = utf8.decode(result);
-      
+
       if (output.contains('OK')) {
         return {'success': true, 'message': 'SSH 키 인증 성공'};
       } else {
@@ -278,7 +298,11 @@ echo "INSTALL_OK"
       }
     } on SSHAuthFailError catch (e) {
       print("SSH Key Auth Error: $e");
-      return {'success': false, 'message': 'SSH 키 인증 실패 - 키가 기기에 등록되지 않았을 수 있습니다', 'error': e.toString()};
+      return {
+        'success': false,
+        'message': 'SSH 키 인증 실패 - 키가 기기에 등록되지 않았을 수 있습니다',
+        'error': e.toString()
+      };
     } catch (e) {
       print("Error testing key: $e");
       return {'success': false, 'message': e.toString(), 'error': e.toString()};
