@@ -1,8 +1,12 @@
 import 'dart:async';
+
 import 'package:flutter/material.dart';
-import 'package:webview_flutter/webview_flutter.dart';
-import '../services/github_service.dart';
+import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
+
 import '../services/diagnostics_service.dart';
+import '../services/github_oauth_ui_service.dart';
+import '../services/github_service.dart';
 import '../widgets/custom_toast.dart';
 
 class GithubLoginScreen extends StatefulWidget {
@@ -20,22 +24,17 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
   String? _verificationUriComplete;
   String? _deviceCode;
   int _interval = 5;
+  int _expiresInTotal = 900;
   bool _isLoading = true;
   bool _isPolling = false;
-  bool _approvalDetected = false;
   bool _pollInFlight = false;
+  bool _flowCompleted = false;
   int _pollErrorCount = 0;
   int _pollAttempt = 0;
-  int _pendingAfterApprovalCount = 0;
-  int _maxPendingAfterApproval = 90;
-  int _expiresInTotal = 900;
-  bool _flowCompleted = false;
+  String _pollStatusText = "브라우저 승인 대기 중...";
   DateTime? _pollDeadline;
-  DateTime? _approvalDetectedAt;
   DateTime? _nextPollAllowedAt;
-  String _pollStatusText = "인증 대기 중...";
   Timer? _uiTicker;
-  WebViewController? _webViewController;
   final DiagnosticsService _diag = DiagnosticsService.instance;
 
   @override
@@ -48,7 +47,15 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
   void dispose() {
     _isPolling = false;
     _uiTicker?.cancel();
+    unawaited(GitHubOAuthUiService.cancelCodeNotification());
+    unawaited(GitHubOAuthUiService.hideCodeHud());
     super.dispose();
+  }
+
+  String _targetUri() {
+    return _verificationUriComplete ??
+        _verificationUri ??
+        'https://github.com/login/device';
   }
 
   void _closeWithError(String message) {
@@ -56,17 +63,22 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
     _flowCompleted = true;
     _isPolling = false;
     _uiTicker?.cancel();
+    unawaited(GitHubOAuthUiService.cancelCodeNotification());
+    unawaited(GitHubOAuthUiService.hideCodeHud());
     _diag.warn('github_oauth', message);
     if (!mounted) return;
     CustomToast.show(context, message, isError: true);
     Navigator.pop(context);
   }
 
-  void _closeWithToken(String token) {
+  Future<void> _closeWithToken(String token) async {
     if (_flowCompleted) return;
     _flowCompleted = true;
     _isPolling = false;
     _uiTicker?.cancel();
+    await GitHubOAuthUiService.bringAppToFront();
+    unawaited(GitHubOAuthUiService.cancelCodeNotification());
+    unawaited(GitHubOAuthUiService.hideCodeHud());
     _diag.info('github_oauth', 'Device flow finished with token');
     if (!mounted) return;
     CustomToast.show(context, "GitHub 로그인 성공!");
@@ -79,45 +91,116 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
     return DateTime.now().isAfter(deadline);
   }
 
+  Future<void> _copyUserCode({bool toast = false}) async {
+    final code = _userCode;
+    if (code == null || code.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: code));
+    if (toast && mounted) {
+      CustomToast.show(context, "코드를 복사했습니다.");
+    }
+  }
+
+  Future<void> _showCodeNotification() async {
+    final code = _userCode?.trim() ?? '';
+    if (code.isEmpty) return;
+    await GitHubOAuthUiService.showCodeNotification(
+      code: code,
+      url: _targetUri(),
+    );
+  }
+
+  Future<void> _showMiniHudIfPossible() async {
+    final code = _userCode?.trim() ?? '';
+    if (code.isEmpty) return;
+    final shown = await GitHubOAuthUiService.showCodeHud(code);
+    if (shown) return;
+    final hasPermission = await GitHubOAuthUiService.hasOverlayPermission();
+    if (!hasPermission) {
+      _diag.warn(
+          'github_oauth', 'Mini HUD skipped: overlay permission missing');
+    }
+  }
+
+  Future<bool> _openInExternalBrowser({bool showFailureToast = true}) async {
+    final raw = _targetUri();
+    Uri uri;
+    try {
+      uri = Uri.parse(raw);
+    } catch (_) {
+      if (showFailureToast && mounted) {
+        CustomToast.show(context, '브라우저 URL이 올바르지 않습니다.', isError: true);
+      }
+      return false;
+    }
+
+    await _copyUserCode();
+    await _showCodeNotification();
+    await _showMiniHudIfPossible();
+
+    try {
+      final launched = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (!launched && showFailureToast && mounted) {
+        CustomToast.show(context, '브라우저를 열 수 없습니다.', isError: true);
+      }
+      return launched;
+    } catch (e) {
+      if (showFailureToast && mounted) {
+        CustomToast.show(context, '브라우저 실행 실패: $e', isError: true);
+      }
+      return false;
+    }
+  }
+
   Future<void> _initiateDeviceFlow() async {
     try {
       final deviceData = await widget.githubService.initiateDeviceFlow();
-      if (mounted) {
-        final expiresRaw = deviceData['expires_in'];
-        final intervalRaw = deviceData['interval'];
-        final expiresIn = expiresRaw is int
-            ? expiresRaw
-            : int.tryParse(expiresRaw?.toString() ?? '') ?? 900;
-        final interval = intervalRaw is int
-            ? intervalRaw
-            : int.tryParse(intervalRaw?.toString() ?? '') ?? 5;
-        final derivedMaxPending = (expiresIn ~/ 4).clamp(30, 120).toInt();
-        setState(() {
-          _userCode = deviceData['user_code'];
-          _verificationUri = deviceData['verification_uri'];
-          _verificationUriComplete = deviceData['verification_uri_complete'];
-          _deviceCode = deviceData['device_code'];
-          _interval = interval;
-          _isLoading = false;
-          _isPolling = true;
-          _approvalDetected = false;
-          _pollErrorCount = 0;
-          _pollAttempt = 0;
-          _pendingAfterApprovalCount = 0;
-          _flowCompleted = false;
-          _maxPendingAfterApproval = derivedMaxPending;
-          _expiresInTotal = expiresIn;
-          _pollDeadline = DateTime.now().add(Duration(seconds: expiresIn));
-          _approvalDetectedAt = null;
-          _pollStatusText = "인증 대기 중...";
-        });
-        _diag.info(
-          'github_oauth',
-          'Screen flow init interval=${_interval}s expires=${expiresIn}s maxAfterApproval=${_maxPendingAfterApproval}s',
+      if (!mounted) return;
+      final expiresRaw = deviceData['expires_in'];
+      final intervalRaw = deviceData['interval'];
+      final expiresIn = expiresRaw is int
+          ? expiresRaw
+          : int.tryParse(expiresRaw?.toString() ?? '') ?? 900;
+      final interval = intervalRaw is int
+          ? intervalRaw
+          : int.tryParse(intervalRaw?.toString() ?? '') ?? 5;
+
+      setState(() {
+        _userCode = deviceData['user_code']?.toString();
+        _verificationUri = deviceData['verification_uri']?.toString();
+        _verificationUriComplete =
+            deviceData['verification_uri_complete']?.toString();
+        _deviceCode = deviceData['device_code']?.toString();
+        _interval = interval;
+        _expiresInTotal = expiresIn;
+        _isLoading = false;
+        _isPolling = true;
+        _flowCompleted = false;
+        _pollErrorCount = 0;
+        _pollAttempt = 0;
+        _pollStatusText = "브라우저 승인 대기 중...";
+        _pollDeadline = DateTime.now().add(Duration(seconds: expiresIn));
+      });
+
+      _diag.info(
+        'github_oauth',
+        'Screen flow init interval=${_interval}s expires=${expiresIn}s',
+      );
+
+      await _copyUserCode();
+      await _showCodeNotification();
+      _startUiTicker();
+      unawaited(_startPolling());
+
+      final launched = await _openInExternalBrowser(showFailureToast: false);
+      if (!launched && mounted) {
+        CustomToast.show(
+          context,
+          "자동으로 브라우저를 열지 못했습니다. '브라우저 열기'를 눌러 진행하세요.",
+          isError: true,
         );
-        _initWebView();
-        _startUiTicker();
-        _startPolling();
       }
     } catch (e) {
       if (mounted) {
@@ -127,195 +210,9 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
     }
   }
 
-  void _initWebView() {
-    final targetUri = _verificationUriComplete ??
-        _verificationUri ??
-        'https://github.com/login/device';
-
-    _webViewController = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(const Color(0xFF1E1E1E))
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onProgress: (int progress) {},
-          onPageStarted: (String url) {
-            if (url.contains('github.com/login/device/success')) {
-              _diag.info('github_oauth', 'Success page started: $url');
-            }
-          },
-          onPageFinished: (String url) {
-            _handlePotentialApprovalUrl(url);
-            unawaited(_injectOtpFocusAssist());
-            Future.delayed(const Duration(milliseconds: 350), () {
-              if (mounted) {
-                unawaited(_injectOtpFocusAssist());
-              }
-            });
-          },
-          onNavigationRequest: (NavigationRequest request) {
-            _handlePotentialApprovalUrl(request.url);
-            return NavigationDecision.navigate;
-          },
-          onWebResourceError: (WebResourceError error) {
-            _diag.warn(
-              'github_webview',
-              'Web resource error code=${error.errorCode} type=${error.errorType} desc=${error.description}',
-            );
-          },
-        ),
-      )
-      ..loadRequest(Uri.parse(targetUri));
-    setState(() {});
-  }
-
-  Future<void> _injectOtpFocusAssist() async {
-    if (_webViewController == null) return;
-    try {
-      await _webViewController!.runJavaScript('''
-(function () {
-  try {
-    var inputs = Array.from(document.querySelectorAll('input')).filter(function (el) {
-      if (el.disabled || el.readOnly) return false;
-      var t = (el.type || 'text').toLowerCase();
-      if (!(t === 'text' || t === 'tel' || t === 'search' || t === '' || t === 'number')) return false;
-      var maxLen = parseInt(el.maxLength || el.getAttribute('maxlength') || '0', 10);
-      if (maxLen !== 1) return false;
-      var rect = el.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    });
-
-    if (inputs.length < 6) return;
-    if (inputs.length > 10) inputs = inputs.slice(0, 10);
-
-    var dispatchValueEvents = function (el) {
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    };
-
-    inputs.forEach(function (el, idx) {
-      if (el.dataset.clAutonextBound === '1') return;
-      el.dataset.clAutonextBound = '1';
-      el.setAttribute('autocapitalize', 'characters');
-      el.setAttribute('autocomplete', 'one-time-code');
-      el.setAttribute('autocorrect', 'off');
-      el.setAttribute('spellcheck', 'false');
-      el.setAttribute('inputmode', 'text');
-      el.setAttribute('data-lpignore', 'true');
-      el.setAttribute('data-1p-ignore', 'true');
-      el.setAttribute('data-bwignore', 'true');
-      try { el.autocomplete = 'off'; } catch (_) {}
-
-      el.addEventListener('input', function () {
-        var v = (el.value || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-        if (v !== el.value) el.value = v;
-        if (v.length > 1) {
-          el.value = v.slice(0, 1);
-          dispatchValueEvents(el);
-        }
-        if (el.value && idx < inputs.length - 1) {
-          inputs[idx + 1].focus();
-          inputs[idx + 1].select && inputs[idx + 1].select();
-        }
-      });
-
-      el.addEventListener('keydown', function (e) {
-        if (e.key === 'ArrowLeft' && idx > 0) {
-          e.preventDefault();
-          inputs[idx - 1].focus();
-          inputs[idx - 1].select && inputs[idx - 1].select();
-          return;
-        }
-        if (e.key === 'ArrowRight' && idx < inputs.length - 1) {
-          e.preventDefault();
-          inputs[idx + 1].focus();
-          inputs[idx + 1].select && inputs[idx + 1].select();
-          return;
-        }
-
-        if (e.key === 'Backspace' && !el.value && idx > 0) {
-          e.preventDefault();
-          inputs[idx - 1].focus();
-          var prev = inputs[idx - 1];
-          prev.value = '';
-          dispatchValueEvents(prev);
-          prev.select && prev.select();
-          return;
-        }
-
-        if (e.key === 'Delete') {
-          e.preventDefault();
-          if (el.value) {
-            el.value = '';
-            dispatchValueEvents(el);
-            return;
-          }
-          if (idx < inputs.length - 1) {
-            var nextEl = inputs[idx + 1];
-            nextEl.value = '';
-            dispatchValueEvents(nextEl);
-            nextEl.focus();
-            nextEl.select && nextEl.select();
-            return;
-          }
-        }
-      });
-
-      el.addEventListener('paste', function (e) {
-        var clip = (e.clipboardData && e.clipboardData.getData('text')) || '';
-        if (!clip) return;
-        clip = clip.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-        if (!clip) return;
-        e.preventDefault();
-        for (var i = 0; i < inputs.length; i++) {
-          inputs[i].value = clip[i] || '';
-          dispatchValueEvents(inputs[i]);
-        }
-        var next = Math.min(clip.length, inputs.length - 1);
-        if (clip.length >= inputs.length) {
-          inputs[inputs.length - 1].blur();
-        } else {
-          inputs[next].focus();
-          inputs[next].select && inputs[next].select();
-        }
-      });
-    });
-
-    var active = document.activeElement;
-    var isInputActive = inputs.indexOf(active) >= 0;
-    if (!isInputActive) {
-      var firstEmpty = inputs.find(function (el) { return !el.value; });
-      (firstEmpty || inputs[0]).focus();
-    }
-  } catch (e) {}
-})();
-      ''');
-    } catch (_) {
-      // Ignore if the current page context blocks script execution.
-    }
-  }
-
-  void _handlePotentialApprovalUrl(String url) {
-    if (_approvalDetected) return;
-    if (!url.contains('github.com/login/device/success')) return;
-
-    if (mounted) {
-      setState(() {
-        _approvalDetected = true;
-        _approvalDetectedAt = DateTime.now();
-        _pollStatusText = "승인됨, 토큰 확인 중";
-        _pendingAfterApprovalCount = 0;
-      });
-    }
-    _diag.info('github_oauth', 'Approval URL detected');
-
-    // Poll once immediately after approval, then continue with server-guided interval.
-    unawaited(_pollTokenOnce(force: true));
-  }
-
-  Future<void> _pollTokenOnce({bool force = false}) async {
+  Future<void> _pollTokenOnce() async {
     if (!_isPolling || !mounted || _deviceCode == null || _pollInFlight) return;
-    if (!force &&
-        _nextPollAllowedAt != null &&
+    if (_nextPollAllowedAt != null &&
         DateTime.now().isBefore(_nextPollAllowedAt!)) {
       return;
     }
@@ -323,50 +220,33 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
       _closeWithError("인증 시간이 만료되었습니다. 다시 시도해주세요.");
       return;
     }
+
     _pollInFlight = true;
     _pollAttempt += 1;
 
     try {
       final token = await widget.githubService.pollForToken(_deviceCode!);
       if (token != null) {
-        _closeWithToken(token);
+        await _closeWithToken(token);
         return;
       }
 
       _pollErrorCount = 0;
-      if (_approvalDetected) {
-        _pendingAfterApprovalCount += 1;
-        final elapsed = DateTime.now()
-            .difference(_approvalDetectedAt ?? DateTime.now())
-            .inSeconds;
+      if (mounted) {
+        setState(() {
+          _pollStatusText = "브라우저 승인 대기 중...";
+        });
+      }
 
-        if (mounted) {
-          setState(() {
-            _pollStatusText = "승인됨, 토큰 확인 중";
-          });
-        }
-
-        if (elapsed >= _maxPendingAfterApproval ||
-            _pendingAfterApprovalCount >= _maxPendingAfterApproval) {
-          _closeWithError("승인 후 토큰 확인이 지연되고 있습니다. 네트워크 상태를 확인한 뒤 다시 시도해주세요.");
-          return;
-        }
-
-        if (_pollAttempt % 10 == 0) {
-          _diag.warn(
-            'github_oauth',
-            'Pending after approval elapsed=${elapsed}s attempts=$_pollAttempt',
-          );
-        }
-      } else if (_pollAttempt % 15 == 0) {
+      if (_pollAttempt % 15 == 0) {
         _diag.info('github_oauth',
-            'Still waiting for approval attempts=$_pollAttempt');
+            'Still waiting for browser approval attempts=$_pollAttempt');
       }
     } catch (e) {
       final message = e.toString();
       if (message.contains('slow_down')) {
         _interval += 5;
-        if (_interval > 15) _interval = 15;
+        if (_interval > 20) _interval = 20;
         if (mounted) {
           setState(() {
             _pollStatusText = "요청 간격 조정 중... (${_interval}s)";
@@ -427,26 +307,7 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
     final deadline = _pollDeadline;
     if (deadline == null) return _expiresInTotal;
     final remaining = deadline.difference(DateTime.now()).inSeconds;
-    if (remaining < 0) return 0;
-    return remaining;
-  }
-
-  int _remainingApprovalSeconds() {
-    final detectedAt = _approvalDetectedAt;
-    if (detectedAt == null) return _maxPendingAfterApproval;
-    final elapsed = DateTime.now().difference(detectedAt).inSeconds;
-    final remaining = _maxPendingAfterApproval - elapsed;
-    if (remaining < 0) return 0;
-    return remaining;
-  }
-
-  double _approvalProgressValue() {
-    if (_maxPendingAfterApproval <= 0) return 0;
-    final detectedAt = _approvalDetectedAt;
-    if (detectedAt == null) return 0;
-    final elapsed = DateTime.now().difference(detectedAt).inSeconds;
-    final raw = elapsed / _maxPendingAfterApproval;
-    return raw.clamp(0.0, 1.0).toDouble();
+    return remaining < 0 ? 0 : remaining;
   }
 
   @override
@@ -456,6 +317,8 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) {
           _isPolling = false;
+          unawaited(GitHubOAuthUiService.cancelCodeNotification());
+          unawaited(GitHubOAuthUiService.hideCodeHud());
         }
       },
       child: Scaffold(
@@ -465,48 +328,51 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
             icon: const Icon(Icons.close),
             onPressed: () {
               _isPolling = false;
+              unawaited(GitHubOAuthUiService.cancelCodeNotification());
+              unawaited(GitHubOAuthUiService.hideCodeHud());
               Navigator.of(context).pop();
             },
           ),
           actions: [
-            if (_webViewController != null)
-              IconButton(
-                icon: const Icon(Icons.refresh),
-                onPressed: () => _webViewController?.reload(),
-                tooltip: "새로고침",
-              ),
+            IconButton(
+              icon: const Icon(Icons.open_in_browser),
+              tooltip: "브라우저 열기",
+              onPressed: () => unawaited(_openInExternalBrowser()),
+            ),
           ],
         ),
         body: _isLoading
             ? const Center(child: CircularProgressIndicator())
-            : Column(
+            : ListView(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
                 children: [
-                  // 상단: 인증 코드 표시
                   Container(
                     width: double.infinity,
                     padding: const EdgeInsets.all(16),
                     decoration: BoxDecoration(
                       color: Colors.grey[900],
-                      border: Border(
-                        bottom: BorderSide(color: Colors.grey[700]!),
-                      ),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.grey[700]!),
                     ),
                     child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const Text(
-                          "코드 입력은 자동 처리됩니다",
-                          style: TextStyle(fontSize: 14, color: Colors.grey),
+                          "외부 브라우저에서 인증하세요",
+                          style: TextStyle(fontSize: 13, color: Colors.grey),
                         ),
-                        const SizedBox(height: 8),
+                        const SizedBox(height: 10),
                         Container(
+                          width: double.infinity,
                           padding: const EdgeInsets.symmetric(
-                              vertical: 12, horizontal: 24),
+                              vertical: 12, horizontal: 14),
                           decoration: BoxDecoration(
                             color: const Color(0xFFFF6D00),
                             borderRadius: BorderRadius.circular(8),
                           ),
                           child: Text(
                             _userCode ?? "ERROR",
+                            textAlign: TextAlign.center,
                             style: const TextStyle(
                               fontSize: 28,
                               fontWeight: FontWeight.bold,
@@ -515,74 +381,75 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
                             ),
                           ),
                         ),
-                        const SizedBox(height: 8),
-                        Text(
-                          _approvalDetected
-                              ? "승인 감지됨, 토큰 확인 중..."
-                              : "입력 시 다음 칸으로 자동 이동합니다. 승인하면 앱이 자동 완료됩니다.",
-                          style:
-                              TextStyle(fontSize: 12, color: Colors.grey[300]),
-                        ),
-                        const SizedBox(height: 8),
-                        if (_isPolling)
-                          Column(
-                            children: [
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  SizedBox(
-                                    width: 12,
-                                    height: 12,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: Colors.grey[400],
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Text(
-                                    _pollStatusText,
-                                    style: TextStyle(
-                                        fontSize: 12, color: Colors.grey[400]),
-                                  ),
-                                ],
+                        const SizedBox(height: 12),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: FilledButton.icon(
+                                onPressed: () =>
+                                    unawaited(_openInExternalBrowser()),
+                                icon: const Icon(Icons.open_in_browser),
+                                label: const Text("브라우저 열기"),
                               ),
-                              if (_approvalDetected) ...[
-                                const SizedBox(height: 6),
-                                Text(
-                                  "남은 시간 ${_remainingApprovalSeconds()}초",
-                                  style: TextStyle(
-                                      fontSize: 11, color: Colors.grey[400]),
-                                ),
-                                const SizedBox(height: 6),
-                                SizedBox(
-                                  width: 240,
-                                  child: LinearProgressIndicator(
-                                    value: _approvalProgressValue(),
-                                    minHeight: 4,
-                                    backgroundColor: Colors.grey[800],
-                                    valueColor:
-                                        const AlwaysStoppedAnimation<Color>(
-                                            Color(0xFFFF6D00)),
-                                  ),
-                                ),
-                              ] else ...[
-                                const SizedBox(height: 6),
-                                Text(
-                                  "인증 만료까지 ${_remainingFlowSeconds()}초",
-                                  style: TextStyle(
-                                      fontSize: 11, color: Colors.grey[500]),
-                                ),
-                              ],
-                            ],
-                          ),
+                            ),
+                            const SizedBox(width: 8),
+                            OutlinedButton.icon(
+                              onPressed: () =>
+                                  unawaited(_copyUserCode(toast: true)),
+                              icon: const Icon(Icons.copy_all),
+                              label: const Text("복사"),
+                            ),
+                          ],
+                        ),
                       ],
                     ),
                   ),
-                  // 하단: WebView로 GitHub 인증 페이지
-                  Expanded(
-                    child: _webViewController != null
-                        ? WebViewWidget(controller: _webViewController!)
-                        : const Center(child: CircularProgressIndicator()),
+                  const SizedBox(height: 14),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.surfaceContainer,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Theme.of(context).colorScheme.primary,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _pollStatusText,
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        ),
+                        Text(
+                          "${_remainingFlowSeconds()}s",
+                          style: TextStyle(
+                            fontSize: 12,
+                            color:
+                                Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    "안내\n"
+                    "1. 코드가 시스템 알림에 고정 표시됩니다.\n"
+                    "2. 오버레이 권한이 있으면 작은 코드 HUD가 함께 표시됩니다.\n"
+                    "3. 외부 브라우저에서 로그인/2FA/패스키(WebAuthn)를 진행하세요.\n"
+                    "4. 승인 후 앱이 자동으로 로그인 완료됩니다.",
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
                   ),
                 ],
               ),

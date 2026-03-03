@@ -1,15 +1,39 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class NativeOverlayHudService {
   NativeOverlayHudService._();
 
   static const MethodChannel _channel = MethodChannel('carrotlink/overlay_hud');
   static final RegExp _ipv4Regex = RegExp(r'^(\d{1,3}\.){3}\d{1,3}$');
+  static const String _enabledPrefKey = 'hud_overlay_enabled';
+  static bool? _enabledCache;
 
   static bool get _isAndroid =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
   static bool get isSupported => _isAndroid;
+
+  static Future<bool> isEnabled() async {
+    final cached = _enabledCache;
+    if (cached != null) return cached;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final enabled = prefs.getBool(_enabledPrefKey) ?? true;
+      _enabledCache = enabled;
+      return enabled;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  static Future<void> setEnabled(bool enabled) async {
+    _enabledCache = enabled;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_enabledPrefKey, enabled);
+    } catch (_) {}
+  }
 
   static Future<bool> hasPermission() async {
     if (!_isAndroid) return false;
@@ -50,6 +74,24 @@ class NativeOverlayHudService {
       await _channel.invokeMethod(
         'updateEndpoint',
         {'host': normalizedHost},
+      );
+    } catch (_) {}
+  }
+
+  static Future<void> updateFallbackMetrics({
+    double? cpuTempC,
+    double? memPct,
+    double? diskPct,
+  }) async {
+    if (!_isAndroid) return;
+    try {
+      await _channel.invokeMethod(
+        'updateFallbackMetrics',
+        {
+          'cpuTempC': cpuTempC,
+          'memPct': memPct,
+          'diskPct': diskPct,
+        },
       );
     } catch (_) {}
   }

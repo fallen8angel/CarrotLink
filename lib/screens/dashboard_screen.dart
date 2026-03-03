@@ -14,6 +14,7 @@ import '../../services/google_drive_service.dart';
 import '../../services/update_service.dart';
 import '../../services/diagnostics_service.dart';
 import '../../services/github_service.dart';
+import '../../services/native_overlay_hud_service.dart';
 import '../../widgets/custom_toast.dart';
 import '../../widgets/update_dialog.dart';
 import 'tabs/home_tab.dart';
@@ -33,12 +34,12 @@ class DashboardScreen extends StatefulWidget {
 class _DashboardScreenState extends State<DashboardScreen>
     with WidgetsBindingObserver {
   static const String _lastDashboardTabIndexKey = 'dashboard_last_tab_index';
+  static const int _tabCount = 5;
   int _currentIndex = 0;
   Timer? _reconnectTimer;
   StreamSubscription<String>? _discoverySubscription;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   Timer? _connectivityDebounceTimer;
-  static const _defaultSshPort = 22;
   static const _baseReconnectDelay = Duration(seconds: 2);
   static const _maxReconnectDelay = Duration(seconds: 45);
   List<ConnectivityResult>? _lastConnectivity;
@@ -46,8 +47,9 @@ class _DashboardScreenState extends State<DashboardScreen>
   int _reconnectFailureCount = 0;
   bool _isAutoConnectRunning = false;
   bool _setupPromptShown = false;
-  String? _lastDiscoveryAttemptIp;
-  DateTime? _lastDiscoveryAttemptAt;
+  bool _overlayLifecycleBusy = false;
+  String? _lastDiscoveryLogIp;
+  DateTime? _lastDiscoveryLogAt;
   final DiagnosticsService _diag = DiagnosticsService.instance;
   final GlobalKey<TerminalTabState> _terminalTabKey =
       GlobalKey<TerminalTabState>();
@@ -56,13 +58,13 @@ class _DashboardScreenState extends State<DashboardScreen>
     FocusManager.instance.primaryFocus?.unfocus();
   }
 
-  late final List<Widget> _tabs = [
-    const HomeTab(),
-    const DeviceSettingsTab(),
-    const GitManagementTab(),
-    TerminalTab(key: _terminalTabKey),
-    const LogsTab(),
-  ];
+  void _setServiceAppVisibility(bool foreground,
+      {String source = 'dashboard'}) {
+    FlutterBackgroundService().invoke('setAppVisibility', {
+      'foreground': foreground,
+      'source': source,
+    });
+  }
 
   @override
   void initState() {
@@ -70,6 +72,13 @@ class _DashboardScreenState extends State<DashboardScreen>
     WidgetsBinding.instance.addObserver(this);
     unawaited(_restoreLastTabIndex());
     _requestPermissions();
+    _setServiceAppVisibility(true, source: 'dashboard_init');
+    unawaited(
+      _syncOverlayForAppVisibility(
+        appForeground: true,
+        reason: 'dashboard_init',
+      ),
+    );
     _tryAutoConnect();
     _startReconnectLoop();
     _setupDiscoveryListener();
@@ -126,6 +135,7 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   @override
   void dispose() {
+    _setServiceAppVisibility(false, source: 'dashboard_dispose');
     WidgetsBinding.instance.removeObserver(this);
     _reconnectTimer?.cancel();
     _connectivityDebounceTimer?.cancel();
@@ -179,73 +189,21 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   void _setupDiscoveryListener() {
     final ssh = Provider.of<SSHService>(context, listen: false);
-    _discoverySubscription = ssh.ipDiscoveryStream.listen((discoveredIp) async {
+    _discoverySubscription = ssh.ipDiscoveryStream.listen((discoveredIp) {
       if (!mounted) return;
       if (ssh.discoverySource == 'settings_manual' ||
           ssh.discoverySource == 'settings_auto') {
         return;
       }
-
-      if (!await _hasOpenpilotPrerequisites()) {
-        return;
-      }
-
-      const storage = FlutterSecureStorage();
-      final storedIp = await storage.read(key: 'ssh_ip');
-      final portStr = await storage.read(key: 'ssh_port');
-      final port = int.tryParse(portStr ?? '') ?? _defaultSshPort;
-
-      if (storedIp != discoveredIp) {
-        debugPrint(
-            '[Dashboard] Discovery found candidate IP: $discoveredIp (stored: $storedIp)');
-        _diag.info('discovery', 'Candidate discovered: $discoveredIp');
-      }
-
-      // 동일 IP 연속 시도 방지
-      if (_lastDiscoveryAttemptIp == discoveredIp &&
-          _lastDiscoveryAttemptAt != null &&
-          DateTime.now().difference(_lastDiscoveryAttemptAt!) <
-              const Duration(seconds: 15)) {
-        return;
-      }
-
-      if (ssh.manualDisconnectRequested ||
-          ssh.isConnected ||
-          ssh.isConnecting) {
-        return;
-      }
-
-      final username = await storage.read(key: 'ssh_username');
-      final key = await storage.read(key: 'current_private_key');
-      final password = await storage.read(key: 'ssh_password');
-      final authUsername =
-          (username == null || username.isEmpty) ? 'comma' : username;
-
-      String? authKey = (key != null && key.isNotEmpty) ? key : null;
-      String? authPassword = authKey == null ? password : null;
-
-      _lastDiscoveryAttemptIp = discoveredIp;
-      _lastDiscoveryAttemptAt = DateTime.now();
-
-      try {
-        await ssh.connect(
-          discoveredIp,
-          authUsername,
-          port: port,
-          password: authPassword,
-          privateKey: authKey,
-        );
-
-        // 성공한 IP만 저장
-        await storage.write(key: 'ssh_ip', value: discoveredIp);
-        _markReconnectSuccess();
-        ssh.stopDiscovery();
-      } catch (e) {
-        _markReconnectFailure();
-        debugPrint('[Dashboard] Auto-connect to discovered IP failed: $e');
-        _diag.warn('autoconnect',
-            'Discovery connect failed ip=$discoveredIp error=$e');
-      }
+      final now = DateTime.now();
+      final shouldLog = _lastDiscoveryLogIp != discoveredIp ||
+          _lastDiscoveryLogAt == null ||
+          now.difference(_lastDiscoveryLogAt!) >= const Duration(seconds: 3);
+      if (!shouldLog) return;
+      _lastDiscoveryLogIp = discoveredIp;
+      _lastDiscoveryLogAt = now;
+      _diag.info('discovery', 'Candidate discovered: $discoveredIp');
+      debugPrint('[Dashboard] Discovery candidate: $discoveredIp');
     });
   }
 
@@ -318,9 +276,67 @@ class _DashboardScreenState extends State<DashboardScreen>
     );
   }
 
+  Future<void> _syncOverlayForAppVisibility({
+    required bool appForeground,
+    required String reason,
+  }) async {
+    if (!mounted) return;
+    if (!NativeOverlayHudService.isSupported) return;
+    if (_overlayLifecycleBusy) return;
+    _overlayLifecycleBusy = true;
+    try {
+      final overlayEnabled = await NativeOverlayHudService.isEnabled();
+      if (!overlayEnabled) {
+        final running = await NativeOverlayHudService.isRunning();
+        if (running) {
+          await NativeOverlayHudService.stop();
+        }
+        _diag.info('overlay', 'Disabled by settings. reason=$reason');
+        return;
+      }
+
+      if (appForeground) {
+        final running = await NativeOverlayHudService.isRunning();
+        if (running) {
+          await NativeOverlayHudService.stop();
+        }
+        return;
+      }
+
+      final hasPermission = await NativeOverlayHudService.hasPermission();
+      if (!hasPermission) return;
+
+      final ssh = Provider.of<SSHService>(context, listen: false);
+      final host = NativeOverlayHudService.normalizeHost(
+        ssh.connectedIp ?? ssh.targetIp,
+      );
+      if (host == null) return;
+
+      final running = await NativeOverlayHudService.isRunning();
+      if (running) {
+        await NativeOverlayHudService.updateEndpoint(host);
+      } else {
+        await NativeOverlayHudService.start(host);
+      }
+      _diag.info('overlay',
+          'Lifecycle sync: foreground=$appForeground reason=$reason host=$host');
+    } catch (e) {
+      _diag.warn('overlay', 'Lifecycle sync failed reason=$reason error=$e');
+    } finally {
+      _overlayLifecycleBusy = false;
+    }
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      _setServiceAppVisibility(true, source: 'lifecycle_resumed');
+      unawaited(
+        _syncOverlayForAppVisibility(
+          appForeground: true,
+          reason: 'lifecycle_resumed',
+        ),
+      );
       _dismissKeyboard();
       // App came to foreground, check connection
       final ssh = Provider.of<SSHService>(context, listen: false);
@@ -333,9 +349,15 @@ class _DashboardScreenState extends State<DashboardScreen>
         print("App resumed: Connection lost, trying to reconnect...");
         _tryAutoConnect(reason: 'resume');
       }
-    } else if (state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.paused ||
+    } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
+      _setServiceAppVisibility(false, source: 'lifecycle_background');
+      unawaited(
+        _syncOverlayForAppVisibility(
+          appForeground: false,
+          reason: 'lifecycle_background',
+        ),
+      );
       unawaited(_persistLastTabIndex(_currentIndex));
     }
   }
@@ -354,9 +376,19 @@ class _DashboardScreenState extends State<DashboardScreen>
     } else if (saved == 5) {
       restored = 4;
     }
-    if (restored >= _tabs.length) return;
+    if (restored >= _tabCount) return;
     if (!mounted) return;
     setState(() => _currentIndex = restored);
+  }
+
+  List<Widget> _buildTabs() {
+    return [
+      HomeTab(isActive: _currentIndex == 0),
+      const DeviceSettingsTab(),
+      const GitManagementTab(),
+      TerminalTab(key: _terminalTabKey),
+      const LogsTab(),
+    ];
   }
 
   Future<void> _persistLastTabIndex(int index) async {
@@ -366,8 +398,9 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   void _startReconnectLoop() {
     _reconnectTimer?.cancel();
-    // Check every 2 seconds
-    _reconnectTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
+    // Discovery/auto reconnect sync loop (broadcast-first).
+    _reconnectTimer =
+        Timer.periodic(const Duration(seconds: 10), (timer) async {
       final ssh = Provider.of<SSHService>(context, listen: false);
       if (!ssh.isConnected && !ssh.isConnecting) {
         await _tryAutoConnect(silent: true, reason: 'timer');
@@ -432,70 +465,16 @@ class _DashboardScreenState extends State<DashboardScreen>
         return;
       }
 
-      const storage = FlutterSecureStorage();
-      final ip = await storage.read(key: 'ssh_ip');
-      final username = await storage.read(key: 'ssh_username');
-      final portStr = await storage.read(key: 'ssh_port');
-      final port = int.tryParse(portStr ?? '') ?? _defaultSshPort;
-      final key = await storage.read(key: 'current_private_key');
-      final password = await storage.read(key: 'ssh_password');
-      final authUsername =
-          (username == null || username.isEmpty) ? 'comma' : username;
-
-      String? authKey = (key != null && key.isNotEmpty) ? key : null;
-      String? authPassword = authKey == null ? password : null;
-
-      debugPrint(
-        '[Dashboard] Auto-connect($reason) - IP: $ip, User: $authUsername, Port: $port, Auth: ${authKey != null ? "key" : "password"}',
-      );
+      // Broadcast-first: do not use persisted IP.
+      ssh.resumeAutoReconnect();
       _diag.info('autoconnect',
-          'Try reason=$reason target=$ip:$port user=$authUsername');
-
-      if (ip != null && ip.isNotEmpty) {
-        // Quick reachability check before full connect attempt
-        try {
-          final socket = await Socket.connect(
-            ip,
-            port,
-            timeout: const Duration(milliseconds: 1200),
-          );
-          socket.destroy();
-        } catch (e) {
-          _markReconnectFailure();
-          if (!silent) {
-            debugPrint('[Dashboard] IP not reachable ($ip:$port): $e');
-          }
-          _startDiscoveryIfNeeded(force: force);
-          return;
-        }
-
-        try {
-          await ssh.connect(
-            ip,
-            authUsername,
-            port: port,
-            password: authPassword,
-            privateKey: authKey,
-          );
-
-          _markReconnectSuccess();
-          if (mounted && !silent) {
-            CustomToast.show(context, '자동 연결됨: $ip');
-          }
-          return;
-        } catch (e) {
-          _markReconnectFailure();
-          _diag.warn('autoconnect', 'Connect failed target=$ip:$port error=$e');
-          if (!silent) {
-            debugPrint('[Dashboard] Auto-connect failed: $e');
-          }
-          _startDiscoveryIfNeeded(force: force);
-          return;
-        }
-      }
-
-      // 저장된 엔드포인트가 없으면 discovery로 fallback
+          'Broadcast sync reason=$reason candidate=${ssh.serviceCandidateIp}');
       _startDiscoveryIfNeeded(force: force);
+      _markReconnectSuccess();
+    } catch (e) {
+      _markReconnectFailure();
+      _diag.warn(
+          'autoconnect', 'Broadcast sync failed reason=$reason error=$e');
     } finally {
       _isAutoConnectRunning = false;
     }
@@ -572,7 +551,7 @@ class _DashboardScreenState extends State<DashboardScreen>
             Expanded(
               child: IndexedStack(
                 index: _currentIndex,
-                children: _tabs,
+                children: _buildTabs(),
               ),
             ),
           ],
@@ -585,7 +564,6 @@ class _DashboardScreenState extends State<DashboardScreen>
                 _dismissKeyboard();
                 setState(() => _currentIndex = idx);
                 unawaited(_persistLastTabIndex(idx));
-                if (idx == 2) ssh.checkGitUpdates();
               },
               destinations: [
                 const NavigationDestination(

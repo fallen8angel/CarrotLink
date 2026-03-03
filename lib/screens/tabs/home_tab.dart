@@ -7,12 +7,14 @@ import '../../services/github_service.dart';
 import '../../services/native_overlay_hud_service.dart';
 import '../../widgets/custom_toast.dart';
 import '../../widgets/home_hud_preview_card.dart';
-import '../../widgets/webrtc_drive_screen.dart';
+import '../drive/live_drive_canvas_screen.dart';
 
 import 'package:carrot_pilot_manager/widgets/design_components.dart';
 
 class HomeTab extends StatefulWidget {
-  const HomeTab({super.key});
+  final bool isActive;
+
+  const HomeTab({super.key, required this.isActive});
 
   @override
   State<HomeTab> createState() => _HomeTabState();
@@ -25,12 +27,10 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   String _serial = "--";
   bool _hasGitHubLogin = false;
   bool _hasActiveSshKey = false;
-  bool _overlayPermissionGranted = false;
   bool _overlayRunning = false;
-  bool _overlayBusy = false;
   String? _overlaySyncedHost;
   DateTime? _overlayLastProbeAt;
-  Timer? _statusTimer;
+  bool _appForeground = true;
   Timer? _prereqTimer;
   Timer? _overlaySyncTimer;
 
@@ -38,18 +38,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _refreshStatus();
-    _statusTimer =
-        Timer.periodic(const Duration(seconds: 30), (_) => _refreshStatus());
-    _prereqTimer = Timer.periodic(
-        const Duration(seconds: 2), (_) => _refreshConnectionPrerequisites());
-    if (NativeOverlayHudService.isSupported) {
-      unawaited(_refreshOverlayState(syncEndpoint: true));
-      _overlaySyncTimer = Timer.periodic(
-        const Duration(seconds: 5),
-        (_) => unawaited(_syncOverlayEndpoint()),
-      );
-    }
+    _applyRealtimeWorkState(forceRefresh: true);
   }
 
   @override
@@ -65,21 +54,58 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _statusTimer?.cancel();
     _prereqTimer?.cancel();
     _overlaySyncTimer?.cancel();
     super.dispose();
   }
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed &&
-        NativeOverlayHudService.isSupported) {
-      unawaited(_refreshOverlayState(syncEndpoint: true));
+  void didUpdateWidget(covariant HomeTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.isActive != widget.isActive) {
+      _applyRealtimeWorkState(forceRefresh: widget.isActive);
     }
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final nextForeground = state == AppLifecycleState.resumed ||
+        state == AppLifecycleState.inactive;
+    if (_appForeground == nextForeground) return;
+    _appForeground = nextForeground;
+    _applyRealtimeWorkState(forceRefresh: nextForeground && widget.isActive);
+  }
+
+  bool get _realtimeWorkEnabled => widget.isActive && _appForeground;
+
+  void _applyRealtimeWorkState({bool forceRefresh = false}) {
+    if (_realtimeWorkEnabled) {
+      _prereqTimer ??= Timer.periodic(
+        const Duration(seconds: 2),
+        (_) => unawaited(_refreshConnectionPrerequisites()),
+      );
+      if (NativeOverlayHudService.isSupported) {
+        _overlaySyncTimer ??= Timer.periodic(
+          const Duration(seconds: 5),
+          (_) => unawaited(_syncOverlayEndpoint()),
+        );
+      }
+      if (forceRefresh) {
+        unawaited(_refreshConnectionPrerequisites());
+        unawaited(_refreshStatus());
+        unawaited(_syncOverlayEndpoint(forceProbe: true));
+      }
+      return;
+    }
+
+    _prereqTimer?.cancel();
+    _prereqTimer = null;
+    _overlaySyncTimer?.cancel();
+    _overlaySyncTimer = null;
+  }
+
   Future<void> _refreshStatus() async {
+    if (!_realtimeWorkEnabled) return;
     await _refreshConnectionPrerequisites();
     if (!mounted) return;
 
@@ -109,6 +135,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   }
 
   Future<void> _refreshConnectionPrerequisites() async {
+    if (!_realtimeWorkEnabled) return;
     try {
       final token = await GitHubService().getToken();
       final privateKey =
@@ -153,20 +180,8 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
         ssh.connectedIp ?? ssh.targetIp);
   }
 
-  Future<void> _refreshOverlayState({bool syncEndpoint = false}) async {
-    final hasPermission = await NativeOverlayHudService.hasPermission();
-    final running = await NativeOverlayHudService.isRunning();
-    if (!mounted) return;
-    setState(() {
-      _overlayPermissionGranted = hasPermission;
-      _overlayRunning = running;
-    });
-    if (syncEndpoint) {
-      await _syncOverlayEndpoint();
-    }
-  }
-
   Future<void> _syncOverlayEndpoint({bool forceProbe = false}) async {
+    if (!_realtimeWorkEnabled && !forceProbe) return;
     if (!mounted) return;
     final ssh = Provider.of<SSHService>(context, listen: false);
     final host = _currentDeviceHost(ssh);
@@ -194,62 +209,6 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _startOverlayHud(SSHService ssh) async {
-    if (_overlayBusy) return;
-    setState(() => _overlayBusy = true);
-    try {
-      var hasPermission = await NativeOverlayHudService.hasPermission();
-      if (!hasPermission) {
-        await NativeOverlayHudService.requestPermission();
-        if (mounted) {
-          CustomToast.show(context, '시스템 설정에서 오버레이 권한을 허용하세요.');
-        }
-        await Future<void>.delayed(const Duration(milliseconds: 350));
-        hasPermission = await NativeOverlayHudService.hasPermission();
-      }
-      if (!hasPermission) return;
-
-      final host = _currentDeviceHost(ssh);
-      if (host == null) {
-        if (mounted) {
-          CustomToast.show(context, '연결된 기기 IP가 없어 시작할 수 없습니다.', isError: true);
-        }
-        return;
-      }
-
-      final started = await NativeOverlayHudService.start(host);
-      if (!mounted) return;
-      if (!started) {
-        CustomToast.show(context, 'HUD 오버레이 시작 실패', isError: true);
-        return;
-      }
-      _overlaySyncedHost = host;
-      CustomToast.show(context, 'HUD 오버레이 시작됨');
-    } finally {
-      if (mounted) {
-        setState(() => _overlayBusy = false);
-      }
-      await _refreshOverlayState(syncEndpoint: true);
-    }
-  }
-
-  Future<void> _stopOverlayHud() async {
-    if (_overlayBusy) return;
-    setState(() => _overlayBusy = true);
-    try {
-      await NativeOverlayHudService.stop();
-      if (mounted) {
-        CustomToast.show(context, 'HUD 오버레이 중지됨');
-      }
-      _overlaySyncedHost = null;
-    } finally {
-      if (mounted) {
-        setState(() => _overlayBusy = false);
-      }
-      await _refreshOverlayState(syncEndpoint: false);
-    }
-  }
-
   void _openWebRtcView(SSHService ssh) {
     final host = (ssh.connectedIp ?? ssh.targetIp ?? '').trim();
     if (host.isEmpty) {
@@ -258,7 +217,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     }
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => WebRtcDriveScreen(hostIp: host),
+        builder: (_) => LiveDriveCanvasScreen(hostIp: host),
       ),
     );
   }
@@ -385,11 +344,12 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
               child: Column(
                 children: [
                   HomeHudPreviewCard(
+                    enabled: _realtimeWorkEnabled,
                     deviceIp: ssh.connectedIp ?? ssh.targetIp,
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    '탭해서 WebRTC 주행화면 열기',
+                    '탭해서 새 주행화면 열기',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                           color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
@@ -397,130 +357,6 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                 ],
               ),
             ),
-            if (NativeOverlayHudService.isSupported) ...[
-              const SizedBox(height: 12),
-              DesignCard(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(
-                          Icons.layers_outlined,
-                          color: Theme.of(context).colorScheme.primary,
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            '네이티브 HUD 오버레이',
-                            style: Theme.of(context)
-                                .textTheme
-                                .titleMedium
-                                ?.copyWith(
-                                  fontWeight: FontWeight.bold,
-                                ),
-                          ),
-                        ),
-                        if (_overlayBusy)
-                          const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      _overlayPermissionGranted
-                          ? (_overlayRunning ? '상태: 실행 중' : '상태: 중지됨')
-                          : '상태: 오버레이 권한 필요',
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      _currentDeviceHost(ssh) == null
-                          ? '대상 IP: 없음'
-                          : '대상 IP: ${_currentDeviceHost(ssh)}',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color:
-                                Theme.of(context).colorScheme.onSurfaceVariant,
-                          ),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        if (!_overlayPermissionGranted)
-                          Expanded(
-                            child: OutlinedButton.icon(
-                              onPressed: _overlayBusy
-                                  ? null
-                                  : () async {
-                                      await NativeOverlayHudService
-                                          .requestPermission();
-                                      if (!context.mounted) return;
-                                      CustomToast.show(
-                                        context,
-                                        '권한 화면에서 "다른 앱 위에 표시"를 허용하세요.',
-                                      );
-                                      await Future<void>.delayed(
-                                          const Duration(milliseconds: 350));
-                                      await _refreshOverlayState(
-                                          syncEndpoint: true);
-                                    },
-                              icon: const Icon(Icons.security_outlined),
-                              label: const Text('권한 요청'),
-                            ),
-                          )
-                        else
-                          Expanded(
-                            child: FilledButton.icon(
-                              onPressed: _overlayBusy
-                                  ? null
-                                  : _overlayRunning
-                                      ? _stopOverlayHud
-                                      : () => _startOverlayHud(ssh),
-                              icon: Icon(
-                                _overlayRunning
-                                    ? Icons.stop_circle_outlined
-                                    : Icons.play_circle_outline,
-                              ),
-                              label: Text(_overlayRunning ? '중지' : '시작'),
-                            ),
-                          ),
-                        const SizedBox(width: 8),
-                        IconButton(
-                          onPressed: (_overlayBusy || !_overlayRunning)
-                              ? null
-                              : () async {
-                                  await NativeOverlayHudService.resetPosition();
-                                  await _refreshOverlayState(syncEndpoint: true);
-                                  if (context.mounted) {
-                                    CustomToast.show(context, 'HUD 위치 초기화됨');
-                                  }
-                                },
-                          icon: const Icon(Icons.my_location),
-                          tooltip: 'HUD 위치 초기화',
-                        ),
-                        const SizedBox(width: 4),
-                        IconButton(
-                          onPressed: _overlayBusy
-                              ? null
-                              : () async {
-                                  await _refreshOverlayState(
-                                      syncEndpoint: true);
-                                  if (context.mounted) {
-                                    CustomToast.show(context, '오버레이 상태 갱신됨');
-                                  }
-                                },
-                          icon: const Icon(Icons.refresh),
-                          tooltip: '오버레이 상태 갱신',
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ],
 
             // Quick Actions Grid Removed
             const SizedBox(height: 120),

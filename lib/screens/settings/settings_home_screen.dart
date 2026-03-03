@@ -3,8 +3,8 @@ import 'package:flutter/material.dart';
 import '../permission_screen.dart';
 import '../diagnostics_screen.dart';
 import 'connection_settings_screen.dart';
+import 'hud_settings_screen.dart';
 import 'info_settings_screen.dart';
-import 'share_settings_screen.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -26,14 +26,6 @@ class SettingsScreen extends StatelessWidget {
           ),
           const Divider(),
           ListTile(
-            leading: const Icon(Icons.share),
-            title: const Text('공유'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.push(context,
-                MaterialPageRoute(builder: (_) => const ShareSettingsScreen())),
-          ),
-          const Divider(),
-          ListTile(
             leading: const Icon(Icons.security),
             title: const Text('권한'),
             trailing: const Icon(Icons.chevron_right),
@@ -42,6 +34,14 @@ class SettingsScreen extends StatelessWidget {
                 MaterialPageRoute(
                     builder: (_) =>
                         const PermissionScreen(fromSettings: true))),
+          ),
+          const Divider(),
+          ListTile(
+            leading: const Icon(Icons.hub_outlined),
+            title: const Text('HUD'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(context,
+                MaterialPageRoute(builder: (_) => const HudSettingsScreen())),
           ),
           const Divider(),
           ListTile(

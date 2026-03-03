@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../services/device_action_service.dart';
-import '../../services/sidecar_service.dart';
 import '../../services/ssh_service.dart';
 import '../../widgets/custom_toast.dart';
 import '../../widgets/design_components.dart';
@@ -15,9 +14,6 @@ class SystemTab extends StatefulWidget {
 
 class _SystemTabState extends State<SystemTab> {
   final DeviceActionService _actionService = DeviceActionService();
-  final SidecarService _sidecarService = SidecarService();
-  bool _sidecarBusy = false;
-  String _sidecarProfile = 'p2';
 
   Future<void> _executeManagedAction(
     BuildContext context, {
@@ -106,72 +102,6 @@ class _SystemTabState extends State<SystemTab> {
     }
   }
 
-  Future<void> _runSidecarTask(
-    BuildContext context, {
-    required String title,
-    required Future<String> Function(SSHService ssh) task,
-    bool showOutputDialog = true,
-  }) async {
-    final ssh = Provider.of<SSHService>(context, listen: false);
-    if (!ssh.isConnected) {
-      CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
-      return;
-    }
-    if (_sidecarBusy) return;
-
-    setState(() => _sidecarBusy = true);
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
-    );
-
-    String? output;
-    Object? error;
-    try {
-      output = await task(ssh);
-    } catch (e) {
-      error = e;
-    } finally {
-      if (mounted && Navigator.of(context, rootNavigator: true).canPop()) {
-        Navigator.of(context, rootNavigator: true).pop();
-      }
-      if (mounted) {
-        setState(() => _sidecarBusy = false);
-      }
-    }
-
-    if (!mounted) return;
-    if (error != null) {
-      CustomToast.show(context, "$title 실패: $error", isError: true);
-      return;
-    }
-    CustomToast.show(context, "$title 완료");
-    if (showOutputDialog) {
-      final text = (output ?? '').trim();
-      if (text.isNotEmpty) {
-        await showDialog<void>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: Text(title),
-            content: SizedBox(
-              width: 460,
-              child: SingleChildScrollView(
-                child: SelectableText(text),
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(),
-                child: const Text("닫기"),
-              ),
-            ],
-          ),
-        );
-      }
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return ListView(
@@ -244,94 +174,6 @@ class _SystemTabState extends State<SystemTab> {
             isDestructive: true,
           ),
         ]),
-        const SizedBox(height: 16),
-        _buildSection(context, "CarrotLink Sidecar", Icons.hub_outlined, [
-          const Padding(
-            padding: EdgeInsets.only(bottom: 8),
-            child: Text(
-              "배포 경로: /data/media/0/carrotlink_sidecar\n"
-              "세션: tmux carrotlink_sidecar / 포트: 7766",
-              style: TextStyle(color: Colors.white70, fontSize: 12),
-            ),
-          ),
-          Row(
-            children: [
-              const Text("프로파일"),
-              const SizedBox(width: 12),
-              Expanded(
-                child: SegmentedButton<String>(
-                  segments: const [
-                    ButtonSegment(value: 'p0', label: Text('P0')),
-                    ButtonSegment(value: 'p1', label: Text('P1')),
-                    ButtonSegment(value: 'p2', label: Text('P2')),
-                    ButtonSegment(value: 'p3', label: Text('P3')),
-                  ],
-                  selected: <String>{_sidecarProfile},
-                  onSelectionChanged: _sidecarBusy
-                      ? null
-                      : (selected) {
-                          if (selected.isEmpty) return;
-                          setState(() => _sidecarProfile = selected.first);
-                        },
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          _buildSidecarButton(
-            context,
-            label: "사이드카 배포/업데이트",
-            icon: Icons.publish,
-            onTap: () => _runSidecarTask(
-              context,
-              title: "사이드카 배포",
-              task: (ssh) => _sidecarService.deploy(ssh),
-            ),
-          ),
-          _buildSidecarButton(
-            context,
-            label: "사이드카 시작",
-            icon: Icons.play_circle_outline,
-            onTap: () => _runSidecarTask(
-              context,
-              title: "사이드카 시작",
-              task: (ssh) => _sidecarService.start(
-                ssh,
-                profile: _sidecarProfile,
-              ),
-            ),
-          ),
-          _buildSidecarButton(
-            context,
-            label: "사이드카 중지",
-            icon: Icons.stop_circle_outlined,
-            onTap: () => _runSidecarTask(
-              context,
-              title: "사이드카 중지",
-              task: (ssh) => _sidecarService.stop(ssh),
-            ),
-          ),
-          _buildSidecarButton(
-            context,
-            label: "상태 확인",
-            icon: Icons.info_outline,
-            onTap: () => _runSidecarTask(
-              context,
-              title: "사이드카 상태",
-              task: (ssh) => _sidecarService.status(ssh),
-            ),
-          ),
-          _buildSidecarButton(
-            context,
-            label: "로그 확인 (최근 120줄)",
-            icon: Icons.article_outlined,
-            onTap: () => _runSidecarTask(
-              context,
-              title: "사이드카 로그",
-              task: (ssh) => _sidecarService.tailLog(ssh, lines: 120),
-            ),
-          ),
-        ]),
         const SizedBox(height: 100),
       ],
     );
@@ -355,30 +197,6 @@ class _SystemTabState extends State<SystemTab> {
           ...children,
         ],
       ),
-    );
-  }
-
-  Widget _buildSidecarButton(
-    BuildContext context, {
-    required String label,
-    required IconData icon,
-    required VoidCallback onTap,
-  }) {
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      leading: Icon(icon, color: Theme.of(context).colorScheme.primary),
-      title: Text(
-        label,
-        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-      ),
-      trailing: _sidecarBusy
-          ? const SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            )
-          : const Icon(Icons.chevron_right, size: 20, color: Colors.grey),
-      onTap: _sidecarBusy ? null : onTap,
     );
   }
 

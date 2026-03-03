@@ -1,0 +1,33 @@
+{
+  "java.enabled": false,
+  "java.configuration.updateBuildConfiguration": "disabled",
+  "java.import.gradle.enabled": false,
+  "java.import.maven.enabled": false,
+  "java.autobuild.enabled": false,
+  "java.server.launchMode": "LightWeight",
+  "java.jdt.ls.vmargs": "-Xmx1G -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:+UseStringDeduplication",
+  "gradle.autoDetect": "off",
+  "files.watcherExclude": {
+    "**/.git/**": true,
+    "**/.gradle/**": true,
+    "**/.dart_tool/**": true,
+    "**/build/**": true,
+    "**/android/.gradle/**": true,
+    "**/android/build/**": true
+  },
+  "search.exclude": {
+    "**/.git": true,
+    "**/.gradle": true,
+    "**/.dart_tool": true,
+    "**/build": true,
+    "**/android/.gradle": true,
+    "**/android/build": true
+  },
+  "dart.analysisExcludedFolders": [
+    "build",
+    ".dart_tool",
+    ".gradle",
+    "android/.gradle",
+    "android/build"
+  ]
+}

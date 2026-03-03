@@ -13,13 +13,6 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
     );
   }
 
-  ButtonStyle _secondaryButtonStyle() {
-    return OutlinedButton.styleFrom(
-      minimumSize: const Size(96, _buttonHeight),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-    );
-  }
-
   Widget _compactIconButton({
     required String tooltip,
     required IconData icon,
@@ -38,7 +31,7 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
 
   Widget _buildScreen(BuildContext context) {
     final ssh = Provider.of<SSHService>(context);
-    final featuresEnabled = _isGitHubLoggedIn;
+    final githubFeaturesEnabled = _isGitHubLoggedIn;
     final bottomPadding = MediaQuery.of(context).padding.bottom + 28;
 
     return Scaffold(
@@ -49,7 +42,7 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
           Text("1. 기기 연결", style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 12),
           _buildConnectionSection(ssh),
-          if (!featuresEnabled) ...[
+          if (!githubFeaturesEnabled) ...[
             const SizedBox(height: 12),
             _buildLoginRequiredNotice(),
           ],
@@ -60,16 +53,13 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
           const SizedBox(height: _sectionSpacing),
           Text("3. SSH Key", style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 12),
-          _buildFeatureGate(
-            enabled: featuresEnabled,
-            child: _buildManualKeySection(),
-          ),
+          _buildManualKeySection(),
           const SizedBox(height: _sectionSpacing),
           Text("4. GitHub SSH 키 관리",
               style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 12),
           _buildFeatureGate(
-            enabled: featuresEnabled,
+            enabled: githubFeaturesEnabled,
             child: _buildGitHubKeyManagerSection(),
           ),
           const SizedBox(height: _sectionSpacing),
@@ -224,6 +214,16 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
     );
   }
 
+  Future<void> _handleManualKeyPrimaryButton() async {
+    if (_isManualKeyEditing) {
+      await _applyManualKey();
+      return;
+    }
+    _setStateSafe(() {
+      _isManualKeyEditing = true;
+    });
+  }
+
   Widget _buildManualKeySection() {
     final activeLabel = _currentKeyType == 'generated'
         ? "현재 적용: ${_activeGeneratedTitle ?? _activeGeneratedId ?? 'GitHub 키'}"
@@ -273,24 +273,9 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
               Expanded(
                 child: ElevatedButton(
                   style: _primaryButtonStyle(),
-                  onPressed: _applyManualKey,
-                  child: Text(_isManualKeyEditing ? "저장/적용" : "이 키 적용"),
+                  onPressed: () => unawaited(_handleManualKeyPrimaryButton()),
+                  child: Text(_isManualKeyEditing ? "키 저장/적용" : "키 적용/수정"),
                 ),
-              ),
-              const SizedBox(width: 8),
-              OutlinedButton(
-                style: _secondaryButtonStyle(),
-                onPressed: () {
-                  _setStateSafe(() {
-                    if (_isManualKeyEditing) {
-                      _manualKeyController.text = _currentPrivateKey ?? '';
-                      _isManualKeyEditing = false;
-                    } else {
-                      _isManualKeyEditing = true;
-                    }
-                  });
-                },
-                child: Text(_isManualKeyEditing ? "편집 취소" : "수정"),
               ),
             ],
           ),
@@ -299,14 +284,15 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
             "입력 키가 GitHub 공개키와 일치하면 해당 GitHub 키로 자동 매칭됩니다.",
             style: TextStyle(fontSize: 11, color: Colors.grey[600]),
           ),
-          if (!_isManualKeyEditing)
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text(
-                "편집하려면 '수정'을 누르세요.",
-                style: TextStyle(fontSize: 11, color: Colors.grey[500]),
-              ),
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              _isManualKeyEditing
+                  ? "수정 후 같은 버튼을 다시 누르면 저장/적용됩니다."
+                  : "버튼을 누르면 편집 모드로 전환됩니다.",
+              style: TextStyle(fontSize: 11, color: Colors.grey[500]),
             ),
+          ),
         ],
       ),
     );
@@ -324,7 +310,7 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text(
-            "로그인 후 연결 설정 기능이 활성화됩니다.",
+            "로그인하면 GitHub 키 동기화/관리 기능이 활성화됩니다.",
             style: TextStyle(fontSize: 11, color: Colors.grey),
           ),
           const SizedBox(height: 12),

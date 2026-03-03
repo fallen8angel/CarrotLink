@@ -1,13 +1,59 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../models/carrot_settings_models.dart';
 import '../../services/carrot_server_settings_service.dart';
 import '../../services/ssh_service.dart';
 import '../../widgets/custom_toast.dart';
 import '../../widgets/design_components.dart';
+
+class _CarrotSettingFavorite {
+  final String group;
+  final String name;
+  final String title;
+  final int savedAtMs;
+
+  const _CarrotSettingFavorite({
+    required this.group,
+    required this.name,
+    required this.title,
+    required this.savedAtMs,
+  });
+
+  String get key => '$group::$name';
+
+  Map<String, dynamic> toJson() => {
+        'group': group,
+        'name': name,
+        'title': title,
+        'savedAtMs': savedAtMs,
+      };
+
+  factory _CarrotSettingFavorite.fromJson(Map<String, dynamic> json) {
+    return _CarrotSettingFavorite(
+      group: (json['group'] ?? '').toString(),
+      name: (json['name'] ?? '').toString(),
+      title: (json['title'] ?? '').toString(),
+      savedAtMs: (json['savedAtMs'] is num)
+          ? (json['savedAtMs'] as num).toInt()
+          : DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+}
+
+class _CarrotSettingSearchHit {
+  final CarrotSettingsGroupMeta group;
+  final CarrotSettingItemMeta item;
+
+  const _CarrotSettingSearchHit({
+    required this.group,
+    required this.item,
+  });
+}
 
 class CarrotSettingsTab extends StatefulWidget {
   const CarrotSettingsTab({super.key});
@@ -18,6 +64,7 @@ class CarrotSettingsTab extends StatefulWidget {
 
 class _CarrotSettingsTabState extends State<CarrotSettingsTab>
     with AutomaticKeepAliveClientMixin, WidgetsBindingObserver {
+  static const String _favoritesPrefKey = 'carrot_settings_favorites_v1';
   final CarrotServerSettingsService _service = CarrotServerSettingsService();
 
   CarrotSettingsBundle? _bundle;
@@ -27,6 +74,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
   String? _error;
   String _query = '';
   final TextEditingController _groupSearchController = TextEditingController();
+  final List<_CarrotSettingFavorite> _favorites = <_CarrotSettingFavorite>[];
   String? _activeHost;
   int _loadEpoch = 0;
 
@@ -38,6 +86,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _groupSearchController.addListener(_onGroupSearchChanged);
+    unawaited(_loadFavorites());
   }
 
   @override
@@ -52,6 +101,131 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
     final next = _groupSearchController.text.trim();
     if (next == _query) return;
     setState(() => _query = next);
+  }
+
+  Future<void> _loadFavorites() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_favoritesPrefKey);
+      if (raw == null || raw.isEmpty) return;
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return;
+      final next = decoded
+          .whereType<Map>()
+          .map((e) =>
+              _CarrotSettingFavorite.fromJson(Map<String, dynamic>.from(e)))
+          .where((e) => e.group.isNotEmpty && e.name.isNotEmpty)
+          .toList();
+      if (!mounted) return;
+      setState(() {
+        _favorites
+          ..clear()
+          ..addAll(next);
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _persistFavorites() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = jsonEncode(_favorites.map((e) => e.toJson()).toList());
+    await prefs.setString(_favoritesPrefKey, raw);
+  }
+
+  List<_CarrotSettingFavorite> _sortedFavorites() {
+    final out = List<_CarrotSettingFavorite>.from(_favorites);
+    out.sort((a, b) {
+      final byTime = b.savedAtMs.compareTo(a.savedAtMs);
+      if (byTime != 0) return byTime;
+      final byGroup = a.group.compareTo(b.group);
+      if (byGroup != 0) return byGroup;
+      return a.title.compareTo(b.title);
+    });
+    return out;
+  }
+
+  Future<bool> _toggleFavorite(CarrotSettingItemMeta item) async {
+    final key = '${item.group}::${item.name}';
+    final existingIndex = _favorites.indexWhere((e) => e.key == key);
+    late final bool nowFavorite;
+    if (existingIndex >= 0) {
+      nowFavorite = false;
+      setState(() => _favorites.removeAt(existingIndex));
+    } else {
+      nowFavorite = true;
+      setState(() {
+        _favorites.add(
+          _CarrotSettingFavorite(
+            group: item.group,
+            name: item.name,
+            title: item.displayTitle,
+            savedAtMs: DateTime.now().millisecondsSinceEpoch,
+          ),
+        );
+      });
+    }
+    await _persistFavorites();
+    return nowFavorite;
+  }
+
+  Future<void> _openFavoritesMenu() async {
+    if (_favorites.isEmpty) {
+      CustomToast.show(context, '즐겨찾기 항목이 없습니다.');
+      return;
+    }
+    final list = _sortedFavorites();
+    final selected = await showModalBottomSheet<_CarrotSettingFavorite>(
+      context: context,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (context) {
+        return ListView.separated(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+          itemCount: list.length,
+          separatorBuilder: (_, __) => const Divider(height: 1),
+          itemBuilder: (context, index) {
+            final fav = list[index];
+            return ListTile(
+              contentPadding: const EdgeInsets.symmetric(horizontal: 6),
+              leading: const Icon(Icons.bookmark, color: Colors.amber),
+              title: Text(
+                fav.title.isEmpty ? fav.name : fav.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              subtitle: Text(
+                '${fav.group} · ${fav.name}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.of(context).pop(fav),
+            );
+          },
+        );
+      },
+    );
+    if (!mounted || selected == null) return;
+    await _openFavoriteTarget(selected);
+  }
+
+  Future<void> _openFavoriteTarget(_CarrotSettingFavorite fav) async {
+    final bundle = _bundle;
+    if (bundle == null) return;
+
+    CarrotSettingsGroupMeta? group;
+    for (final g in bundle.groups) {
+      if (g.group == fav.group) {
+        group = g;
+        break;
+      }
+    }
+    final targetGroup = group;
+    if (targetGroup == null) {
+      CustomToast.show(context, '해당 그룹을 찾을 수 없습니다.', isError: true);
+      return;
+    }
+    await _openGroupScreen(targetGroup, focusItemName: fav.name);
   }
 
   @override
@@ -125,37 +299,65 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
     }
   }
 
-  List<CarrotSettingsGroupMeta> _filteredGroups() {
+  bool _itemMatchesQuery(CarrotSettingItemMeta item, String query) {
+    if (query.isEmpty) return true;
+    final pool = [
+      item.name,
+      item.title,
+      item.descr,
+      item.etitle,
+      item.edescr,
+      item.ctitle,
+      item.cdescr,
+    ].whereType<String>().join(' ').toLowerCase();
+    return pool.contains(query);
+  }
+
+  List<_CarrotSettingSearchHit> _filteredSettingHits() {
     final bundle = _bundle;
     if (bundle == null) return const [];
     final query = _query.toLowerCase();
-    final groups = bundle.groups;
-    if (query.isEmpty) return groups;
+    if (query.isEmpty) return const [];
 
-    bool itemMatches(CarrotSettingItemMeta item) {
-      final pool = [
-        item.name,
-        item.title,
-        item.descr,
-        item.etitle,
-        item.edescr,
-        item.ctitle,
-        item.cdescr,
-      ].whereType<String>().join(' ').toLowerCase();
-      return pool.contains(query);
-    }
-
-    return groups.where((g) {
-      final groupMatch = [
-        g.group,
-        g.egroup,
-        g.cgroup,
-      ].whereType<String>().join(' ').toLowerCase().contains(query);
-      if (groupMatch) return true;
+    final out = <_CarrotSettingSearchHit>[];
+    for (final group in bundle.groups) {
       final items =
-          bundle.itemsByGroup[g.group] ?? const <CarrotSettingItemMeta>[];
-      return items.any(itemMatches);
-    }).toList();
+          bundle.itemsByGroup[group.group] ?? const <CarrotSettingItemMeta>[];
+      for (final item in items) {
+        if (_itemMatchesQuery(item, query)) {
+          out.add(_CarrotSettingSearchHit(group: group, item: item));
+        }
+      }
+    }
+    return out;
+  }
+
+  Future<void> _openGroupScreen(
+    CarrotSettingsGroupMeta group, {
+    String? focusItemName,
+  }) async {
+    final bundle = _bundle;
+    final host = _activeHost;
+    if (bundle == null || host == null || host.isEmpty) return;
+    final changed = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => _CarrotSettingsGroupScreen(
+          host: host,
+          group: group,
+          bundle: bundle,
+          service: _service,
+          initialFocusItemName: focusItemName,
+          initialFavoriteNames: _favorites
+              .where((e) => e.group == group.group)
+              .map((e) => e.name)
+              .toSet(),
+          onToggleFavorite: _toggleFavorite,
+        ),
+      ),
+    );
+    if (changed == true && mounted) {
+      setState(() {});
+    }
   }
 
   Future<void> _openCarSelector() async {
@@ -341,7 +543,9 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
   Widget _buildGroupsCard() {
     final bundle = _bundle;
     if (bundle == null) return const SizedBox.shrink();
-    final groups = _filteredGroups();
+    final groups = bundle.groups;
+    final hits = _filteredSettingHits();
+    final isSearching = _query.isNotEmpty;
     return DesignCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -362,9 +566,9 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      _query.isEmpty
+                      !isSearching
                           ? '${groups.length}개 그룹'
-                          : '검색 중: "$_query" · ${groups.length}개',
+                          : '검색 중: "$_query" · ${hits.length}개 항목',
                       style: TextStyle(
                         fontSize: 12,
                         color: Theme.of(context).colorScheme.onSurfaceVariant,
@@ -374,7 +578,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
                 ),
               ),
               SizedBox(
-                width: 150,
+                width: 170,
                 child: SizedBox(
                   height: 38,
                   child: TextField(
@@ -393,6 +597,10 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
                         minWidth: 34,
                         minHeight: 34,
                       ),
+                      suffixIconConstraints: const BoxConstraints(
+                        minWidth: 32,
+                        minHeight: 34,
+                      ),
                       suffixIcon: _query.isEmpty
                           ? null
                           : IconButton(
@@ -407,10 +615,20 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
                   ),
                 ),
               ),
+              const SizedBox(width: 4),
+              IconButton(
+                tooltip: '즐겨찾기 (${_favorites.length})',
+                onPressed:
+                    (_bundle == null || _isLoading) ? null : _openFavoritesMenu,
+                icon: Icon(
+                  Icons.bookmarks_outlined,
+                  color: _favorites.isEmpty ? null : Colors.amber,
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 8),
-          if (groups.isEmpty)
+          if (isSearching && hits.isEmpty)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 20),
               child: Center(
@@ -421,6 +639,36 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
                   ),
                 ),
               ),
+            )
+          else if (isSearching)
+            ListView.separated(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: hits.length,
+              separatorBuilder: (_, __) => const Divider(height: 1),
+              itemBuilder: (context, index) {
+                final hit = hits[index];
+                return ListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                  leading: const Icon(Icons.tune, size: 18),
+                  title: Text(
+                    hit.item.displayTitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  subtitle: Text(
+                    '${hit.group.displayName} · ${hit.item.name}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => _openGroupScreen(
+                    hit.group,
+                    focusItemName: hit.item.name,
+                  ),
+                );
+              },
             )
           else
             ListView.separated(
@@ -457,17 +705,8 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
                           overflow: TextOverflow.ellipsis,
                         ),
                   trailing: const Icon(Icons.chevron_right),
-                  onTap: () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => _CarrotSettingsGroupScreen(
-                          host: _activeHost!,
-                          group: g,
-                          bundle: bundle,
-                          service: _service,
-                        ),
-                      ),
-                    );
+                  onTap: () async {
+                    await _openGroupScreen(g);
                   },
                 );
               },
@@ -483,12 +722,18 @@ class _CarrotSettingsGroupScreen extends StatefulWidget {
   final CarrotSettingsGroupMeta group;
   final CarrotSettingsBundle bundle;
   final CarrotServerSettingsService service;
+  final String? initialFocusItemName;
+  final Set<String> initialFavoriteNames;
+  final Future<bool> Function(CarrotSettingItemMeta item) onToggleFavorite;
 
   const _CarrotSettingsGroupScreen({
     required this.host,
     required this.group,
     required this.bundle,
     required this.service,
+    this.initialFocusItemName,
+    this.initialFavoriteNames = const <String>{},
+    required this.onToggleFavorite,
   });
 
   @override
@@ -498,14 +743,23 @@ class _CarrotSettingsGroupScreen extends StatefulWidget {
 
 class _CarrotSettingsGroupScreenState
     extends State<_CarrotSettingsGroupScreen> {
+  static const Duration _highlightDuration = Duration(seconds: 2);
+  static const double _estimatedRowExtent = 150.0;
   final TextEditingController _searchController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+  final Map<String, GlobalKey> _rowKeysByName = <String, GlobalKey>{};
   Map<String, dynamic> _values = {};
   bool _loading = false;
   String? _error;
   String _query = '';
+  String? _highlightedItemName;
+  String? _pendingFocusItemName;
+  late Set<String> _favoriteNames;
+  final Set<String> _favoriteBusyNames = <String>{};
   final Set<String> _savingNames = <String>{};
   final Map<String, int> _stepByName = <String, int>{};
   final Map<String, double> _sliderDraftByName = <String, double>{};
+  Timer? _highlightClearTimer;
 
   List<CarrotSettingItemMeta> get _items =>
       widget.bundle.itemsByGroup[widget.group.group] ??
@@ -515,13 +769,17 @@ class _CarrotSettingsGroupScreenState
   void initState() {
     super.initState();
     _searchController.addListener(_onSearchChanged);
+    _favoriteNames = Set<String>.from(widget.initialFavoriteNames);
+    _pendingFocusItemName = widget.initialFocusItemName;
     unawaited(_loadValues());
   }
 
   @override
   void dispose() {
+    _highlightClearTimer?.cancel();
     _searchController.removeListener(_onSearchChanged);
     _searchController.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -543,6 +801,7 @@ class _CarrotSettingsGroupScreenState
       setState(() {
         _values = values;
       });
+      _requestPendingFocus();
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = e.toString());
@@ -566,6 +825,138 @@ class _CarrotSettingsGroupScreenState
       ].whereType<String>().join(' ').toLowerCase();
       return hay.contains(q);
     }).toList();
+  }
+
+  GlobalKey _rowKeyFor(String name) {
+    return _rowKeysByName.putIfAbsent(name, () => GlobalKey());
+  }
+
+  void _requestPendingFocus() {
+    if (_pendingFocusItemName == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(_focusItemByName(_pendingFocusItemName!));
+    });
+  }
+
+  void _setHighlighted(String itemName) {
+    _highlightClearTimer?.cancel();
+    setState(() => _highlightedItemName = itemName);
+    _highlightClearTimer = Timer(_highlightDuration, () {
+      if (!mounted) return;
+      setState(() {
+        if (_highlightedItemName == itemName) {
+          _highlightedItemName = null;
+        }
+      });
+    });
+  }
+
+  Future<void> _focusItemByName(String itemName) async {
+    final exists = _items.any((e) => e.name == itemName);
+    if (!exists) {
+      _pendingFocusItemName = null;
+      return;
+    }
+
+    // If current filter hides the target, clear filter first.
+    if (_query.isNotEmpty && !_filteredItems().any((e) => e.name == itemName)) {
+      _searchController.clear();
+      await Future<void>.delayed(const Duration(milliseconds: 16));
+    }
+
+    final items = _filteredItems();
+    final index = items.indexWhere((e) => e.name == itemName);
+    if (index < 0) {
+      _pendingFocusItemName = null;
+      return;
+    }
+
+    if (_scrollController.hasClients) {
+      final target = (index * _estimatedRowExtent).toDouble();
+      final max = _scrollController.position.maxScrollExtent;
+      await _scrollController.animateTo(
+        target.clamp(0.0, max),
+        duration: const Duration(milliseconds: 260),
+        curve: Curves.easeOutCubic,
+      );
+    }
+
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final key = _rowKeyFor(itemName);
+    final ctx = key.currentContext;
+    if (ctx != null) {
+      Scrollable.ensureVisible(
+        ctx,
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOutCubic,
+        alignment: 0.2,
+      );
+    }
+    if (!mounted) return;
+    _pendingFocusItemName = null;
+    _setHighlighted(itemName);
+  }
+
+  Future<void> _showSearchResultPicker() async {
+    final items = _filteredItems();
+    if (items.isEmpty) {
+      CustomToast.show(context, '검색 결과가 없습니다.');
+      return;
+    }
+    final selected = await showModalBottomSheet<CarrotSettingItemMeta>(
+      context: context,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (context) {
+        return ListView.separated(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+          itemCount: items.length,
+          separatorBuilder: (_, __) => const Divider(height: 1),
+          itemBuilder: (context, index) {
+            final item = items[index];
+            return ListTile(
+              title: Text(item.displayTitle),
+              subtitle: Text(
+                item.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: const Icon(Icons.my_location),
+              onTap: () => Navigator.of(context).pop(item),
+            );
+          },
+        );
+      },
+    );
+    if (!mounted || selected == null) return;
+    await _focusItemByName(selected.name);
+  }
+
+  bool _isFavoriteItem(CarrotSettingItemMeta item) {
+    return _favoriteNames.contains(item.name);
+  }
+
+  Future<void> _toggleFavoriteItem(CarrotSettingItemMeta item) async {
+    if (_favoriteBusyNames.contains(item.name)) return;
+    setState(() => _favoriteBusyNames.add(item.name));
+    try {
+      final nowFavorite = await widget.onToggleFavorite(item);
+      if (!mounted) return;
+      setState(() {
+        if (nowFavorite) {
+          _favoriteNames.add(item.name);
+        } else {
+          _favoriteNames.remove(item.name);
+        }
+      });
+      CustomToast.show(
+        context,
+        nowFavorite ? '즐겨찾기에 등록되었습니다.' : '즐겨찾기에서 제거되었습니다.',
+      );
+    } finally {
+      if (mounted) setState(() => _favoriteBusyNames.remove(item.name));
+    }
   }
 
   dynamic _effectiveValue(CarrotSettingItemMeta item) {
@@ -812,9 +1203,23 @@ class _CarrotSettingsGroupScreenState
                   ),
                   suffixIcon: _query.isEmpty
                       ? null
-                      : IconButton(
-                          onPressed: () => _searchController.clear(),
-                          icon: const Icon(Icons.close, size: 16),
+                      : SizedBox(
+                          width: 88,
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                tooltip: '검색 결과에서 이동',
+                                onPressed: _showSearchResultPicker,
+                                icon: const Icon(Icons.my_location, size: 16),
+                              ),
+                              IconButton(
+                                onPressed: () => _searchController.clear(),
+                                icon: const Icon(Icons.close, size: 16),
+                              ),
+                            ],
+                          ),
                         ),
                   filled: true,
                   isDense: true,
@@ -855,6 +1260,7 @@ class _CarrotSettingsGroupScreenState
               child: _loading && _values.isEmpty
                   ? const Center(child: CircularProgressIndicator())
                   : ListView.separated(
+                      controller: _scrollController,
                       padding: EdgeInsets.fromLTRB(12, 4, 12, 20 + bottomInset),
                       itemCount: items.length,
                       separatorBuilder: (_, __) => const SizedBox(height: 8),
@@ -866,55 +1272,60 @@ class _CarrotSettingsGroupScreenState
                         final value = sliderValue ?? effectiveValue;
                         final isSaving = _savingNames.contains(item.name);
                         final step = item.isBooleanLike ? null : _stepFor(item);
-                        return _SettingRowCard(
-                          item: item,
-                          value: value,
-                          isSaving: isSaving,
-                          quickStep: step,
-                          onBooleanChanged: item.isBooleanLike
-                              ? (next) => _setValue(item, next ? 1 : 0)
-                              : null,
-                          onTap: null,
-                          onDecrement: item.isBooleanLike
-                              ? null
-                              : () => _adjustValueByStep(item, -1,
-                                  stepOverride: step),
-                          onIncrement: item.isBooleanLike
-                              ? null
-                              : () => _adjustValueByStep(item, 1,
-                                  stepOverride: step),
-                          onQuickInput: item.isBooleanLike
-                              ? null
-                              : () => _showQuickValueInput(item),
-                          onStepTap: item.isBooleanLike
-                              ? null
-                              : () => _cycleStep(item),
-                          sliderValue: sliderValue,
-                          sliderMin: item.min?.toDouble(),
-                          sliderMax: item.max?.toDouble(),
-                          sliderDivisions: step == null
-                              ? null
-                              : _sliderDivisions(item, step),
-                          onSliderChanged:
-                              item.isBooleanLike || sliderValue == null
-                                  ? null
-                                  : (v) => _onSliderChanged(
-                                        item,
-                                        v,
-                                        stepOverride: step,
-                                      ),
-                          onSliderChangeEnd:
-                              item.isBooleanLike || sliderValue == null
-                                  ? null
-                                  : (v) => unawaited(
-                                        _onSliderChangeEnd(
+                        return KeyedSubtree(
+                          key: _rowKeyFor(item.name),
+                          child: _SettingRowCard(
+                            item: item,
+                            value: value,
+                            isSaving: isSaving,
+                            isHighlighted: _highlightedItemName == item.name,
+                            isFavorite: _isFavoriteItem(item),
+                            quickStep: step,
+                            onBooleanChanged: item.isBooleanLike
+                                ? (next) => _setValue(item, next ? 1 : 0)
+                                : null,
+                            onTap: () => _openEditor(item),
+                            onFavoriteLongPress: () =>
+                                unawaited(_toggleFavoriteItem(item)),
+                            onDecrement: item.isBooleanLike
+                                ? null
+                                : () => _adjustValueByStep(item, -1,
+                                    stepOverride: step),
+                            onIncrement: item.isBooleanLike
+                                ? null
+                                : () => _adjustValueByStep(item, 1,
+                                    stepOverride: step),
+                            onQuickInput: item.isBooleanLike
+                                ? null
+                                : () => _showQuickValueInput(item),
+                            onStepTap: item.isBooleanLike
+                                ? null
+                                : () => _cycleStep(item),
+                            sliderValue: sliderValue,
+                            sliderMin: item.min?.toDouble(),
+                            sliderMax: item.max?.toDouble(),
+                            sliderDivisions: step == null
+                                ? null
+                                : _sliderDivisions(item, step),
+                            onSliderChanged:
+                                item.isBooleanLike || sliderValue == null
+                                    ? null
+                                    : (v) => _onSliderChanged(
                                           item,
                                           v,
                                           stepOverride: step,
                                         ),
-                                      ),
-                          onResetDefault: () =>
-                              _setValue(item, item.defaultValue),
+                            onSliderChangeEnd:
+                                item.isBooleanLike || sliderValue == null
+                                    ? null
+                                    : (v) => unawaited(
+                                          _onSliderChangeEnd(
+                                            item,
+                                            v,
+                                            stepOverride: step,
+                                          ),
+                                        ),
+                          ),
                         );
                       },
                     ),
@@ -930,9 +1341,12 @@ class _SettingRowCard extends StatelessWidget {
   final CarrotSettingItemMeta item;
   final dynamic value;
   final bool isSaving;
+  final bool isHighlighted;
+  final bool isFavorite;
   final int? quickStep;
   final ValueChanged<bool>? onBooleanChanged;
   final VoidCallback? onTap;
+  final VoidCallback? onFavoriteLongPress;
   final VoidCallback? onDecrement;
   final VoidCallback? onIncrement;
   final VoidCallback? onQuickInput;
@@ -943,15 +1357,17 @@ class _SettingRowCard extends StatelessWidget {
   final int? sliderDivisions;
   final ValueChanged<double>? onSliderChanged;
   final ValueChanged<double>? onSliderChangeEnd;
-  final VoidCallback onResetDefault;
 
   const _SettingRowCard({
     required this.item,
     required this.value,
     required this.isSaving,
+    required this.isHighlighted,
+    required this.isFavorite,
     required this.quickStep,
     required this.onBooleanChanged,
     required this.onTap,
+    required this.onFavoriteLongPress,
     required this.onDecrement,
     required this.onIncrement,
     required this.onQuickInput,
@@ -962,7 +1378,6 @@ class _SettingRowCard extends StatelessWidget {
     required this.sliderDivisions,
     required this.onSliderChanged,
     required this.onSliderChangeEnd,
-    required this.onResetDefault,
   });
 
   @override
@@ -977,161 +1392,200 @@ class _SettingRowCard extends StatelessWidget {
     }
     if (rangeText != null) subtitleParts.add(rangeText);
 
-    return Material(
-      color: Theme.of(context).colorScheme.surfaceContainer,
-      borderRadius: BorderRadius.circular(14),
-      child: InkWell(
+    final borderColor = isHighlighted
+        ? Theme.of(context).colorScheme.primary
+        : Colors.transparent;
+    final bgColor = isHighlighted
+        ? Theme.of(context).colorScheme.primaryContainer.withOpacity(0.36)
+        : Theme.of(context).colorScheme.surfaceContainer;
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 220),
+      decoration: BoxDecoration(
+        color: bgColor,
         borderRadius: BorderRadius.circular(14),
-        onLongPress: onResetDefault,
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Column(
+        border: Border.all(color: borderColor, width: isHighlighted ? 1.4 : 0),
+      ),
+      child: Stack(
+        children: [
+          Material(
+            color: Colors.transparent,
+            borderRadius: BorderRadius.circular(14),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(14),
+              onLongPress: onFavoriteLongPress,
+              onTap: onTap,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            item.displayTitle,
-                            style: const TextStyle(fontWeight: FontWeight.w700),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  item.displayTitle,
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.w700),
+                                ),
+                              ),
+                              if (isSaving)
+                                const SizedBox(
+                                  width: 14,
+                                  height: 14,
+                                  child:
+                                      CircularProgressIndicator(strokeWidth: 2),
+                                ),
+                            ],
                           ),
-                        ),
-                        if (isSaving)
-                          const SizedBox(
-                            width: 14,
-                            height: 14,
-                            child: CircularProgressIndicator(strokeWidth: 2),
+                          const SizedBox(height: 4),
+                          Text(
+                            item.name,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontFamily: 'monospace',
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
                           ),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      item.name,
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontFamily: 'monospace',
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          const SizedBox(height: 4),
+                          if (subtitleParts.isNotEmpty)
+                            Text(
+                              subtitleParts.join(' · '),
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .onSurfaceVariant,
+                              ),
+                            ),
+                          const SizedBox(height: 8),
+                          if (item.isBooleanLike)
+                            Text(
+                              _displaySettingValue(value),
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w800,
+                                color: Theme.of(context).colorScheme.primary,
+                              ),
+                            ),
+                        ],
                       ),
                     ),
-                    const SizedBox(height: 4),
-                    if (subtitleParts.isNotEmpty)
-                      Text(
-                        subtitleParts.join(' · '),
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    const SizedBox(height: 8),
+                    const SizedBox(width: 8),
                     if (item.isBooleanLike)
-                      Text(
-                        _displaySettingValue(value),
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w800,
-                          color: Theme.of(context).colorScheme.primary,
+                      Switch(
+                        value: _asBoolLike(value),
+                        onChanged: isSaving ? null : onBooleanChanged,
+                      )
+                    else
+                      SizedBox(
+                        width: 172,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: _ValuePill(
+                                    text: _displaySettingValue(value),
+                                    onTap: isSaving ? null : onQuickInput,
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                _TinyInfoPill(
+                                  text: '단위 ${quickStep ?? 1}',
+                                  onTap: isSaving ? null : onStepTap,
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            if (sliderValue != null &&
+                                sliderMin != null &&
+                                sliderMax != null)
+                              Row(
+                                children: [
+                                  _InlineActionButton(
+                                    icon: Icons.remove,
+                                    onTap: isSaving ? null : onDecrement,
+                                  ),
+                                  const SizedBox(width: 2),
+                                  Expanded(
+                                    child: SliderTheme(
+                                      data: SliderTheme.of(context).copyWith(
+                                        trackHeight: 7,
+                                        thumbShape: const RoundSliderThumbShape(
+                                          enabledThumbRadius: 11,
+                                        ),
+                                        overlayShape:
+                                            const RoundSliderOverlayShape(
+                                          overlayRadius: 18,
+                                        ),
+                                      ),
+                                      child: SizedBox(
+                                        height: 42,
+                                        child: Slider(
+                                          value: sliderValue!,
+                                          min: sliderMin!,
+                                          max: sliderMax!,
+                                          divisions: sliderDivisions,
+                                          onChanged:
+                                              isSaving ? null : onSliderChanged,
+                                          onChangeEnd: isSaving
+                                              ? null
+                                              : onSliderChangeEnd,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 2),
+                                  _InlineActionButton(
+                                    icon: Icons.add,
+                                    onTap: isSaving ? null : onIncrement,
+                                  ),
+                                ],
+                              )
+                            else
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.end,
+                                children: [
+                                  _InlineActionButton(
+                                    icon: Icons.remove,
+                                    onTap: isSaving ? null : onDecrement,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  _InlineActionButton(
+                                    icon: Icons.add,
+                                    onTap: isSaving ? null : onIncrement,
+                                  ),
+                                ],
+                              ),
+                          ],
                         ),
                       ),
                   ],
                 ),
               ),
-              const SizedBox(width: 8),
-              if (item.isBooleanLike)
-                Switch(
-                  value: _asBoolLike(value),
-                  onChanged: isSaving ? null : onBooleanChanged,
-                )
-              else
-                SizedBox(
-                  width: 172,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: _ValuePill(
-                              text: _displaySettingValue(value),
-                              onTap: isSaving ? null : onQuickInput,
-                            ),
-                          ),
-                          const SizedBox(width: 6),
-                          _TinyInfoPill(
-                            text: '단위 ${quickStep ?? 1}',
-                            onTap: isSaving ? null : onStepTap,
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      if (sliderValue != null &&
-                          sliderMin != null &&
-                          sliderMax != null)
-                        Row(
-                          children: [
-                            _InlineActionButton(
-                              icon: Icons.remove,
-                              onTap: isSaving ? null : onDecrement,
-                            ),
-                            const SizedBox(width: 2),
-                            Expanded(
-                              child: SliderTheme(
-                                data: SliderTheme.of(context).copyWith(
-                                  trackHeight: 7,
-                                  thumbShape: const RoundSliderThumbShape(
-                                    enabledThumbRadius: 11,
-                                  ),
-                                  overlayShape: const RoundSliderOverlayShape(
-                                    overlayRadius: 18,
-                                  ),
-                                ),
-                                child: SizedBox(
-                                  height: 42,
-                                  child: Slider(
-                                    value: sliderValue!,
-                                    min: sliderMin!,
-                                    max: sliderMax!,
-                                    divisions: sliderDivisions,
-                                    onChanged:
-                                        isSaving ? null : onSliderChanged,
-                                    onChangeEnd:
-                                        isSaving ? null : onSliderChangeEnd,
-                                  ),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 2),
-                            _InlineActionButton(
-                              icon: Icons.add,
-                              onTap: isSaving ? null : onIncrement,
-                            ),
-                          ],
-                        )
-                      else
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
-                          children: [
-                            _InlineActionButton(
-                              icon: Icons.remove,
-                              onTap: isSaving ? null : onDecrement,
-                            ),
-                            const SizedBox(width: 6),
-                            _InlineActionButton(
-                              icon: Icons.add,
-                              onTap: isSaving ? null : onIncrement,
-                            ),
-                          ],
-                        ),
-                    ],
-                  ),
-                ),
-            ],
+            ),
           ),
-        ),
+          if (!isSaving && isFavorite)
+            const Positioned(
+              top: 6,
+              right: 6,
+              child: IgnorePointer(
+                child: Icon(
+                  Icons.bookmark,
+                  size: 16,
+                  color: Colors.amber,
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }

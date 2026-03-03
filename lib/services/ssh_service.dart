@@ -34,6 +34,18 @@ class SSHCommandResult {
   }
 }
 
+class HudFallbackMetrics {
+  final double? cpuTempC;
+  final double? memPct;
+  final double? diskPct;
+
+  const HudFallbackMetrics({
+    this.cpuTempC,
+    this.memPct,
+    this.diskPct,
+  });
+}
+
 class SSHService extends ChangeNotifier {
   SSHClient? _client;
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
@@ -149,16 +161,25 @@ class SSHService extends ChangeNotifier {
 
   Future<void> _syncAutoConnectProfileToService(
       {bool resumeAutoReconnect = false}) async {
-    final ip = await _storage.read(key: 'ssh_ip');
-    final username = await _storage.read(key: 'ssh_username');
-    final password = await _storage.read(key: 'ssh_password');
+    await _storage.delete(key: 'ssh_ip');
+    final usernameRaw = await _storage.read(key: 'ssh_username');
+    final username = (usernameRaw == null || usernameRaw.trim().isEmpty)
+        ? 'comma'
+        : usernameRaw.trim();
+    final passwordRaw = await _storage.read(key: 'ssh_password');
     final portStr = await _storage.read(key: 'ssh_port');
-    final privateKey = await _storage.read(key: 'current_private_key');
+    final privateKeyRaw = await _storage.read(key: 'current_private_key');
+    final password = (passwordRaw == null || passwordRaw.trim().isEmpty)
+        ? null
+        : passwordRaw;
+    final privateKey = (privateKeyRaw == null || privateKeyRaw.trim().isEmpty)
+        ? null
+        : privateKeyRaw;
     final port = int.tryParse(portStr ?? '') ?? _defaultSshPort;
 
     FlutterBackgroundService().invoke('configureAutoConnect', {
-      'ip': ip,
-      'username': username ?? 'comma',
+      'ip': null,
+      'username': username,
       'password': password,
       'privateKey': privateKey,
       'port': port,
@@ -168,25 +189,34 @@ class SSHService extends ChangeNotifier {
   }
 
   Future<void> _reconnectFromStorage({String? preferredIp}) async {
-    final ip = await _storage.read(key: 'ssh_ip');
-    final username = await _storage.read(key: 'ssh_username');
-    final password = await _storage.read(key: 'ssh_password');
+    final usernameRaw = await _storage.read(key: 'ssh_username');
+    final username = (usernameRaw == null || usernameRaw.trim().isEmpty)
+        ? 'comma'
+        : usernameRaw.trim();
+    var password = await _storage.read(key: 'ssh_password');
     final portStr = await _storage.read(key: 'ssh_port');
     final port = int.tryParse(portStr ?? '') ?? _defaultSshPort;
 
     // 새로운 키 저장 구조에서 로드
-    final privateKey = await _storage.read(key: 'current_private_key');
+    final privateKeyRaw = await _storage.read(key: 'current_private_key');
+    final privateKey = (privateKeyRaw == null || privateKeyRaw.trim().isEmpty)
+        ? null
+        : privateKeyRaw;
+    if (privateKey == null && (password == null || password.trim().isEmpty)) {
+      // openpilot 기본 계정 호환 기본값
+      password = 'comma';
+    }
 
     final targetIp = preferredIp != null && _isValidIpv4(preferredIp)
         ? preferredIp
-        : (ip ?? _serviceCandidateIp);
+        : _serviceCandidateIp;
 
     print(
         '[SSHService] Reconnect from storage - IP: $targetIp, Username: $username, Port: $port');
     _diag.info(
         'ssh', 'Reconnect from storage target=$targetIp:$port user=$username');
 
-    if (targetIp != null && username != null) {
+    if (targetIp != null) {
       // Reconnect using standard flow
       await connect(targetIp, username,
           port: port, password: password, privateKey: privateKey);
@@ -841,7 +871,7 @@ class SSHService extends ChangeNotifier {
     String? keyPath, {
     int port = _defaultSshPort,
   }) async {
-    await _storage.write(key: 'ssh_ip', value: ip);
+    await _storage.delete(key: 'ssh_ip');
     await _storage.write(key: 'ssh_username', value: username);
     await _storage.write(key: 'ssh_port', value: port.toString());
     if (password != null)
@@ -872,17 +902,58 @@ class SSHService extends ChangeNotifier {
     }
   }
 
-  Future<String> getCpuTemp() async {
-    // This path might vary depending on the device (C2/C3). Using a generic thermal zone.
-    // Often thermal_zone0 is CPU.
-    final result =
-        await executeCommand("cat /sys/class/thermal/thermal_zone0/temp");
+  Future<double?> getCpuTempFromCarrotDeviceState() async {
+    final metrics = await getHudFallbackMetrics();
+    return metrics?.cpuTempC;
+  }
+
+  Future<HudFallbackMetrics?> getHudFallbackMetrics() async {
+    // Match carrot/openpilot deviceState thermal source as closely as possible.
+    // tici/mici typically expose cpu[0-3]-silver-usr + cpu[0-3]-gold-usr.
+    const cmd = r'''
+avg=$(for z in /sys/devices/virtual/thermal/thermal_zone*; do
+  [ -f "$z/type" ] || continue
+  t=$(cat "$z/type" 2>/dev/null)
+  case "$t" in
+    cpu[0-9]-silver-usr|cpu[0-9]-gold-usr)
+      cat "$z/temp" 2>/dev/null
+      ;;
+  esac
+done | awk 'BEGIN{sum=0;n=0} {v=$1+0; if(v>0){sum+=v;n++}} END{if(n>0) printf "%.2f", sum/(n*1000)}')
+if [ -n "$avg" ]; then
+  cpu="$avg"
+else
+  cpu=$(awk '{v=$1+0; if(v>0) printf "%.2f", v/1000}' /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+fi
+mem=$(awk '/MemTotal:/ {t=$2} /MemAvailable:/ {a=$2} END{if(t>0) printf "%.2f", ((t-a)*100)/t}' /proc/meminfo 2>/dev/null)
+disk=$(df -P /data 2>/dev/null | awk 'NR==2 {gsub("%","",$5); print $5}')
+printf "%s %s %s\n" "$cpu" "$mem" "$disk"
+''';
     try {
-      final temp = int.parse(result.trim());
-      return "${(temp / 1000).toStringAsFixed(1)}°C";
-    } catch (e) {
-      return "N/A";
+      final result = (await executeCommand(cmd)).trim();
+      if (result.isEmpty) return null;
+      final parts = result.split(RegExp(r'\s+'));
+      if (parts.isEmpty) return null;
+
+      double? parseAt(int index) {
+        if (index < 0 || index >= parts.length) return null;
+        return double.tryParse(parts[index]);
+      }
+
+      return HudFallbackMetrics(
+        cpuTempC: parseAt(0),
+        memPct: parseAt(1),
+        diskPct: parseAt(2),
+      );
+    } catch (_) {
+      return null;
     }
+  }
+
+  Future<String> getCpuTemp() async {
+    final tempC = await getCpuTempFromCarrotDeviceState();
+    if (tempC == null) return "N/A";
+    return "${tempC.toStringAsFixed(1)}°C";
   }
 
   Future<String> getStorageUsage() async {
@@ -939,8 +1010,11 @@ class SSHService extends ChangeNotifier {
       }
     });
 
-    // 2. Start Active Subnet Scan
-    unawaited(_scanSubnet(generation));
+    // Broadcast-first discovery for auto flow.
+    // Keep active scan only for explicit manual discovery sessions.
+    if (manualSession) {
+      unawaited(_scanSubnet(generation));
+    }
     return true;
   }
 
@@ -986,7 +1060,7 @@ class SSHService extends ChangeNotifier {
     if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
     try {
       final socket = await Socket.connect(ip, port,
-          timeout: const Duration(milliseconds: 500));
+          timeout: const Duration(milliseconds: 1000));
       socket.destroy();
       if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
       _emitDiscoveredIp(ip);

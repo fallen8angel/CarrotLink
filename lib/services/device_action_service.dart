@@ -211,11 +211,10 @@ class DeviceActionService {
   }) async {
     final script = '''
 ${_repoDetectScript(preferredRepoPath: preferredRepoPath)}
-git -C "\$REPO" fetch --all --prune >/dev/null 2>&1 || true
 PRIMARY_REMOTE="\$(git -C "\$REPO" remote | head -n1 | tr -d '\\r')"
 CURRENT_BRANCH="\$(git -C "\$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 UPSTREAM_REF="\$(git -C "\$REPO" rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || true)"
-DEFAULT_BRANCH="\$(git -C "\$REPO" remote show origin 2>/dev/null | sed -n 's/.*HEAD branch: //p' | head -n1)"
+DEFAULT_BRANCH="\$(git -C "\$REPO" remote show -n origin 2>/dev/null | sed -n 's/.*HEAD branch: //p' | head -n1)"
 ORIGIN_URL="\$(git -C "\$REPO" config --get remote.origin.url 2>/dev/null || true)"
 if [ -n "\$ORIGIN_URL" ]; then
   REPO_URL="\$ORIGIN_URL"
@@ -397,9 +396,7 @@ else
   git -C "\$REPO" remote add origin "\$URL"
 fi
 EFFECTIVE_URL="\$(git -C "\$REPO" config --get remote.origin.url 2>/dev/null || true)"
-FETCH_OK=0
-git -C "\$REPO" fetch origin --prune >/dev/null 2>&1 || FETCH_OK=1
-echo "__RESULT__|\$EFFECTIVE_URL|\$FETCH_OK"
+echo "__RESULT__|\$EFFECTIVE_URL|0"
 ''';
 
     final result = await ssh.executeCommandResult(
@@ -420,7 +417,7 @@ echo "__RESULT__|\$EFFECTIVE_URL|\$FETCH_OK"
       }
     }
     var effective = normalizedUrl;
-    var fetchSucceeded = false;
+    var fetchSucceeded = true;
     if (markerLine != null) {
       final parts = markerLine.split('|');
       if (parts.length > 1 && parts[1].trim().isNotEmpty) {
@@ -457,7 +454,6 @@ if git -C "\$REPO" remote get-url "\$NAME" >/dev/null 2>&1; then
 else
   git -C "\$REPO" remote add "\$NAME" "\$URL"
 fi
-git -C "\$REPO" fetch "\$NAME" --prune >/dev/null 2>&1 || true
 git -C "\$REPO" remote -v
 ''';
     final result = await ssh.executeCommandResult(
@@ -517,9 +513,8 @@ if [ -z "\$CURRENT_BRANCH" ]; then
   echo "current branch not found"
   exit 2
 fi
-git -C "\$REPO" fetch "\$REMOTE" --prune >/dev/null 2>&1 || true
 if ! git -C "\$REPO" show-ref --verify --quiet "refs/remotes/\$REMOTE/\$RBRANCH"; then
-  echo "remote branch not found: \$REMOTE/\$RBRANCH"
+  echo "remote branch not found locally: \$REMOTE/\$RBRANCH (run Git Sync first)"
   exit 3
 fi
 git -C "\$REPO" branch --set-upstream-to="\$REMOTE/\$RBRANCH" "\$CURRENT_BRANCH"
@@ -587,7 +582,6 @@ git -C "\$REPO" reset --hard HEAD
 ${_repoDetectScript(preferredRepoPath: repoPathOverride)}
 BRANCH="$normalized"
 REMOTE="$remoteName"
-git -C "\$REPO" fetch --all --prune
 if git -C "\$REPO" show-ref --verify --quiet "refs/heads/\$BRANCH"; then
   git -C "\$REPO" checkout "\$BRANCH"
 else
@@ -596,7 +590,7 @@ else
   elif git -C "\$REPO" show-ref --verify --quiet "refs/remotes/origin/\$BRANCH"; then
     git -C "\$REPO" checkout -B "\$BRANCH" "origin/\$BRANCH"
   else
-    echo "remote branch not found: \$REMOTE/\$BRANCH"
+    echo "remote branch not found locally: \$REMOTE/\$BRANCH (run Git Sync first)"
     exit 3
   fi
 fi

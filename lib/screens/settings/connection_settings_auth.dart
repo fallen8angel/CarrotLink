@@ -199,7 +199,7 @@ extension _ConnectionSettingsAuth on _ConnectionSettingsScreenState {
     final tokenController = TextEditingController();
     await showDialog(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         title: const Text("토큰 직접 입력"),
         content: Column(
           mainAxisSize: MainAxisSize.min,
@@ -224,7 +224,8 @@ extension _ConnectionSettingsAuth on _ConnectionSettingsScreenState {
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(context), child: const Text("취소")),
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text("취소")),
           FilledButton(
             onPressed: () async {
               final token = tokenController.text.trim();
@@ -249,13 +250,15 @@ extension _ConnectionSettingsAuth on _ConnectionSettingsScreenState {
               await _syncKeyStateAfterLogin(interactive: true);
               if (!mounted) return;
 
-              Navigator.pop(context);
+              if (!dialogContext.mounted) return;
+              Navigator.pop(dialogContext);
               CustomToast.show(context, "GitHub 로그인 성공");
               if (!_hasActiveSshKey) {
                 final loaded = await _loadKeys();
+                if (!mounted) return;
                 if (loaded && _keys.isEmpty) {
                   await _showKeyGenerationDialog();
-                } else if (mounted) {
+                } else {
                   CustomToast.show(
                       context, "적용 가능한 개인키가 없습니다. 로컬 키를 적용하거나 새 키를 생성하세요.",
                       isError: true);
@@ -271,33 +274,43 @@ extension _ConnectionSettingsAuth on _ConnectionSettingsScreenState {
   }
 
   Future<void> _startDeviceFlow() async {
+    if (!mounted) return;
     _diag.info('github_oauth', 'Launching GitHub device flow screen');
-    final token = await Navigator.push<String>(
-      context,
+    final nav = Navigator.of(context);
+    final token = await nav.push<String>(
       MaterialPageRoute(
         builder: (context) => GithubLoginScreen(githubService: _githubService),
       ),
     );
 
-    if (token != null && mounted) {
+    if (!mounted) return;
+    if (token != null) {
       _diag.info(
           'github_oauth', 'Device flow returned token, verifying in settings');
       await _githubService.saveToken(token);
+      if (!mounted) return;
       await _checkGitHubLogin();
+      if (!mounted) return;
       if (!_isGitHubLoggedIn) {
-        if (mounted) {
-          CustomToast.show(context, "GitHub 인증 결과를 확인하지 못했습니다. 다시 시도해주세요.",
-              isError: true);
-        }
+        CustomToast.show(context, "GitHub 인증 결과를 확인하지 못했습니다. 다시 시도해주세요.",
+            isError: true);
         return;
       }
       await _syncKeyStateAfterLogin(interactive: true);
+      if (!mounted) return;
+      final ssh = _sshRef;
+      if (ssh != null) {
+        ssh.resumeAutoReconnect();
+      } else {
+        _getSsh().resumeAutoReconnect();
+      }
       CustomToast.show(context, "GitHub 로그인 성공");
       if (!_hasActiveSshKey) {
         final loaded = await _loadKeys();
+        if (!mounted) return;
         if (loaded && _keys.isEmpty) {
           await _showKeyGenerationDialog();
-        } else if (mounted) {
+        } else {
           CustomToast.show(context, "적용 가능한 개인키가 없습니다. 로컬 키를 적용하거나 새 키를 생성하세요.",
               isError: true);
         }
@@ -306,6 +319,7 @@ extension _ConnectionSettingsAuth on _ConnectionSettingsScreenState {
   }
 
   Future<void> _showKeyGenerationDialog() async {
+    if (!mounted) return;
     final result = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(

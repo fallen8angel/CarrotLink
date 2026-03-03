@@ -120,6 +120,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   List<double> _lastValidWideFromDeviceEuler = const <double>[];
   double _lastValidPathOffsetZ = 1.22;
   String _hudDefaultMode = HudDriveSettingsService.modeWebrtc;
+  String _hudSidecarProfile = _defaultSidecarProfile;
 
   final ValueNotifier<_DriveOverlaySnapshot> _overlayNotifier =
       ValueNotifier<_DriveOverlaySnapshot>(
@@ -2280,102 +2281,154 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   }
 
   void _openSidecarActionPopup() {
+    if (!_openpilotOverlayMode) return;
     showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
+      isScrollControlled: true,
       builder: (sheetContext) {
+        var selectedProfile = _hudSidecarProfile;
         final titleStyle = Theme.of(sheetContext).textTheme.titleSmall;
-        return SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-                child: Row(
-                  children: [
-                    Icon(
-                      Icons.hub_outlined,
-                      color: Theme.of(sheetContext).colorScheme.primary,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      '사이드카 제어 (기본 P2)',
-                      style: titleStyle,
-                    ),
-                  ],
+        return StatefulBuilder(
+          builder: (context, setLocalState) {
+            return SafeArea(
+              child: SingleChildScrollView(
+                child: Padding(
+                  padding: EdgeInsets.only(
+                    bottom: MediaQuery.of(sheetContext).viewInsets.bottom,
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.hub_outlined,
+                              color: Theme.of(sheetContext).colorScheme.primary,
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              '사이드카 제어',
+                              style: titleStyle,
+                            ),
+                          ],
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: <String>[
+                              'p0',
+                              'p1',
+                              'p2',
+                              'p3',
+                              'p4',
+                            ].map((profile) {
+                              final selected = selectedProfile == profile;
+                              return ChoiceChip(
+                                label: Text(profile.toUpperCase()),
+                                selected: selected,
+                                onSelected: _sidecarBusy
+                                    ? null
+                                    : (_) {
+                                        setLocalState(
+                                          () => selectedProfile = profile,
+                                        );
+                                        setState(
+                                          () => _hudSidecarProfile = profile,
+                                        );
+                                      },
+                              );
+                            }).toList(growable: false),
+                          ),
+                        ),
+                      ),
+                      ListTile(
+                        leading: const Icon(Icons.publish),
+                        title: const Text('배포/업데이트'),
+                        onTap: _sidecarBusy
+                            ? null
+                            : () {
+                                Navigator.of(sheetContext).pop();
+                                unawaited(
+                                  _runSidecarTask(
+                                    title: '사이드카 배포',
+                                    task: (ssh) => _sidecarService.deploy(ssh),
+                                  ),
+                                );
+                              },
+                      ),
+                      ListTile(
+                        leading: const Icon(Icons.play_circle_outline),
+                        title: Text('시작 (${selectedProfile.toUpperCase()})'),
+                        onTap: _sidecarBusy
+                            ? null
+                            : () {
+                                final profileToStart = selectedProfile;
+                                Navigator.of(sheetContext).pop();
+                                unawaited(
+                                  _runSidecarTask(
+                                    title: '사이드카 시작',
+                                    task: (ssh) => _sidecarService.start(
+                                      ssh,
+                                      profile: profileToStart,
+                                    ),
+                                  ).then((_) {
+                                    _startSidecarLoop();
+                                    if (_openpilotOverlayMode) {
+                                      unawaited(_ensureDriveProfile());
+                                    }
+                                  }),
+                                );
+                              },
+                      ),
+                      ListTile(
+                        leading: const Icon(Icons.stop_circle_outlined),
+                        title: const Text(
+                          '중지',
+                          overflow: TextOverflow.ellipsis,
+                          maxLines: 1,
+                        ),
+                        onTap: _sidecarBusy
+                            ? null
+                            : () {
+                                Navigator.of(sheetContext).pop();
+                                unawaited(
+                                  _runSidecarTask(
+                                    title: '사이드카 중지',
+                                    task: (ssh) => _sidecarService.stop(ssh),
+                                  ).then((_) => _stopSidecarLoop()),
+                                );
+                              },
+                      ),
+                      ListTile(
+                        leading: const Icon(Icons.info_outline),
+                        title: const Text('상태 확인'),
+                        onTap: _sidecarBusy
+                            ? null
+                            : () {
+                                Navigator.of(sheetContext).pop();
+                                unawaited(
+                                  _runSidecarTask(
+                                    title: '사이드카 상태',
+                                    task: (ssh) => _sidecarService.status(ssh),
+                                  ),
+                                );
+                              },
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                  ),
                 ),
               ),
-              ListTile(
-                leading: const Icon(Icons.publish),
-                title: const Text('배포/업데이트'),
-                onTap: _sidecarBusy
-                    ? null
-                    : () {
-                        Navigator.of(sheetContext).pop();
-                        unawaited(
-                          _runSidecarTask(
-                            title: '사이드카 배포',
-                            task: (ssh) => _sidecarService.deploy(ssh),
-                          ),
-                        );
-                      },
-              ),
-              ListTile(
-                leading: const Icon(Icons.play_circle_outline),
-                title: const Text('시작 (P2)'),
-                onTap: _sidecarBusy
-                    ? null
-                    : () {
-                        Navigator.of(sheetContext).pop();
-                        unawaited(
-                          _runSidecarTask(
-                            title: '사이드카 시작',
-                            task: (ssh) => _sidecarService.start(
-                              ssh,
-                              profile: _defaultSidecarProfile,
-                            ),
-                          ).then((_) {
-                            _startSidecarLoop();
-                            if (_openpilotOverlayMode) {
-                              unawaited(_ensureDriveProfile());
-                            }
-                          }),
-                        );
-                      },
-              ),
-              ListTile(
-                leading: const Icon(Icons.stop_circle_outlined),
-                title: const Text('중지'),
-                onTap: _sidecarBusy
-                    ? null
-                    : () {
-                        Navigator.of(sheetContext).pop();
-                        unawaited(
-                          _runSidecarTask(
-                            title: '사이드카 중지',
-                            task: (ssh) => _sidecarService.stop(ssh),
-                          ).then((_) => _stopSidecarLoop()),
-                        );
-                      },
-              ),
-              ListTile(
-                leading: const Icon(Icons.info_outline),
-                title: const Text('상태 확인'),
-                onTap: _sidecarBusy
-                    ? null
-                    : () {
-                        Navigator.of(sheetContext).pop();
-                        unawaited(
-                          _runSidecarTask(
-                            title: '사이드카 상태',
-                            task: (ssh) => _sidecarService.status(ssh),
-                          ),
-                        );
-                      },
-              ),
-              const SizedBox(height: 8),
-            ],
-          ),
+            );
+          },
         );
       },
     );
@@ -2789,15 +2842,18 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                         ),
                         const Spacer(),
                         IconButton(
-                          onPressed:
-                              _sidecarBusy ? null : _openSidecarActionPopup,
+                          onPressed: _sidecarBusy || !_openpilotOverlayMode
+                              ? null
+                              : _openSidecarActionPopup,
                           icon: Icon(
                             Icons.hub_outlined,
-                            color: _sidecarBusy
+                            color: _sidecarBusy || !_openpilotOverlayMode
                                 ? Colors.white38
                                 : const Color(0xFF87FFAA),
                           ),
-                          tooltip: '사이드카 제어',
+                          tooltip: _openpilotOverlayMode
+                              ? '사이드카 제어'
+                              : 'WebRTC 모드에서는 비활성화',
                         ),
                         const SizedBox(height: 8),
                       ],

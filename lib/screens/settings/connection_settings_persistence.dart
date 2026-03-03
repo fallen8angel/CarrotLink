@@ -79,12 +79,21 @@ extension _ConnectionSettingsPersistence on _ConnectionSettingsScreenState {
   }
 
   Future<void> _loadSettings() async {
-    final ip = await _storage.read(key: 'ssh_ip');
-    final username = await _storage.read(key: 'ssh_username');
+    await _storage.delete(key: 'ssh_ip');
+    var username = await _storage.read(key: 'ssh_username');
     final password = await _storage.read(key: 'ssh_password');
-    final port = await _storage.read(key: 'ssh_port');
+    var port = await _storage.read(key: 'ssh_port');
 
-    debugPrint('[Settings] Loaded IP: $ip, Username: $username');
+    if (username == null || username.trim().isEmpty) {
+      username = _ConnectionSettingsScreenState._fixedSshUsername;
+      await _storage.write(key: 'ssh_username', value: username);
+    }
+    if (port == null || port.trim().isEmpty) {
+      port = _ConnectionSettingsScreenState._fixedSshPort.toString();
+      await _storage.write(key: 'ssh_port', value: port);
+    }
+
+    debugPrint('[Settings] Loaded Username: $username');
 
     // 새 구조에서 키 로드
     final keyType = await _storage.read(key: 'current_key_type');
@@ -99,14 +108,9 @@ extension _ConnectionSettingsPersistence on _ConnectionSettingsScreenState {
 
     if (mounted) {
       _setStateSafe(() {
-        if (ip != null && ip.isNotEmpty) {
-          _ipController.text = ip;
-          _lockDiscoveryIpOverwrite = true;
-          _autoFilledIp = null;
-        } else {
-          _lockDiscoveryIpOverwrite = false;
-          _autoFilledIp = null;
-        }
+        _ipController.clear();
+        _lockDiscoveryIpOverwrite = false;
+        _autoFilledIp = null;
         if (username != null) _usernameController.text = username;
         if (password != null) _passwordController.text = password;
         if (port != null && port.isNotEmpty) _portController.text = port;
@@ -137,6 +141,11 @@ extension _ConnectionSettingsPersistence on _ConnectionSettingsScreenState {
       await _storage.delete(key: 'active_generated_id');
     }
     await _storage.write(key: 'key_verified', value: 'false');
+    if (mounted) {
+      try {
+        Provider.of<SSHService>(context, listen: false).resumeAutoReconnect();
+      } catch (_) {}
+    }
 
     if (!mounted) return;
     _setStateSafe(() {

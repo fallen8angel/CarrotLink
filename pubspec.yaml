@@ -1,7 +1,7 @@
 name: carrot_pilot_manager
 description: A CarrotLink App
 publish_to: 'none'
-version: 1.1014.0+26
+version: 2.0000.0+2000000
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -58,3 +58,5 @@ flutter:
   assets:
     - assets/icon.png
     - assets/speed_bg.png
+    - assets/sidecar/carrotlink_sidecar.py
+    - assets/sidecar/run_sidecar.sh

@@ -81,6 +81,7 @@ void onStart(ServiceInstance service) async {
   bool discoveryListening = false;
   bool stopping = false;
   bool autoReconnectEnabled = true;
+  bool appForeground = false;
 
   String? connectedIp;
   int? connectedPort;
@@ -92,15 +93,14 @@ void onStart(ServiceInstance service) async {
   String? profilePassword;
   String? profilePrivateKey;
   int profilePort = 22;
-  String? preferredIp;
 
   bool manualDisconnectRequested = false;
   DateTime? manualDisconnectUntil;
   int reconnectAttempt = 0;
+  int noBroadcastWaitAttempt = 0;
   late Future<void> Function(
     String, {
     required String reason,
-    bool updatePreferred,
   }) connectTo;
   late Future<void> Function() startDiscoveryListener;
 
@@ -131,21 +131,53 @@ void onStart(ServiceInstance service) async {
     return true;
   }
 
+  Duration candidateStaleThresholdForProfile() {
+    return appForeground
+        ? const Duration(seconds: 8)
+        : const Duration(seconds: 25);
+  }
+
+  Duration heartbeatIntervalForProfile() {
+    return appForeground
+        ? const Duration(seconds: 2)
+        : const Duration(seconds: 10);
+  }
+
+  Duration heartbeatTimeoutForProfile() {
+    return appForeground
+        ? const Duration(seconds: 1)
+        : const Duration(seconds: 3);
+  }
+
+  Duration candidateBroadcastDedupeWindow() {
+    return appForeground
+        ? const Duration(milliseconds: 200)
+        : const Duration(milliseconds: 500);
+  }
+
   int reconnectBackoffSeconds(int attempt) {
-    const seq = [2, 4, 8, 16, 30];
+    final seq = appForeground ? const [1, 2, 3, 5] : const [5, 10, 20, 30];
+    if (attempt < 0) return seq.first;
+    if (attempt >= seq.length) return seq.last;
+    return seq[attempt];
+  }
+
+  int noBroadcastBackoffSeconds(int attempt) {
+    final seq = appForeground ? const [2, 3] : const [20, 30];
     if (attempt < 0) return seq.first;
     if (attempt >= seq.length) return seq.last;
     return seq[attempt];
   }
 
   String? pickReconnectTarget() {
-    if (candidateIp != null &&
-        candidateSeenAt != null &&
-        DateTime.now().difference(candidateSeenAt!) <=
-            const Duration(seconds: 12)) {
-      return candidateIp;
+    final ip = candidateIp;
+    final seenAt = candidateSeenAt;
+    if (ip == null || seenAt == null) return null;
+    if (DateTime.now().difference(seenAt) >
+        candidateStaleThresholdForProfile()) {
+      return null;
     }
-    return preferredIp;
+    return ip;
   }
 
   void emitConnectionState({
@@ -176,7 +208,7 @@ void onStart(ServiceInstance service) async {
       'autoReconnectEnabled': autoReconnectEnabled,
       'manualDisconnectRequested': manualDisconnectRequested,
       'connectedIp': connectedIp,
-      'preferredIp': preferredIp,
+      'appForeground': appForeground,
     });
   }
 
@@ -234,19 +266,75 @@ void onStart(ServiceInstance service) async {
     if (stopping || !canAutoReconnect() || !hasConnectProfile()) return;
     if (connectInFlight || (sshClient != null && !sshClient!.isClosed)) return;
     final target = pickReconnectTarget();
-    if (target == null || target.isEmpty) return;
+    if (target == null || target.isEmpty) {
+      if (reconnectTimer?.isActive == true) return;
+      final delaySec = noBroadcastBackoffSeconds(noBroadcastWaitAttempt);
+      noBroadcastWaitAttempt =
+          noBroadcastWaitAttempt < 10 ? noBroadcastWaitAttempt + 1 : 10;
+      reconnectTimer = Timer(Duration(seconds: delaySec), () {
+        if (stopping) return;
+        emitDiscoveryState(source: 'wait_no_broadcast');
+        scheduleReconnect('wait_no_broadcast');
+      });
+      return;
+    }
     if (reconnectTimer?.isActive == true) return;
 
+    noBroadcastWaitAttempt = 0;
     final delaySec = reconnectBackoffSeconds(reconnectAttempt);
     reconnectAttempt = reconnectAttempt < 10 ? reconnectAttempt + 1 : 10;
     reconnectTimer = Timer(Duration(seconds: delaySec), () {
       if (stopping) return;
-      unawaited(connectTo(target, reason: reason, updatePreferred: false));
+      unawaited(connectTo(target, reason: reason));
     });
   }
 
-  connectTo =
-      (String ip, {required String reason, bool updatePreferred = true}) async {
+  void startHeartbeatLoop() {
+    heartbeatTimer?.cancel();
+    if (sshClient == null || sshClient!.isClosed) return;
+
+    heartbeatTimer =
+        Timer.periodic(heartbeatIntervalForProfile(), (timer) async {
+      if (sshClient == null || sshClient!.isClosed) {
+        timer.cancel();
+        await handleDisconnected('heartbeat_closed');
+        scheduleReconnect('heartbeat_closed');
+        return;
+      }
+      try {
+        await sshClient!.run('true').timeout(heartbeatTimeoutForProfile());
+      } catch (e) {
+        debugPrint('Background heartbeat failed: $e');
+        timer.cancel();
+        await handleDisconnected('heartbeat_failed');
+        scheduleReconnect('heartbeat_failed');
+      }
+    });
+  }
+
+  Future<void> applyActivityProfile(
+    bool foreground, {
+    String source = 'event',
+  }) async {
+    if (appForeground == foreground) {
+      return;
+    }
+    appForeground = foreground;
+    reconnectAttempt = 0;
+    noBroadcastWaitAttempt = 0;
+    clearReconnectTimer();
+    startHeartbeatLoop();
+    emitDiscoveryState(
+      source: foreground
+          ? 'profile_foreground_$source'
+          : 'profile_background_$source',
+    );
+    await updateNotification(
+      content: foreground ? '연결 감시(빠름)' : '연결 감시(절전)',
+    );
+  }
+
+  connectTo = (String ip, {required String reason}) async {
     if (stopping || connectInFlight) return;
     if (!isValidIpv4(ip) || !hasConnectProfile()) return;
 
@@ -282,8 +370,8 @@ void onStart(ServiceInstance service) async {
 
       connectedIp = ip;
       connectedPort = profilePort;
-      if (updatePreferred) preferredIp = ip;
       reconnectAttempt = 0;
+      noBroadcastWaitAttempt = 0;
 
       emitConnectionState(
         isConnected: true,
@@ -294,25 +382,7 @@ void onStart(ServiceInstance service) async {
       emitDiscoveryState(source: reason);
 
       await updateNotification(title: 'IP: $ip', content: '백업 확인 준비 중...');
-
-      heartbeatTimer?.cancel();
-      heartbeatTimer =
-          Timer.periodic(const Duration(seconds: 5), (timer) async {
-        if (sshClient == null || sshClient!.isClosed) {
-          timer.cancel();
-          await handleDisconnected('heartbeat_closed');
-          scheduleReconnect('heartbeat_closed');
-          return;
-        }
-        try {
-          await sshClient!.run('true').timeout(const Duration(seconds: 2));
-        } catch (e) {
-          debugPrint('Background heartbeat failed: $e');
-          timer.cancel();
-          await handleDisconnected('heartbeat_failed');
-          scheduleReconnect('heartbeat_failed');
-        }
-      });
+      startHeartbeatLoop();
     } catch (e) {
       await handleDisconnected('connect_failed');
       emitConnectionState(
@@ -333,20 +403,28 @@ void onStart(ServiceInstance service) async {
     if (!isValidIpv4(ip)) return;
     final now = DateTime.now();
     final changed = candidateIp != ip;
+    final connectedChanged = connectedIp != null && connectedIp != ip;
     candidateIp = ip;
     candidateSeenAt = now;
+    noBroadcastWaitAttempt = 0;
     emitDiscoveryState(source: source);
 
     if (changed ||
         lastCandidateBroadcastAt == null ||
         now.difference(lastCandidateBroadcastAt!) >
-            const Duration(seconds: 2)) {
+            candidateBroadcastDedupeWindow()) {
       lastCandidateBroadcastAt = now;
       service.invoke('candidateIp', {
         'ip': ip,
         'source': source,
         'ts': now.millisecondsSinceEpoch,
       });
+    }
+
+    if (connectedChanged && canAutoReconnect() && hasConnectProfile()) {
+      unawaited(handleDisconnected('candidate_changed'));
+      unawaited(connectTo(ip, reason: 'candidate_changed'));
+      return;
     }
 
     if ((sshClient == null || sshClient!.isClosed) &&
@@ -430,7 +508,6 @@ void onStart(ServiceInstance service) async {
     profilePassword = pw is String && pw.isNotEmpty ? pw : null;
     profilePrivateKey = key is String && key.isNotEmpty ? key : null;
     profilePort = port;
-    preferredIp = isValidIpv4(ip) ? ip : preferredIp;
     autoReconnectEnabled = true;
     manualDisconnectRequested = false;
     manualDisconnectUntil = null;
@@ -458,11 +535,6 @@ void onStart(ServiceInstance service) async {
       profilePort = parsedPort;
     }
 
-    final ip = event['ip']?.toString();
-    if (ip != null && isValidIpv4(ip)) {
-      preferredIp = ip;
-    }
-
     final auto = event['autoReconnectEnabled'];
     if (auto is bool) {
       autoReconnectEnabled = auto;
@@ -476,10 +548,11 @@ void onStart(ServiceInstance service) async {
     if ((sshClient == null || sshClient!.isClosed) &&
         canAutoReconnect() &&
         hasConnectProfile()) {
-      final target = pickReconnectTarget() ?? preferredIp;
+      final target = pickReconnectTarget();
       if (target != null) {
-        unawaited(
-            connectTo(target, reason: 'profile_sync', updatePreferred: false));
+        unawaited(connectTo(target, reason: 'profile_sync'));
+      } else {
+        scheduleReconnect('profile_sync_wait_broadcast');
       }
     }
   });
@@ -490,9 +563,11 @@ void onStart(ServiceInstance service) async {
     autoReconnectEnabled = true;
     emitDiscoveryState(source: 'resume_auto_reconnect');
     if ((sshClient == null || sshClient!.isClosed) && hasConnectProfile()) {
-      final target = pickReconnectTarget() ?? preferredIp;
+      final target = pickReconnectTarget();
       if (target != null) {
         unawaited(connectTo(target, reason: 'resume_auto_reconnect'));
+      } else {
+        scheduleReconnect('resume_wait_broadcast');
       }
     }
   });
@@ -502,6 +577,18 @@ void onStart(ServiceInstance service) async {
       unawaited(startDiscoveryListener());
     } else {
       emitDiscoveryState(source: 'ensure_discovery');
+    }
+  });
+
+  service.on('setAppVisibility').listen((event) async {
+    if (event == null) return;
+    final foreground = event['foreground'] == true;
+    final source = event['source']?.toString() ?? 'setAppVisibility';
+    await applyActivityProfile(foreground, source: source);
+    if ((sshClient == null || sshClient!.isClosed) &&
+        canAutoReconnect() &&
+        hasConnectProfile()) {
+      scheduleReconnect('profile_switch');
     }
   });
 
@@ -534,7 +621,7 @@ void onStart(ServiceInstance service) async {
       'listening': discoveryListening,
       'autoReconnectEnabled': autoReconnectEnabled,
       'manualDisconnectRequested': manualDisconnectRequested,
-      'preferredIp': preferredIp,
+      'appForeground': appForeground,
     });
     emitDiscoveryState(source: 'status');
   });

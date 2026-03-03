@@ -75,7 +75,7 @@ chmod 755 "\$BASE/run_sidecar.sh" "\$BASE/carrotlink_sidecar.py"
     }
 
     final p = profile.trim().toLowerCase();
-    if (!{'p0', 'p1', 'p2', 'p3'}.contains(p)) {
+    if (!{'p0', 'p1', 'p2', 'p3', 'p4'}.contains(p)) {
       throw Exception('지원하지 않는 프로파일입니다: $profile');
     }
 

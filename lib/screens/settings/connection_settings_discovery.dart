@@ -6,21 +6,22 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
     if (!_isOpenpilotReady) return;
     if (_ipController.text.trim().isNotEmpty) return;
 
-    final ssh = Provider.of<SSHService>(context, listen: false);
+    final ssh = _sshRef;
+    if (ssh == null) return;
     if (ssh.isConnected || ssh.isConnecting || ssh.isDiscoveryActive) return;
 
     unawaited(
       _startDiscovery(
         manualSession: false,
         forceRestart: false,
-        timeout: const Duration(seconds: 8),
+        timeout: const Duration(seconds: 15),
       ),
     );
   }
 
   Future<void> _runGuidedDiscovery() async {
     if (!mounted) return;
-    Provider.of<SSHService>(context, listen: false).resumeAutoReconnect();
+    _getSsh().resumeAutoReconnect();
     _setStateSafe(() {
       _lockDiscoveryIpOverwrite = false;
       _autoFilledIp = null;
@@ -31,9 +32,10 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
     await _startDiscovery(
       manualSession: true,
       forceRestart: true,
-      timeout: const Duration(seconds: 20),
+      timeout: const Duration(seconds: 60),
       toastOnStart: true,
     );
+    if (!mounted) return;
     _diag.info('discovery', 'Manual discovery started from settings');
     CustomToast.show(context, 'IP 자동 검색을 시작합니다.');
   }
@@ -45,7 +47,7 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
     bool toastOnStart = false,
   }) async {
     try {
-      final ssh = Provider.of<SSHService>(context, listen: false);
+      final ssh = _getSsh();
       final started = await ssh.startDiscovery(
         forceRestart: forceRestart,
         timeout: timeout,
@@ -90,9 +92,16 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
               ssh.discoverySource != 'settings_auto') {
             return;
           }
-          if (ssh.isConnected || ssh.isConnecting) {
-            return;
-          }
+
+          var isNewCandidate = false;
+          _setStateSafe(() {
+            if (_discoverySeenIps.add(ip)) {
+              isNewCandidate = true;
+              if (_discoverySeenIps.length > 8) {
+                _discoverySeenIps.remove(_discoverySeenIps.first);
+              }
+            }
+          });
 
           final currentIp = _ipController.text.trim();
           final canAutoFill = !_lockDiscoveryIpOverwrite &&
@@ -104,13 +113,11 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
               _ipController.text = ip;
               _autoFilledIp = ip;
             });
-            if (manualSession && _discoverySeenIps.add(ip)) {
+            if (manualSession && isNewCandidate) {
               CustomToast.show(context, "기기 발견: $ip (자동 입력)");
             }
             debugPrint('[Settings] Auto-filled discovered IP: $ip');
-          } else if (manualSession &&
-              currentIp != ip &&
-              _discoverySeenIps.add(ip)) {
+          } else if (manualSession && currentIp != ip && isNewCandidate) {
             CustomToast.show(context, "기기 발견: $ip");
           }
 
@@ -119,9 +126,11 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
               _discoveryStatus = '검색 중 (${_discoverySeenIps.length}개 발견)';
             });
           }
-          _diag.info('discovery', 'Settings candidate: $ip');
-          debugPrint(
-              '[Settings] Discovered IP candidate: $ip (manual lock: $_lockDiscoveryIpOverwrite)');
+          if (isNewCandidate) {
+            _diag.info('discovery', 'Settings candidate: $ip');
+            debugPrint(
+                '[Settings] Discovered IP candidate: $ip (manual lock: $_lockDiscoveryIpOverwrite)');
+          }
         },
         onError: (e) => debugPrint("Discovery error: $e"),
       );
@@ -131,7 +140,7 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
   }
 
   Future<void> _connect() async {
-    final ssh = Provider.of<SSHService>(context, listen: false);
+    final ssh = _getSsh();
     if (ssh.isConnecting) {
       CustomToast.show(context, "이미 연결 시도 중입니다.");
       return;
@@ -178,8 +187,8 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
         privateKey: authKey,
       );
 
-      // 성공한 연결 정보만 저장
-      await _storage.write(key: 'ssh_ip', value: ipToSave);
+      // IP는 브로드캐스트 기준으로만 사용한다.
+      await _storage.delete(key: 'ssh_ip');
       await _storage.write(key: 'ssh_username', value: usernameToSave);
       await _storage.write(key: 'ssh_port', value: port.toString());
       if (authPassword != null) {
@@ -217,7 +226,7 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
   }
 
   Future<void> _disconnect() async {
-    final ssh = Provider.of<SSHService>(context, listen: false);
+    final ssh = _getSsh();
     final wasConnecting = ssh.isConnecting && !ssh.isConnected;
     await ssh.disconnect();
     if (mounted) {
@@ -261,7 +270,7 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
                 width: double.infinity,
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.08),
+                  color: Colors.black.withValues(alpha: 0.08),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: SelectableText(

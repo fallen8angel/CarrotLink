@@ -1,15 +1,24 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flutter/material.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
 
 class HomeHudPreviewCard extends StatefulWidget {
   final String? deviceIp;
+  final bool enabled;
+  final double? fallbackCpuTempC;
+  final double? fallbackMemPct;
+  final double? fallbackDiskPct;
 
   const HomeHudPreviewCard({
     super.key,
     this.deviceIp,
+    this.enabled = true,
+    this.fallbackCpuTempC,
+    this.fallbackMemPct,
+    this.fallbackDiskPct,
   });
 
   @override
@@ -17,11 +26,10 @@ class HomeHudPreviewCard extends StatefulWidget {
 }
 
 class _HomeHudPreviewCardState extends State<HomeHudPreviewCard> {
-  static const Duration _reconnectDelay = Duration(seconds: 2);
-
-  WebSocketChannel? _channel;
-  StreamSubscription? _wsSubscription;
-  Timer? _reconnectTimer;
+  Isolate? _workerIsolate;
+  ReceivePort? _workerReceivePort;
+  StreamSubscription? _workerSubscription;
+  int _workerToken = 0;
   String? _activeIp;
   _HudSnapshot _snapshot = const _HudSnapshot();
 
@@ -34,16 +42,15 @@ class _HomeHudPreviewCardState extends State<HomeHudPreviewCard> {
   @override
   void didUpdateWidget(covariant HomeHudPreviewCard oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.deviceIp != widget.deviceIp) {
+    if (oldWidget.deviceIp != widget.deviceIp ||
+        oldWidget.enabled != widget.enabled) {
       _restartChannelIfNeeded(force: true);
     }
   }
 
   @override
   void dispose() {
-    _reconnectTimer?.cancel();
-    _wsSubscription?.cancel();
-    _channel?.sink.close();
+    _stopWorker();
     super.dispose();
   }
 
@@ -57,64 +64,77 @@ class _HomeHudPreviewCardState extends State<HomeHudPreviewCard> {
   }
 
   void _restartChannelIfNeeded({bool force = false}) {
+    if (!widget.enabled) {
+      _activeIp = null;
+      _stopWorker();
+      if (mounted) {
+        setState(() => _snapshot = const _HudSnapshot());
+      }
+      return;
+    }
     final nextIp = _normalizeIp(widget.deviceIp);
     if (!force && nextIp == _activeIp) return;
     _activeIp = nextIp;
-    _reconnectTimer?.cancel();
-    _reconnectTimer = null;
-    _disconnectChannel();
+    _stopWorker();
     if (nextIp == null) {
       if (mounted) {
         setState(() => _snapshot = const _HudSnapshot());
       }
       return;
     }
-    _connectChannel(nextIp);
+    final token = _workerToken;
+    unawaited(_startWorker(nextIp, token));
   }
 
-  void _disconnectChannel() {
-    _wsSubscription?.cancel();
-    _wsSubscription = null;
-    _channel?.sink.close();
-    _channel = null;
+  void _stopWorker() {
+    _workerToken++;
+    _workerSubscription?.cancel();
+    _workerSubscription = null;
+    _workerReceivePort?.close();
+    _workerReceivePort = null;
+    _workerIsolate?.kill(priority: Isolate.immediate);
+    _workerIsolate = null;
   }
 
-  void _scheduleReconnect() {
-    if (!mounted || _activeIp == null) return;
-    if (_reconnectTimer != null) return;
-    _reconnectTimer = Timer(_reconnectDelay, () {
-      _reconnectTimer = null;
-      final ip = _activeIp;
-      if (ip == null || !mounted) return;
-      _connectChannel(ip);
+  Future<void> _startWorker(String ip, int token) async {
+    if (!widget.enabled || _activeIp != ip || token != _workerToken) return;
+    final receivePort = ReceivePort();
+    _workerReceivePort = receivePort;
+    _workerSubscription = receivePort.listen((event) {
+      if (!mounted || token != _workerToken) return;
+      _handleWorkerEvent(event);
     });
-  }
-
-  void _connectChannel(String ip) {
-    _disconnectChannel();
     try {
-      final uri = Uri.parse('ws://$ip:7000/ws/carstate');
-      final channel = WebSocketChannel.connect(uri);
-      _channel = channel;
-      _wsSubscription = channel.stream.listen(
-        _handleMessage,
-        onDone: _scheduleReconnect,
-        onError: (_) => _scheduleReconnect(),
-        cancelOnError: true,
+      final isolate = await Isolate.spawn<Map<String, dynamic>>(
+        _hudWsWorkerMain,
+        <String, dynamic>{
+          'ip': ip,
+          'maxHz': 10,
+          'sendPort': receivePort.sendPort,
+        },
+        debugName: 'hud_ws_worker_$ip',
       );
+      if (token != _workerToken) {
+        isolate.kill(priority: Isolate.immediate);
+        return;
+      }
+      _workerIsolate = isolate;
     } catch (_) {
-      _scheduleReconnect();
+      // Keep last snapshot and retry when widget updates state/IP.
     }
   }
 
-  void _handleMessage(dynamic event) {
+  void _handleWorkerEvent(dynamic event) {
     if (!mounted) return;
+    if (event is! Map) return;
+    final payload = event['payload'];
+    if (payload is! Map) return;
     try {
-      final decoded = jsonDecode(event.toString());
-      if (decoded is! Map<String, dynamic>) return;
-      final next = _HudSnapshot.fromWs(decoded);
+      final next = _HudSnapshot.fromWs(Map<String, dynamic>.from(payload));
       setState(() => _snapshot = next);
-    } catch (_) {}
+    } catch (_) {
+      // ignore malformed worker payload
+    }
   }
 
   String _fmtCpu(double? v) =>
@@ -175,7 +195,11 @@ class _HomeHudPreviewCardState extends State<HomeHudPreviewCard> {
 
   @override
   Widget build(BuildContext context) {
-    final diskLabel = _snapshot.diskLabel;
+    final effectiveMemPct = _snapshot.memPct ?? widget.fallbackMemPct;
+    final effectiveDiskValue = _snapshot.diskValue ?? widget.fallbackDiskPct;
+    final effectiveDiskLabel = _snapshot.diskValue != null
+        ? _snapshot.diskLabel
+        : (widget.fallbackDiskPct != null ? 'DISK' : _snapshot.diskLabel);
     final tempColor = _tempColor(_snapshot.tempIsDecel);
     final driveModeBg = _driveModeBg(_snapshot.driveModeKind);
     final driveModeFg = _driveModeFg(_snapshot.driveModeKind);
@@ -201,21 +225,24 @@ class _HomeHudPreviewCardState extends State<HomeHudPreviewCard> {
                       Expanded(
                         child: _HudMiniMetric(
                           label: 'CPU',
-                          value: _fmtCpu(_snapshot.cpuTempC),
+                          value: _fmtCpu(
+                            _snapshot.cpuTempC ?? widget.fallbackCpuTempC,
+                          ),
                         ),
                       ),
                       const SizedBox(width: 8),
                       Expanded(
                         child: _HudMiniMetric(
                           label: 'MEM',
-                          value: _fmtMem(_snapshot.memPct),
+                          value: _fmtMem(effectiveMemPct),
                         ),
                       ),
                       const SizedBox(width: 8),
                       Expanded(
                         child: _HudMiniMetric(
-                          label: diskLabel,
-                          value: _fmtDisk(_snapshot.diskValue, diskLabel),
+                          label: effectiveDiskLabel,
+                          value:
+                              _fmtDisk(effectiveDiskValue, effectiveDiskLabel),
                         ),
                       ),
                     ],
@@ -455,6 +482,50 @@ class _HomeHudPreviewCardState extends State<HomeHudPreviewCard> {
   }
 }
 
+@pragma('vm:entry-point')
+Future<void> _hudWsWorkerMain(Map<String, dynamic> config) async {
+  final ip = (config['ip']?.toString() ?? '').trim();
+  final maxHz = (config['maxHz'] as int?) ?? 10;
+  final sendPort = config['sendPort'] as SendPort?;
+  if (ip.isEmpty || sendPort == null) return;
+  final minIntervalMs = maxHz <= 0 ? 100 : (1000 / maxHz).round();
+  var lastSentMs = 0;
+  while (true) {
+    WebSocket? socket;
+    try {
+      socket = await WebSocket.connect('ws://$ip:7000/ws/carstate');
+      await for (final event in socket) {
+        final nowMs = DateTime.now().millisecondsSinceEpoch;
+        if (nowMs - lastSentMs < minIntervalMs) continue;
+        Map<String, dynamic>? payload;
+        try {
+          final decoded = jsonDecode(event.toString());
+          if (decoded is Map<String, dynamic>) {
+            payload = decoded;
+          } else if (decoded is Map) {
+            payload = Map<String, dynamic>.from(decoded);
+          }
+        } catch (_) {
+          payload = null;
+        }
+        if (payload == null) continue;
+        lastSentMs = nowMs;
+        sendPort.send({
+          'type': 'snapshot',
+          'payload': payload,
+        });
+      }
+    } catch (_) {
+      // reconnect loop
+    } finally {
+      try {
+        await socket?.close();
+      } catch (_) {}
+    }
+    await Future<void>.delayed(const Duration(seconds: 2));
+  }
+}
+
 class _HudMiniMetric extends StatelessWidget {
   final String label;
   final String value;
@@ -547,6 +618,14 @@ class _HudSnapshot {
     return null;
   }
 
+  static double? _firstDouble(Map<String, dynamic> raw, List<String> keys) {
+    for (final key in keys) {
+      final v = _asDouble(raw[key]);
+      if (v != null) return v;
+    }
+    return null;
+  }
+
   static int _asInt(dynamic v, {int fallback = 0}) {
     if (v is int) return v;
     if (v is num) return v.round();
@@ -589,9 +668,10 @@ class _HudSnapshot {
 
     final label = (raw['diskLabel']?.toString().trim().toUpperCase() ?? 'VOLT');
     return _HudSnapshot(
-      cpuTempC: _asDouble(raw['cpuTempC']),
-      memPct: _asDouble(raw['memPct']),
-      diskValue: _asDouble(raw['diskPct']),
+      cpuTempC: _firstDouble(raw, const ['cpuTempC', 'cpuTemp', 'cpu_temp_c']),
+      memPct: _firstDouble(raw,
+          const ['memPct', 'memPctC', 'mem', 'mem_pct', 'memoryUsagePercent']),
+      diskValue: _firstDouble(raw, const ['diskPct', 'disk', 'disk_pct']),
       diskLabel: label.isEmpty ? 'VOLT' : label,
       vEgoKph: vEgoMs == null ? null : (vEgoMs * 3.6),
       vSetKph: _asDouble(raw['vSetKph']),

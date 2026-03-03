@@ -21,6 +21,7 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
@@ -45,7 +46,11 @@ class OverlayHudService : Service() {
     const val ACTION_STOP = "carrot.overlay.STOP"
     const val ACTION_UPDATE_ENDPOINT = "carrot.overlay.UPDATE_ENDPOINT"
     const val ACTION_RESET_POSITION = "carrot.overlay.RESET_POSITION"
+    const val ACTION_UPDATE_FALLBACK_METRICS = "carrot.overlay.UPDATE_FALLBACK_METRICS"
     const val EXTRA_HOST = "extra_host"
+    const val EXTRA_CPU_TEMP_C = "extra_cpu_temp_c"
+    const val EXTRA_MEM_PCT = "extra_mem_pct"
+    const val EXTRA_DISK_PCT = "extra_disk_pct"
 
     private const val NOTIFICATION_CHANNEL_ID = "carrot_overlay_hud"
     private const val NOTIFICATION_ID = 9021
@@ -66,6 +71,11 @@ class OverlayHudService : Service() {
   private var windowManager: WindowManager? = null
   private var rootView: View? = null
   private var rootLayoutParams: WindowManager.LayoutParams? = null
+  private var closeTargetView: View? = null
+  private var closeTargetLayoutParams: WindowManager.LayoutParams? = null
+  private var closeTargetBubble: TextView? = null
+  private var closeTargetCaption: TextView? = null
+  private val dragHoldToCloseMs = 260L
 
   private var wsClient: OkHttpClient? = null
   private var webSocket: WebSocket? = null
@@ -75,6 +85,12 @@ class OverlayHudService : Service() {
   private var hostIp: String? = null
   private var lastMessageAt = 0L
   private var isSocketConnected = false
+  private var fallbackCpuTempC: Double? = null
+  private var fallbackCpuUpdatedAt = 0L
+  private var fallbackMemPct: Double? = null
+  private var fallbackMemUpdatedAt = 0L
+  private var fallbackDiskPct: Double? = null
+  private var fallbackDiskUpdatedAt = 0L
 
   private var metricCpuValue: TextView? = null
   private var metricMemValue: TextView? = null
@@ -141,6 +157,13 @@ class OverlayHudService : Service() {
         return START_NOT_STICKY
       }
 
+      ACTION_UPDATE_FALLBACK_METRICS -> {
+        if (intent != null) {
+          applyFallbackMetricIntent(intent)
+        }
+        return START_STICKY
+      }
+
       ACTION_RESET_POSITION -> {
         if (!canDrawOverlay()) {
           updateStatusUi("오버레이 권한 필요")
@@ -189,6 +212,7 @@ class OverlayHudService : Service() {
     cancelReconnect()
     disconnectWebSocket(shutdownClient = true)
     detachOverlay()
+    detachCloseTarget()
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
       stopForeground(STOP_FOREGROUND_REMOVE)
     } else {
@@ -201,6 +225,15 @@ class OverlayHudService : Service() {
   private fun canDrawOverlay(): Boolean {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
     return Settings.canDrawOverlays(this)
+  }
+
+  private fun overlayWindowType(): Int {
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+    } else {
+      @Suppress("DEPRECATION")
+      WindowManager.LayoutParams.TYPE_PHONE
+    }
   }
 
   private fun connectWebSocket(force: Boolean) {
@@ -308,18 +341,10 @@ class OverlayHudService : Service() {
     }
     val wm = windowManager ?: return
 
-    val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-    } else {
-      @Suppress("DEPRECATION")
-      val legacyType = WindowManager.LayoutParams.TYPE_PHONE
-      legacyType
-    }
-
     val params = WindowManager.LayoutParams(
         WindowManager.LayoutParams.WRAP_CONTENT,
         WindowManager.LayoutParams.WRAP_CONTENT,
-        type,
+        overlayWindowType(),
         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
@@ -359,6 +384,137 @@ class OverlayHudService : Service() {
     }
     rootView = null
     rootLayoutParams = null
+  }
+
+  private fun attachCloseTargetIfNeeded() {
+    if (closeTargetView != null) return
+    val wm = windowManager ?: return
+
+    val params = WindowManager.LayoutParams(
+        WindowManager.LayoutParams.WRAP_CONTENT,
+        WindowManager.LayoutParams.WRAP_CONTENT,
+        overlayWindowType(),
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+        PixelFormat.TRANSLUCENT
+    ).apply {
+      gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+      y = dp(26)
+    }
+
+    val closeContainer = LinearLayout(this).apply {
+      orientation = LinearLayout.VERTICAL
+      gravity = Gravity.CENTER_HORIZONTAL
+      visibility = View.GONE
+      alpha = 0f
+      // Larger container makes drop-to-close easier while dragging.
+      setPadding(dp(20), dp(16), dp(20), dp(18))
+    }
+
+    val bubble = textView(16f, bold = true).apply {
+      text = "HUD 종료"
+      gravity = Gravity.CENTER
+      setTextColor(Color.parseColor("#1A1F26"))
+      layoutParams = LinearLayout.LayoutParams(dp(170), dp(56))
+      background = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = dpF(18f)
+        setColor(Color.parseColor("#F4B08B"))
+        setStroke(dp(1), Color.parseColor("#FFD5BC"))
+      }
+    }
+    val caption = textView(11f, bold = true).apply {
+      text = "길게 눌러 이동 후 여기에 놓기"
+      setTextColor(Color.parseColor("#E6FFFFFF"))
+      setPadding(0, dp(5), 0, 0)
+    }
+    closeContainer.addView(bubble)
+    closeContainer.addView(caption)
+
+    try {
+      wm.addView(closeContainer, params)
+      closeTargetView = closeContainer
+      closeTargetLayoutParams = params
+      closeTargetBubble = bubble
+      closeTargetCaption = caption
+    } catch (_: Throwable) {
+    }
+  }
+
+  private fun detachCloseTarget() {
+    val wm = windowManager ?: return
+    val view = closeTargetView ?: return
+    try {
+      wm.removeView(view)
+    } catch (_: Throwable) {
+    }
+    closeTargetView = null
+    closeTargetLayoutParams = null
+    closeTargetBubble = null
+    closeTargetCaption = null
+  }
+
+  private fun showCloseTarget() {
+    attachCloseTargetIfNeeded()
+    val target = closeTargetView ?: return
+    if (target.visibility == View.VISIBLE && target.alpha >= 0.99f) return
+    target.visibility = View.VISIBLE
+    target.animate().cancel()
+    target.animate().alpha(1f).setDuration(120).start()
+    setCloseTargetHover(false)
+  }
+
+  private fun hideCloseTarget() {
+    val target = closeTargetView ?: return
+    target.animate().cancel()
+    target.alpha = 0f
+    target.visibility = View.GONE
+    setCloseTargetHover(false)
+  }
+
+  private fun setCloseTargetHover(hover: Boolean) {
+    val bubble = closeTargetBubble ?: return
+    val bg = bubble.background as? GradientDrawable ?: return
+    if (hover) {
+      bg.setColor(Color.parseColor("#D93B3B"))
+      bg.setStroke(dp(2), Color.parseColor("#FFF1F1"))
+      bubble.setTextColor(Color.WHITE)
+      closeTargetCaption?.text = "놓으면 종료"
+      closeTargetCaption?.setTextColor(Color.WHITE)
+    } else {
+      bg.setColor(Color.parseColor("#F4B08B"))
+      bg.setStroke(dp(1), Color.parseColor("#FFD5BC"))
+      bubble.setTextColor(Color.parseColor("#1A1F26"))
+      closeTargetCaption?.text = "길게 눌러 이동 후 여기에 놓기"
+      closeTargetCaption?.setTextColor(Color.parseColor("#E6FFFFFF"))
+    }
+  }
+
+  private fun isOverlayOverCloseTarget(): Boolean {
+    val overlay = rootView ?: return false
+    val target = closeTargetView ?: return false
+    if (target.visibility != View.VISIBLE) return false
+    if (overlay.width <= 0 || overlay.height <= 0) return false
+    if (target.width <= 0 || target.height <= 0) return false
+
+    val overlayLoc = IntArray(2)
+    val targetLoc = IntArray(2)
+    overlay.getLocationOnScreen(overlayLoc)
+    target.getLocationOnScreen(targetLoc)
+
+    val centerX = overlayLoc[0] + overlay.width / 2
+    val centerY = overlayLoc[1] + overlay.height / 2
+
+    val rect = Rect(
+        targetLoc[0],
+        targetLoc[1],
+        targetLoc[0] + target.width,
+        targetLoc[1] + target.height
+    )
+    rect.inset(-dp(64), -dp(52))
+    return rect.contains(centerX, centerY)
   }
 
   private fun buildHudView(): View {
@@ -510,7 +666,14 @@ class OverlayHudService : Service() {
       private var startY = 0
       private var touchX = 0f
       private var touchY = 0f
-      private var dragging = false
+      private var moved = false
+      private var dragByLongPress = false
+      private var longPressRunnable: Runnable? = null
+
+      private fun cancelLongPressTimer() {
+        longPressRunnable?.let { mainHandler.removeCallbacks(it) }
+        longPressRunnable = null
+      }
 
       override fun onTouch(v: View?, event: MotionEvent?): Boolean {
         val e = event ?: return false
@@ -521,7 +684,19 @@ class OverlayHudService : Service() {
             startY = p.y
             touchX = e.rawX
             touchY = e.rawY
-            dragging = false
+            moved = false
+            dragByLongPress = false
+            cancelLongPressTimer()
+            longPressRunnable = Runnable {
+              dragByLongPress = true
+              showCloseTarget()
+              setCloseTargetHover(false)
+              v?.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            }
+            mainHandler.postDelayed(
+                longPressRunnable!!,
+                dragHoldToCloseMs
+            )
             return true
           }
 
@@ -529,10 +704,14 @@ class OverlayHudService : Service() {
             val p = rootLayoutParams ?: return false
             val dx = (e.rawX - touchX).toInt()
             val dy = (e.rawY - touchY).toInt()
-            if (!dragging && abs(dx) < dragTouchSlop && abs(dy) < dragTouchSlop) {
+            if (!dragByLongPress) {
+              if (abs(dx) > dragTouchSlop * 2 || abs(dy) > dragTouchSlop * 2) {
+                moved = true
+                cancelLongPressTimer()
+              }
               return true
             }
-            dragging = true
+            moved = true
             p.x = startX + dx
             p.y = startY + dy
             val size = currentOverlaySize()
@@ -541,16 +720,38 @@ class OverlayHudService : Service() {
               windowManager?.updateViewLayout(rootView, p)
             } catch (_: Throwable) {
             }
+            setCloseTargetHover(isOverlayOverCloseTarget())
             return true
           }
 
           MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+            cancelLongPressTimer()
             val p = rootLayoutParams
-            if (dragging && p != null) {
-              persistOverlayPosition(p)
-              ensureOverlayInBounds(forceApply = true, persistIfChanged = true)
+            if (p != null) {
+              if (dragByLongPress) {
+                val shouldClose = isOverlayOverCloseTarget()
+                hideCloseTarget()
+                dragByLongPress = false
+                if (shouldClose) {
+                  updateStatusUi("HUD 종료")
+                  stopSelf()
+                  return true
+                }
+                val size = currentOverlaySize()
+                clampOverlayPosition(p, size.first, size.second)
+                snapOverlayToNearestAnchor(p, size.first, size.second)
+                try {
+                  windowManager?.updateViewLayout(rootView, p)
+                } catch (_: Throwable) {
+                }
+                persistOverlayPosition(p)
+              } else if (e.actionMasked == MotionEvent.ACTION_UP && !moved) {
+                openAppFromOverlayTap()
+              }
             }
-            dragging = false
+            hideCloseTarget()
+            moved = false
+            dragByLongPress = false
             return true
           }
         }
@@ -587,6 +788,19 @@ class OverlayHudService : Service() {
       addView(valueView)
     }
     return Pair(cell, valueView)
+  }
+
+  private fun openAppFromOverlayTap() {
+    try {
+      val launchIntent = packageManager.getLaunchIntentForPackage(packageName) ?: return
+      launchIntent.addFlags(
+          Intent.FLAG_ACTIVITY_NEW_TASK or
+              Intent.FLAG_ACTIVITY_SINGLE_TOP or
+              Intent.FLAG_ACTIVITY_CLEAR_TOP
+      )
+      startActivity(launchIntent)
+    } catch (_: Throwable) {
+    }
   }
 
   private fun textView(sizeSp: Float, bold: Boolean): TextView {
@@ -709,6 +923,52 @@ class OverlayHudService : Service() {
     return changed
   }
 
+  private fun snapOverlayToNearestAnchor(
+      params: WindowManager.LayoutParams,
+      viewWidth: Int,
+      viewHeight: Int
+  ): Boolean {
+    val bounds = screenBounds()
+    val safeMargin = dp(6)
+    val minX = safeMargin
+    val minY = safeMargin
+    val maxX = (bounds.width() - viewWidth - safeMargin).coerceAtLeast(minX)
+    val maxY = (bounds.height() - viewHeight - safeMargin).coerceAtLeast(minY)
+    val centerX = ((minX + maxX) / 2.0).roundToInt()
+    val centerY = ((minY + maxY) / 2.0).roundToInt()
+
+    val anchors = arrayOf(
+        Pair(minX, minY),      // top-left
+        Pair(centerX, minY),   // top-center
+        Pair(maxX, minY),      // top-right
+        Pair(minX, centerY),   // left-center
+        Pair(centerX, centerY),// center
+        Pair(maxX, centerY),   // right-center
+        Pair(minX, maxY),      // bottom-left
+        Pair(centerX, maxY),   // bottom-center
+        Pair(maxX, maxY),      // bottom-right
+    )
+
+    var best = anchors[0]
+    var bestDist = Long.MAX_VALUE
+    for (anchor in anchors) {
+      val dx = (params.x - anchor.first).toLong()
+      val dy = (params.y - anchor.second).toLong()
+      val dist = dx * dx + dy * dy
+      if (dist < bestDist) {
+        bestDist = dist
+        best = anchor
+      }
+    }
+
+    val changed = params.x != best.first || params.y != best.second
+    if (changed) {
+      params.x = best.first
+      params.y = best.second
+    }
+    return changed
+  }
+
   private fun ensureOverlayInBounds(forceApply: Boolean, persistIfChanged: Boolean) {
     val view = rootView ?: return
     val params = rootLayoutParams ?: return
@@ -727,10 +987,31 @@ class OverlayHudService : Service() {
   private fun applyPayloadText(raw: String) {
     try {
       val obj = JSONObject(raw)
-      val cpu = formatTemp(optDouble(obj, "cpuTempC"))
-      val mem = formatPercent(optDouble(obj, "memPct"))
-      val diskLabel = (obj.optString("diskLabel", "VOLT").ifBlank { "VOLT" }).uppercase(Locale.US)
-      val diskRaw = optDouble(obj, "diskPct")
+      val parsedCpu = optDoubleAny(obj, "cpuTempC", "cpuTemp", "cpu_temp_c")
+      val cpuValue = parsedCpu ?: latestFallbackCpuTemp()
+      if (parsedCpu != null) {
+        fallbackCpuTempC = parsedCpu
+        fallbackCpuUpdatedAt = SystemClock.elapsedRealtime()
+      }
+      val cpu = formatTemp(cpuValue)
+      val parsedMem = optDoubleAny(obj, "memPct", "memPctC", "mem", "mem_pct", "memoryUsagePercent")
+      val memValue = parsedMem ?: latestFallbackMemPct()
+      if (parsedMem != null) {
+        fallbackMemPct = parsedMem
+        fallbackMemUpdatedAt = SystemClock.elapsedRealtime()
+      }
+      val mem = formatPercent(memValue)
+
+      val wsDiskLabel = (obj.optString("diskLabel", "VOLT").ifBlank { "VOLT" }).uppercase(Locale.US)
+      val parsedDisk = optDoubleAny(obj, "diskPct", "disk", "disk_pct")
+      val fallbackDisk = latestFallbackDiskPct()
+      if (parsedDisk != null) {
+        fallbackDiskPct = parsedDisk
+        fallbackDiskUpdatedAt = SystemClock.elapsedRealtime()
+      }
+      val usingDiskFallback = parsedDisk == null && fallbackDisk != null
+      val diskLabel = if (usingDiskFallback) "DISK" else wsDiskLabel
+      val diskRaw = parsedDisk ?: fallbackDisk
       val disk = if (diskLabel == "VOLT") {
         if (diskRaw == null) "--.-V" else String.format(Locale.US, "%.1fV", diskRaw)
       } else {
@@ -846,6 +1127,72 @@ class OverlayHudService : Service() {
       is String -> value.toDoubleOrNull()
       else -> null
     }
+  }
+
+  private fun optDoubleAny(obj: JSONObject?, vararg keys: String): Double? {
+    for (key in keys) {
+      val v = optDouble(obj, key)
+      if (v != null) return v
+    }
+    return null
+  }
+
+  private fun applyFallbackMetricIntent(intent: Intent) {
+    if (intent.hasExtra(EXTRA_CPU_TEMP_C)) {
+      val value = intent.getDoubleExtra(EXTRA_CPU_TEMP_C, Double.NaN)
+      if (value.isFinite()) {
+        fallbackCpuTempC = value
+        fallbackCpuUpdatedAt = SystemClock.elapsedRealtime()
+      }
+    }
+    if (intent.hasExtra(EXTRA_MEM_PCT)) {
+      val value = intent.getDoubleExtra(EXTRA_MEM_PCT, Double.NaN)
+      if (value.isFinite()) {
+        fallbackMemPct = value
+        fallbackMemUpdatedAt = SystemClock.elapsedRealtime()
+      }
+    }
+    if (intent.hasExtra(EXTRA_DISK_PCT)) {
+      val value = intent.getDoubleExtra(EXTRA_DISK_PCT, Double.NaN)
+      if (value.isFinite()) {
+        fallbackDiskPct = value
+        fallbackDiskUpdatedAt = SystemClock.elapsedRealtime()
+      }
+    }
+
+    mainHandler.post {
+      val cpu = latestFallbackCpuTemp()
+      val mem = latestFallbackMemPct()
+      val disk = latestFallbackDiskPct()
+      if (metricCpuValue?.text?.toString()?.startsWith("--") == true && cpu != null) {
+        setTextIfChanged(metricCpuValue, formatTemp(cpu))
+      }
+      if (metricMemValue?.text?.toString()?.startsWith("--") == true && mem != null) {
+        setTextIfChanged(metricMemValue, formatPercent(mem))
+      }
+      if (metricVoltValue?.text?.toString()?.startsWith("--") == true && disk != null) {
+        setTextIfChanged(metricVoltLabel, "DISK")
+        setTextIfChanged(metricVoltValue, "${disk.roundToInt()}%")
+      }
+    }
+  }
+
+  private fun latestFallbackCpuTemp(): Double? {
+    val value = fallbackCpuTempC ?: return null
+    val age = SystemClock.elapsedRealtime() - fallbackCpuUpdatedAt
+    return if (age <= 15000) value else null
+  }
+
+  private fun latestFallbackMemPct(): Double? {
+    val value = fallbackMemPct ?: return null
+    val age = SystemClock.elapsedRealtime() - fallbackMemUpdatedAt
+    return if (age <= 15000) value else null
+  }
+
+  private fun latestFallbackDiskPct(): Double? {
+    val value = fallbackDiskPct ?: return null
+    val age = SystemClock.elapsedRealtime() - fallbackDiskUpdatedAt
+    return if (age <= 15000) value else null
   }
 
   private fun updateNotification(text: String) {

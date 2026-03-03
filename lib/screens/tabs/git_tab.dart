@@ -907,14 +907,8 @@ class _GitTabState extends State<GitTab> {
       if (!mounted) return;
       if (!result.ok) {
         CustomToast.show(context, "origin 변경 실패", isError: true);
-      } else if (!result.fetchSucceeded) {
-        CustomToast.show(
-          context,
-          "origin은 변경됨, fetch 확인 실패(URL/권한 확인 필요)",
-          isError: true,
-        );
       } else {
-        CustomToast.show(context, "origin 변경 및 fetch 확인 완료");
+        CustomToast.show(context, "origin 변경 완료 (원격 반영은 Git Sync 실행)");
       }
       await _refreshGitSourceInfo(silent: true);
     } catch (e) {

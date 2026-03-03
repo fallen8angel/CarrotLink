@@ -46,6 +46,7 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
   final GitHubService _githubService = GitHubService();
   final KeyBackupService _keyBackupService = KeyBackupService();
   final DiagnosticsService _diag = DiagnosticsService.instance;
+  SSHService? _sshRef;
   static const String _managedKeyPrefix = 'carrotpilot';
   static const String _fixedSshUsername = 'comma';
   static const int _fixedSshPort = 22;
@@ -71,10 +72,21 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
 
   bool get _hasActiveSshKey =>
       _currentPrivateKey != null && _currentPrivateKey!.isNotEmpty;
-  bool get _isOpenpilotReady => _isGitHubLoggedIn && _hasActiveSshKey;
+  bool get _isOpenpilotReady => _hasActiveSshKey;
   void _setStateSafe(VoidCallback fn) {
     if (!mounted) return;
     setState(fn);
+  }
+
+  SSHService _getSsh() {
+    final cached = _sshRef;
+    if (cached != null) return cached;
+    if (!mounted) {
+      throw StateError('SSHService unavailable after widget dispose');
+    }
+    final resolved = Provider.of<SSHService>(context, listen: false);
+    _sshRef = resolved;
+    return resolved;
   }
 
   bool _isManagedKeyTitle(String title) {
@@ -97,20 +109,25 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _sshRef ??= Provider.of<SSHService>(context, listen: false);
+  }
+
+  @override
   Widget build(BuildContext context) => _buildScreen(context);
 
   @override
   void dispose() {
     _discoverySubscription?.cancel();
     _discoveryStatusTimer?.cancel();
-    try {
-      final ssh = Provider.of<SSHService>(context, listen: false);
-      if (ssh.discoverySource == 'settings_manual' ||
-          ssh.discoverySource == 'settings_auto') {
+    final ssh = _sshRef;
+    if (ssh != null &&
+        (ssh.discoverySource == 'settings_manual' ||
+            ssh.discoverySource == 'settings_auto')) {
+      try {
         ssh.stopDiscovery();
-      }
-    } catch (e) {
-      debugPrint('Failed to stop discovery: $e');
+      } catch (_) {}
     }
     _ipController.dispose();
     _usernameController.dispose();
