@@ -53,6 +53,8 @@ class NativeOverlayHudService {
 
   static Future<bool> start(String host) async {
     if (!_isAndroid) return false;
+    final enabled = await isEnabled();
+    if (!enabled) return false;
     final normalizedHost = normalizeHost(host);
     if (normalizedHost == null) return false;
     try {
@@ -68,6 +70,8 @@ class NativeOverlayHudService {
 
   static Future<void> updateEndpoint(String host) async {
     if (!_isAndroid) return;
+    final enabled = await isEnabled();
+    if (!enabled) return;
     final normalizedHost = normalizeHost(host);
     if (normalizedHost == null) return;
     try {
@@ -84,6 +88,10 @@ class NativeOverlayHudService {
     double? diskPct,
   }) async {
     if (!_isAndroid) return;
+    final enabled = await isEnabled();
+    if (!enabled) return;
+    final running = await isRunning();
+    if (!running) return;
     try {
       await _channel.invokeMethod(
         'updateFallbackMetrics',

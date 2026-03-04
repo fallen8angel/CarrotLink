@@ -37,11 +37,11 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       EventChannel('carrotlink/native_drive_video_events');
   static const MethodChannel _nativeCameraControlChannel =
       MethodChannel('carrotlink/native_drive_video_control');
-  static const bool _temporaryLimitedHudControls = true;
-  static const String _defaultSidecarProfile = 'p2';
+  static const bool _temporaryLimitedHudControls = false;
 
   late final WebViewController _cameraController;
   final SidecarService _sidecarService = SidecarService();
+  SSHService? _sshService;
   bool _cameraLoading = true;
   String? _cameraError;
   String? _cameraSourceKey;
@@ -64,12 +64,10 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   StreamSubscription? _sidecarWorkerSubscription;
   bool _sidecarConnected = false;
   int _sidecarSession = 0;
-  bool _replayBusy = false;
-  bool _replayActive = false;
-  bool _sidecarBusy = false;
-  String? _replayRoute;
-  int? _replaySegment;
-  String? _replayError;
+  bool _sidecarAutoManaging = false;
+  bool _sidecarTransitioning = false;
+  bool _suppressCameraErrors = false;
+  Timer? _sidecarTransitionTimer;
   _DriveCameraKind _liveCameraKind = _DriveCameraKind.road;
   bool _wideCamRequested = false;
   int _overlayDiagFrames = 0;
@@ -79,14 +77,13 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   final ListQueue<int> _overlayFrameOrder = ListQueue<int>();
   static const int _overlayFrameBufferSize = 220;
   static const int _overlaySyncMaxDeltaLive = 8;
-  static const int _overlaySyncMaxDeltaReplay = 10;
   static const bool _strictFrameLock = true;
   static const int _strictFrameHoldUs = 120000;
   static const int _cameraFrameStaleUs = 350000;
   static const int _interpMinUs = 12000;
   static const int _interpMaxUs = 90000;
+  static const Duration _lifecycleSuspendDelay = Duration(milliseconds: 900);
   bool _cameraSuspendedByLifecycle = false;
-  bool _replayFrameClockReady = false;
   int? _lastCameraFrameId;
   int _lastCameraFrameEventUs = 0;
   int? _lastPublishedModelFrameId;
@@ -113,14 +110,17 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   String _overlayVerifyText = '';
   int _lastOverlayVerifyUpdateUs = 0;
   static const int _overlayVerifyIntervalUs = 200000;
-  int _lastProfileEnforceUs = 0;
-  static const int _profileEnforceIntervalUs = 3000000;
+  bool _coverViewportPreferred = true;
+  bool _debugShowGuides = true;
+  bool _debugShowVerifyPanel = true;
+  bool _debugShowViewportFrame = true;
   int _lastCameraFallbackLogUs = 0;
+  Timer? _lifecycleSuspendTimer;
   List<double> _lastValidCalibrationRpy = const <double>[];
   List<double> _lastValidWideFromDeviceEuler = const <double>[];
   double _lastValidPathOffsetZ = 1.22;
   String _hudDefaultMode = HudDriveSettingsService.modeWebrtc;
-  String _hudSidecarProfile = _defaultSidecarProfile;
+  bool _hudModeLoaded = false;
 
   final ValueNotifier<_DriveOverlaySnapshot> _overlayNotifier =
       ValueNotifier<_DriveOverlaySnapshot>(
@@ -149,7 +149,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       ];
 
   String get _sidecarWsUrl =>
-      'ws://${widget.hostIp}:7766/ws/live?encoding=zlib-json';
+      'ws://${widget.hostIp}:7766/ws/live?encoding=zlib-json&camera=$_liveCameraName';
 
   bool get _openpilotOverlayMode =>
       HudDriveSettingsService.isOpenpilotOverlay(_hudDefaultMode);
@@ -157,7 +157,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   bool get _canUseNativeCamera => !kIsWeb && Platform.isAndroid;
 
   bool get _useNativeLiveCamera =>
-      _canUseNativeCamera && !_replayActive && !_nativeCameraUnsupported;
+      _canUseNativeCamera && !_nativeCameraUnsupported;
 
   bool get _useNativeOverlayRenderer =>
       _openpilotOverlayMode && _useNativeLiveCamera && _nativeOverlayEnabled;
@@ -191,7 +191,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       return;
     }
     _sourceSizeByKind[kind] = next;
-    if (!_replayActive && kind != _liveCameraKind) {
+    if (kind != _liveCameraKind) {
       return;
     }
     _cameraSourceSize = next;
@@ -200,10 +200,10 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   String get _liveCameraWsUrl =>
       'ws://${widget.hostIp}:7766/ws/camera/$_liveCameraName';
 
-  bool get _coverViewport => true;
+  bool get _coverViewport =>
+      _overlayVerifyMode ? false : _coverViewportPreferred;
 
-  int get _overlaySyncMaxDeltaCurrent =>
-      _replayActive ? _overlaySyncMaxDeltaReplay : _overlaySyncMaxDeltaLive;
+  int get _overlaySyncMaxDeltaCurrent => _overlaySyncMaxDeltaLive;
 
   @override
   void initState() {
@@ -245,10 +245,14 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
           .receiveBroadcastStream()
           .listen(_handleNativeCameraEvent, onError: (_) {});
     }
-    unawaited(_loadCameraSource(force: true));
     unawaited(_lockLandscapeOrientations());
     unawaited(_loadHudDefaultMode());
-    unawaited(_refreshReplayStatus());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _sshService ??= Provider.of<SSHService>(context, listen: false);
   }
 
   @override
@@ -282,9 +286,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       _lastValidCalibrationRpy = const <double>[];
       _lastValidWideFromDeviceEuler = const <double>[];
       _lastValidPathOffsetZ = 1.22;
-      unawaited(_loadCameraSource(force: true));
       _applyHudModeRuntime();
-      unawaited(_refreshReplayStatus());
     }
   }
 
@@ -293,22 +295,38 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     if (!mounted) return;
     setState(() {
       _hudDefaultMode = mode;
+      _hudModeLoaded = true;
     });
     _applyHudModeRuntime();
   }
 
   void _applyHudModeRuntime() {
     if (_openpilotOverlayMode) {
+      _suppressCameraErrors = true;
+      if (mounted) {
+        setState(() {
+          _cameraLoading = false;
+          _cameraError = null;
+          _nativeCameraViewId = null;
+        });
+      } else {
+        _cameraLoading = false;
+        _cameraError = null;
+        _nativeCameraViewId = null;
+      }
       _startSidecarLoop();
-      unawaited(_ensureDriveProfile());
+      unawaited(_ensureSidecarRuntime());
       return;
     }
+    _suppressCameraErrors = false;
     _stopSidecarLoop();
+    unawaited(_stopSidecarProcessIfNeeded());
     _applyOverlaySnapshot(
       const _DriveOverlaySnapshot.empty(),
       forceNativePush: true,
     );
     unawaited(_clearNativeOverlay());
+    unawaited(_loadCameraSource(force: true));
   }
 
   void _handleNativeCameraEvent(dynamic event) {
@@ -372,13 +390,24 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       debugPrint('[DriveCanvas][native] state=$state');
       if (!mounted) return;
       if (state == 'connected' || state.startsWith('decoder_configured')) {
-        setState(() => _cameraLoading = false);
+        _sidecarTransitionTimer?.cancel();
+        setState(() {
+          _cameraLoading = false;
+          _sidecarTransitioning = false;
+          _suppressCameraErrors = false;
+        });
       }
       return;
     }
     if (type == 'camera_error') {
       final reason = map['reason']?.toString().trim() ?? '';
       if (reason.isEmpty) return;
+      final unsupported = reason.contains('invalid_ws_url') ||
+          reason.contains('decoder_init_failed');
+      if ((_sidecarTransitioning || _suppressCameraErrors) && !unsupported) {
+        debugPrint('[DriveCanvas][native] suppressed error=$reason');
+        return;
+      }
       debugPrint('[DriveCanvas][native] error=$reason');
       if (!mounted) return;
       setState(() {
@@ -394,18 +423,55 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     }
   }
 
-  void _toggleOverlayVerifyMode() {
+  void _setOverlayVerifyMode(bool enabled) {
     if (!mounted) return;
+    if (_overlayVerifyMode == enabled) return;
     setState(() {
-      _overlayVerifyMode = !_overlayVerifyMode;
-      if (!_overlayVerifyMode) {
+      _overlayVerifyMode = enabled;
+      if (!enabled) {
         _overlayVerifyText = '';
       }
     });
-    _toast(_overlayVerifyMode ? '정합 검증 ON' : '정합 검증 OFF');
-    if (_overlayVerifyMode) {
+    _toast(enabled ? '정합 검증 ON' : '정합 검증 OFF');
+    if (enabled && _debugShowVerifyPanel) {
       _refreshOverlayVerify(_overlayNotifier.value, force: true);
     }
+  }
+
+  void _setViewportFitMode(bool coverPreferred) {
+    if (!mounted) return;
+    if (_coverViewportPreferred == coverPreferred) return;
+    setState(() => _coverViewportPreferred = coverPreferred);
+    _toast(coverPreferred ? '크롭(cover) ON' : '레터박스(contain) ON');
+  }
+
+  void _setDebugGuides(bool enabled) {
+    if (!mounted) return;
+    if (_debugShowGuides == enabled) return;
+    setState(() => _debugShowGuides = enabled);
+    _toast(enabled ? '디버그 가이드 ON' : '디버그 가이드 OFF');
+  }
+
+  void _setDebugVerifyPanel(bool enabled) {
+    if (!mounted) return;
+    if (_debugShowVerifyPanel == enabled) return;
+    setState(() {
+      _debugShowVerifyPanel = enabled;
+      if (!enabled) {
+        _overlayVerifyText = '';
+      }
+    });
+    _toast(enabled ? '우측 정보창 ON' : '우측 정보창 OFF');
+    if (_overlayVerifyMode && enabled) {
+      _refreshOverlayVerify(_overlayNotifier.value, force: true);
+    }
+  }
+
+  void _setDebugViewportFrame(bool enabled) {
+    if (!mounted) return;
+    if (_debugShowViewportFrame == enabled) return;
+    setState(() => _debugShowViewportFrame = enabled);
+    _toast(enabled ? '레터박스 프레임 ON' : '레터박스 프레임 OFF');
   }
 
   void _handleCameraJsMessage(String raw) {
@@ -426,9 +492,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     if (type == 'camera_frame') {
       final frameId = _DriveOverlaySnapshot._asInt(map['frameId']);
       if (frameId != null) {
-        if (_replayActive) {
-          _replayFrameClockReady = true;
-        }
         _handleCameraFrameEvent(
           frameId,
           source: 'web',
@@ -462,14 +525,15 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     if (type == 'camera_error') {
       final reason = map['reason']?.toString().trim() ?? '';
       if (reason.isEmpty || !mounted) return;
+      if (_sidecarTransitioning || _suppressCameraErrors) {
+        debugPrint('[DriveCanvas] suppressed camera_error reason=$reason');
+        return;
+      }
       debugPrint('[DriveCanvas] camera_error reason=$reason');
       setState(() => _cameraError = '카메라 디코더 오류: $reason');
       return;
     }
     if (type == 'camera_timeline_ready') {
-      if (_replayActive) {
-        _replayFrameClockReady = true;
-      }
       return;
     }
   }
@@ -496,10 +560,14 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _sidecarTransitionTimer?.cancel();
+    _sidecarTransitionTimer = null;
+    _cancelLifecycleSuspendTimer();
     _renderTicker?.dispose();
     _renderTicker = null;
     unawaited(_clearNativeOverlay());
     _stopSidecarLoop();
+    unawaited(_stopSidecarProcessIfNeeded());
     final nativeSub = _nativeCameraEventSub;
     _nativeCameraEventSub = null;
     if (nativeSub != null) {
@@ -515,32 +583,19 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     if (!mounted) return;
     switch (state) {
       case AppLifecycleState.resumed:
+        _cancelLifecycleSuspendTimer();
         _resumeFromBackground();
         break;
       case AppLifecycleState.inactive:
+        // Notification shade / transient focus loss can emit inactive briefly.
+        // Keep camera alive here to avoid visible flicker.
+        break;
       case AppLifecycleState.paused:
       case AppLifecycleState.hidden:
       case AppLifecycleState.detached:
-        _suspendForBackground();
+        _scheduleSuspendForBackground();
         break;
     }
-  }
-
-  Uri _replayVideoUri(String route, int segment) {
-    final segmentId = Uri.encodeComponent('$route--$segment');
-    return Uri.parse(
-      'http://${widget.hostIp}:8082/footage/qcamera/$segmentId',
-    );
-  }
-
-  Uri _replayCameraTimelineUri(String route, int segment) {
-    return _sidecarHttpUri(
-      '/replay/camera_timeline',
-      <String, String>{
-        'route': route,
-        'segment': '$segment',
-      },
-    );
   }
 
   String _buildLiveCameraHtml(_DriveCameraKind cameraKind) {
@@ -1202,178 +1257,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
 ''';
   }
 
-  String _buildReplayCameraHtml(Uri videoUri, Uri timelineUri) {
-    final src = jsonEncode(videoUri.toString());
-    final timelineSrc = jsonEncode(timelineUri.toString());
-    return '''
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
-  <style>
-    html, body {
-      margin: 0;
-      padding: 0;
-      width: 100%;
-      height: 100%;
-      background: #000;
-      overflow: hidden;
-    }
-    #v {
-      width: 100vw;
-      height: 100vh;
-      object-fit: cover;
-      display: block;
-      background: #000;
-    }
-  </style>
-</head>
-<body>
-  <video id="v" autoplay playsinline muted></video>
-  <script>
-    const src = $src;
-    const timelineSrc = $timelineSrc;
-    const v = document.getElementById('v');
-    let activeCamera = 'road';
-    let syncRaf = null;
-    let timelineTimes = [];
-    let timelineFrameIds = [];
-    let timelineDurationSec = 0;
-    let lastPublishedFrame = -1;
-    function postToFlutter(payload) {
-      try {
-        if (window.CarrotCamera && typeof window.CarrotCamera.postMessage === 'function') {
-          window.CarrotCamera.postMessage(JSON.stringify(payload));
-        }
-      } catch (_) {}
-    }
-    function payloadWithCamera(payload) {
-      if (!payload || typeof payload !== 'object') return payload;
-      return Object.assign({ camera: activeCamera }, payload);
-    }
-    function publishFrame(frameId) {
-      if (!Number.isFinite(frameId) || frameId < 0) return;
-      if (frameId === lastPublishedFrame) return;
-      lastPublishedFrame = frameId;
-      postToFlutter(payloadWithCamera({ type: 'camera_frame', frameId: frameId }));
-    }
-    function publishMeta() {
-      const w = Number(v.videoWidth || 0);
-      const h = Number(v.videoHeight || 0);
-      if (w > 0 && h > 0) {
-        postToFlutter(payloadWithCamera({ type: 'camera_meta', width: w, height: h }));
-      }
-    }
-    function frameIdForTime(sec) {
-      if (!timelineFrameIds.length || !timelineTimes.length) return null;
-      let t = Number(sec || 0);
-      if (!Number.isFinite(t) || t < 0) t = 0;
-      if (timelineDurationSec > 0) {
-        t = t % timelineDurationSec;
-      }
-      let lo = 0;
-      let hi = timelineTimes.length - 1;
-      while (lo < hi) {
-        const mid = Math.floor((lo + hi + 1) / 2);
-        if (timelineTimes[mid] <= t) {
-          lo = mid;
-        } else {
-          hi = mid - 1;
-        }
-      }
-      const idx = Math.max(0, Math.min(lo, timelineFrameIds.length - 1));
-      return Number(timelineFrameIds[idx]);
-    }
-    function stopSyncLoop() {
-      if (syncRaf !== null) {
-        cancelAnimationFrame(syncRaf);
-        syncRaf = null;
-      }
-    }
-    function syncTick() {
-      const frameId = frameIdForTime(v.currentTime);
-      if (frameId !== null) {
-        publishFrame(frameId);
-      }
-      syncRaf = requestAnimationFrame(syncTick);
-    }
-    function startSyncLoop() {
-      stopSyncLoop();
-      syncRaf = requestAnimationFrame(syncTick);
-    }
-    async function loadTimeline() {
-      try {
-        const res = await fetch(timelineSrc, { method: 'GET' });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const body = await res.json();
-        const streams = body && body.streams ? body.streams : {};
-        const preferred = String(body && body.preferredCamera ? body.preferredCamera : 'road');
-        activeCamera = preferred === 'wideRoad' ? 'wideRoad' : 'road';
-        const primary = streams[preferred] || streams.road || streams.wideRoad || null;
-        if (!primary) throw new Error('no stream');
-        const times = Array.isArray(primary.tSec) ? primary.tSec : [];
-        const ids = Array.isArray(primary.frameIds) ? primary.frameIds : [];
-        const n = Math.min(times.length, ids.length);
-        timelineTimes = [];
-        timelineFrameIds = [];
-        for (let i = 0; i < n; i++) {
-          const t = Number(times[i]);
-          const id = Number(ids[i]);
-          if (!Number.isFinite(t) || !Number.isFinite(id)) continue;
-          if (id < 0) continue;
-          if (timelineTimes.length && t < timelineTimes[timelineTimes.length - 1]) continue;
-          timelineTimes.push(t);
-          timelineFrameIds.push(Math.floor(id));
-        }
-        timelineDurationSec = timelineTimes.length ? timelineTimes[timelineTimes.length - 1] : 0;
-        postToFlutter(
-          payloadWithCamera({
-            type: 'camera_timeline_ready',
-            frames: timelineFrameIds.length,
-          }),
-        );
-      } catch (e) {
-        timelineTimes = [];
-        timelineFrameIds = [];
-        timelineDurationSec = 0;
-        postToFlutter(
-          payloadWithCamera({
-            type: 'camera_error',
-            reason: 'replay_timeline:' + String(e && e.message ? e.message : e),
-          }),
-        );
-      }
-    }
-    v.src = src;
-    v.loop = true;
-    v.controls = false;
-    v.addEventListener('loadedmetadata', publishMeta);
-    v.addEventListener('canplay', async () => {
-      publishMeta();
-      try { await v.play(); } catch (_) {}
-      startSyncLoop();
-    });
-    v.addEventListener('play', startSyncLoop);
-    v.addEventListener('pause', stopSyncLoop);
-    document.addEventListener('visibilitychange', async () => {
-      if (!document.hidden) {
-        publishMeta();
-        try { await v.play(); } catch (_) {}
-        startSyncLoop();
-      }
-    });
-    window.addEventListener('beforeunload', stopSyncLoop);
-    loadTimeline().then(() => {
-      const frameId = frameIdForTime(0);
-      if (frameId !== null) publishFrame(frameId);
-    });
-  </script>
-</body>
-</html>
-''';
-  }
-
   String _buildIdleCameraHtml() {
     return '''
 <!doctype html>
@@ -1407,9 +1290,25 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   }
 
   Future<void> _loadCameraSource({bool force = false}) async {
-    final hasReplayTarget =
-        _replayActive && _replayRoute != null && _replaySegment != null;
-    if (!hasReplayTarget && _useNativeLiveCamera) {
+    if (!_hudModeLoaded) return;
+
+    if (_openpilotOverlayMode && !_sidecarConnected) {
+      _cameraSourceKey = null;
+      if (mounted) {
+        setState(() {
+          _cameraLoading = false;
+          _cameraError = null;
+          _nativeCameraViewId = null;
+        });
+      } else {
+        _cameraLoading = false;
+        _cameraError = null;
+        _nativeCameraViewId = null;
+      }
+      return;
+    }
+
+    if (_useNativeLiveCamera) {
       if (mounted) {
         setState(() {
           _cameraLoading = true;
@@ -1419,9 +1318,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       _cameraSourceKey = 'native-live:${widget.hostIp}:$_liveCameraName';
       return;
     }
-    final key = hasReplayTarget
-        ? 'replay:${widget.hostIp}:${_replayRoute!}:${_replaySegment!}'
-        : 'live:${widget.hostIp}:$_liveCameraName';
+    final key = 'live:${widget.hostIp}:$_liveCameraName';
     if (!force && _cameraSourceKey == key) return;
     _cameraSourceKey = key;
 
@@ -1433,29 +1330,16 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     }
 
     try {
-      if (hasReplayTarget) {
-        final replayUri = _replayVideoUri(_replayRoute!, _replaySegment!);
-        final timelineUri =
-            _replayCameraTimelineUri(_replayRoute!, _replaySegment!);
-        debugPrint(
-          '[DriveCanvas] source=replay url=$replayUri timeline=$timelineUri',
-        );
-        await _cameraController.loadHtmlString(
-          _buildReplayCameraHtml(replayUri, timelineUri),
-          baseUrl: _cameraBaseUri.toString(),
-        );
-      } else {
-        final endpoints =
-            _streamEndpointCandidates.map((uri) => uri.toString()).join(', ');
-        final direct = _liveCameraWsUrl;
-        debugPrint(
-          '[DriveCanvas] source=live base=${_cameraBaseUri.toString()} direct=$direct fallback=$endpoints camera=$_liveCameraName',
-        );
-        await _cameraController.loadHtmlString(
-          _buildLiveCameraHtml(_liveCameraKind),
-          baseUrl: _cameraBaseUri.toString(),
-        );
-      }
+      final endpoints =
+          _streamEndpointCandidates.map((uri) => uri.toString()).join(', ');
+      final direct = _liveCameraWsUrl;
+      debugPrint(
+        '[DriveCanvas] source=live base=${_cameraBaseUri.toString()} direct=$direct fallback=$endpoints camera=$_liveCameraName',
+      );
+      await _cameraController.loadHtmlString(
+        _buildLiveCameraHtml(_liveCameraKind),
+        baseUrl: _cameraBaseUri.toString(),
+      );
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -1489,7 +1373,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   }
 
   void _syncLiveCameraKind(_DriveOverlaySnapshot snapshot) {
-    if (_replayActive) return;
     final nextKind = _selectLiveCameraKind(snapshot);
     if (nextKind == _liveCameraKind) return;
     unawaited(_clearNativeOverlay());
@@ -1509,16 +1392,21 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     });
     _lastCameraFrameId = null;
     _lastCameraFrameEventUs = 0;
+    if (_openpilotOverlayMode && !_cameraSuspendedByLifecycle) {
+      _startSidecarLoop();
+    }
     if (!_cameraSuspendedByLifecycle) {
       unawaited(_loadCameraSource(force: true));
     }
   }
 
   void _suspendForBackground() {
+    _cancelLifecycleSuspendTimer();
     if (_cameraSuspendedByLifecycle) return;
     debugPrint('[DriveCanvas][lifecycle] suspend');
     _cameraSuspendedByLifecycle = true;
     _stopSidecarLoop();
+    unawaited(_stopSidecarProcessIfNeeded());
     _lastCameraFrameId = null;
     _lastCameraFrameEventUs = 0;
     _lastPublishedModelFrameId = null;
@@ -1551,13 +1439,27 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   }
 
   void _resumeFromBackground() {
+    _cancelLifecycleSuspendTimer();
     if (!_cameraSuspendedByLifecycle) return;
     debugPrint('[DriveCanvas][lifecycle] resume');
     _cameraSuspendedByLifecycle = false;
     unawaited(_lockLandscapeOrientations());
-    _startSidecarLoop();
-    unawaited(_ensureDriveProfile());
-    unawaited(_loadCameraSource(force: true));
+    _applyHudModeRuntime();
+  }
+
+  void _scheduleSuspendForBackground() {
+    if (_cameraSuspendedByLifecycle) return;
+    _cancelLifecycleSuspendTimer();
+    _lifecycleSuspendTimer = Timer(_lifecycleSuspendDelay, () {
+      _lifecycleSuspendTimer = null;
+      if (!mounted) return;
+      _suspendForBackground();
+    });
+  }
+
+  void _cancelLifecycleSuspendTimer() {
+    _lifecycleSuspendTimer?.cancel();
+    _lifecycleSuspendTimer = null;
   }
 
   void _cacheOverlaySnapshot(_DriveOverlaySnapshot snapshot) {
@@ -1590,9 +1492,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   }
 
   int? _cameraFrameIdFromSnapshot(_DriveOverlaySnapshot snapshot) {
-    if (_replayActive) {
-      return snapshot.roadFrameId ?? snapshot.wideRoadFrameId;
-    }
     if (_liveCameraKind == _DriveCameraKind.wideRoad) {
       return snapshot.wideRoadFrameId ?? snapshot.roadFrameId;
     }
@@ -1655,7 +1554,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     _DriveOverlaySnapshot snapshot, {
     bool force = false,
   }) {
-    if (!_overlayVerifyMode || !mounted) return;
+    if (!_overlayVerifyMode || !_debugShowVerifyPanel || !mounted) return;
     final nowUs = _renderClock.elapsedMicroseconds;
     if (!force &&
         (nowUs - _lastOverlayVerifyUpdateUs) < _overlayVerifyIntervalUs) {
@@ -1669,11 +1568,10 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     final text = _DriveOverlayPainter.buildProjectionDebugText(
       snapshot: snapshot,
       sourceSize: _cameraSourceSize,
-      cameraKind: _replayActive ? _DriveCameraKind.road : _liveCameraKind,
+      cameraKind: _liveCameraKind,
       canvasSize: canvasSize,
       coverViewport: _coverViewport,
-      cameraSourceLabel: _replayActive ? 'replay' : 'live',
-      replayActive: _replayActive,
+      cameraSourceLabel: 'live',
     );
     if (!mounted) return;
     if (_overlayVerifyText != text) {
@@ -1712,7 +1610,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       cameraKind: _liveCameraKind,
       canvasSize: _nativeOverlaySize,
       coverViewport: _coverViewport,
-      showDebugGuides: _overlayVerifyMode,
+      showDebugGuides: _overlayVerifyMode && _debugShowGuides,
     );
     if (!force &&
         _lastNativeOverlaySignature == signature &&
@@ -1789,8 +1687,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       return;
     }
     final modelFrameId = synced.modelFrameId;
-    if (!_replayActive &&
-        _lastPublishedModelFrameId != null &&
+    if (_lastPublishedModelFrameId != null &&
         modelFrameId != null &&
         modelFrameId < (_lastPublishedModelFrameId! - 1)) {
       return;
@@ -1930,7 +1827,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     _DriveCameraKind? cameraKind,
   }) {
     if (frameId < 0) return;
-    if (!_replayActive && cameraKind != null && cameraKind != _liveCameraKind) {
+    if (cameraKind != null && cameraKind != _liveCameraKind) {
       // Drop stale frame events from a camera stream that is no longer active.
       return;
     }
@@ -2007,12 +1904,38 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     final type = map['type']?.toString() ?? '';
     if (type == 'connected') {
       final next = map['connected'] == true;
-      if (next != _sidecarConnected) {
-        if (mounted) {
-          setState(() => _sidecarConnected = next);
-        } else {
+      if (next && _sidecarTransitioning) {
+        _sidecarTransitionTimer?.cancel();
+      }
+      if (mounted) {
+        setState(() {
           _sidecarConnected = next;
+          if (next) {
+            _sidecarTransitioning = false;
+            _suppressCameraErrors = false;
+            _cameraError = null;
+          } else if (_openpilotOverlayMode) {
+            _suppressCameraErrors = true;
+            _cameraError = null;
+            _cameraLoading = false;
+          }
+        });
+      } else {
+        _sidecarConnected = next;
+        if (next) {
+          _sidecarTransitioning = false;
+          _suppressCameraErrors = false;
+          _cameraError = null;
+        } else if (_openpilotOverlayMode) {
+          _suppressCameraErrors = true;
+          _cameraError = null;
+          _cameraLoading = false;
         }
+      }
+      if (next && !_cameraSuspendedByLifecycle) {
+        unawaited(_loadCameraSource(force: true));
+      } else if (!next && _openpilotOverlayMode && !_cameraSuspendedByLifecycle) {
+        unawaited(_ensureSidecarRuntime());
       }
       return;
     }
@@ -2027,6 +1950,13 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     _DriveOverlaySnapshot snapshot,
   ) {
     var next = snapshot;
+    final mergedOverlay2d = _mergeSidecarOverlay2dTrackVertices(
+      current: next.sidecarOverlay2d,
+      previous: _latestOverlaySnapshot.sidecarOverlay2d,
+    );
+    if (!identical(mergedOverlay2d, next.sidecarOverlay2d)) {
+      next = next.copyWith(sidecarOverlay2d: mergedOverlay2d);
+    }
 
     // Keep using last valid calibration when live calibration is temporarily unavailable.
     if (snapshot.calibrationRpy.length >= 3) {
@@ -2064,18 +1994,55 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     return next;
   }
 
+  Map<String, dynamic>? _mergeSidecarOverlay2dTrackVertices({
+    required Map<String, dynamic>? current,
+    required Map<String, dynamic>? previous,
+  }) {
+    if (current == null || previous == null) return current;
+    final currentCamerasRaw = current['cameras'];
+    final previousCamerasRaw = previous['cameras'];
+    if (currentCamerasRaw is! Map || previousCamerasRaw is! Map) return current;
+
+    final currentCameras = Map<String, dynamic>.from(currentCamerasRaw);
+    final previousCameras = Map<String, dynamic>.from(previousCamerasRaw);
+    var changed = false;
+
+    for (final entry in currentCameras.entries.toList(growable: false)) {
+      final key = entry.key;
+      final currentCamRaw = entry.value;
+      final previousCamRaw = previousCameras[key];
+      if (currentCamRaw is! Map || previousCamRaw is! Map) continue;
+
+      final currentCam = Map<String, dynamic>.from(currentCamRaw);
+      final previousCam = Map<String, dynamic>.from(previousCamRaw);
+      final currentTrack = currentCam['pathTrackVertices'];
+      final previousTrack = previousCam['pathTrackVertices'];
+      final currentLen = currentTrack is List ? currentTrack.length : 0;
+      final previousLen = previousTrack is List ? previousTrack.length : 0;
+      final needTrackFallback = currentLen < 6 && previousLen >= 6;
+      if (!needTrackFallback) continue;
+
+      currentCam['pathTrackVertices'] =
+          List<dynamic>.from(previousTrack as List);
+      final metaRaw = currentCam['meta'];
+      final meta = metaRaw is Map<String, dynamic>
+          ? Map<String, dynamic>.from(metaRaw)
+          : <String, dynamic>{};
+      meta['pathTrackFallback'] = 'previous_frame';
+      currentCam['meta'] = meta;
+      currentCameras[key] = currentCam;
+      changed = true;
+    }
+
+    if (!changed) return current;
+    final merged = Map<String, dynamic>.from(current);
+    merged['cameras'] = currentCameras;
+    return merged;
+  }
+
   void _handleSidecarPayload(Map<String, dynamic> payload) {
     if (payload['type'] == 'hello') return;
     if (!_openpilotOverlayMode) return;
-    final profile = payload['profile']?.toString().trim().toLowerCase();
-    if (profile != null && profile.isNotEmpty && profile != 'p2') {
-      final nowUs = _renderClock.elapsedMicroseconds;
-      if ((nowUs - _lastProfileEnforceUs) >= _profileEnforceIntervalUs) {
-        _lastProfileEnforceUs = nowUs;
-        debugPrint('[DriveCanvas][profile] enforce p2 (current=$profile)');
-        unawaited(_ensureDriveProfile());
-      }
-    }
 
     final next = _stabilizeOverlaySnapshot(
       _DriveOverlaySnapshot.fromSidecar(payload),
@@ -2111,25 +2078,17 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     }
     if (!mounted) return;
     final inferredCameraFrame = _cameraFrameIdFromSnapshot(next);
-    if (_replayActive && !_replayFrameClockReady) {
-      if (inferredCameraFrame != null) {
-        _lastCameraFrameId = inferredCameraFrame;
-      }
-    } else {
-      final nowUs = _renderClock.elapsedMicroseconds;
-      final cameraStale = _lastCameraFrameEventUs <= 0 ||
-          (nowUs - _lastCameraFrameEventUs) > _cameraFrameStaleUs;
-      if (inferredCameraFrame != null &&
-          (_lastCameraFrameId == null || cameraStale)) {
-        _lastCameraFrameId = inferredCameraFrame;
-        if (cameraStale &&
-            !_replayActive &&
-            (nowUs - _lastCameraFallbackLogUs) >= 2000000) {
-          _lastCameraFallbackLogUs = nowUs;
-          debugPrint(
-            '[DriveCanvas][sync] fallback cameraFrame=$inferredCameraFrame via sidecar (native frame event stale)',
-          );
-        }
+    final nowUs = _renderClock.elapsedMicroseconds;
+    final cameraStale = _lastCameraFrameEventUs <= 0 ||
+        (nowUs - _lastCameraFrameEventUs) > _cameraFrameStaleUs;
+    if (inferredCameraFrame != null &&
+        (_lastCameraFrameId == null || cameraStale)) {
+      _lastCameraFrameId = inferredCameraFrame;
+      if (cameraStale && (nowUs - _lastCameraFallbackLogUs) >= 2000000) {
+        _lastCameraFallbackLogUs = nowUs;
+        debugPrint(
+          '[DriveCanvas][sync] fallback cameraFrame=$inferredCameraFrame via sidecar (native frame event stale)',
+        );
       }
     }
     _publishOverlaySynced();
@@ -2170,571 +2129,196 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     }
   }
 
-  Future<Map<String, dynamic>> _sidecarPostJson(
-    String path,
-    Map<String, dynamic> body,
-  ) async {
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 4);
-    try {
-      final request = await client.postUrl(_sidecarHttpUri(path)).timeout(
-            const Duration(seconds: 4),
-          );
-      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
-      request.headers.contentType = ContentType.json;
-      request.add(utf8.encode(jsonEncode(body)));
-      final response =
-          await request.close().timeout(const Duration(seconds: 6));
-      final text = await utf8.decodeStream(response);
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw Exception('HTTP ${response.statusCode}: $text');
-      }
-      final decoded =
-          text.trim().isEmpty ? <String, dynamic>{} : jsonDecode(text);
-      if (decoded is Map) return Map<String, dynamic>.from(decoded);
-      throw Exception('invalid response');
-    } finally {
-      client.close(force: true);
+  void _setSidecarTransitioning(bool active, {Duration? hold}) {
+    _sidecarTransitionTimer?.cancel();
+    _sidecarTransitionTimer = null;
+    if (active && hold != null) {
+      _sidecarTransitionTimer = Timer(hold, () {
+        if (!mounted) {
+          _sidecarTransitioning = false;
+          return;
+        }
+        setState(() => _sidecarTransitioning = false);
+      });
     }
-  }
-
-  Future<void> _ensureDriveProfile() async {
-    try {
-      final resp = await _sidecarPostJson(
-        '/profile',
-        const <String, dynamic>{'profile': 'p2'},
-      );
-      final current = resp['profile']?.toString() ?? '?';
-      debugPrint('[DriveCanvas][profile] requested=p2 result=$current');
-    } catch (e) {
-      debugPrint('[DriveCanvas][profile] enforce failed: $e');
-      // Sidecar may be unavailable during startup; ignore.
+    if (mounted) {
+      setState(() {
+        _sidecarTransitioning = active;
+        if (active) {
+          _cameraError = null;
+        }
+      });
+    } else {
+      _sidecarTransitioning = active;
+      if (active) {
+        _cameraError = null;
+      }
     }
   }
 
   void _toast(String message) {
     if (!mounted) return;
-    final messenger = ScaffoldMessenger.of(context);
-    messenger
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
+    CustomToast.show(context, message);
   }
 
-  Future<void> _runSidecarTask({
-    required String title,
-    required Future<String> Function(SSHService ssh) task,
-  }) async {
-    if (_sidecarBusy) return;
-    final ssh = Provider.of<SSHService>(context, listen: false);
-    if (!ssh.isConnected) {
-      CustomToast.show(context, '기기와 연결되어 있지 않습니다.', isError: true);
-      return;
-    }
+  Future<void> _waitForSidecarReady() async {
+    final deadline = DateTime.now().add(const Duration(seconds: 10));
+    Object? lastError;
+    while (DateTime.now().isBefore(deadline)) {
+      try {
+        final health = await _sidecarGetJson('/health');
+        if (health['ok'] != true) {
+          throw Exception('health not ok');
+        }
 
+        WebSocket? ws;
+        try {
+          ws = await WebSocket.connect(_liveCameraWsUrl).timeout(
+            const Duration(seconds: 2),
+          );
+        } finally {
+          await ws?.close();
+        }
+        return;
+      } catch (e) {
+        lastError = e;
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+      }
+    }
+    throw Exception('ready timeout: $lastError');
+  }
+
+  Future<void> _ensureSidecarRuntime() async {
+    if (!_openpilotOverlayMode || _cameraSuspendedByLifecycle) return;
+    if (_sidecarAutoManaging) return;
+    final ssh =
+        _sshService ?? (mounted ? Provider.of<SSHService>(context, listen: false) : null);
+    if (ssh == null || !ssh.isConnected) return;
+    _sidecarAutoManaging = true;
+    _suppressCameraErrors = false;
+    _setSidecarTransitioning(true, hold: const Duration(seconds: 8));
     if (mounted) {
-      setState(() => _sidecarBusy = true);
+      setState(() => _cameraLoading = true);
+    } else {
+      _cameraLoading = true;
     }
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
-    );
-
-    String? output;
-    Object? error;
     try {
-      output = await task(ssh);
+      await _sidecarService.deploy(ssh);
+      await _sidecarService.start(ssh);
+      await _waitForSidecarReady();
+      _startSidecarLoop();
+      _setSidecarTransitioning(true, hold: const Duration(seconds: 2));
     } catch (e) {
-      error = e;
-    } finally {
-      if (mounted && Navigator.of(context, rootNavigator: true).canPop()) {
-        Navigator.of(context, rootNavigator: true).pop();
-      }
       if (mounted) {
-        setState(() => _sidecarBusy = false);
+        CustomToast.show(context, '사이드카 자동 준비 실패: $e', isError: true);
       }
+    } finally {
+      _sidecarAutoManaging = false;
     }
-
-    if (!mounted) return;
-    if (error != null) {
-      CustomToast.show(context, '$title 실패: $error', isError: true);
-      return;
-    }
-    CustomToast.show(context, '$title 완료');
-    final text = (output ?? '').trim();
-    if (text.isEmpty) return;
-    if (!mounted) return;
-    await showDialog<void>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: Text(title),
-        content: SingleChildScrollView(
-          child: SelectableText(text),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('닫기'),
-          ),
-        ],
-      ),
-    );
   }
 
-  void _openSidecarActionPopup() {
-    if (!_openpilotOverlayMode) return;
-    showModalBottomSheet<void>(
+  Future<void> _stopSidecarProcessIfNeeded() async {
+    if (_sidecarAutoManaging) return;
+    final ssh =
+        _sshService ?? (mounted ? Provider.of<SSHService>(context, listen: false) : null);
+    if (ssh == null || !ssh.isConnected) return;
+    _sidecarAutoManaging = true;
+    try {
+      await _sidecarService.stop(ssh);
+    } catch (_) {
+      // Ignore stop errors during lifecycle transitions.
+    } finally {
+      _sidecarAutoManaging = false;
+    }
+  }
+
+  Future<void> _openDebugOptionsPopup() async {
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
-      isScrollControlled: true,
+      backgroundColor: const Color(0xFF11141A),
       builder: (sheetContext) {
-        var selectedProfile = _hudSidecarProfile;
-        final titleStyle = Theme.of(sheetContext).textTheme.titleSmall;
         return StatefulBuilder(
           builder: (context, setLocalState) {
+            final debugEnabled =
+                !_temporaryLimitedHudControls && _overlayVerifyMode;
+            final maxSheetHeight =
+                MediaQuery.of(sheetContext).size.height * 0.78;
             return SafeArea(
-              child: SingleChildScrollView(
-                child: Padding(
-                  padding: EdgeInsets.only(
-                    bottom: MediaQuery.of(sheetContext).viewInsets.bottom,
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-                        child: Row(
-                          children: [
-                            Icon(
-                              Icons.hub_outlined,
-                              color: Theme.of(sheetContext).colorScheme.primary,
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              '사이드카 제어',
-                              style: titleStyle,
-                            ),
-                          ],
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: maxSheetHeight),
+                child: SingleChildScrollView(
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(
+                      16,
+                      4,
+                      16,
+                      16 + MediaQuery.of(sheetContext).viewInsets.bottom,
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SwitchListTile(
+                          value: _coverViewportPreferred,
+                          onChanged: _temporaryLimitedHudControls
+                              ? null
+                              : (value) {
+                                  _setViewportFitMode(value);
+                                  setLocalState(() {});
+                                },
+                          title: const Text('크롭(cover) 기본'),
                         ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: Wrap(
-                            spacing: 8,
-                            runSpacing: 8,
-                            children: <String>[
-                              'p0',
-                              'p1',
-                              'p2',
-                              'p3',
-                              'p4',
-                            ].map((profile) {
-                              final selected = selectedProfile == profile;
-                              return ChoiceChip(
-                                label: Text(profile.toUpperCase()),
-                                selected: selected,
-                                onSelected: _sidecarBusy
-                                    ? null
-                                    : (_) {
-                                        setLocalState(
-                                          () => selectedProfile = profile,
-                                        );
-                                        setState(
-                                          () => _hudSidecarProfile = profile,
-                                        );
-                                      },
-                              );
-                            }).toList(growable: false),
-                          ),
+                        SwitchListTile(
+                          value: _overlayVerifyMode,
+                          onChanged: _temporaryLimitedHudControls
+                              ? null
+                              : (value) {
+                                  _setOverlayVerifyMode(value);
+                                  setLocalState(() {});
+                                },
+                          title: const Text('정합 검증'),
                         ),
-                      ),
-                      ListTile(
-                        leading: const Icon(Icons.publish),
-                        title: const Text('배포/업데이트'),
-                        onTap: _sidecarBusy
-                            ? null
-                            : () {
-                                Navigator.of(sheetContext).pop();
-                                unawaited(
-                                  _runSidecarTask(
-                                    title: '사이드카 배포',
-                                    task: (ssh) => _sidecarService.deploy(ssh),
-                                  ),
-                                );
-                              },
-                      ),
-                      ListTile(
-                        leading: const Icon(Icons.play_circle_outline),
-                        title: Text('시작 (${selectedProfile.toUpperCase()})'),
-                        onTap: _sidecarBusy
-                            ? null
-                            : () {
-                                final profileToStart = selectedProfile;
-                                Navigator.of(sheetContext).pop();
-                                unawaited(
-                                  _runSidecarTask(
-                                    title: '사이드카 시작',
-                                    task: (ssh) => _sidecarService.start(
-                                      ssh,
-                                      profile: profileToStart,
-                                    ),
-                                  ).then((_) {
-                                    _startSidecarLoop();
-                                    if (_openpilotOverlayMode) {
-                                      unawaited(_ensureDriveProfile());
-                                    }
-                                  }),
-                                );
-                              },
-                      ),
-                      ListTile(
-                        leading: const Icon(Icons.stop_circle_outlined),
-                        title: const Text(
-                          '중지',
-                          overflow: TextOverflow.ellipsis,
-                          maxLines: 1,
-                        ),
-                        onTap: _sidecarBusy
-                            ? null
-                            : () {
-                                Navigator.of(sheetContext).pop();
-                                unawaited(
-                                  _runSidecarTask(
-                                    title: '사이드카 중지',
-                                    task: (ssh) => _sidecarService.stop(ssh),
-                                  ).then((_) => _stopSidecarLoop()),
-                                );
-                              },
-                      ),
-                      ListTile(
-                        leading: const Icon(Icons.info_outline),
-                        title: const Text('상태 확인'),
-                        onTap: _sidecarBusy
-                            ? null
-                            : () {
-                                Navigator.of(sheetContext).pop();
-                                unawaited(
-                                  _runSidecarTask(
-                                    title: '사이드카 상태',
-                                    task: (ssh) => _sidecarService.status(ssh),
-                                  ),
-                                );
-                              },
-                      ),
-                      const SizedBox(height: 8),
-                    ],
-                  ),
-                ),
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
-
-  Future<void> _refreshReplayStatus() async {
-    try {
-      final response = await _sidecarGetJson('/replay/status');
-      if (!mounted) return;
-      final wasReplayActive = _replayActive;
-      final active = response['active'] == true;
-      final route = (response['route']?.toString().trim().isNotEmpty ?? false)
-          ? response['route'].toString()
-          : null;
-      final segment = response['segment'] is num
-          ? (response['segment'] as num).toInt()
-          : int.tryParse(response['segment']?.toString() ?? '');
-      final err = response['error']?.toString().trim() ?? '';
-      setState(() {
-        _replayActive = active;
-        _replayRoute = route;
-        _replaySegment = segment;
-        _replayError = err.isEmpty ? null : err;
-        _cameraSourceSize = active
-            ? _sourceSizeForKind(_DriveCameraKind.road)
-            : _sourceSizeForKind(_liveCameraKind);
-      });
-      if (wasReplayActive != active) {
-        _replayFrameClockReady = false;
-        _lastCameraFrameId = null;
-        _lastCameraFrameEventUs = 0;
-        _lastPublishedModelFrameId = null;
-        _latestOverlaySnapshot = const _DriveOverlaySnapshot.empty();
-        _overlayByModelFrame.clear();
-        _overlayFrameOrder.clear();
-        _pathAnimationPhase = 0.0;
-        _pathAnimationSeq2 = -1;
-        _pathAnimationForward = true;
-        _lastPathAnimationTickUs = 0;
-        _applyOverlaySnapshot(
-          const _DriveOverlaySnapshot.empty(),
-          forceNativePush: true,
-        );
-        unawaited(_clearNativeOverlay());
-      }
-      await _loadCameraSource();
-    } catch (_) {
-      // No-op: sidecar may be unavailable before deploy/start.
-    }
-  }
-
-  Future<List<_ReplayRouteEntry>> _fetchReplayRoutes() async {
-    final response = await _sidecarGetJson(
-      '/replay/routes',
-      query: const <String, String>{'limit': '300'},
-    );
-    final rawRoutes = response['routes'];
-    if (rawRoutes is! List) return const <_ReplayRouteEntry>[];
-    final routes = <_ReplayRouteEntry>[];
-    for (final raw in rawRoutes) {
-      if (raw is! Map) continue;
-      final map = Map<String, dynamic>.from(raw);
-      final route = map['route']?.toString().trim() ?? '';
-      if (route.isEmpty) continue;
-      final segments = <int>[];
-      final segRaw = map['segments'];
-      if (segRaw is List) {
-        for (final v in segRaw) {
-          if (v is num) {
-            segments.add(v.toInt());
-          } else {
-            final n = int.tryParse(v.toString());
-            if (n != null) segments.add(n);
-          }
-        }
-      }
-      segments.sort();
-      if (segments.isEmpty) continue;
-      routes.add(_ReplayRouteEntry(route: route, segments: segments));
-    }
-    return routes;
-  }
-
-  Future<void> _startReplay({
-    required String route,
-    required int segment,
-  }) async {
-    if (_replayBusy) return;
-    setState(() => _replayBusy = true);
-    try {
-      // Replay overlay validation needs modelV2, so request p2 profile first.
-      try {
-        await _sidecarPostJson(
-            '/profile', const <String, dynamic>{'profile': 'p2'});
-      } catch (_) {}
-
-      final result = await _sidecarPostJson(
-        '/replay/start',
-        <String, dynamic>{
-          'route': route,
-          'segment': segment,
-          'speed': 1.0,
-        },
-      );
-      if (result['ok'] != true) {
-        throw Exception(result['error']?.toString() ?? 'replay start failed');
-      }
-      await _refreshReplayStatus();
-      _toast('테스트 재생 시작: $route -- $segment');
-    } catch (e) {
-      _toast('테스트 재생 시작 실패: $e');
-    } finally {
-      if (mounted) setState(() => _replayBusy = false);
-    }
-  }
-
-  Future<void> _stopReplay() async {
-    if (_replayBusy) return;
-    setState(() => _replayBusy = true);
-    try {
-      await _sidecarPostJson('/replay/stop', const <String, dynamic>{});
-      await _refreshReplayStatus();
-      _toast('테스트 재생 중지');
-    } catch (e) {
-      _toast('테스트 재생 중지 실패: $e');
-    } finally {
-      if (mounted) setState(() => _replayBusy = false);
-    }
-  }
-
-  Future<void> _openReplayPickerDialog() async {
-    if (_replayBusy) return;
-    setState(() => _replayBusy = true);
-    List<_ReplayRouteEntry> routes = const <_ReplayRouteEntry>[];
-    try {
-      routes = await _fetchReplayRoutes();
-      await _refreshReplayStatus();
-    } catch (e) {
-      _toast('테스트 목록 조회 실패: $e');
-    } finally {
-      if (mounted) setState(() => _replayBusy = false);
-    }
-    if (!mounted) return;
-
-    String? selectedRoute;
-    int? selectedSegment;
-    if (_replayRoute != null) {
-      final existing = routes.where((e) => e.route == _replayRoute).toList();
-      if (existing.isNotEmpty) {
-        selectedRoute = existing.first.route;
-        if (_replaySegment != null &&
-            existing.first.segments.contains(_replaySegment)) {
-          selectedSegment = _replaySegment;
-        } else {
-          selectedSegment = existing.first.segments.last;
-        }
-      }
-    }
-    if (selectedRoute == null && routes.isNotEmpty) {
-      selectedRoute = routes.first.route;
-      selectedSegment = routes.first.segments.last;
-    }
-
-    final action = await showDialog<_ReplayDialogAction>(
-      context: context,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            final currentRoute = routes.firstWhere(
-              (e) => e.route == selectedRoute,
-              orElse: () => routes.isNotEmpty
-                  ? routes.first
-                  : const _ReplayRouteEntry.empty(),
-            );
-            final currentSegments =
-                currentRoute.isEmpty ? const <int>[] : currentRoute.segments;
-            final selectedIsValid = selectedSegment != null &&
-                currentSegments.contains(selectedSegment);
-            if (!selectedIsValid && currentSegments.isNotEmpty) {
-              selectedSegment = currentSegments.last;
-            }
-
-            return AlertDialog(
-              title: const Text('로그/루트 테스트 재생'),
-              content: SizedBox(
-                width: 420,
-                child: routes.isEmpty
-                    ? const Text('사용 가능한 route/segment를 찾지 못했습니다.')
-                    : Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          DropdownButtonFormField<String>(
-                            initialValue: selectedRoute,
-                            decoration: const InputDecoration(
-                              labelText: 'Route',
-                              isDense: true,
-                            ),
-                            items: routes
-                                .map(
-                                  (e) => DropdownMenuItem<String>(
-                                    value: e.route,
-                                    child: Text(
-                                      e.route,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                                )
-                                .toList(),
-                            onChanged: (value) {
-                              setDialogState(() {
-                                selectedRoute = value;
-                                final route = routes.firstWhere(
-                                  (e) => e.route == value,
-                                  orElse: () => const _ReplayRouteEntry.empty(),
-                                );
-                                if (!route.isEmpty) {
-                                  selectedSegment = route.segments.last;
+                        SwitchListTile(
+                          value: _debugShowGuides,
+                          onChanged: debugEnabled
+                              ? (value) {
+                                  _setDebugGuides(value);
+                                  setLocalState(() {});
                                 }
-                              });
-                            },
-                          ),
-                          const SizedBox(height: 10),
-                          DropdownButtonFormField<int>(
-                            initialValue: selectedSegment,
-                            decoration: const InputDecoration(
-                              labelText: 'Segment',
-                              isDense: true,
-                            ),
-                            items: currentSegments
-                                .map(
-                                  (seg) => DropdownMenuItem<int>(
-                                    value: seg,
-                                    child: Text('$seg'),
-                                  ),
-                                )
-                                .toList(),
-                            onChanged: (value) {
-                              setDialogState(() => selectedSegment = value);
-                            },
-                          ),
-                          const SizedBox(height: 12),
-                          Text(
-                            _replayActive
-                                ? '현재 재생 중: ${_replayRoute ?? '-'} -- ${_replaySegment ?? '-'}'
-                                : '현재 재생 중 아님',
-                            style: const TextStyle(
-                                fontSize: 12, color: Colors.white70),
-                          ),
-                          if (_replayError != null) ...[
-                            const SizedBox(height: 6),
-                            Text(
-                              '오류: $_replayError',
-                              style: const TextStyle(
-                                fontSize: 12,
-                                color: Color(0xFFFF8E8E),
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
+                              : null,
+                          title: const Text('그리드/가이드'),
+                        ),
+                        SwitchListTile(
+                          value: _debugShowVerifyPanel,
+                          onChanged: debugEnabled
+                              ? (value) {
+                                  _setDebugVerifyPanel(value);
+                                  setLocalState(() {});
+                                }
+                              : null,
+                          title: const Text('우측 정보창'),
+                        ),
+                        SwitchListTile(
+                          value: _debugShowViewportFrame,
+                          onChanged: debugEnabled
+                              ? (value) {
+                                  _setDebugViewportFrame(value);
+                                  setLocalState(() {});
+                                }
+                              : null,
+                          title: const Text('레터박스 프레임'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(
-                    const _ReplayDialogAction.cancel(),
-                  ),
-                  child: const Text('닫기'),
-                ),
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(
-                    const _ReplayDialogAction.stop(),
-                  ),
-                  child: const Text('중지'),
-                ),
-                FilledButton(
-                  onPressed: routes.isEmpty ||
-                          selectedRoute == null ||
-                          selectedSegment == null
-                      ? null
-                      : () => Navigator.of(context).pop(
-                            _ReplayDialogAction.start(
-                              route: selectedRoute!,
-                              segment: selectedSegment!,
-                            ),
-                          ),
-                  child: const Text('시작'),
-                ),
-              ],
             );
           },
         );
       },
     );
-
-    if (action == null || !mounted) return;
-    if (action.type == _ReplayActionType.start &&
-        action.route != null &&
-        action.segment != null) {
-      await _startReplay(route: action.route!, segment: action.segment!);
-      return;
-    }
-    if (action.type == _ReplayActionType.stop) {
-      await _stopReplay();
-      return;
-    }
   }
 
   @override
@@ -2788,72 +2372,26 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                           ),
                         ),
                         const SizedBox(height: 10),
-                        IconButton(
-                          onPressed: _temporaryLimitedHudControls || _replayBusy
-                              ? null
-                              : _openReplayPickerDialog,
-                          icon: _replayBusy
-                              ? const SizedBox(
-                                  width: 14,
-                                  height: 14,
-                                  child:
-                                      CircularProgressIndicator(strokeWidth: 2),
-                                )
-                              : Icon(
-                                  _replayActive
-                                      ? Icons.movie_filter
-                                      : Icons.play_circle_outline,
-                                  color: _temporaryLimitedHudControls
-                                      ? Colors.white38
-                                      : (_replayActive
-                                          ? const Color(0xFF5DFF89)
-                                          : Colors.white),
+                        Expanded(
+                          child: SingleChildScrollView(
+                            padding: const EdgeInsets.only(bottom: 4),
+                            child: Column(
+                              children: [
+                                IconButton(
+                                  onPressed: _temporaryLimitedHudControls
+                                      ? null
+                                      : _openDebugOptionsPopup,
+                                  icon: Icon(
+                                    Icons.tune,
+                                    color: _temporaryLimitedHudControls
+                                        ? Colors.white38
+                                        : const Color(0xFF8FE7FF),
+                                  ),
+                                  tooltip: '디버그 옵션',
                                 ),
-                          tooltip: '로그/루트 테스트 재생',
-                        ),
-                        IconButton(
-                          onPressed: _temporaryLimitedHudControls ||
-                                  _replayBusy ||
-                                  !_replayActive
-                              ? null
-                              : _stopReplay,
-                          icon: const Icon(Icons.stop_circle_outlined),
-                          color: _temporaryLimitedHudControls
-                              ? Colors.white38
-                              : const Color(0xFFFF8E8E),
-                          tooltip: '테스트 재생 중지',
-                        ),
-                        IconButton(
-                          onPressed: _temporaryLimitedHudControls
-                              ? null
-                              : _toggleOverlayVerifyMode,
-                          icon: Icon(
-                            _overlayVerifyMode
-                                ? Icons.fact_check
-                                : Icons.fact_check_outlined,
-                            color: _temporaryLimitedHudControls
-                                ? Colors.white38
-                                : (_overlayVerifyMode
-                                    ? const Color(0xFF5DFF89)
-                                    : Colors.white),
+                              ],
+                            ),
                           ),
-                          tooltip:
-                              _overlayVerifyMode ? '정합 검증 ON' : '정합 검증 OFF',
-                        ),
-                        const Spacer(),
-                        IconButton(
-                          onPressed: _sidecarBusy || !_openpilotOverlayMode
-                              ? null
-                              : _openSidecarActionPopup,
-                          icon: Icon(
-                            Icons.hub_outlined,
-                            color: _sidecarBusy || !_openpilotOverlayMode
-                                ? Colors.white38
-                                : const Color(0xFF87FFAA),
-                          ),
-                          tooltip: _openpilotOverlayMode
-                              ? '사이드카 제어'
-                              : 'WebRTC 모드에서는 비활성화',
                         ),
                         const SizedBox(height: 8),
                       ],
@@ -2911,43 +2449,54 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                             ? const ColoredBox(
                                                 color: Colors.black,
                                               )
-                                            : (_useNativeLiveCamera
-                                                ? AndroidView(
-                                                    key: ValueKey<String>(
-                                                      'native-live-${widget.hostIp}-${_replayActive ? 1 : 0}-$_liveCameraName',
-                                                    ),
-                                                    viewType:
-                                                        'carrotlink/native_drive_video',
-                                                    creationParams: <String,
-                                                        dynamic>{
-                                                      'wsUrl': _liveCameraWsUrl,
-                                                    },
-                                                    creationParamsCodec:
-                                                        const StandardMessageCodec(),
-                                                    onPlatformViewCreated:
-                                                        (viewId) {
-                                                      if (!mounted) return;
-                                                      setState(() {
-                                                        _nativeCameraViewId =
-                                                            viewId;
-                                                        _cameraLoading = true;
-                                                        _cameraError = null;
-                                                      });
-                                                      if (_useNativeOverlayRenderer) {
-                                                        unawaited(
-                                                          _pushNativeOverlay(
-                                                            _overlayNotifier
-                                                                .value,
-                                                            force: true,
-                                                          ),
-                                                        );
-                                                      }
-                                                    },
+                                            : (!_hudModeLoaded
+                                                ? const ColoredBox(
+                                                    color: Colors.black,
                                                   )
-                                                : WebViewWidget(
-                                                    controller:
-                                                        _cameraController,
-                                                  )),
+                                                : (_openpilotOverlayMode &&
+                                                    !_sidecarConnected
+                                                ? const ColoredBox(
+                                                    color: Colors.black,
+                                                  )
+                                                : (_useNativeLiveCamera
+                                                    ? AndroidView(
+                                                        key: ValueKey<String>(
+                                                          'native-live-${widget.hostIp}-$_liveCameraName',
+                                                        ),
+                                                        viewType:
+                                                            'carrotlink/native_drive_video',
+                                                        creationParams: <String,
+                                                            dynamic>{
+                                                          'wsUrl':
+                                                              _liveCameraWsUrl,
+                                                        },
+                                                        creationParamsCodec:
+                                                            const StandardMessageCodec(),
+                                                        onPlatformViewCreated:
+                                                            (viewId) {
+                                                          if (!mounted) return;
+                                                          setState(() {
+                                                            _nativeCameraViewId =
+                                                                viewId;
+                                                            _cameraLoading =
+                                                                true;
+                                                            _cameraError = null;
+                                                          });
+                                                          if (_useNativeOverlayRenderer) {
+                                                            unawaited(
+                                                              _pushNativeOverlay(
+                                                                _overlayNotifier
+                                                                    .value,
+                                                                force: true,
+                                                              ),
+                                                            );
+                                                          }
+                                                        },
+                                                      )
+                                                    : WebViewWidget(
+                                                        controller:
+                                                            _cameraController,
+                                                      )))),
                                       ),
                                       if (_openpilotOverlayMode &&
                                           !_useNativeOverlayRenderer)
@@ -2964,13 +2513,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                                         _sidecarConnected,
                                                     sourceSize:
                                                         _cameraSourceSize,
-                                                    cameraKind: _replayActive
-                                                        ? _DriveCameraKind.road
-                                                        : _liveCameraKind,
+                                                    cameraKind: _liveCameraKind,
                                                     coverViewport:
                                                         _coverViewport,
                                                     showDebugGuides:
-                                                        _overlayVerifyMode,
+                                                        _overlayVerifyMode &&
+                                                            _debugShowGuides,
                                                   ),
                                                 ),
                                               );
@@ -2991,7 +2539,69 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                     ],
                                   ),
                                 ),
-                                if (_cameraError != null)
+                                if (_sidecarTransitioning)
+                                  Positioned(
+                                    left: 16,
+                                    right: 16,
+                                    bottom: 16,
+                                    child: Container(
+                                      padding: const EdgeInsets.all(10),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xCC2C2C2C),
+                                        borderRadius: BorderRadius.circular(10),
+                                        border:
+                                            Border.all(color: Colors.white24),
+                                      ),
+                                      child: const Text(
+                                        '사이드카 재시작 중...',
+                                        style: TextStyle(
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                    ),
+                                  )
+                                else if (_openpilotOverlayMode &&
+                                    !_sidecarConnected)
+                                  Positioned(
+                                    left: 16,
+                                    right: 16,
+                                    bottom: 16,
+                                    child: Container(
+                                      padding: const EdgeInsets.all(10),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xCC1C2532),
+                                        borderRadius: BorderRadius.circular(10),
+                                        border:
+                                            Border.all(color: Colors.white24),
+                                      ),
+                                      child: const Text(
+                                        '사이드카 자동 준비 중...',
+                                        style: TextStyle(
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                    ),
+                                  )
+                                else if (!_hudModeLoaded)
+                                  Positioned(
+                                    left: 16,
+                                    right: 16,
+                                    bottom: 16,
+                                    child: Container(
+                                      padding: const EdgeInsets.all(10),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xCC1C2532),
+                                        borderRadius: BorderRadius.circular(10),
+                                        border:
+                                            Border.all(color: Colors.white24),
+                                      ),
+                                      child: const Text(
+                                        'HUD 모드 설정을 불러오는 중...',
+                                        style: TextStyle(color: Colors.white),
+                                      ),
+                                    ),
+                                  )
+                                else if (_cameraError != null)
                                   Positioned(
                                     left: 16,
                                     right: 16,
@@ -3013,6 +2623,26 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                     ),
                                   ),
                                 if (_overlayVerifyMode &&
+                                    _debugShowViewportFrame &&
+                                    !_coverViewport)
+                                  Positioned(
+                                    left: left,
+                                    top: top,
+                                    width: drawW,
+                                    height: drawH,
+                                    child: IgnorePointer(
+                                      child: Container(
+                                        decoration: BoxDecoration(
+                                          border: Border.all(
+                                            color: const Color(0xFF62FF8B),
+                                            width: 2,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                if (_overlayVerifyMode &&
+                                    _debugShowVerifyPanel &&
                                     _overlayVerifyText.isNotEmpty)
                                   Positioned(
                                     top: 14,
@@ -3056,49 +2686,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       ),
     );
   }
-}
-
-class _ReplayRouteEntry {
-  final String route;
-  final List<int> segments;
-
-  const _ReplayRouteEntry({
-    required this.route,
-    required this.segments,
-  });
-
-  const _ReplayRouteEntry.empty()
-      : route = '',
-        segments = const <int>[];
-
-  bool get isEmpty => route.isEmpty || segments.isEmpty;
-}
-
-enum _ReplayActionType { cancel, start, stop }
-
-class _ReplayDialogAction {
-  final _ReplayActionType type;
-  final String? route;
-  final int? segment;
-
-  const _ReplayDialogAction._({
-    required this.type,
-    this.route,
-    this.segment,
-  });
-
-  const _ReplayDialogAction.cancel() : this._(type: _ReplayActionType.cancel);
-
-  const _ReplayDialogAction.stop() : this._(type: _ReplayActionType.stop);
-
-  const _ReplayDialogAction.start({
-    required String route,
-    required int segment,
-  }) : this._(
-          type: _ReplayActionType.start,
-          route: route,
-          segment: segment,
-        );
 }
 
 class _DriveOverlaySnapshot {
@@ -3199,6 +2786,7 @@ class _DriveOverlaySnapshot {
     List<double>? wideFromDeviceEuler,
     double? pathOffsetZ,
     double? animationPhase,
+    Map<String, dynamic>? sidecarOverlay2d,
   }) {
     final phase = animationPhase ?? this.animationPhase;
     return _DriveOverlaySnapshot(
@@ -3226,7 +2814,7 @@ class _DriveOverlaySnapshot {
       modelFrameId: modelFrameId,
       roadFrameId: roadFrameId,
       wideRoadFrameId: wideRoadFrameId,
-      sidecarOverlay2d: sidecarOverlay2d,
+      sidecarOverlay2d: sidecarOverlay2d ?? this.sidecarOverlay2d,
       usingLateralPath: usingLateralPath,
       modelPathXMax: modelPathXMax,
       lateralPathXMax: lateralPathXMax,
@@ -3959,6 +3547,35 @@ class _DriveOverlayPainter extends CustomPainter {
     );
   }
 
+  _SourceCanvasPlacement _sourceToCanvasPlacementSimple({
+    required Size source,
+    required Size canvas,
+  }) {
+    final sx = canvas.width / source.width;
+    final sy = canvas.height / source.height;
+    final scale = coverViewport ? math.max(sx, sy) : math.min(sx, sy);
+    final drawW = source.width * scale;
+    final drawH = source.height * scale;
+    final dx = (canvas.width - drawW) * 0.5;
+    final dy = (canvas.height - drawH) * 0.5;
+    return _SourceCanvasPlacement(
+      transform: _M3(
+        scale,
+        0.0,
+        dx,
+        0.0,
+        scale,
+        dy,
+        0.0,
+        0.0,
+        1.0,
+      ),
+      scale: scale,
+      xOffset: 0.0,
+      yOffset: 0.0,
+    );
+  }
+
   _ProjectionTransform _buildTransform(Size size) {
     final wideCam = cameraKind == _DriveCameraKind.wideRoad;
     final src = _effectiveSourceSize;
@@ -4562,7 +4179,6 @@ class _DriveOverlayPainter extends CustomPainter {
     required Size canvasSize,
     required bool coverViewport,
     required String cameraSourceLabel,
-    required bool replayActive,
   }) {
     final painter = _DriveOverlayPainter(
       snapshot: snapshot,
@@ -4574,14 +4190,12 @@ class _DriveOverlayPainter extends CustomPainter {
     return painter._buildProjectionDebugText(
       canvasSize: canvasSize,
       cameraSourceLabel: cameraSourceLabel,
-      replayActive: replayActive,
     );
   }
 
   String _buildProjectionDebugText({
     required Size canvasSize,
     required String cameraSourceLabel,
-    required bool replayActive,
   }) {
     final src = _effectiveSourceSize;
     final transform = _buildTransform(canvasSize);
@@ -4673,7 +4287,7 @@ class _DriveOverlayPainter extends CustomPainter {
     final sourceText =
         'src ${src.width.toStringAsFixed(0)}x${src.height.toStringAsFixed(0)} '
         'canvas ${canvasSize.width.toStringAsFixed(0)}x${canvasSize.height.toStringAsFixed(0)} '
-        'fit=${coverViewport ? 'cover' : 'contain'} cam=${cameraKind.name} $cameraSourceLabel ${replayActive ? 'replay' : 'live'}';
+        'fit=${coverViewport ? 'cover' : 'contain'} cam=${cameraKind.name} $cameraSourceLabel';
 
     return <String>[
       '[Projection Verify]',
@@ -4726,21 +4340,9 @@ class _DriveOverlayPainter extends CustomPainter {
     final srcW = (sourceWidth > 1.0) ? sourceWidth : _baseSourceWidth;
     final srcH = (sourceHeight > 1.0) ? sourceHeight : _baseSourceHeight;
     final source = Size(srcW, srcH);
-    final wideCam = cameraKind == _DriveCameraKind.wideRoad;
-    final intrinsic = _intrinsicForSource(source, wideCam);
-    final deviceFromCalib = _rotationFromEuler(snapshot.calibrationRpy);
-    final wideFromDevice = wideCam
-        ? _rotationFromEuler(snapshot.wideFromDeviceEuler)
-        : const _M3.identity();
-    final viewFromCalib = wideCam
-        ? _viewFromDevice.multiply(wideFromDevice.multiply(deviceFromCalib))
-        : _viewFromDevice.multiply(deviceFromCalib);
-    final calibTransform = intrinsic.multiply(viewFromCalib);
-    final placement = _sourceToCanvasPlacement(
+    final placement = _sourceToCanvasPlacementSimple(
       source: source,
       canvas: canvasSize,
-      intrinsic: intrinsic,
-      calibTransform: calibTransform,
     );
     final out = <Offset>[];
     for (final p in sourcePoints) {
@@ -4769,8 +4371,36 @@ class _DriveOverlayPainter extends CustomPainter {
         _DriveOverlaySnapshot._asDouble(cam['sourceWidth']) ?? _baseSourceWidth;
     final sourceHeight = _DriveOverlaySnapshot._asDouble(cam['sourceHeight']) ??
         _baseSourceHeight;
+    var sidecarPathMode =
+        _DriveOverlaySnapshot._asInt(cam['pathMode']) ?? snapshot.pathMode;
+    var sidecarPathColor =
+        _DriveOverlaySnapshot._asInt(cam['pathColor']) ?? snapshot.pathColor;
+    // Enforce classic visual style on sidecar-provided payload as well.
+    if (sidecarPathMode >= 13 && sidecarPathMode <= 15) {
+      sidecarPathMode = 0;
+    }
+    if (sidecarPathColor == 14 || sidecarPathColor == 19) {
+      sidecarPathColor = 3;
+    }
+    var sidecarBrakeLights = snapshot.brakeLights;
+    final meta = cam['meta'];
+    if (meta is Map) {
+      final brakeRaw = meta['brakeLights'];
+      if (brakeRaw is bool) {
+        sidecarBrakeLights = brakeRaw;
+      } else if (brakeRaw is num) {
+        sidecarBrakeLights = brakeRaw != 0;
+      } else if (brakeRaw is String) {
+        final lower = brakeRaw.trim().toLowerCase();
+        if (lower == '1' || lower == 'true' || lower == 'yes') {
+          sidecarBrakeLights = true;
+        } else if (lower == '0' || lower == 'false' || lower == 'no') {
+          sidecarBrakeLights = false;
+        }
+      }
+    }
     final polygons = <Map<String, dynamic>>[];
-    List<Map<String, dynamic>>? labels;
+    final labels = <Map<String, dynamic>>[];
 
     final laneRaw = cam['lanePolygons'];
     if (laneRaw is List) {
@@ -4819,31 +4449,63 @@ class _DriveOverlayPainter extends CustomPainter {
       }
     }
 
-    final trackVertices = _mapSourcePointsToCanvas(
+    var trackVertices = _mapSourcePointsToCanvas(
       _decodeOverlayPoints(cam['pathTrackVertices']),
       canvasSize: size,
       sourceWidth: sourceWidth,
       sourceHeight: sourceHeight,
     );
+    if (trackVertices.length < 3 && snapshot.path.length >= 2) {
+      final transform = _buildTransform(size);
+      final modelMax = snapshot.path.x.isNotEmpty ? snapshot.path.x.last : 0.0;
+      final maxDistance = modelMax.clamp(10.0, 100.0);
+      final widthApply = _pathHalfWidthByMode(
+        sidecarPathMode,
+        snapshot.pathWidthRatio,
+      );
+      final zOff = snapshot.pathOffsetZ.isFinite ? snapshot.pathOffsetZ : 1.22;
+      final fallbackTrack = _mapLineToTrackVerticesDist(
+        transform,
+        snapshot.path,
+        widthApply,
+        zOff,
+        zOff,
+        maxDistance,
+        startDistance: snapshot.active ? 2.0 : 3.5,
+        allowInvert: false,
+      );
+      if (fallbackTrack != null && fallbackTrack.length >= 3) {
+        trackVertices = fallbackTrack;
+      }
+    }
     if (trackVertices.length >= 3) {
       _collectPathPolygonsByMode(
         polygons,
         trackVertices,
-        snapshot.pathMode,
-        snapshot.pathColor,
-        snapshot.brakeLights,
+        sidecarPathMode,
+        sidecarPathColor,
+        sidecarBrakeLights,
       );
     }
+
+    _appendSidecarLeadAndRadarPolygons(
+      cam: cam,
+      canvasSize: size,
+      sourceWidth: sourceWidth,
+      sourceHeight: sourceHeight,
+      polygons: polygons,
+      labels: labels,
+    );
 
     if (showDebugGuides) {
       _appendDebugScreenGridPolygons(
         polygons,
         canvasSize: size,
       );
-      labels = _buildDebugGridLabels(canvasSize: size);
+      labels.addAll(_buildDebugGridLabels(canvasSize: size));
     }
 
-    if (polygons.isEmpty && (labels == null || labels.isEmpty)) return null;
+    if (polygons.isEmpty && labels.isEmpty) return null;
     return <String, dynamic>{
       'version': 3,
       'canvasWidth': size.width,
@@ -4851,7 +4513,7 @@ class _DriveOverlayPainter extends CustomPainter {
       'sourceWidth': sourceWidth,
       'sourceHeight': sourceHeight,
       'polygons': polygons,
-      if (labels != null && labels.isNotEmpty) 'labels': labels,
+      if (labels.isNotEmpty) 'labels': labels,
     };
   }
 
@@ -5382,6 +5044,322 @@ class _DriveOverlayPainter extends CustomPainter {
     }
     if ((maxX - minX) <= 1e-3 || (maxY - minY) <= 1e-3) return null;
     return Rect.fromLTRB(minX, minY, maxX, maxY);
+  }
+
+  bool _boolFromDynamic(dynamic raw, {bool fallback = false}) {
+    if (raw is bool) return raw;
+    if (raw is num) return raw != 0;
+    if (raw is String) {
+      final value = raw.trim().toLowerCase();
+      if (value == '1' || value == 'true' || value == 'yes' || value == 'on') {
+        return true;
+      }
+      if (value == '0' || value == 'false' || value == 'no' || value == 'off') {
+        return false;
+      }
+    }
+    return fallback;
+  }
+
+  List<Offset> _rectVertices(
+      double left, double top, double right, double bottom) {
+    return <Offset>[
+      Offset(left, top),
+      Offset(right, top),
+      Offset(right, bottom),
+      Offset(left, bottom),
+    ];
+  }
+
+  List<Offset> _circleVertices(
+    Offset center,
+    double radius, {
+    int segments = 18,
+  }) {
+    if (radius <= 0.0) return const <Offset>[];
+    final steps = segments < 6 ? 6 : segments;
+    final points = <Offset>[];
+    for (var i = 0; i < steps; i++) {
+      final theta = (math.pi * 2.0 * i) / steps;
+      points.add(
+        Offset(
+          center.dx + (math.cos(theta) * radius),
+          center.dy + (math.sin(theta) * radius),
+        ),
+      );
+    }
+    return points;
+  }
+
+  void _appendOverlayLabel(
+    List<Map<String, dynamic>> labels, {
+    required Offset anchor,
+    required String text,
+    required Color color,
+    double size = 20.0,
+    bool centered = true,
+  }) {
+    final content = text.trim();
+    if (content.isEmpty || !anchor.dx.isFinite || !anchor.dy.isFinite) return;
+    final x =
+        centered ? (anchor.dx - (content.length * size * 0.22)) : anchor.dx;
+    labels.add(<String, dynamic>{
+      'x': x,
+      'y': anchor.dy,
+      'text': content,
+      'color': color.toARGB32(),
+      'size': size,
+    });
+  }
+
+  void _appendBadge(
+    List<Map<String, dynamic>> polygons,
+    List<Map<String, dynamic>> labels, {
+    required Offset center,
+    required String text,
+    required Color fillColor,
+    required Color textColor,
+    Color? strokeColor,
+    double fontSize = 22.0,
+    double minWidth = 54.0,
+    double height = 38.0,
+  }) {
+    final content = text.trim();
+    if (content.isEmpty || !center.dx.isFinite || !center.dy.isFinite) return;
+    final width = math
+        .max(minWidth, (content.length * fontSize * 0.62) + 18.0)
+        .toDouble();
+    final left = center.dx - (width * 0.5);
+    final top = center.dy - (height * 0.5);
+    final right = left + width;
+    final bottom = top + height;
+    polygons.add(
+      _encodePolygon(
+        _rectVertices(left, top, right, bottom),
+        fillColor,
+        strokeColor: strokeColor,
+        strokeWidth: strokeColor == null ? 0.0 : 2.0,
+      ),
+    );
+    _appendOverlayLabel(
+      labels,
+      anchor: Offset(center.dx, top + (height * 0.70)),
+      text: content,
+      color: textColor,
+      size: fontSize,
+      centered: true,
+    );
+  }
+
+  void _appendSidecarLeadAndRadarPolygons({
+    required Map<String, dynamic> cam,
+    required Size canvasSize,
+    required double sourceWidth,
+    required double sourceHeight,
+    required List<Map<String, dynamic>> polygons,
+    required List<Map<String, dynamic>> labels,
+  }) {
+    final meta = cam['meta'];
+    final showRadarInfo = meta is Map
+        ? (_DriveOverlaySnapshot._asInt(meta['showRadarInfo']) ?? 0)
+        : 0;
+
+    Offset? mapSingleSourcePoint(dynamic raw) {
+      if (raw is! List || raw.length < 2) return null;
+      final sx = _DriveOverlaySnapshot._asDouble(raw[0]);
+      final sy = _DriveOverlaySnapshot._asDouble(raw[1]);
+      if (sx == null || sy == null) return null;
+      final mapped = _mapSourcePointsToCanvas(
+        <Offset>[Offset(sx, sy)],
+        canvasSize: canvasSize,
+        sourceWidth: sourceWidth,
+        sourceHeight: sourceHeight,
+      );
+      if (mapped.isEmpty) return null;
+      return mapped.first;
+    }
+
+    Offset? mapBadgeFromAnchor(dynamic rawAnchor, double dx, double dy) {
+      if (rawAnchor is! List || rawAnchor.length < 2) return null;
+      final ax = _DriveOverlaySnapshot._asDouble(rawAnchor[0]);
+      final ay = _DriveOverlaySnapshot._asDouble(rawAnchor[1]);
+      if (ax == null || ay == null) return null;
+      return mapSingleSourcePoint(<double>[ax + dx, ay + dy]);
+    }
+
+    final leadRaw = cam['leadAreaBoxes'];
+    if (leadRaw is List) {
+      for (final item in leadRaw) {
+        if (item is! Map) continue;
+        final lead = Map<String, dynamic>.from(item);
+        final mapped = _mapSourcePointsToCanvas(
+          _decodeOverlayPoints(lead['points']),
+          canvasSize: canvasSize,
+          sourceWidth: sourceWidth,
+          sourceHeight: sourceHeight,
+        );
+        if (mapped.length < 3) continue;
+        final bounds = _verticesBounds(mapped);
+        if (bounds == null) continue;
+
+        final kind = lead['kind']?.toString() ?? 'leadOne';
+        final status = _DriveOverlaySnapshot._asInt(lead['status']) ?? 0;
+        final radarDetected = _boolFromDynamic(lead['radar']);
+        final radarTrackId =
+            _DriveOverlaySnapshot._asInt(lead['radarTrackId']) ?? -1;
+        final isLeadScc = radarTrackId < 1;
+
+        Color strokeColor;
+        Color fillColor;
+        if (kind == 'leadTwo') {
+          strokeColor = const Color(0xFFB68A3A);
+          fillColor =
+              status >= 2 ? const Color(0x66FF3B30) : const Color(0x33000000);
+        } else {
+          fillColor = const Color(0x33000000);
+          if (!radarDetected) {
+            strokeColor = const Color(0xFF3D7BFF);
+          } else {
+            strokeColor =
+                isLeadScc ? const Color(0xFFFF3B30) : const Color(0xFFFFA726);
+          }
+        }
+        polygons.add(
+          _encodePolygon(
+            mapped,
+            fillColor,
+            strokeColor: strokeColor,
+            strokeWidth: 2.6,
+          ),
+        );
+
+        if (kind == 'leadOne') {
+          final radarDist =
+              _DriveOverlaySnapshot._asDouble(lead['radarDistance']) ?? 0.0;
+          final visionDist =
+              _DriveOverlaySnapshot._asDouble(lead['visionDistance']) ?? 0.0;
+          final anchorRaw = lead['anchorCenter'];
+          final radarBadgeCenter =
+              mapSingleSourcePoint(lead['radarBadgeCenter']) ??
+                  mapBadgeFromAnchor(anchorRaw, -80.0, 60.0);
+          final visionBadgeCenter =
+              mapSingleSourcePoint(lead['visionBadgeCenter']) ??
+                  mapBadgeFromAnchor(anchorRaw, 80.0, 60.0);
+          final badgeY = bounds.bottom + 24.0;
+          if (radarDist > 0.0) {
+            _appendBadge(
+              polygons,
+              labels,
+              center:
+                  radarBadgeCenter ?? Offset(bounds.center.dx - 84.0, badgeY),
+              text: radarDist.toStringAsFixed(1),
+              fillColor:
+                  isLeadScc ? const Color(0xFFFF3B30) : const Color(0xFFFFA726),
+              textColor: Colors.white,
+            );
+          }
+          if (visionDist > 0.0) {
+            _appendBadge(
+              polygons,
+              labels,
+              center:
+                  visionBadgeCenter ?? Offset(bounds.center.dx + 84.0, badgeY),
+              text: visionDist.toStringAsFixed(1),
+              fillColor: const Color(0xFF3D7BFF),
+              textColor: Colors.white,
+            );
+          }
+        }
+      }
+    }
+
+    final radarRaw = cam['radarTargets'];
+    if (showRadarInfo <= 0 || radarRaw is! List) return;
+    for (final item in radarRaw) {
+      if (item is! Map) continue;
+      final radar = Map<String, dynamic>.from(item);
+      final center = mapSingleSourcePoint(radar['center']);
+      if (center == null) continue;
+
+      final vSigned =
+          _DriveOverlaySnapshot._asDouble(radar['speedMpsSigned']) ?? 0.0;
+      final speedAbs = vSigned.abs();
+      final dRel = _DriveOverlaySnapshot._asDouble(radar['dRel']) ?? 0.0;
+      final yRel = _DriveOverlaySnapshot._asDouble(radar['yRel']) ?? 0.0;
+      final radarDetected = _boolFromDynamic(radar['radar']);
+      final modelProb =
+          _DriveOverlaySnapshot._asDouble(radar['modelProb']) ?? 0.0;
+
+      final future = mapSingleSourcePoint(radar['future']);
+      if (future != null && speedAbs > 3.0) {
+        _appendDebugLinePolygon(
+          polygons,
+          a: center,
+          b: future,
+          color: vSigned >= 0.0
+              ? const Color(0xFF23D55D)
+              : const Color(0xFFFF3B30),
+          thickness: 3.0,
+        );
+        polygons.add(
+          _encodePolygon(
+            _circleVertices(future, 7.0),
+            vSigned >= 0.0 ? const Color(0xFF23D55D) : const Color(0xFFFF3B30),
+          ),
+        );
+      }
+
+      if (speedAbs > 3.0) {
+        final speedKph =
+            _DriveOverlaySnapshot._asDouble(radar['speedKphSigned']) ??
+                (vSigned * 3.6);
+        Color badgeColor;
+        if (!radarDetected) {
+          badgeColor = const Color(0xFF3D7BFF);
+        } else if ((modelProb - 0.01).abs() < 1e-3) {
+          badgeColor = const Color(0xFF23D55D);
+        } else if (vSigned > 0.0) {
+          badgeColor = const Color(0xFFFFA726);
+        } else {
+          badgeColor = const Color(0xFFFF3B30);
+        }
+        _appendBadge(
+          polygons,
+          labels,
+          center: Offset(center.dx, center.dy - 14.0),
+          text: speedKph.toStringAsFixed(0),
+          fillColor: badgeColor,
+          textColor: Colors.white,
+        );
+        if (showRadarInfo >= 2) {
+          _appendOverlayLabel(
+            labels,
+            anchor: Offset(center.dx, center.dy - 44.0),
+            text: yRel.toStringAsFixed(1),
+            color: Colors.white,
+            size: 18.0,
+            centered: true,
+          );
+          _appendOverlayLabel(
+            labels,
+            anchor: Offset(center.dx, center.dy + 28.0),
+            text: dRel.toStringAsFixed(1),
+            color: Colors.white,
+            size: 18.0,
+            centered: true,
+          );
+        }
+      } else if (showRadarInfo >= 3) {
+        _appendOverlayLabel(
+          labels,
+          anchor: center,
+          text: '*',
+          color: Colors.white,
+          size: 28.0,
+          centered: true,
+        );
+      }
+    }
   }
 
   void _appendDebugScreenGridPolygons(

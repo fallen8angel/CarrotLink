@@ -152,10 +152,14 @@ class NativeDriveVideoView(
   @Volatile private var currentWidth = 0
   @Volatile private var currentHeight = 0
   @Volatile private var connectAttempts = 0
+  @Volatile private var lastPacketAtMs = 0L
   private val pendingFrameIds: ArrayDeque<Int> = ArrayDeque()
 
   private var reconnectRunnable: Runnable? = null
+  private var frameWatchdogRunnable: Runnable? = null
   private val cameraName: String = parseCameraName(wsUrl)
+  private val frameWatchdogIntervalMs = 1000L
+  private val frameStallTimeoutMs = 2500L
 
   init {
     rootView.addView(
@@ -182,6 +186,7 @@ class NativeDriveVideoView(
   override fun dispose() {
     closed = true
     clearReconnect()
+    stopFrameWatchdog()
     closeSocket()
     releaseDecoder()
     clearOverlay()
@@ -206,6 +211,7 @@ class NativeDriveVideoView(
   override fun surfaceDestroyed(holder: SurfaceHolder) {
     surface = null
     emitState("surface_destroyed")
+    stopFrameWatchdog()
     closeSocket()
     releaseDecoder()
   }
@@ -226,20 +232,25 @@ class NativeDriveVideoView(
             request,
             object : WebSocketListener() {
               override fun onOpen(webSocket: WebSocket, response: Response) {
+                lastPacketAtMs = System.currentTimeMillis()
+                startFrameWatchdog()
                 emitState("connected")
               }
 
               override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                lastPacketAtMs = System.currentTimeMillis()
                 val copy = bytes.toByteArray()
                 decodeHandler.post { handlePacket(copy) }
               }
 
               override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                stopFrameWatchdog()
                 emitError("socket_failure:${t.message ?: "unknown"}")
                 scheduleReconnect(900)
               }
 
               override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                stopFrameWatchdog()
                 emitState("closed:$code")
                 scheduleReconnect(900)
               }
@@ -264,6 +275,38 @@ class NativeDriveVideoView(
       reconnectHandler.removeCallbacks(it)
     }
     reconnectRunnable = null
+  }
+
+  private fun startFrameWatchdog() {
+    stopFrameWatchdog()
+    lastPacketAtMs = System.currentTimeMillis()
+    frameWatchdogRunnable =
+        object : Runnable {
+          override fun run() {
+            if (closed) return
+            val localSurface = surface
+            if (localSurface == null || !localSurface.isValid) {
+              stopFrameWatchdog()
+              return
+            }
+            val elapsedMs = System.currentTimeMillis() - lastPacketAtMs
+            if (webSocket != null && elapsedMs > frameStallTimeoutMs) {
+              emitError("frame_stall_${elapsedMs}ms")
+              stopFrameWatchdog()
+              closeSocket()
+              releaseDecoder()
+              scheduleReconnect(250)
+              return
+            }
+            reconnectHandler.postDelayed(this, frameWatchdogIntervalMs)
+          }
+        }
+    reconnectHandler.postDelayed(frameWatchdogRunnable!!, frameWatchdogIntervalMs)
+  }
+
+  private fun stopFrameWatchdog() {
+    frameWatchdogRunnable?.let { reconnectHandler.removeCallbacks(it) }
+    frameWatchdogRunnable = null
   }
 
   private fun closeSocket() {

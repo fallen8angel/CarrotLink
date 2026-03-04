@@ -33,6 +33,10 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   bool _appForeground = true;
   Timer? _prereqTimer;
   Timer? _overlaySyncTimer;
+  Timer? _hudFallbackTimer;
+  double? _fallbackCpuTempC;
+  double? _fallbackMemPct;
+  double? _fallbackDiskPct;
 
   @override
   void initState() {
@@ -56,6 +60,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _prereqTimer?.cancel();
     _overlaySyncTimer?.cancel();
+    _hudFallbackTimer?.cancel();
     super.dispose();
   }
 
@@ -90,10 +95,15 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
           (_) => unawaited(_syncOverlayEndpoint()),
         );
       }
+      _hudFallbackTimer ??= Timer.periodic(
+        const Duration(seconds: 5),
+        (_) => unawaited(_refreshHudFallbackMetrics()),
+      );
       if (forceRefresh) {
         unawaited(_refreshConnectionPrerequisites());
         unawaited(_refreshStatus());
         unawaited(_syncOverlayEndpoint(forceProbe: true));
+        unawaited(_refreshHudFallbackMetrics());
       }
       return;
     }
@@ -102,6 +112,8 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     _prereqTimer = null;
     _overlaySyncTimer?.cancel();
     _overlaySyncTimer = null;
+    _hudFallbackTimer?.cancel();
+    _hudFallbackTimer = null;
   }
 
   Future<void> _refreshStatus() async {
@@ -207,6 +219,42 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
       await NativeOverlayHudService.updateEndpoint(host);
       _overlaySyncedHost = host;
     }
+  }
+
+  Future<void> _refreshHudFallbackMetrics() async {
+    if (!_realtimeWorkEnabled) return;
+    if (!mounted) return;
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    if (!ssh.isConnected) return;
+    final metrics = await ssh.getHudFallbackMetrics();
+    if (metrics == null) return;
+
+    if (NativeOverlayHudService.isSupported) {
+      final overlayEnabled = await NativeOverlayHudService.isEnabled();
+      if (!overlayEnabled) {
+        return;
+      }
+      final overlayRunning = await NativeOverlayHudService.isRunning();
+      if (!overlayRunning) {
+        return;
+      }
+      await NativeOverlayHudService.updateFallbackMetrics(
+        cpuTempC: metrics.cpuTempC,
+        memPct: metrics.memPct,
+        diskPct: metrics.diskPct,
+      );
+    }
+
+    if (!mounted) return;
+    final sameCpu = _fallbackCpuTempC == metrics.cpuTempC;
+    final sameMem = _fallbackMemPct == metrics.memPct;
+    final sameDisk = _fallbackDiskPct == metrics.diskPct;
+    if (sameCpu && sameMem && sameDisk) return;
+    setState(() {
+      _fallbackCpuTempC = metrics.cpuTempC;
+      _fallbackMemPct = metrics.memPct;
+      _fallbackDiskPct = metrics.diskPct;
+    });
   }
 
   void _openWebRtcView(SSHService ssh) {
@@ -346,6 +394,9 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                   HomeHudPreviewCard(
                     enabled: _realtimeWorkEnabled,
                     deviceIp: ssh.connectedIp ?? ssh.targetIp,
+                    fallbackCpuTempC: _fallbackCpuTempC,
+                    fallbackMemPct: _fallbackMemPct,
+                    fallbackDiskPct: _fallbackDiskPct,
                   ),
                   const SizedBox(height: 6),
                   Text(

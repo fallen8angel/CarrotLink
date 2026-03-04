@@ -133,8 +133,8 @@ void onStart(ServiceInstance service) async {
 
   Duration candidateStaleThresholdForProfile() {
     return appForeground
-        ? const Duration(seconds: 8)
-        : const Duration(seconds: 25);
+        ? const Duration(seconds: 20)
+        : const Duration(seconds: 60);
   }
 
   Duration heartbeatIntervalForProfile() {
@@ -163,7 +163,7 @@ void onStart(ServiceInstance service) async {
   }
 
   int noBroadcastBackoffSeconds(int attempt) {
-    final seq = appForeground ? const [2, 3] : const [20, 30];
+    final seq = appForeground ? const [1, 2] : const [20, 30];
     if (attempt < 0) return seq.first;
     if (attempt >= seq.length) return seq.last;
     return seq[attempt];
@@ -578,6 +578,14 @@ void onStart(ServiceInstance service) async {
     } else {
       emitDiscoveryState(source: 'ensure_discovery');
     }
+  });
+
+  service.on('candidateHint').listen((event) {
+    if (event == null) return;
+    final ip = event['ip']?.toString() ?? '';
+    if (!isValidIpv4(ip)) return;
+    final source = event['source']?.toString() ?? 'hint';
+    onCandidateIp(ip, source: source);
   });
 
   service.on('setAppVisibility').listen((event) async {

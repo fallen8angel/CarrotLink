@@ -102,6 +102,16 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
     );
   }
 
+  String _compactDiscoveryStatus(SSHService ssh) {
+    final seenAt = ssh.serviceCandidateSeenAt;
+    final hasFreshCandidate = ssh.serviceCandidateIp != null &&
+        seenAt != null &&
+        DateTime.now().difference(seenAt) <= const Duration(seconds: 45);
+    final searching =
+        _manualDiscoverySession || ssh.isDiscoveryActive || hasFreshCandidate;
+    return searching ? "검색중" : "후보없음";
+  }
+
   Widget _buildConnectionSection(SSHService ssh) {
     final isConnecting = ssh.isConnecting;
     final isConnected = ssh.isConnected;
@@ -181,9 +191,7 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
           ),
           const SizedBox(height: 4),
           Text(
-            _manualDiscoverySession
-                ? "검색 상태: 수동 / $_discoveryStatus"
-                : "검색 상태: $_discoveryStatus",
+            "검색 상태: ${_compactDiscoveryStatus(ssh)}",
             style: TextStyle(
               fontSize: 11,
               color: Colors.grey[700],

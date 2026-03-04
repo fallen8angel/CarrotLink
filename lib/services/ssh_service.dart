@@ -908,22 +908,30 @@ class SSHService extends ChangeNotifier {
   }
 
   Future<HudFallbackMetrics?> getHudFallbackMetrics() async {
-    // Match carrot/openpilot deviceState thermal source as closely as possible.
-    // tici/mici typically expose cpu[0-3]-silver-usr + cpu[0-3]-gold-usr.
     const cmd = r'''
-avg=$(for z in /sys/devices/virtual/thermal/thermal_zone*; do
+read_cpu_avg() {
+for z in /sys/devices/virtual/thermal/thermal_zone*; do
   [ -f "$z/type" ] || continue
-  t=$(cat "$z/type" 2>/dev/null)
+  t=$(cat "$z/type" 2>/dev/null | tr '[:upper:]' '[:lower:]')
   case "$t" in
-    cpu[0-9]-silver-usr|cpu[0-9]-gold-usr)
+    cpu*|soc*|ap*|big*|little*)
       cat "$z/temp" 2>/dev/null
       ;;
   esac
-done | awk 'BEGIN{sum=0;n=0} {v=$1+0; if(v>0){sum+=v;n++}} END{if(n>0) printf "%.2f", sum/(n*1000)}')
-if [ -n "$avg" ]; then
-  cpu="$avg"
-else
-  cpu=$(awk '{v=$1+0; if(v>0) printf "%.2f", v/1000}' /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+done | awk 'BEGIN{sum=0;n=0} {
+  v=$1+0;
+  if(v>1000) v=v/1000;
+  if(v>0 && v<150){sum+=v;n++}
+} END{if(n>0) printf "%.2f", sum/n}'
+}
+
+cpu=$(read_cpu_avg)
+if [ -z "$cpu" ]; then
+  cpu=$(awk '{
+    v=$1+0;
+    if(v>1000) v=v/1000;
+    if(v>0 && v<150) printf "%.2f", v
+  }' /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
 fi
 mem=$(awk '/MemTotal:/ {t=$2} /MemAvailable:/ {a=$2} END{if(t>0) printf "%.2f", ((t-a)*100)/t}' /proc/meminfo 2>/dev/null)
 disk=$(df -P /data 2>/dev/null | awk 'NR==2 {gsub("%","",$5); print $5}')
@@ -1010,45 +1018,76 @@ printf "%s %s %s\n" "$cpu" "$mem" "$disk"
       }
     });
 
-    // Broadcast-first discovery for auto flow.
-    // Keep active scan only for explicit manual discovery sessions.
-    if (manualSession) {
-      unawaited(_scanSubnet(generation));
-    }
+    // Keep UDP broadcast as primary, but always run active scan as fallback.
+    // Manual session uses multi-pass aggressive probing.
+    unawaited(_scanSubnet(generation, aggressive: manualSession));
     return true;
   }
 
-  Future<void> _scanSubnet(int generation) async {
+  Future<void> _scanSubnet(
+    int generation, {
+    required bool aggressive,
+  }) async {
     try {
+      final prefixes = <String>{};
+      void addPrefixFromIp(String? ip) {
+        if (ip == null || ip.isEmpty) return;
+        final parts = ip.split('.');
+        if (parts.length != 4) return;
+        prefixes.add("${parts[0]}.${parts[1]}.${parts[2]}");
+      }
+
       final interfaces = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
         includeLinkLocal: false,
       );
 
       for (final interface in interfaces) {
-        if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
         for (final addr in interface.addresses) {
-          if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
           if (addr.isLoopback) continue;
+          addPrefixFromIp(addr.address);
+        }
+      }
 
-          final ip = addr.address;
-          final parts = ip.split('.');
-          if (parts.length != 4) continue;
+      addPrefixFromIp(_serviceCandidateIp);
+      addPrefixFromIp(_connectedIp);
+      addPrefixFromIp(_targetIp);
+      addPrefixFromIp(_lastDiscoveredIp);
+      if (prefixes.isEmpty) return;
 
-          final prefix = "${parts[0]}.${parts[1]}.${parts[2]}";
+      final timeoutPhasesMs = aggressive
+          ? const <int>[450, 1000, 1700]
+          : const <int>[1000, 1600];
+      final batchSize = aggressive ? 36 : 24;
 
-          // Scan 1-254 in batches to avoid FD limits
-          for (int i = 1; i < 255; i += 20) {
+      for (var p = 0; p < timeoutPhasesMs.length; p++) {
+        final timeoutMs = timeoutPhasesMs[p];
+        for (final prefix in prefixes) {
+          if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
+          for (int i = 1; i < 255; i += batchSize) {
             if (!_isDiscoveryActive || generation != _discoveryGeneration)
               return;
             final futures = <Future>[];
-            for (int j = 0; j < 20 && (i + j) < 255; j++) {
+            for (int j = 0; j < batchSize && (i + j) < 255; j++) {
               final targetIp = "$prefix.${i + j}";
-              if (targetIp == ip) continue; // Skip self
-              futures.add(_checkPort(targetIp, _defaultSshPort, generation));
+              futures.add(
+                _checkPort(
+                  targetIp,
+                  _defaultSshPort,
+                  generation,
+                  timeoutMs: timeoutMs,
+                ),
+              );
             }
             await Future.wait(futures);
           }
+        }
+
+        if (!aggressive &&
+            _lastDiscoveredAt != null &&
+            DateTime.now().difference(_lastDiscoveredAt!) <
+                const Duration(seconds: 4)) {
+          break;
         }
       }
     } catch (e) {
@@ -1056,11 +1095,19 @@ printf "%s %s %s\n" "$cpu" "$mem" "$disk"
     }
   }
 
-  Future<void> _checkPort(String ip, int port, int generation) async {
+  Future<void> _checkPort(
+    String ip,
+    int port,
+    int generation, {
+    required int timeoutMs,
+  }) async {
     if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
     try {
-      final socket = await Socket.connect(ip, port,
-          timeout: const Duration(milliseconds: 1000));
+      final socket = await Socket.connect(
+        ip,
+        port,
+        timeout: Duration(milliseconds: timeoutMs),
+      );
       socket.destroy();
       if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
       _emitDiscoveredIp(ip);
@@ -1084,6 +1131,12 @@ printf "%s %s %s\n" "$cpu" "$mem" "$disk"
     if (_ipDiscoveryController != null && !_ipDiscoveryController!.isClosed) {
       _ipDiscoveryController!.add(ip);
     }
+
+    FlutterBackgroundService().invoke('candidateHint', {
+      'ip': ip,
+      'source': 'active_scan',
+      'ts': now.millisecondsSinceEpoch,
+    });
   }
 
   bool _isValidIpv4(String ip) {

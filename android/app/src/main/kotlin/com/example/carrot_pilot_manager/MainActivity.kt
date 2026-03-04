@@ -71,6 +71,10 @@ class MainActivity : FlutterActivity() {
             }
 
             "updateFallbackMetrics" -> {
+              if (!OverlayHudService.isRunning()) {
+                result.success(false)
+                return@setMethodCallHandler
+              }
               val cpuTempC = call.argument<Double>("cpuTempC")
               val memPct = call.argument<Double>("memPct")
               val diskPct = call.argument<Double>("diskPct")

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE="${CARROTLINK_SIDECAR_BASE:-/data/media/0/carrotlink_sidecar}"
+BASE="${CARROTLINK_SIDECAR_BASE:-/data/openpilot/selfdrive/carrot}"
 PROFILE="${CARROTLINK_SIDECAR_PROFILE:-p1}"
 HOST="${CARROTLINK_SIDECAR_HOST:-0.0.0.0}"
 PORT="${CARROTLINK_SIDECAR_PORT:-7766}"
@@ -21,8 +21,8 @@ if [ -z "${REPO}" ]; then
   exit 2
 fi
 
-if [ ! -f "${BASE}/carrotlink_sidecar.py" ]; then
-  echo "[sidecar] missing sidecar python file: ${BASE}/carrotlink_sidecar.py"
+if [ ! -f "${BASE}/carrot_linkview.py" ]; then
+  echo "[sidecar] missing sidecar python file: ${BASE}/carrot_linkview.py"
   exit 3
 fi
 
@@ -35,4 +35,4 @@ export CARROTLINK_SIDECAR_PROFILE="${PROFILE}"
 export CARROTLINK_SIDECAR_HOST="${HOST}"
 export CARROTLINK_SIDECAR_PORT="${PORT}"
 
-exec python3 "${BASE}/carrotlink_sidecar.py"
+exec python3 "${BASE}/carrot_linkview.py"

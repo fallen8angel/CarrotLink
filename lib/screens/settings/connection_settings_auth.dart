@@ -87,40 +87,8 @@ extension _ConnectionSettingsAuth on _ConnectionSettingsScreenState {
   }
 
   Future<void> _loginToGitHub() async {
-    final selected = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text("GitHub 로그인 방식 선택"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.touch_app),
-              title: const Text("간편 로그인 (권장)"),
-              subtitle: const Text("브라우저 인증 (Device Flow)"),
-              onTap: () => Navigator.pop(context, 'device'),
-            ),
-            const Divider(),
-            ListTile(
-              leading: const Icon(Icons.vpn_key),
-              title: const Text("토큰 직접 입력"),
-              subtitle: const Text("Personal Access Token (PAT)"),
-              onTap: () => Navigator.pop(context, 'pat'),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context), child: const Text("취소")),
-        ],
-      ),
-    );
-
-    if (selected == 'device') {
-      await _startDeviceFlow();
-    } else if (selected == 'pat') {
-      await _showPatDialog();
-    }
+    // Simplified flow: always use GitHub Device Flow.
+    await _startDeviceFlow();
   }
 
   Future<bool> _ensureOpenpilotReady({
@@ -193,84 +161,6 @@ extension _ConnectionSettingsAuth on _ConnectionSettingsScreenState {
       }
     }
     return false;
-  }
-
-  Future<void> _showPatDialog() async {
-    final tokenController = TextEditingController();
-    await showDialog(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text("토큰 직접 입력"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-                "GitHub Personal Access Token (PAT)을 입력하세요.\n필수 권한: admin:public_key, gist"),
-            const SizedBox(height: 10),
-            TextField(
-              controller: tokenController,
-              decoration: const InputDecoration(
-                labelText: "Token",
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 10),
-            TextButton(
-              onPressed: () => launchUrl(Uri.parse(
-                  "https://github.com/settings/tokens/new?scopes=admin:public_key,gist&description=CarrotLink")),
-              child: const Text("토큰 생성 페이지 열기"),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text("취소")),
-          FilledButton(
-            onPressed: () async {
-              final token = tokenController.text.trim();
-              if (token.isEmpty) {
-                if (mounted) {
-                  CustomToast.show(context, "토큰을 입력하세요.", isError: true);
-                }
-                return;
-              }
-
-              await _githubService.saveToken(token);
-              await _checkGitHubLogin();
-              if (!_isGitHubLoggedIn) {
-                if (mounted) {
-                  CustomToast.show(context,
-                      "유효하지 않은 토큰이거나 권한(admin:public_key, gist)이 부족합니다.",
-                      isError: true);
-                }
-                return;
-              }
-
-              await _syncKeyStateAfterLogin(interactive: true);
-              if (!mounted) return;
-
-              if (!dialogContext.mounted) return;
-              Navigator.pop(dialogContext);
-              CustomToast.show(context, "GitHub 로그인 성공");
-              if (!_hasActiveSshKey) {
-                final loaded = await _loadKeys();
-                if (!mounted) return;
-                if (loaded && _keys.isEmpty) {
-                  await _showKeyGenerationDialog();
-                } else {
-                  CustomToast.show(
-                      context, "적용 가능한 개인키가 없습니다. 로컬 키를 적용하거나 새 키를 생성하세요.",
-                      isError: true);
-                }
-              }
-            },
-            child: const Text("로그인"),
-          ),
-        ],
-      ),
-    );
-    tokenController.dispose();
   }
 
   Future<void> _startDeviceFlow() async {
