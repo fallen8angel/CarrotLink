@@ -133,8 +133,8 @@ void onStart(ServiceInstance service) async {
 
   Duration candidateStaleThresholdForProfile() {
     return appForeground
-        ? const Duration(seconds: 20)
-        : const Duration(seconds: 60);
+        ? const Duration(seconds: 12)
+        : const Duration(seconds: 25);
   }
 
   Duration heartbeatIntervalForProfile() {
@@ -156,14 +156,14 @@ void onStart(ServiceInstance service) async {
   }
 
   int reconnectBackoffSeconds(int attempt) {
-    final seq = appForeground ? const [1, 2, 3, 5] : const [5, 10, 20, 30];
+    final seq = appForeground ? const [1, 1, 2, 3] : const [2, 4, 6, 10];
     if (attempt < 0) return seq.first;
     if (attempt >= seq.length) return seq.last;
     return seq[attempt];
   }
 
   int noBroadcastBackoffSeconds(int attempt) {
-    final seq = appForeground ? const [1, 2] : const [20, 30];
+    final seq = appForeground ? const [1, 2] : const [8, 12];
     if (attempt < 0) return seq.first;
     if (attempt >= seq.length) return seq.last;
     return seq[attempt];
@@ -577,6 +577,29 @@ void onStart(ServiceInstance service) async {
       unawaited(startDiscoveryListener());
     } else {
       emitDiscoveryState(source: 'ensure_discovery');
+    }
+  });
+
+  service.on('networkChanged').listen((event) {
+    var source = 'network_changed';
+    final eventMap = event is Map ? event : null;
+    final rawSource = eventMap?['source'];
+    if (rawSource is String && rawSource.isNotEmpty) {
+      source = rawSource;
+    }
+    candidateIp = null;
+    candidateSeenAt = null;
+    reconnectAttempt = 0;
+    noBroadcastWaitAttempt = 0;
+    clearReconnectTimer();
+    emitDiscoveryState(source: source);
+    if (discoverySocket == null) {
+      unawaited(startDiscoveryListener());
+    }
+    if ((sshClient == null || sshClient!.isClosed) &&
+        canAutoReconnect() &&
+        hasConnectProfile()) {
+      scheduleReconnect('network_changed');
     }
   });
 

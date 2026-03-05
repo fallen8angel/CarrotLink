@@ -211,7 +211,7 @@ class SSHService extends ChangeNotifier {
         ? preferredIp
         : _serviceCandidateIp;
 
-    print(
+    debugPrint(
         '[SSHService] Reconnect from storage - IP: $targetIp, Username: $username, Port: $port');
     _diag.info(
         'ssh', 'Reconnect from storage target=$targetIp:$port user=$username');
@@ -321,17 +321,18 @@ class SSHService extends ChangeNotifier {
 
       if (privateKey != null) {
         try {
-          print("Debug: Attempting to parse PEM key...");
-          print("Debug: Key starts with: ${privateKey.substring(0, 50)}...");
+          debugPrint("Debug: Attempting to parse PEM key...");
+          debugPrint(
+              "Debug: Key starts with: ${privateKey.substring(0, 50)}...");
 
           final keys = SSHKeyPair.fromPem(privateKey);
-          print("Debug: Parsed ${keys.length} keys from PEM.");
+          debugPrint("Debug: Parsed ${keys.length} keys from PEM.");
 
           if (keys.isEmpty) {
             throw Exception("No valid keys found in the provided PEM.");
           }
 
-          print("Debug: Key type: ${keys.first.type}");
+          debugPrint("Debug: Key type: ${keys.first.type}");
 
           _client = SSHClient(
             socket,
@@ -339,7 +340,7 @@ class SSHService extends ChangeNotifier {
             identities: keys,
           );
         } catch (e) {
-          print("Debug: Key parsing/auth failed: $e");
+          debugPrint("Debug: Key parsing/auth failed: $e");
           rethrow;
         }
       } else {
@@ -380,16 +381,16 @@ class SSHService extends ChangeNotifier {
 
       // Listen for immediate disconnection events from the socket
       _client!.done.then((_) {
-        print("SSH Connection closed by OS/Remote");
+        debugPrint("SSH Connection closed by OS/Remote");
         _handleDisconnect(reason: "socket closed");
       }).catchError((e) {
-        print("SSH Connection error: $e");
+        debugPrint("SSH Connection error: $e");
         _handleDisconnect(reason: "socket error");
       });
 
       _startHeartbeat();
     } catch (e) {
-      print("Connection failed: $e");
+      debugPrint("Connection failed: $e");
       _connectionStatus = _mapErrorToMessage(e);
       _diag.warn('ssh', 'Connection failed target=$ip:$port error=$e');
       _client = null;
@@ -433,7 +434,7 @@ class SSHService extends ChangeNotifier {
       }
 
       if (_client!.isClosed) {
-        print("Heartbeat: Client is closed");
+        debugPrint("Heartbeat: Client is closed");
         timer.cancel();
         _handleDisconnect(reason: "heartbeat: client closed");
         return;
@@ -453,8 +454,8 @@ class SSHService extends ChangeNotifier {
         _heartbeatFailureCount = 0;
       } catch (e) {
         _heartbeatFailureCount += 1;
-        print(
-            "Heartbeat failed (${_heartbeatFailureCount}/$_maxHeartbeatFailures): $e");
+        debugPrint(
+            "Heartbeat failed ($_heartbeatFailureCount/$_maxHeartbeatFailures): $e");
         if (_heartbeatFailureCount >= _maxHeartbeatFailures) {
           timer.cancel();
           _handleDisconnect(reason: "heartbeat failures");
@@ -472,12 +473,14 @@ class SSHService extends ChangeNotifier {
     bool manual = false,
   }) {
     if (_isHandlingDisconnect) return;
-    if (_client == null && _connectionStatus == "Disconnected" && !manual)
+    if (_client == null && _connectionStatus == "Disconnected" && !manual) {
       return; // 이미 처리됨
+    }
     _isHandlingDisconnect = true;
 
     try {
-      print("Connection lost - updating state immediately (reason: $reason)");
+      debugPrint(
+          "Connection lost - updating state immediately (reason: $reason)");
       _diag.warn('ssh', 'Disconnected reason=$reason manual=$manual');
       _manualDisconnectRequested = manual;
       _manualDisconnectUntil =
@@ -580,7 +583,7 @@ class SSHService extends ChangeNotifier {
           duration: duration,
         );
       } catch (e) {
-        print("Command execution failed: $e");
+        debugPrint("Command execution failed: $e");
         final errorStr = e.toString();
         if (errorStr.contains("SocketException") ||
             errorStr.contains("Connection closed") ||
@@ -864,6 +867,16 @@ class SSHService extends ChangeNotifier {
     notifyListeners();
   }
 
+  void notifyNetworkChanged({String source = 'ui'}) {
+    _serviceCandidateIp = null;
+    _serviceCandidateSeenAt = null;
+    _lastDiscoveredIp = null;
+    _lastDiscoveredAt = null;
+    FlutterBackgroundService().invoke('networkChanged', {'source': source});
+    _diag.info('connectivity', 'Network changed source=$source');
+    notifyListeners();
+  }
+
   Future<void> saveConnection(
     String ip,
     String username,
@@ -874,10 +887,12 @@ class SSHService extends ChangeNotifier {
     await _storage.delete(key: 'ssh_ip');
     await _storage.write(key: 'ssh_username', value: username);
     await _storage.write(key: 'ssh_port', value: port.toString());
-    if (password != null)
+    if (password != null) {
       await _storage.write(key: 'ssh_password', value: password);
-    if (keyPath != null)
+    }
+    if (keyPath != null) {
       await _storage.write(key: 'ssh_key_path', value: keyPath);
+    }
     await _syncAutoConnectProfileToService();
   }
 
@@ -1055,9 +1070,8 @@ printf "%s %s %s\n" "$cpu" "$mem" "$disk"
       addPrefixFromIp(_lastDiscoveredIp);
       if (prefixes.isEmpty) return;
 
-      final timeoutPhasesMs = aggressive
-          ? const <int>[450, 1000, 1700]
-          : const <int>[1000, 1600];
+      final timeoutPhasesMs =
+          aggressive ? const <int>[450, 1000, 1700] : const <int>[1000, 1600];
       final batchSize = aggressive ? 36 : 24;
 
       for (var p = 0; p < timeoutPhasesMs.length; p++) {
@@ -1065,8 +1079,9 @@ printf "%s %s %s\n" "$cpu" "$mem" "$disk"
         for (final prefix in prefixes) {
           if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
           for (int i = 1; i < 255; i += batchSize) {
-            if (!_isDiscoveryActive || generation != _discoveryGeneration)
+            if (!_isDiscoveryActive || generation != _discoveryGeneration) {
               return;
+            }
             final futures = <Future>[];
             for (int j = 0; j < batchSize && (i + j) < 255; j++) {
               final targetIp = "$prefix.${i + j}";
@@ -1091,7 +1106,7 @@ printf "%s %s %s\n" "$cpu" "$mem" "$disk"
         }
       }
     } catch (e) {
-      print("Subnet scan error: $e");
+      debugPrint("Subnet scan error: $e");
     }
   }
 
@@ -1111,7 +1126,7 @@ printf "%s %s %s\n" "$cpu" "$mem" "$disk"
       socket.destroy();
       if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
       _emitDiscoveredIp(ip);
-      print("Found openpilot at $ip");
+      debugPrint("Found openpilot at $ip");
     } catch (e) {
       // Connection failed or timed out
     }
@@ -1163,7 +1178,7 @@ printf "%s %s %s\n" "$cpu" "$mem" "$disk"
   Future<void> checkGitUpdates() async {
     if (!isConnected) return;
     try {
-      final script = '''
+      const script = '''
 REPO="";
 for d in /data/openpilot /home/comma/openpilot; do
   if [ -d "\$d/.git" ]; then
@@ -1196,7 +1211,7 @@ echo "\$LOCAL_HASH|\$REMOTE_HASH"
       }
       notifyListeners();
     } catch (e) {
-      print("Git update check failed: $e");
+      debugPrint("Git update check failed: $e");
       _hasGitUpdate = false;
       notifyListeners();
     }

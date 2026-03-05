@@ -10,14 +10,43 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../../services/hud_drive_settings_service.dart';
 import '../../services/sidecar_service.dart';
 import '../../services/ssh_service.dart';
-import '../../widgets/custom_toast.dart';
+import '../tabs/device_settings_tab.dart';
 
 enum _DriveCameraKind { road, wideRoad }
+
+enum _SidecarPhase {
+  idle,
+  deploying,
+  starting,
+  verifying,
+  running,
+  stopping,
+  failed
+}
+
+enum _DisableDmAction {
+  cancel,
+  openSettings,
+}
+
+enum _AdaptiveCameraQualityMode {
+  quality,
+  stable,
+}
+
+enum _OverlayPreviewScenario {
+  highwayStraight,
+  gentleLeft,
+  gentleRight,
+  traffic,
+}
 
 class LiveDriveCanvasScreen extends StatefulWidget {
   final String hostIp;
@@ -37,7 +66,28 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       EventChannel('carrotlink/native_drive_video_events');
   static const MethodChannel _nativeCameraControlChannel =
       MethodChannel('carrotlink/native_drive_video_control');
+  static const bool _hudDebugMenuEnabled = true;
   static const bool _temporaryLimitedHudControls = false;
+  // Sidecar is treated as an externally managed resident process on comma.
+  static const bool _residentSidecarManaged = true;
+  static const bool _autoDeployDuringHudRuntime = false;
+  static const String _landscapeOrientationPrefKey =
+      'hud_last_landscape_orientation';
+  static const String _sidecarBootstrapDonePrefKey =
+      'sidecar_bootstrap_done_v1';
+  static const String _sidecarRevisionNotifiedPrefKey =
+      'sidecar_revision_notified_v1';
+  static const _M3 _viewFromDevice = _M3(
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+    1.0,
+    0.0,
+    0.0,
+  );
 
   late final WebViewController _cameraController;
   final SidecarService _sidecarService = SidecarService();
@@ -68,6 +118,14 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   bool _sidecarTransitioning = false;
   bool _suppressCameraErrors = false;
   Timer? _sidecarTransitionTimer;
+  Timer? _sidecarRecoveryTimer;
+  DateTime? _sidecarRecoveryNextAt;
+  int _sidecarRecoveryBackoffSeconds = 1;
+  _SidecarPhase _sidecarPhase = _SidecarPhase.idle;
+  String? _sidecarPhaseMessage;
+  String? _hudNoticeMessage;
+  bool _hudNoticeIsError = false;
+  Timer? _hudNoticeTimer;
   _DriveCameraKind _liveCameraKind = _DriveCameraKind.road;
   bool _wideCamRequested = false;
   int _overlayDiagFrames = 0;
@@ -82,8 +140,17 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const int _cameraFrameStaleUs = 350000;
   static const int _interpMinUs = 12000;
   static const int _interpMaxUs = 90000;
-  static const Duration _lifecycleSuspendDelay = Duration(milliseconds: 900);
+  static const Duration _lifecycleSuspendDelay = Duration(milliseconds: 2600);
+  static const Duration _backgroundProcessKeepAlive = Duration(seconds: 45);
+  static const Duration _backgroundUiResetGrace = Duration(seconds: 8);
+  static const Duration _disableDmCacheTtl = Duration(seconds: 20);
+  static const Duration _adaptiveStartupStableHold = Duration(seconds: 8);
+  static String? _disableDmCachedValue;
+  static DateTime? _disableDmCachedAt;
   bool _cameraSuspendedByLifecycle = false;
+  bool _cameraStalled = false;
+  String? _cameraStallReason;
+  DateTime? _cameraStallSince;
   int? _lastCameraFrameId;
   int _lastCameraFrameEventUs = 0;
   int? _lastPublishedModelFrameId;
@@ -111,16 +178,71 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   int _lastOverlayVerifyUpdateUs = 0;
   static const int _overlayVerifyIntervalUs = 200000;
   bool _coverViewportPreferred = true;
-  bool _debugShowGuides = true;
-  bool _debugShowVerifyPanel = true;
-  bool _debugShowViewportFrame = true;
+  bool _debugShowGuides = false;
+  bool _debugShowVerifyPanel = false;
+  bool _debugShowViewportFrame = false;
+  bool _debugShowPathFill = true;
+  bool _debugShowLaneLines = true;
+  bool _debugShowRoadEdge = true;
+  bool _debugShowLead1 = true;
+  bool _debugShowLead2 = true;
+  bool _debugShowRadarBadge = true;
+  bool _debugShowRadarVector = true;
+  bool _debugShowStopDistanceTf = true;
+  bool _debugShowStateText = true;
+  Map<String, String> _sidecarProcessSnapshot = <String, String>{};
+  Map<String, dynamic> _sidecarHealthSnapshot = <String, dynamic>{};
+  DateTime? _sidecarProcessCheckedAt;
+  DateTime? _sidecarLastDeployAt;
+  DateTime? _sidecarLastStartAt;
+  DateTime? _sidecarLastStopAt;
+  DateTime? _sidecarLastRevisionCheckedAt;
+  DateTime? _sidecarLastFrameAt;
+  String _sidecarLastDeployResult = '-';
+  String? _sidecarLocalRevision;
+  String? _sidecarRemoteRevision;
+  String _sidecarRevisionAction = '-';
+  DateTime? _sidecarLastBootstrapAt;
+  String _sidecarLastBootstrapResult = '-';
+  String _sidecarLastBootstrapDetail = '-';
+  String? _sidecarProcessStatusError;
+  int _overlayDebugWindowStartMs = 0;
+  int _overlayDebugWindowFrames = 0;
+  double _overlayDebugFps = 0.0;
+  int _overlayDropCount = 0;
+  int? _overlayPrevModelFrameId;
+  int? _overlayModelCameraGap;
+  final ListQueue<String> _sidecarHistory = ListQueue<String>();
   int _lastCameraFallbackLogUs = 0;
   Timer? _lifecycleSuspendTimer;
-  List<double> _lastValidCalibrationRpy = const <double>[];
-  List<double> _lastValidWideFromDeviceEuler = const <double>[];
-  double _lastValidPathOffsetZ = 1.22;
+  Timer? _sidecarProcessStopTimer;
+  Timer? _backgroundUiResetTimer;
+  Timer? _adaptiveCameraQualityTimer;
+  bool _backgroundUiResetDone = false;
   String _hudDefaultMode = HudDriveSettingsService.modeWebrtc;
   bool _hudModeLoaded = false;
+  bool _disableDmGateBlocked = false;
+  bool _disableDmGateChecking = false;
+  String? _disableDmCurrentValue;
+  DeviceOrientation _preferredLandscapeOrientation =
+      DeviceOrientation.landscapeLeft;
+  _AdaptiveCameraQualityMode _adaptiveCameraQualityMode =
+      _AdaptiveCameraQualityMode.stable;
+  int _adaptiveBadScore = 0;
+  DateTime? _adaptiveLastSwitchAt;
+  DateTime? _adaptiveStableSince;
+  DateTime? _adaptiveStartupHoldUntil;
+  bool _adaptiveCameraQualityBusy = false;
+  int? _adaptiveLastFrameCount;
+  int? _adaptiveLastDropCount;
+  bool _adaptiveCameraQualitySynced = false;
+  bool? _sidecarBootstrapDone;
+  bool _debugOverlayPreviewMode = false;
+  _OverlayPreviewScenario _debugOverlayPreviewScenario =
+      _OverlayPreviewScenario.highwayStraight;
+  double _debugOverlayPreviewSpeed = 1.0;
+  Timer? _overlayPreviewTimer;
+  int _overlayPreviewFrameSeq = 0;
 
   final ValueNotifier<_DriveOverlaySnapshot> _overlayNotifier =
       ValueNotifier<_DriveOverlaySnapshot>(
@@ -225,17 +347,28 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
             setState(() {
               _cameraLoading = true;
               _cameraError = null;
+              _cameraStalled = false;
+              _cameraStallReason = null;
+              _cameraStallSince = null;
             });
           },
           onPageFinished: (_) {
             if (!mounted) return;
-            setState(() => _cameraLoading = false);
+            setState(() {
+              _cameraLoading = false;
+              _cameraStalled = false;
+              _cameraStallReason = null;
+              _cameraStallSince = null;
+            });
           },
           onWebResourceError: (error) {
             if (!mounted) return;
             setState(() {
               _cameraLoading = false;
               _cameraError = '카메라 로드 실패: ${error.description}';
+              _cameraStalled = false;
+              _cameraStallReason = null;
+              _cameraStallSince = null;
             });
           },
         ),
@@ -245,7 +378,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
           .receiveBroadcastStream()
           .listen(_handleNativeCameraEvent, onError: (_) {});
     }
-    unawaited(_lockLandscapeOrientations());
+    unawaited(_enableScreenAwake());
+    unawaited(_loadAndApplyLandscapeOrientation());
     unawaited(_loadHudDefaultMode());
   }
 
@@ -283,11 +417,15 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       _lastCameraFrameId = null;
       _lastCameraFrameEventUs = 0;
       _lastPublishedModelFrameId = null;
-      _lastValidCalibrationRpy = const <double>[];
-      _lastValidWideFromDeviceEuler = const <double>[];
-      _lastValidPathOffsetZ = 1.22;
-      _applyHudModeRuntime();
+      _stopAdaptiveCameraQualityLoop(resetMode: true);
+      unawaited(_applyHudModeRuntimeWithDisableDmGate());
     }
+  }
+
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    _rememberLandscapeOrientationFromView();
   }
 
   Future<void> _loadHudDefaultMode() async {
@@ -297,35 +435,192 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       _hudDefaultMode = mode;
       _hudModeLoaded = true;
     });
+    unawaited(_applyHudModeRuntimeWithDisableDmGate());
+  }
+
+  Future<String?> _readDisableDmValue({bool allowCache = true}) async {
+    if (allowCache &&
+        _disableDmCachedAt != null &&
+        DateTime.now().difference(_disableDmCachedAt!) <= _disableDmCacheTtl) {
+      return _disableDmCachedValue;
+    }
+    final ssh = _sshService ??
+        (mounted ? Provider.of<SSHService>(context, listen: false) : null);
+    if (ssh == null || !ssh.isConnected) return null;
+    try {
+      final result = await ssh.executeCommandResult(
+        "bash -lc 'cat /data/params/d/DisableDM 2>/dev/null || true'",
+      );
+      if (!result.isSuccess) return null;
+      final lines = result.output
+          .split(RegExp(r'[\r\n]+'))
+          .map((line) => line.trim())
+          .where((line) => line.isNotEmpty)
+          .toList(growable: false);
+      final value = lines.isEmpty ? '' : lines.last;
+      _disableDmCachedValue = value;
+      _disableDmCachedAt = DateTime.now();
+      return value;
+    } catch (_) {
+      if (allowCache &&
+          _disableDmCachedAt != null &&
+          DateTime.now().difference(_disableDmCachedAt!) <=
+              _disableDmCacheTtl) {
+        return _disableDmCachedValue;
+      }
+      return null;
+    }
+  }
+
+  Future<void> _openDisableDmSettingsFromDrive() async {
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => Scaffold(
+          appBar: AppBar(title: const Text('콤마 설정')),
+          body: const DeviceSettingsTab(
+            initialTabIndex: 0,
+            initialFocusItemName: 'DisableDM',
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<bool> _ensureDisableDmGateFromDrive({bool interactive = false}) async {
+    final current = await _readDisableDmValue();
+    _disableDmCurrentValue = current;
+    if (current == '2') return true;
+    if (!interactive || !mounted) return false;
+
+    final action = await showDialog<_DisableDmAction>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('진입 조건 필요'),
+        content: Text(
+          '오픈파일럿 그래픽 모드는 DisableDM=2 일 때만 진입할 수 있습니다.\n'
+          '현재 값: ${current == null || current.isEmpty ? '확인 불가' : current}',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(_DisableDmAction.cancel),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () =>
+                Navigator.of(ctx).pop(_DisableDmAction.openSettings),
+            child: const Text('설정으로 이동'),
+          ),
+        ],
+      ),
+    );
+
+    if (!mounted || action != _DisableDmAction.openSettings) {
+      return false;
+    }
+    await _openDisableDmSettingsFromDrive();
+    final updated = await _readDisableDmValue(allowCache: false);
+    _disableDmCurrentValue = updated;
+    return updated == '2';
+  }
+
+  Future<void> _applyHudModeRuntimeWithDisableDmGate() async {
+    if (!_openpilotOverlayMode) {
+      if (mounted) {
+        setState(() {
+          _disableDmGateBlocked = false;
+          _disableDmGateChecking = false;
+        });
+      } else {
+        _disableDmGateBlocked = false;
+        _disableDmGateChecking = false;
+      }
+      _applyHudModeRuntime();
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _disableDmGateChecking = true;
+      });
+    } else {
+      _disableDmGateChecking = true;
+    }
+    final allowed = await _ensureDisableDmGateFromDrive(interactive: false);
+    if (!mounted) return;
+    if (!allowed) {
+      _stopAdaptiveCameraQualityLoop(resetMode: true);
+      _stopSidecarLoop();
+      if (!_residentSidecarManaged) {
+        unawaited(_stopSidecarProcessIfNeeded());
+      }
+      setState(() {
+        _disableDmGateBlocked = true;
+        _disableDmGateChecking = false;
+        _cameraLoading = false;
+        _cameraError = null;
+      });
+      _setSidecarPhase(
+        _SidecarPhase.failed,
+        message: 'DisableDM=2가 필요합니다.',
+      );
+      return;
+    }
+
+    setState(() {
+      _disableDmGateBlocked = false;
+      _disableDmGateChecking = false;
+    });
     _applyHudModeRuntime();
   }
 
   void _applyHudModeRuntime() {
     if (_openpilotOverlayMode) {
+      _clearSidecarRecoverySchedule();
+      _setSidecarPhase(
+        _SidecarPhase.verifying,
+        message: '사이드카 런타임 상태를 확인합니다.',
+      );
+      _startAdaptiveCameraQualityLoop();
       _suppressCameraErrors = true;
       if (mounted) {
         setState(() {
-          _cameraLoading = false;
+          _cameraLoading = true;
           _cameraError = null;
+          _cameraStalled = false;
+          _cameraStallReason = null;
+          _cameraStallSince = null;
           _nativeCameraViewId = null;
         });
       } else {
-        _cameraLoading = false;
+        _cameraLoading = true;
         _cameraError = null;
+        _cameraStalled = false;
+        _cameraStallReason = null;
+        _cameraStallSince = null;
         _nativeCameraViewId = null;
       }
-      _startSidecarLoop();
-      unawaited(_ensureSidecarRuntime());
+      unawaited(_ensureSidecarRuntime(reason: 'mode_apply'));
       return;
     }
+    _clearSidecarRecoverySchedule();
     _suppressCameraErrors = false;
+    _setSidecarPhase(
+        _residentSidecarManaged ? _SidecarPhase.idle : _SidecarPhase.stopping,
+        message: _residentSidecarManaged
+            ? '오픈파일럿 그래픽 모드를 종료했습니다.'
+            : '오픈파일럿 그래픽 모드를 정리하는 중입니다.');
+    _stopAdaptiveCameraQualityLoop(resetMode: true);
     _stopSidecarLoop();
-    unawaited(_stopSidecarProcessIfNeeded());
+    if (!_residentSidecarManaged) {
+      unawaited(_stopSidecarProcessIfNeeded());
+    }
     _applyOverlaySnapshot(
       const _DriveOverlaySnapshot.empty(),
       forceNativePush: true,
     );
     unawaited(_clearNativeOverlay());
+    _clearCameraStalled();
     unawaited(_loadCameraSource(force: true));
   }
 
@@ -382,6 +677,9 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       setState(() {
         _cameraLoading = false;
         _cameraError = null;
+        _cameraStalled = false;
+        _cameraStallReason = null;
+        _cameraStallSince = null;
       });
       return;
     }
@@ -389,19 +687,44 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       final state = map['state']?.toString() ?? '';
       debugPrint('[DriveCanvas][native] state=$state');
       if (!mounted) return;
-      if (state == 'connected' || state.startsWith('decoder_configured')) {
-        _sidecarTransitionTimer?.cancel();
+      if (state.startsWith('stalling_')) {
+        _recordAdaptiveNetworkIssue('native_state:$state');
+        _markCameraStalled(state);
+        return;
+      }
+      if (state == 'recovered') {
+        _clearCameraStalled();
         setState(() {
           _cameraLoading = false;
-          _sidecarTransitioning = false;
-          _suppressCameraErrors = false;
+          _cameraError = null;
         });
+        return;
+      }
+      if (state == 'connected' || state.startsWith('decoder_configured')) {
+        _sidecarTransitionTimer?.cancel();
+        _clearCameraStalled();
+        setState(() {
+          _cameraLoading = false;
+          _suppressCameraErrors = false;
+          _cameraError = null;
+        });
+        _setSidecarPhase(
+          _openpilotOverlayMode ? _SidecarPhase.running : _SidecarPhase.idle,
+          message: '카메라 스트림 연결이 확인되었습니다.',
+        );
       }
       return;
     }
     if (type == 'camera_error') {
       final reason = map['reason']?.toString().trim() ?? '';
       if (reason.isEmpty) return;
+      if (_isTransientCameraStallReason(reason)) {
+        debugPrint('[DriveCanvas][native] transient stall=$reason');
+        _recordAdaptiveNetworkIssue('native_stall:$reason');
+        if (!mounted) return;
+        _markCameraStalled(reason);
+        return;
+      }
       final unsupported = reason.contains('invalid_ws_url') ||
           reason.contains('decoder_init_failed');
       if ((_sidecarTransitioning || _suppressCameraErrors) && !unsupported) {
@@ -409,7 +732,9 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
         return;
       }
       debugPrint('[DriveCanvas][native] error=$reason');
+      _recordAdaptiveNetworkIssue('native_error:$reason', severity: 2);
       if (!mounted) return;
+      _clearCameraStalled();
       setState(() {
         _cameraError = '네이티브 디코더 오류: $reason';
         if (reason.contains('invalid_ws_url') ||
@@ -474,6 +799,40 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     _toast(enabled ? '레터박스 프레임 ON' : '레터박스 프레임 OFF');
   }
 
+  void _clearSidecarRecoverySchedule() {
+    _sidecarRecoveryTimer?.cancel();
+    _sidecarRecoveryTimer = null;
+    _sidecarRecoveryNextAt = null;
+    _sidecarRecoveryBackoffSeconds = 1;
+  }
+
+  void _scheduleSidecarRuntimeRecovery({
+    required String reason,
+    Duration minDelay = const Duration(milliseconds: 600),
+  }) {
+    if (!_openpilotOverlayMode || _cameraSuspendedByLifecycle) return;
+    final now = DateTime.now();
+    if (_sidecarRecoveryNextAt != null &&
+        now.isBefore(_sidecarRecoveryNextAt!)) {
+      return;
+    }
+    final backoff = Duration(seconds: _sidecarRecoveryBackoffSeconds);
+    final delay = backoff > minDelay ? backoff : minDelay;
+    _sidecarRecoveryNextAt = now.add(delay);
+    _sidecarRecoveryTimer?.cancel();
+    _pushSidecarHistory(
+      'AUTO_RECOVER',
+      'scheduled ${delay.inMilliseconds}ms reason=$reason',
+    );
+    _sidecarRecoveryTimer = Timer(delay, () {
+      _sidecarRecoveryTimer = null;
+      _sidecarRecoveryNextAt = null;
+      unawaited(_ensureSidecarRuntime(reason: 'recover:$reason'));
+    });
+    _sidecarRecoveryBackoffSeconds =
+        math.min(_sidecarRecoveryBackoffSeconds * 2, 8);
+  }
+
   void _handleCameraJsMessage(String raw) {
     dynamic decoded;
     try {
@@ -510,6 +869,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       final currentSize = _sourceSizeForKind(eventCameraKind);
       if ((next.width - currentSize.width).abs() < 0.5 &&
           (next.height - currentSize.height).abs() < 0.5) {
+        _clearCameraStalled();
         return;
       }
       if (!mounted) {
@@ -519,17 +879,30 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       debugPrint(
         '[DriveCanvas] camera_meta=${next.width.toStringAsFixed(0)}x${next.height.toStringAsFixed(0)}',
       );
-      setState(() => _updateSourceSize(next, kind: eventCameraKind));
+      setState(() {
+        _updateSourceSize(next, kind: eventCameraKind);
+        _cameraStalled = false;
+        _cameraStallReason = null;
+        _cameraStallSince = null;
+      });
       return;
     }
     if (type == 'camera_error') {
       final reason = map['reason']?.toString().trim() ?? '';
       if (reason.isEmpty || !mounted) return;
+      if (_isTransientCameraStallReason(reason)) {
+        debugPrint('[DriveCanvas] transient stall camera_error reason=$reason');
+        _recordAdaptiveNetworkIssue('web_stall:$reason');
+        _markCameraStalled(reason);
+        return;
+      }
       if (_sidecarTransitioning || _suppressCameraErrors) {
         debugPrint('[DriveCanvas] suppressed camera_error reason=$reason');
         return;
       }
       debugPrint('[DriveCanvas] camera_error reason=$reason');
+      _recordAdaptiveNetworkIssue('web_error:$reason', severity: 2);
+      _clearCameraStalled();
       setState(() => _cameraError = '카메라 디코더 오류: $reason');
       return;
     }
@@ -538,16 +911,692 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     }
   }
 
+  bool _isTransientCameraStallReason(String reason) {
+    final lower = reason.toLowerCase();
+    return lower.startsWith('frame_stall_') ||
+        lower.contains('camera_send_timeout') ||
+        lower.contains('no_frames');
+  }
+
+  void _markCameraStalled(String reason) {
+    final trimmed = reason.trim().isEmpty ? 'frame_stall' : reason.trim();
+    if (mounted) {
+      setState(() {
+        _cameraStalled = true;
+        _cameraStallReason = trimmed;
+        _cameraStallSince = DateTime.now();
+        _cameraLoading = false;
+        _cameraError = null;
+      });
+    } else {
+      _cameraStalled = true;
+      _cameraStallReason = trimmed;
+      _cameraStallSince = DateTime.now();
+      _cameraLoading = false;
+      _cameraError = null;
+    }
+  }
+
+  void _clearCameraStalled() {
+    if (!(_cameraStalled || (_cameraStallReason?.isNotEmpty ?? false))) return;
+    if (mounted) {
+      setState(() {
+        _cameraStalled = false;
+        _cameraStallReason = null;
+        _cameraStallSince = null;
+      });
+    } else {
+      _cameraStalled = false;
+      _cameraStallReason = null;
+      _cameraStallSince = null;
+    }
+  }
+
+  String _cameraStallBadgeText() {
+    final since = _cameraStallSince;
+    if (since == null) return '네트워크 지연';
+    final ms = DateTime.now().difference(since).inMilliseconds;
+    final sec = (ms / 1000.0);
+    return '네트워크 지연 ${sec.toStringAsFixed(1)}s';
+  }
+
+  String _overlayPreviewScenarioLabel(_OverlayPreviewScenario scenario) {
+    switch (scenario) {
+      case _OverlayPreviewScenario.highwayStraight:
+        return '직선 주행';
+      case _OverlayPreviewScenario.gentleLeft:
+        return '완만 좌회전';
+      case _OverlayPreviewScenario.gentleRight:
+        return '완만 우회전';
+      case _OverlayPreviewScenario.traffic:
+        return '정체/근접 리드';
+    }
+  }
+
+  void _setOverlayPreviewMode(bool enabled) {
+    if (_debugOverlayPreviewMode == enabled) return;
+    if (mounted) {
+      setState(() {
+        _debugOverlayPreviewMode = enabled;
+        _cameraLoading = false;
+        _cameraError = null;
+        _cameraStalled = false;
+        _cameraStallReason = null;
+        _cameraStallSince = null;
+        if (enabled) {
+          // Preview intent: show all overlay layers by default.
+          _debugShowPathFill = true;
+          _debugShowLaneLines = true;
+          _debugShowRoadEdge = true;
+          _debugShowLead1 = true;
+          _debugShowLead2 = true;
+          _debugShowRadarBadge = true;
+          _debugShowRadarVector = true;
+          _debugShowStopDistanceTf = true;
+          _debugShowStateText = true;
+        }
+      });
+    } else {
+      _debugOverlayPreviewMode = enabled;
+      _cameraLoading = false;
+      _cameraError = null;
+      _cameraStalled = false;
+      _cameraStallReason = null;
+      _cameraStallSince = null;
+      if (enabled) {
+        _debugShowPathFill = true;
+        _debugShowLaneLines = true;
+        _debugShowRoadEdge = true;
+        _debugShowLead1 = true;
+        _debugShowLead2 = true;
+        _debugShowRadarBadge = true;
+        _debugShowRadarVector = true;
+        _debugShowStopDistanceTf = true;
+        _debugShowStateText = true;
+      }
+    }
+
+    if (enabled) {
+      _startOverlayPreviewLoop();
+      _toast('프리뷰 모드 활성화 (실데이터 없이 그래픽 확인)');
+      return;
+    }
+
+    _stopOverlayPreviewLoop();
+    if (_openpilotOverlayMode && _latestOverlaySnapshot.path.length >= 2) {
+      _applyOverlaySnapshot(_latestOverlaySnapshot, forceNativePush: true);
+    } else {
+      _applyOverlaySnapshot(
+        const _DriveOverlaySnapshot.empty(),
+        forceNativePush: true,
+      );
+    }
+    _toast('프리뷰 모드 비활성화');
+  }
+
+  void _startOverlayPreviewLoop() {
+    _overlayPreviewTimer?.cancel();
+    _overlayPreviewFrameSeq = 0;
+    _tickOverlayPreview();
+    _overlayPreviewTimer =
+        Timer.periodic(const Duration(milliseconds: 90), (_) {
+      _tickOverlayPreview();
+    });
+  }
+
+  void _stopOverlayPreviewLoop() {
+    _overlayPreviewTimer?.cancel();
+    _overlayPreviewTimer = null;
+  }
+
+  void _tickOverlayPreview() {
+    if (!_debugOverlayPreviewMode) return;
+    _overlayPreviewFrameSeq += 1;
+    final next = _buildOverlayPreviewSnapshot(seq: _overlayPreviewFrameSeq);
+    _latestOverlaySnapshot = next;
+    _applyOverlaySnapshot(next, forceNativePush: true);
+    _sidecarLastFrameAt = DateTime.now();
+    if (_overlayDebugWindowStartMs <= 0) {
+      _overlayDebugWindowStartMs = DateTime.now().millisecondsSinceEpoch - 500;
+    }
+  }
+
+  List<List<double>> _previewRoadPathVertices({
+    required int sourceWidth,
+    required int sourceHeight,
+    required double t,
+  }) {
+    final horizon = sourceHeight * 0.34;
+    double curveAmp;
+    switch (_debugOverlayPreviewScenario) {
+      case _OverlayPreviewScenario.highwayStraight:
+        curveAmp = 0.0;
+      case _OverlayPreviewScenario.gentleLeft:
+        curveAmp = -220.0;
+      case _OverlayPreviewScenario.gentleRight:
+        curveAmp = 220.0;
+      case _OverlayPreviewScenario.traffic:
+        curveAmp = 40.0;
+    }
+    final pointsLeft = <List<double>>[];
+    final pointsRight = <List<double>>[];
+    for (var i = 0; i < 18; i++) {
+      final u = i / 17.0; // 0 (near) -> 1 (far)
+      final y = (sourceHeight - 14.0) - (u * (sourceHeight - horizon - 14.0));
+      final center = (sourceWidth * 0.5) +
+          (curveAmp * u * u) +
+          (math.sin(t + (u * 2.2)) *
+              (_debugOverlayPreviewScenario == _OverlayPreviewScenario.traffic
+                  ? 18.0
+                  : 8.0));
+      final halfW = ((1.0 - u) * 300.0 + 58.0).clamp(58.0, 300.0).toDouble();
+      pointsLeft.add(<double>[center - halfW, y]);
+      pointsRight.add(<double>[center + halfW, y]);
+    }
+    return <List<double>>[
+      ...pointsLeft,
+      ...pointsRight.reversed,
+    ];
+  }
+
+  List<List<double>> _previewLanePolygon({
+    required int sourceWidth,
+    required int sourceHeight,
+    required double t,
+    required double laneFactor,
+    required double thickness,
+  }) {
+    final horizon = sourceHeight * 0.34;
+    double curveAmp;
+    switch (_debugOverlayPreviewScenario) {
+      case _OverlayPreviewScenario.highwayStraight:
+        curveAmp = 0.0;
+      case _OverlayPreviewScenario.gentleLeft:
+        curveAmp = -220.0;
+      case _OverlayPreviewScenario.gentleRight:
+        curveAmp = 220.0;
+      case _OverlayPreviewScenario.traffic:
+        curveAmp = 40.0;
+    }
+    final left = <List<double>>[];
+    final right = <List<double>>[];
+    for (var i = 0; i < 15; i++) {
+      final u = i / 14.0;
+      final y = (sourceHeight - 14.0) - (u * (sourceHeight - horizon - 14.0));
+      final center = (sourceWidth * 0.5) +
+          (curveAmp * u * u) +
+          (math.sin(t + (u * 2.2)) *
+              (_debugOverlayPreviewScenario == _OverlayPreviewScenario.traffic
+                  ? 18.0
+                  : 8.0));
+      final halfW = ((1.0 - u) * 300.0 + 58.0).clamp(58.0, 300.0).toDouble();
+      final laneX = center + (halfW * laneFactor);
+      left.add(<double>[laneX - (thickness * 0.5), y]);
+      right.add(<double>[laneX + (thickness * 0.5), y]);
+    }
+    return <List<double>>[
+      ...left,
+      ...right.reversed,
+    ];
+  }
+
+  _DriveOverlaySnapshot _buildOverlayPreviewSnapshot({required int seq}) {
+    const sourceW = 1928;
+    const sourceH = 1208;
+    final t = seq * 0.05 * _debugOverlayPreviewSpeed;
+    final pathVertices = _previewRoadPathVertices(
+      sourceWidth: sourceW,
+      sourceHeight: sourceH,
+      t: t,
+    );
+    final leadNear =
+        _debugOverlayPreviewScenario == _OverlayPreviewScenario.traffic;
+    final leadU = leadNear ? 0.58 : 0.72;
+    const horizon = sourceH * 0.34;
+    double curveAmp;
+    switch (_debugOverlayPreviewScenario) {
+      case _OverlayPreviewScenario.highwayStraight:
+        curveAmp = 0.0;
+      case _OverlayPreviewScenario.gentleLeft:
+        curveAmp = -220.0;
+      case _OverlayPreviewScenario.gentleRight:
+        curveAmp = 220.0;
+      case _OverlayPreviewScenario.traffic:
+        curveAmp = 40.0;
+    }
+    final leadY = (sourceH - 14.0) - (leadU * (sourceH - horizon - 14.0));
+    final leadCenterX = (sourceW * 0.5) +
+        (curveAmp * leadU * leadU) +
+        (math.sin(t + (leadU * 2.2)) *
+            (_debugOverlayPreviewScenario == _OverlayPreviewScenario.traffic
+                ? 18.0
+                : 8.0));
+    final leadHalfW = (((1.0 - leadU) * 180.0) + (leadNear ? 130.0 : 92.0))
+        .clamp(80.0, 180.0)
+        .toDouble();
+    final leadTop = leadY - (leadHalfW * 0.55);
+    final leadBox = <List<double>>[
+      <double>[leadCenterX - leadHalfW, leadTop],
+      <double>[leadCenterX + leadHalfW, leadTop],
+      <double>[leadCenterX + leadHalfW, leadY],
+      <double>[leadCenterX - leadHalfW, leadY],
+    ];
+    final badgeDx = (leadHalfW * 0.88).clamp(58.0, 150.0).toDouble();
+    final badgeDy = (leadHalfW * 0.56).clamp(44.0, 98.0).toDouble();
+    final leadTwoHalfW = (leadHalfW * 0.72).clamp(56.0, 130.0).toDouble();
+    final leadTwoCenterX = leadCenterX - (leadHalfW * 1.7);
+    final leadTwoY = leadY + (leadHalfW * 0.32);
+    final leadTwoTop = leadTwoY - (leadTwoHalfW * 0.58);
+    final leadTwoBox = <List<double>>[
+      <double>[leadTwoCenterX - leadTwoHalfW, leadTwoTop],
+      <double>[leadTwoCenterX + leadTwoHalfW, leadTwoTop],
+      <double>[leadTwoCenterX + leadTwoHalfW, leadTwoY],
+      <double>[leadTwoCenterX - leadTwoHalfW, leadTwoY],
+    ];
+    final leadDist = leadNear ? 11.8 : 16.5;
+    final visionDist = leadNear ? 12.5 : 17.7;
+    final speedKph =
+        _debugOverlayPreviewScenario == _OverlayPreviewScenario.traffic
+            ? 28.0
+            : 64.0;
+
+    final sidecarOverlay2d = <String, dynamic>{
+      'version': 1,
+      'source': 'preview_mock',
+      'cameraMode': 'road',
+      'cameras': <String, dynamic>{
+        'road': <String, dynamic>{
+          'camera': 'road',
+          'sourceWidth': sourceW.toDouble(),
+          'sourceHeight': sourceH.toDouble(),
+          'displayTransform': <String, dynamic>{
+            'zoom': 1.0,
+            'tx': 0.0,
+            'ty': 0.0,
+            'xOffset': 0.0,
+            'yOffset': 0.0,
+          },
+          'modelFrameId': seq,
+          'cameraFrameId': seq,
+          'pathMode': 0,
+          'pathColor': 3,
+          'pathTrackVertices': pathVertices,
+          'lanePolygons': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'index': 1,
+              'probability': 0.98,
+              'points': _previewLanePolygon(
+                sourceWidth: sourceW,
+                sourceHeight: sourceH,
+                t: t,
+                laneFactor: -0.92,
+                thickness: 9.0,
+              ),
+            },
+            <String, dynamic>{
+              'index': 2,
+              'probability': 0.98,
+              'points': _previewLanePolygon(
+                sourceWidth: sourceW,
+                sourceHeight: sourceH,
+                t: t,
+                laneFactor: 0.92,
+                thickness: 9.0,
+              ),
+            },
+          ],
+          'roadEdgePolygons': const <Map<String, dynamic>>[],
+          'leadAreaBoxes': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'kind': 'leadOne',
+              'points': leadBox,
+              'radar': true,
+              'radarTrackId': 2,
+              'status': 1,
+              'radarDistance': leadDist,
+              'visionDistance': visionDist,
+              'anchorCenter': <double>[leadCenterX, leadY],
+              'anchorWidth': leadHalfW * 2.0,
+              'radarBadgeCenter': <double>[
+                leadCenterX - badgeDx,
+                leadY + badgeDy
+              ],
+              'visionBadgeCenter': <double>[
+                leadCenterX + badgeDx,
+                leadY + badgeDy
+              ],
+              'stateTextCenter': <double>[
+                leadCenterX,
+                leadY + (badgeDy * 1.28)
+              ],
+              'strokeColorArgb': 0xFFFFA726,
+              'fillColorArgb': 0x33000000,
+              'radarBadgeColorArgb': 0xFFFF3B30,
+              'visionBadgeColorArgb': 0xFF3D7BFF,
+            },
+            <String, dynamic>{
+              'kind': 'leadTwo',
+              'points': leadTwoBox,
+              'radar': true,
+              'radarTrackId': 12,
+              'status': 1,
+              'radarDistance': leadDist + 3.4,
+              'anchorCenter': <double>[leadTwoCenterX, leadTwoY],
+              'anchorWidth': leadTwoHalfW * 2.0,
+              'strokeColorArgb': 0xFFB68A3A,
+              'fillColorArgb': 0x33000000,
+            },
+          ],
+          'radarTargets': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'center': <double>[
+                leadCenterX + (leadHalfW * 1.05),
+                leadY + 20.0
+              ],
+              'speedMpsSigned': 4.9,
+              'speedKphSigned': 17.6,
+              'dRel': leadDist,
+              'yRel': 0.1,
+              'radar': true,
+              'modelProb': 0.70,
+              'future': <double>[
+                leadCenterX + (leadHalfW * 1.18),
+                leadY - 36.0
+              ],
+            },
+            <String, dynamic>{
+              'center': <double>[
+                leadCenterX - (leadHalfW * 1.55),
+                leadY + 14.0
+              ],
+              'speedMpsSigned': -5.6,
+              'speedKphSigned': -20.1,
+              'dRel': leadDist + 1.7,
+              'yRel': -1.4,
+              'radar': true,
+              'modelProb': 0.82,
+              'future': <double>[
+                leadCenterX - (leadHalfW * 1.42),
+                leadY - 20.0
+              ],
+            },
+          ],
+          'tfMarker': <String, dynamic>{
+            'points': <List<double>>[
+              <double>[leadCenterX - (leadHalfW * 0.7), leadY + 12.0],
+              <double>[leadCenterX + (leadHalfW * 0.7), leadY + 12.0],
+            ],
+            'distance': leadDist,
+            'tFollow': 1.20,
+          },
+          'meta': <String, dynamic>{
+            'showRadarInfo': 3,
+            'xState': 0,
+            'trafficState': 0,
+            'longActive': true,
+            'vEgoMps': speedKph / 3.6,
+            'brakeLights': false,
+            'tFollow': 1.20,
+            'desiredDistance': leadDist,
+          },
+        },
+      },
+    };
+    sidecarOverlay2d['cameras']['wideRoad'] =
+        sidecarOverlay2d['cameras']['road'];
+
+    return _DriveOverlaySnapshot(
+      path: const _XyzSeries(
+        x: <double>[0, 5, 10, 15, 20, 30, 40, 60, 80],
+        y: <double>[0, 0, 0, 0, 0, 0, 0, 0, 0],
+        z: <double>[1.22, 1.22, 1.22, 1.22, 1.22, 1.22, 1.22, 1.22, 1.22],
+      ),
+      laneLines: const <_LaneLineSeries>[],
+      roadEdges: const <_RoadEdgeSeries>[],
+      active: true,
+      activeLaneLine: true,
+      carrotExperimentalMode: false,
+      brakeLights: false,
+      leadDetected: true,
+      pathMode: 0,
+      pathColor: 3,
+      accel0: 0.0,
+      aEgo: 0.0,
+      speedMps: speedKph / 3.6,
+      speedKph: speedKph,
+      leftLaneLine: 20,
+      rightLaneLine: 20,
+      calibrationRpy: const <double>[0.0, 0.0, 0.0],
+      wideFromDeviceEuler: const <double>[0.0, 0.0, 0.0],
+      pathOffsetZ: 1.22,
+      pathWidthRatio: 1.0,
+      animationPhase: _pathAnimationPhase,
+      modelFrameId: seq,
+      roadFrameId: seq,
+      wideRoadFrameId: seq,
+      sidecarOverlay2d: sidecarOverlay2d,
+      usingLateralPath: false,
+      modelPathXMax: 80.0,
+      lateralPathXMax: 0.0,
+    );
+  }
+
+  Widget _buildOverlayPreviewBackdrop() {
+    return const CustomPaint(
+      painter: _PreviewRoadBackdropPainter(),
+      child: SizedBox.expand(),
+    );
+  }
+
   Future<void> _restorePortraitOrientation() async {
     await SystemChrome.setPreferredOrientations(const [
       DeviceOrientation.portraitUp,
     ]);
   }
 
+  Future<void> _enableScreenAwake() async {
+    try {
+      await WakelockPlus.enable();
+    } catch (_) {}
+  }
+
+  Future<void> _disableScreenAwake() async {
+    try {
+      await WakelockPlus.disable();
+    } catch (_) {}
+  }
+
+  Future<void> _loadAndApplyLandscapeOrientation() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved =
+          (prefs.getString(_landscapeOrientationPrefKey) ?? '').toLowerCase();
+      if (saved == 'right') {
+        _preferredLandscapeOrientation = DeviceOrientation.landscapeRight;
+      } else if (saved == 'left') {
+        _preferredLandscapeOrientation = DeviceOrientation.landscapeLeft;
+      }
+    } catch (_) {}
+    await _lockLandscapeOrientations();
+    _rememberLandscapeOrientationFromView();
+  }
+
+  DeviceOrientation? _inferLandscapeOrientationFromView() {
+    final views = WidgetsBinding.instance.platformDispatcher.views;
+    if (views.isEmpty) return null;
+    final view = views.first;
+    final left = view.padding.left + view.viewPadding.left;
+    final right = view.padding.right + view.viewPadding.right;
+    const epsilon = 0.1;
+    if ((left - right).abs() <= epsilon) return null;
+    return left > right
+        ? DeviceOrientation.landscapeLeft
+        : DeviceOrientation.landscapeRight;
+  }
+
+  Future<void> _savePreferredLandscapeOrientation(
+      DeviceOrientation orientation) async {
+    final value =
+        orientation == DeviceOrientation.landscapeRight ? 'right' : 'left';
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_landscapeOrientationPrefKey, value);
+    } catch (_) {}
+  }
+
+  Future<bool> _isSidecarBootstrapDone() async {
+    if (_sidecarBootstrapDone != null) return _sidecarBootstrapDone!;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _sidecarBootstrapDone =
+          prefs.getBool(_sidecarBootstrapDonePrefKey) ?? false;
+    } catch (_) {
+      _sidecarBootstrapDone ??= false;
+    }
+    return _sidecarBootstrapDone ?? false;
+  }
+
+  Future<void> _setSidecarBootstrapDone(bool value) async {
+    _sidecarBootstrapDone = value;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_sidecarBootstrapDonePrefKey, value);
+    } catch (_) {}
+  }
+
+  String _shortSidecarRevision(String? revision) {
+    return _sidecarService.shortRevision(revision);
+  }
+
+  Future<void> _notifySidecarRevisionUpdated(String revision) async {
+    final normalized = revision.trim();
+    if (normalized.isEmpty) return;
+    var shouldNotify = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final key = '${widget.hostIp}:$normalized';
+      final prev = prefs.getString(_sidecarRevisionNotifiedPrefKey);
+      if (prev == key) {
+        shouldNotify = false;
+      } else {
+        await prefs.setString(_sidecarRevisionNotifiedPrefKey, key);
+      }
+    } catch (_) {}
+    if (!shouldNotify) return;
+    _toast(
+      '사이드카 업데이트됨 (sha256:${_shortSidecarRevision(normalized)})',
+      duration: const Duration(seconds: 4),
+    );
+  }
+
+  Future<void> _ensureSidecarRevisionUpToDate(SSHService ssh) async {
+    final localRevision = await _sidecarService.localRevision();
+    final remoteRevision = await _sidecarService.remoteRevision(ssh);
+    _sidecarLocalRevision = localRevision;
+    _sidecarRemoteRevision = remoteRevision;
+    _sidecarLastRevisionCheckedAt = DateTime.now();
+
+    if (remoteRevision == localRevision) {
+      _sidecarRevisionAction = 'match';
+      return;
+    }
+
+    _sidecarRevisionAction = 'mismatch';
+    _pushSidecarHistory(
+      'AUTO_REV',
+      'mismatch local=${_shortSidecarRevision(localRevision)} remote=${_shortSidecarRevision(remoteRevision)}',
+    );
+    _setSidecarPhase(
+      _SidecarPhase.deploying,
+      message: '사이드카 업데이트 중...',
+    );
+
+    await _sidecarService.deploy(ssh);
+    _sidecarLastDeployAt = DateTime.now();
+    _sidecarLastDeployResult = 'success';
+
+    final remoteAfter = await _sidecarService.remoteRevision(ssh);
+    _sidecarRemoteRevision = remoteAfter;
+    _sidecarLastRevisionCheckedAt = DateTime.now();
+    if (remoteAfter != localRevision) {
+      _sidecarRevisionAction = 'verify_fail';
+      throw Exception(
+        '사이드카 업데이트 검증 실패(local=${_shortSidecarRevision(localRevision)} remote=${_shortSidecarRevision(remoteAfter)})',
+      );
+    }
+
+    _sidecarRevisionAction = 'updated';
+    _pushSidecarHistory(
+      'AUTO_REV',
+      'updated rev=${_shortSidecarRevision(localRevision)}',
+    );
+    await _notifySidecarRevisionUpdated(localRevision);
+  }
+
+  bool _isSidecarDeployMissingError(Object error) {
+    final message = error.toString().toLowerCase();
+    return message.contains('sidecar_not_deployed') ||
+        message.contains('missing sidecar') ||
+        message.contains('not deployed') ||
+        message.contains('no such file');
+  }
+
+  Future<bool> _tryAutoBootstrapSidecar(
+    SSHService ssh, {
+    required Object startError,
+  }) async {
+    if (!_isSidecarDeployMissingError(startError)) return false;
+    _sidecarLastBootstrapAt = DateTime.now();
+    _sidecarLastBootstrapDetail = startError.toString();
+    _sidecarLastBootstrapResult = 'pending';
+    final done = await _isSidecarBootstrapDone();
+    if (done) {
+      // If device wiped sidecar files after bootstrap, allow one recovery deploy.
+      _pushSidecarHistory('AUTO_BOOTSTRAP', 'recovery deploy requested');
+    } else {
+      _pushSidecarHistory('AUTO_BOOTSTRAP', 'first-run deploy requested');
+    }
+    _setSidecarPhase(
+      _SidecarPhase.deploying,
+      message: '사이드카 최초 설정을 적용하는 중...',
+    );
+    try {
+      await _sidecarService.deploy(ssh);
+      _sidecarLastDeployAt = DateTime.now();
+      _sidecarLastDeployResult = 'success';
+      _sidecarLastBootstrapAt = DateTime.now();
+      _sidecarLastBootstrapResult = 'success';
+      _sidecarLastBootstrapDetail = done
+          ? 'recovery deploy (missing sidecar detected)'
+          : 'first-run deploy';
+      await _setSidecarBootstrapDone(true);
+      _pushSidecarHistory('AUTO_BOOTSTRAP', 'deploy ok');
+      return true;
+    } catch (e) {
+      _sidecarLastDeployResult = 'fail';
+      _sidecarLastBootstrapAt = DateTime.now();
+      _sidecarLastBootstrapResult = 'fail';
+      _sidecarLastBootstrapDetail = e.toString();
+      _pushSidecarHistory('AUTO_BOOTSTRAP_FAIL', '$e');
+      return false;
+    }
+  }
+
+  void _rememberLandscapeOrientationFromView() {
+    final inferred = _inferLandscapeOrientationFromView();
+    if (inferred == null || inferred == _preferredLandscapeOrientation) return;
+    _preferredLandscapeOrientation = inferred;
+    unawaited(_savePreferredLandscapeOrientation(inferred));
+  }
+
   Future<void> _lockLandscapeOrientations() async {
-    await SystemChrome.setPreferredOrientations(const [
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
+    final primary = _preferredLandscapeOrientation;
+    final secondary = primary == DeviceOrientation.landscapeLeft
+        ? DeviceOrientation.landscapeRight
+        : DeviceOrientation.landscapeLeft;
+    await SystemChrome.setPreferredOrientations([
+      primary,
+      secondary,
     ]);
   }
 
@@ -560,19 +1609,30 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _stopOverlayPreviewLoop();
     _sidecarTransitionTimer?.cancel();
     _sidecarTransitionTimer = null;
+    _sidecarRecoveryTimer?.cancel();
+    _sidecarRecoveryTimer = null;
+    _hudNoticeTimer?.cancel();
+    _hudNoticeTimer = null;
+    _stopAdaptiveCameraQualityLoop(resetMode: true);
     _cancelLifecycleSuspendTimer();
+    _cancelDelayedSidecarStop();
+    _cancelBackgroundUiResetTimer();
     _renderTicker?.dispose();
     _renderTicker = null;
     unawaited(_clearNativeOverlay());
     _stopSidecarLoop();
-    unawaited(_stopSidecarProcessIfNeeded());
+    if (!_residentSidecarManaged) {
+      unawaited(_stopSidecarProcessIfNeeded());
+    }
     final nativeSub = _nativeCameraEventSub;
     _nativeCameraEventSub = null;
     if (nativeSub != null) {
       unawaited(nativeSub.cancel());
     }
+    unawaited(_disableScreenAwake());
     _overlayNotifier.dispose();
     unawaited(_restorePortraitOrientation());
     super.dispose();
@@ -583,6 +1643,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     if (!mounted) return;
     switch (state) {
       case AppLifecycleState.resumed:
+        unawaited(_enableScreenAwake());
         _cancelLifecycleSuspendTimer();
         _resumeFromBackground();
         break;
@@ -593,6 +1654,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       case AppLifecycleState.paused:
       case AppLifecycleState.hidden:
       case AppLifecycleState.detached:
+        unawaited(_disableScreenAwake());
         _scheduleSuspendForBackground();
         break;
     }
@@ -1292,27 +2354,14 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   Future<void> _loadCameraSource({bool force = false}) async {
     if (!_hudModeLoaded) return;
 
-    if (_openpilotOverlayMode && !_sidecarConnected) {
-      _cameraSourceKey = null;
-      if (mounted) {
-        setState(() {
-          _cameraLoading = false;
-          _cameraError = null;
-          _nativeCameraViewId = null;
-        });
-      } else {
-        _cameraLoading = false;
-        _cameraError = null;
-        _nativeCameraViewId = null;
-      }
-      return;
-    }
-
     if (_useNativeLiveCamera) {
       if (mounted) {
         setState(() {
           _cameraLoading = true;
           _cameraError = null;
+          _cameraStalled = false;
+          _cameraStallReason = null;
+          _cameraStallSince = null;
         });
       }
       _cameraSourceKey = 'native-live:${widget.hostIp}:$_liveCameraName';
@@ -1326,6 +2375,9 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       setState(() {
         _cameraLoading = true;
         _cameraError = null;
+        _cameraStalled = false;
+        _cameraStallReason = null;
+        _cameraStallSince = null;
       });
     }
 
@@ -1345,6 +2397,9 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       setState(() {
         _cameraLoading = false;
         _cameraError = '카메라 로드 실패: $e';
+        _cameraStalled = false;
+        _cameraStallReason = null;
+        _cameraStallSince = null;
       });
     }
   }
@@ -1404,9 +2459,75 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     _cancelLifecycleSuspendTimer();
     if (_cameraSuspendedByLifecycle) return;
     debugPrint('[DriveCanvas][lifecycle] suspend');
+    _clearSidecarRecoverySchedule();
     _cameraSuspendedByLifecycle = true;
+    _backgroundUiResetDone = false;
+    _stopAdaptiveCameraQualityLoop();
+    _scheduleDelayedSidecarStop();
+    _scheduleBackgroundUiReset();
+  }
+
+  void _resumeFromBackground() {
+    _cancelLifecycleSuspendTimer();
+    _cancelDelayedSidecarStop();
+    _cancelBackgroundUiResetTimer();
+    if (!_cameraSuspendedByLifecycle) return;
+    debugPrint('[DriveCanvas][lifecycle] resume');
+    _cameraSuspendedByLifecycle = false;
+    unawaited(_lockLandscapeOrientations());
+    if (!_backgroundUiResetDone) {
+      if (_openpilotOverlayMode) {
+        _startAdaptiveCameraQualityLoop();
+        if (!_sidecarConnected) {
+          unawaited(_ensureSidecarRuntime(reason: 'resume_quick'));
+        } else {
+          _setSidecarPhase(_SidecarPhase.running, message: '사이드카 실행 중');
+        }
+      } else {
+        unawaited(_loadCameraSource(force: false));
+      }
+      return;
+    }
+    unawaited(_applyHudModeRuntimeWithDisableDmGate());
+  }
+
+  void _scheduleSuspendForBackground() {
+    if (_cameraSuspendedByLifecycle) return;
+    _cancelLifecycleSuspendTimer();
+    _lifecycleSuspendTimer = Timer(_lifecycleSuspendDelay, () {
+      _lifecycleSuspendTimer = null;
+      if (!mounted) return;
+      _suspendForBackground();
+    });
+  }
+
+  void _cancelLifecycleSuspendTimer() {
+    _lifecycleSuspendTimer?.cancel();
+    _lifecycleSuspendTimer = null;
+  }
+
+  void _cancelDelayedSidecarStop() {
+    _sidecarProcessStopTimer?.cancel();
+    _sidecarProcessStopTimer = null;
+  }
+
+  void _cancelBackgroundUiResetTimer() {
+    _backgroundUiResetTimer?.cancel();
+    _backgroundUiResetTimer = null;
+  }
+
+  void _scheduleBackgroundUiReset() {
+    _cancelBackgroundUiResetTimer();
+    _backgroundUiResetTimer = Timer(_backgroundUiResetGrace, () {
+      _backgroundUiResetTimer = null;
+      if (!mounted || !_cameraSuspendedByLifecycle) return;
+      _backgroundUiResetDone = true;
+      _performBackgroundUiReset();
+    });
+  }
+
+  void _performBackgroundUiReset() {
     _stopSidecarLoop();
-    unawaited(_stopSidecarProcessIfNeeded());
     _lastCameraFrameId = null;
     _lastCameraFrameEventUs = 0;
     _lastPublishedModelFrameId = null;
@@ -1427,39 +2548,44 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     unawaited(_clearNativeOverlay());
     _cameraSourceKey = null;
     _nativeCameraViewId = null;
-    _lastCameraFrameEventUs = 0;
     unawaited(_unloadWebCameraSurface());
     if (mounted) {
       setState(() {
         _nativeCameraViewId = null;
         _cameraLoading = false;
         _cameraError = null;
+        _cameraStalled = false;
+        _cameraStallReason = null;
+        _cameraStallSince = null;
       });
     }
   }
 
-  void _resumeFromBackground() {
-    _cancelLifecycleSuspendTimer();
-    if (!_cameraSuspendedByLifecycle) return;
-    debugPrint('[DriveCanvas][lifecycle] resume');
-    _cameraSuspendedByLifecycle = false;
-    unawaited(_lockLandscapeOrientations());
-    _applyHudModeRuntime();
-  }
-
-  void _scheduleSuspendForBackground() {
-    if (_cameraSuspendedByLifecycle) return;
-    _cancelLifecycleSuspendTimer();
-    _lifecycleSuspendTimer = Timer(_lifecycleSuspendDelay, () {
-      _lifecycleSuspendTimer = null;
-      if (!mounted) return;
-      _suspendForBackground();
+  void _scheduleDelayedSidecarStop() {
+    _cancelDelayedSidecarStop();
+    if (_residentSidecarManaged) {
+      _pushSidecarHistory(
+          'BG_KEEPALIVE', 'resident mode: process stop skipped');
+      return;
+    }
+    if (!_openpilotOverlayMode) {
+      unawaited(_stopSidecarProcessIfNeeded());
+      return;
+    }
+    _pushSidecarHistory(
+      'BG_KEEPALIVE',
+      'defer stop ${_backgroundProcessKeepAlive.inSeconds}s',
+    );
+    _sidecarProcessStopTimer = Timer(_backgroundProcessKeepAlive, () {
+      _sidecarProcessStopTimer = null;
+      if (!mounted || !_cameraSuspendedByLifecycle) return;
+      _setSidecarPhase(
+        _SidecarPhase.stopping,
+        message: '백그라운드 유지 시간이 지나 사이드카를 중지합니다.',
+      );
+      _stopSidecarLoop();
+      unawaited(_stopSidecarProcessIfNeeded());
     });
-  }
-
-  void _cancelLifecycleSuspendTimer() {
-    _lifecycleSuspendTimer?.cancel();
-    _lifecycleSuspendTimer = null;
   }
 
   void _cacheOverlaySnapshot(_DriveOverlaySnapshot snapshot) {
@@ -1611,6 +2737,15 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       canvasSize: _nativeOverlaySize,
       coverViewport: _coverViewport,
       showDebugGuides: _overlayVerifyMode && _debugShowGuides,
+      showPathFill: _debugShowPathFill,
+      showLaneLines: _debugShowLaneLines,
+      showRoadEdge: _debugShowRoadEdge,
+      showLead1: _debugShowLead1,
+      showLead2: _debugShowLead2,
+      showRadarBadge: _debugShowRadarBadge,
+      showRadarVector: _debugShowRadarVector,
+      showStopDistanceTf: _debugShowStopDistanceTf,
+      showStateText: _debugShowStateText,
     );
     if (!force &&
         _lastNativeOverlaySignature == signature &&
@@ -1833,6 +2968,19 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     }
     _lastCameraFrameId = frameId;
     _lastCameraFrameEventUs = _renderClock.elapsedMicroseconds;
+    if (mounted && (_cameraLoading || _cameraStalled)) {
+      setState(() {
+        _cameraLoading = false;
+        _cameraStalled = false;
+        _cameraStallReason = null;
+        _cameraStallSince = null;
+      });
+    } else if (!mounted && (_cameraLoading || _cameraStalled)) {
+      _cameraLoading = false;
+      _cameraStalled = false;
+      _cameraStallReason = null;
+      _cameraStallSince = null;
+    }
     _publishOverlaySynced();
     if (frameId % 60 == 0) {
       debugPrint(
@@ -1842,6 +2990,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   }
 
   void _startSidecarLoop() {
+    if (_disableDmGateBlocked || _disableDmGateChecking) return;
     _stopSidecarLoop(resetSession: false);
     _sidecarSession++;
     final session = _sidecarSession;
@@ -1895,6 +3044,10 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       } else {
         _sidecarConnected = false;
       }
+      _setSidecarPhase(
+        _SidecarPhase.failed,
+        message: '사이드카 워커 시작에 실패했습니다.',
+      );
     }
   }
 
@@ -1904,38 +3057,76 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     final type = map['type']?.toString() ?? '';
     if (type == 'connected') {
       final next = map['connected'] == true;
-      if (next && _sidecarTransitioning) {
+      _pushSidecarHistory('WS', next ? 'connected' : 'disconnected');
+      if (next && _isSidecarBusy) {
         _sidecarTransitionTimer?.cancel();
       }
       if (mounted) {
         setState(() {
           _sidecarConnected = next;
           if (next) {
-            _sidecarTransitioning = false;
             _suppressCameraErrors = false;
             _cameraError = null;
+            _cameraStalled = false;
+            _cameraStallReason = null;
+            _cameraStallSince = null;
           } else if (_openpilotOverlayMode) {
             _suppressCameraErrors = true;
             _cameraError = null;
             _cameraLoading = false;
+            _cameraStalled = false;
+            _cameraStallReason = null;
+            _cameraStallSince = null;
           }
         });
       } else {
         _sidecarConnected = next;
         if (next) {
-          _sidecarTransitioning = false;
           _suppressCameraErrors = false;
           _cameraError = null;
+          _cameraStalled = false;
+          _cameraStallReason = null;
+          _cameraStallSince = null;
         } else if (_openpilotOverlayMode) {
           _suppressCameraErrors = true;
           _cameraError = null;
           _cameraLoading = false;
+          _cameraStalled = false;
+          _cameraStallReason = null;
+          _cameraStallSince = null;
         }
+      }
+      if (next) {
+        _clearSidecarRecoverySchedule();
+        _setSidecarPhase(
+          _SidecarPhase.running,
+          message: '사이드카 연결이 복구되었습니다.',
+        );
+        if (!_adaptiveCameraQualitySynced) {
+          unawaited(
+            _setAdaptiveCameraQualityMode(
+              _adaptiveCameraQualityMode,
+              reason: 'ws_reconnected',
+              force: true,
+            ),
+          );
+        }
+      } else if (_openpilotOverlayMode && !_cameraSuspendedByLifecycle) {
+        _recordAdaptiveNetworkIssue('sidecar_ws_disconnected', severity: 3);
+        _setSidecarPhase(
+          _SidecarPhase.verifying,
+          message: '사이드카 재연결을 시도합니다.',
+        );
+      } else if (!_openpilotOverlayMode) {
+        _setSidecarPhase(_SidecarPhase.idle);
       }
       if (next && !_cameraSuspendedByLifecycle) {
         unawaited(_loadCameraSource(force: true));
-      } else if (!next && _openpilotOverlayMode && !_cameraSuspendedByLifecycle) {
-        unawaited(_ensureSidecarRuntime());
+      } else if (!next &&
+          _openpilotOverlayMode &&
+          !_cameraSuspendedByLifecycle &&
+          !_isSidecarBusy) {
+        _scheduleSidecarRuntimeRecovery(reason: 'worker_disconnected');
       }
       return;
     }
@@ -1956,30 +3147,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     );
     if (!identical(mergedOverlay2d, next.sidecarOverlay2d)) {
       next = next.copyWith(sidecarOverlay2d: mergedOverlay2d);
-    }
-
-    // Keep using last valid calibration when live calibration is temporarily unavailable.
-    if (snapshot.calibrationRpy.length >= 3) {
-      _lastValidCalibrationRpy =
-          snapshot.calibrationRpy.take(3).toList(growable: false);
-    } else if (_lastValidCalibrationRpy.length >= 3) {
-      next = next.copyWith(calibrationRpy: _lastValidCalibrationRpy);
-    }
-
-    if (snapshot.wideFromDeviceEuler.length >= 3) {
-      _lastValidWideFromDeviceEuler =
-          snapshot.wideFromDeviceEuler.take(3).toList(growable: false);
-    } else if (_lastValidWideFromDeviceEuler.length >= 3) {
-      next = next.copyWith(
-        wideFromDeviceEuler: _lastValidWideFromDeviceEuler,
-      );
-    }
-
-    final z = snapshot.pathOffsetZ;
-    if (z.isFinite && z > 0.3 && z < 4.0) {
-      _lastValidPathOffsetZ = z;
-    } else {
-      next = next.copyWith(pathOffsetZ: _lastValidPathOffsetZ);
     }
 
     // Enforce classic visual style (no blue 3-strip mode).
@@ -2043,6 +3210,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   void _handleSidecarPayload(Map<String, dynamic> payload) {
     if (payload['type'] == 'hello') return;
     if (!_openpilotOverlayMode) return;
+    if (_debugOverlayPreviewMode) return;
 
     final next = _stabilizeOverlaySnapshot(
       _DriveOverlaySnapshot.fromSidecar(payload),
@@ -2051,6 +3219,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     _cacheOverlaySnapshot(next);
     _overlayDiagFrames++;
     final now = DateTime.now();
+    _sidecarLastFrameAt = now;
+    _tickOverlayDebugMetrics(next, now);
     if (now.difference(_overlayDiagLastLogAt).inSeconds >= 2) {
       final frameGap = (next.modelFrameId != null && next.roadFrameId != null)
           ? (next.modelFrameId! - next.roadFrameId!).abs()
@@ -2129,189 +3299,2035 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     }
   }
 
-  void _setSidecarTransitioning(bool active, {Duration? hold}) {
-    _sidecarTransitionTimer?.cancel();
-    _sidecarTransitionTimer = null;
-    if (active && hold != null) {
-      _sidecarTransitionTimer = Timer(hold, () {
-        if (!mounted) {
-          _sidecarTransitioning = false;
+  Future<Map<String, dynamic>> _sidecarPostJson(
+    String path, {
+    required Map<String, dynamic> body,
+  }) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 4);
+    try {
+      final request = await client.postUrl(_sidecarHttpUri(path)).timeout(
+            const Duration(seconds: 4),
+          );
+      request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.write(jsonEncode(body));
+      final response =
+          await request.close().timeout(const Duration(seconds: 5));
+      final text = await utf8.decodeStream(response);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw Exception('HTTP ${response.statusCode}: $text');
+      }
+      final decoded =
+          text.trim().isEmpty ? <String, dynamic>{} : jsonDecode(text);
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+      throw Exception('invalid response');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  String _adaptiveCameraQualityLabel(_AdaptiveCameraQualityMode mode) {
+    return mode == _AdaptiveCameraQualityMode.quality ? 'quality' : 'stable';
+  }
+
+  void _resetAdaptiveCameraQualityState({bool resetMode = false}) {
+    _adaptiveBadScore = 0;
+    _adaptiveLastSwitchAt = null;
+    _adaptiveStableSince = null;
+    _adaptiveStartupHoldUntil = null;
+    _adaptiveLastFrameCount = null;
+    _adaptiveLastDropCount = null;
+    _adaptiveCameraQualitySynced = false;
+    if (resetMode) {
+      _adaptiveCameraQualityMode = _AdaptiveCameraQualityMode.stable;
+    }
+  }
+
+  void _startAdaptiveCameraQualityLoop() {
+    _adaptiveCameraQualityTimer?.cancel();
+    _adaptiveCameraQualityTimer = null;
+    _resetAdaptiveCameraQualityState(resetMode: true);
+    _adaptiveStartupHoldUntil = DateTime.now().add(_adaptiveStartupStableHold);
+    _adaptiveStableSince = DateTime.now();
+    _adaptiveCameraQualityTimer = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => unawaited(_tickAdaptiveCameraQuality()),
+    );
+    unawaited(
+      _setAdaptiveCameraQualityMode(
+        _adaptiveCameraQualityMode,
+        reason: 'init',
+        force: true,
+      ),
+    );
+  }
+
+  void _stopAdaptiveCameraQualityLoop({bool resetMode = false}) {
+    _adaptiveCameraQualityTimer?.cancel();
+    _adaptiveCameraQualityTimer = null;
+    _adaptiveCameraQualityBusy = false;
+    _resetAdaptiveCameraQualityState(resetMode: resetMode);
+  }
+
+  Future<void> _setAdaptiveCameraQualityMode(
+    _AdaptiveCameraQualityMode mode, {
+    required String reason,
+    bool force = false,
+  }) async {
+    if (!_openpilotOverlayMode || _cameraSuspendedByLifecycle) return;
+    if (_adaptiveCameraQualityBusy) return;
+    if (!force &&
+        _adaptiveCameraQualitySynced &&
+        mode == _adaptiveCameraQualityMode) {
+      return;
+    }
+    _adaptiveCameraQualityBusy = true;
+    final modeLabel = _adaptiveCameraQualityLabel(mode);
+    try {
+      final response = await _sidecarPostJson(
+        '/camera_quality',
+        body: <String, dynamic>{'mode': modeLabel},
+      );
+      if (response['ok'] != true) {
+        throw Exception(response['error']?.toString() ?? 'unknown error');
+      }
+      _adaptiveCameraQualityMode = mode;
+      _adaptiveCameraQualitySynced = true;
+      _adaptiveLastSwitchAt = DateTime.now();
+      if (mode == _AdaptiveCameraQualityMode.stable) {
+        _adaptiveStableSince = null;
+        _adaptiveStartupHoldUntil =
+            DateTime.now().add(_adaptiveStartupStableHold);
+      } else {
+        _adaptiveStableSince = DateTime.now();
+        _adaptiveStartupHoldUntil = null;
+      }
+      _pushSidecarHistory('CAM_QUALITY', 'mode=$modeLabel reason=$reason');
+    } catch (e) {
+      _adaptiveCameraQualitySynced = false;
+      _pushSidecarHistory(
+          'CAM_QUALITY_FAIL', 'mode=$modeLabel reason=$reason $e');
+    } finally {
+      _adaptiveCameraQualityBusy = false;
+    }
+  }
+
+  void _recordAdaptiveNetworkIssue(String reason, {int severity = 1}) {
+    if (!_openpilotOverlayMode || _cameraSuspendedByLifecycle) return;
+    final step = severity.clamp(1, 4);
+    _adaptiveStableSince = null;
+    _adaptiveBadScore = (_adaptiveBadScore + step).clamp(0, 12);
+    if (_adaptiveCameraQualityMode == _AdaptiveCameraQualityMode.quality &&
+        _adaptiveBadScore >= 3) {
+      unawaited(
+        _setAdaptiveCameraQualityMode(
+          _AdaptiveCameraQualityMode.stable,
+          reason: reason,
+        ),
+      );
+    }
+  }
+
+  Future<void> _tickAdaptiveCameraQuality() async {
+    if (!_openpilotOverlayMode ||
+        _cameraSuspendedByLifecycle ||
+        !_sidecarConnected) {
+      return;
+    }
+    if (_adaptiveCameraQualityBusy) return;
+    _adaptiveCameraQualityBusy = true;
+    try {
+      final health = await _sidecarGetJson('/health');
+      final relayRaw = health['cameraRelay'];
+      if (relayRaw is! Map) return;
+      final relay = Map<String, dynamic>.from(relayRaw);
+      final camerasRaw = relay['cameras'];
+      if (camerasRaw is! Map) return;
+      final cameras = Map<String, dynamic>.from(camerasRaw);
+      final activeRaw = cameras[_liveCameraName];
+      if (activeRaw is! Map) return;
+      final active = Map<String, dynamic>.from(activeRaw);
+      final frameCount = _DriveOverlaySnapshot._asInt(active['frames']) ?? 0;
+      final dropCount = _DriveOverlaySnapshot._asInt(active['drops']) ?? 0;
+
+      var frameDelta = 0;
+      var dropDelta = 0;
+      if (_adaptiveLastFrameCount != null) {
+        frameDelta = frameCount - _adaptiveLastFrameCount!;
+      }
+      if (_adaptiveLastDropCount != null) {
+        dropDelta = dropCount - _adaptiveLastDropCount!;
+      }
+      _adaptiveLastFrameCount = frameCount;
+      _adaptiveLastDropCount = dropCount;
+
+      if (dropDelta > 0) {
+        _adaptiveBadScore = (_adaptiveBadScore + 2).clamp(0, 12);
+      } else if (frameDelta <= 0) {
+        _adaptiveBadScore = (_adaptiveBadScore + 1).clamp(0, 12);
+      } else {
+        _adaptiveBadScore = (_adaptiveBadScore - 1).clamp(0, 12);
+      }
+
+      final nowUs = _renderClock.elapsedMicroseconds;
+      final cameraEventStale = _lastCameraFrameEventUs <= 0 ||
+          (nowUs - _lastCameraFrameEventUs) > (_cameraFrameStaleUs * 2);
+      if (cameraEventStale) {
+        _adaptiveBadScore = (_adaptiveBadScore + 1).clamp(0, 12);
+      }
+
+      final goodSlice = frameDelta >= 8 && dropDelta <= 0 && !cameraEventStale;
+      if (goodSlice) {
+        _adaptiveStableSince ??= DateTime.now();
+      } else {
+        _adaptiveStableSince = null;
+      }
+
+      if (!_adaptiveCameraQualitySynced) {
+        final current = _adaptiveCameraQualityMode;
+        _adaptiveCameraQualityBusy = false;
+        await _setAdaptiveCameraQualityMode(
+          current,
+          reason: 'sync',
+          force: true,
+        );
+        return;
+      }
+
+      if (_adaptiveCameraQualityMode == _AdaptiveCameraQualityMode.quality &&
+          _adaptiveBadScore >= 3) {
+        _adaptiveCameraQualityBusy = false;
+        await _setAdaptiveCameraQualityMode(
+          _AdaptiveCameraQualityMode.stable,
+          reason: 'weak_network',
+        );
+        return;
+      }
+
+      if (_adaptiveCameraQualityMode == _AdaptiveCameraQualityMode.stable) {
+        final stableFor = (_adaptiveStableSince == null)
+            ? Duration.zero
+            : DateTime.now().difference(_adaptiveStableSince!);
+        final startupHoldDone = _adaptiveStartupHoldUntil == null ||
+            !DateTime.now().isBefore(_adaptiveStartupHoldUntil!);
+        final switchCooldown = _adaptiveLastSwitchAt == null ||
+            DateTime.now().difference(_adaptiveLastSwitchAt!) >=
+                const Duration(seconds: 12);
+        if (_adaptiveBadScore <= 0 &&
+            startupHoldDone &&
+            stableFor >= const Duration(seconds: 16) &&
+            switchCooldown) {
+          _adaptiveCameraQualityBusy = false;
+          await _setAdaptiveCameraQualityMode(
+            _AdaptiveCameraQualityMode.quality,
+            reason: 'network_recovered',
+          );
           return;
         }
-        setState(() => _sidecarTransitioning = false);
-      });
+      }
+    } catch (_) {
+      // ignore transient probe errors
+    } finally {
+      _adaptiveCameraQualityBusy = false;
     }
+  }
+
+  String _fmtClock(DateTime? when) {
+    if (when == null) return '-';
+    final t = when.toLocal();
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${two(t.hour)}:${two(t.minute)}:${two(t.second)}';
+  }
+
+  Map<String, String> _parseStatusPairs(String raw) {
+    final parsed = <String, String>{};
+    for (final line in raw.split('\n')) {
+      final trimmed = line.trim();
+      if (trimmed.isEmpty) continue;
+      final idx = trimmed.indexOf('=');
+      if (idx <= 0) continue;
+      final key = trimmed.substring(0, idx).trim();
+      final value = trimmed.substring(idx + 1).trim();
+      if (key.isEmpty) continue;
+      parsed[key] = value;
+    }
+    return parsed;
+  }
+
+  Future<void> _refreshSidecarProcessStatus() async {
+    final ssh = _sshService ??
+        (mounted ? Provider.of<SSHService>(context, listen: false) : null);
+    if (ssh == null || !ssh.isConnected) {
+      if (!mounted) {
+        _sidecarProcessSnapshot = <String, String>{};
+        _sidecarHealthSnapshot = <String, dynamic>{};
+        _sidecarProcessCheckedAt = DateTime.now();
+        _sidecarProcessStatusError = 'SSH 연결 안됨';
+        return;
+      }
+      setState(() {
+        _sidecarProcessSnapshot = <String, String>{};
+        _sidecarHealthSnapshot = <String, dynamic>{};
+        _sidecarProcessCheckedAt = DateTime.now();
+        _sidecarProcessStatusError = 'SSH 연결 안됨';
+      });
+      return;
+    }
+
+    final now = DateTime.now();
+    final nextProcess = <String, String>{};
+    var nextHealth = <String, dynamic>{};
+    String? nextError;
+    try {
+      final statusRaw = await _sidecarService.status(ssh);
+      nextProcess.addAll(_parseStatusPairs(statusRaw));
+      try {
+        nextHealth = await _sidecarGetJson('/health');
+      } catch (e) {
+        nextError = 'health 조회 실패: $e';
+      }
+    } catch (e) {
+      nextError = e.toString();
+    }
+
+    if (!mounted) {
+      _sidecarProcessSnapshot = nextProcess;
+      _sidecarHealthSnapshot = nextHealth;
+      _sidecarProcessCheckedAt = now;
+      _sidecarProcessStatusError = nextError;
+      return;
+    }
+    setState(() {
+      _sidecarProcessSnapshot = nextProcess;
+      _sidecarHealthSnapshot = nextHealth;
+      _sidecarProcessCheckedAt = now;
+      _sidecarProcessStatusError = nextError;
+    });
+  }
+
+  Widget _statusLine(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 126,
+            child: Text(
+              label,
+              style: const TextStyle(color: Colors.white60, fontSize: 13),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _debugMetricPill(String label, String value) {
+    return Container(
+      constraints: const BoxConstraints(minWidth: 148),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF171B24),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.white12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              color: Colors.white54,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 14,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _pushSidecarHistory(String type, String summary) {
+    final line = '[${_fmtClock(DateTime.now())}] $type $summary';
+    _sidecarHistory.addFirst(line);
+    while (_sidecarHistory.length > 20) {
+      _sidecarHistory.removeLast();
+    }
+  }
+
+  void _tickOverlayDebugMetrics(_DriveOverlaySnapshot next, DateTime now) {
+    final nowMs = now.millisecondsSinceEpoch;
+    if (_overlayDebugWindowStartMs <= 0) {
+      _overlayDebugWindowStartMs = nowMs;
+      _overlayDebugWindowFrames = 0;
+    }
+    _overlayDebugWindowFrames += 1;
+    final elapsed = nowMs - _overlayDebugWindowStartMs;
+    if (elapsed >= 1000) {
+      _overlayDebugFps = (_overlayDebugWindowFrames * 1000.0) / elapsed;
+      _overlayDebugWindowStartMs = nowMs;
+      _overlayDebugWindowFrames = 0;
+    }
+
+    final modelFrame = next.modelFrameId;
+    if (modelFrame != null) {
+      final prev = _overlayPrevModelFrameId;
+      if (prev != null && modelFrame > prev + 1) {
+        _overlayDropCount += (modelFrame - prev - 1);
+      }
+      _overlayPrevModelFrameId = modelFrame;
+    }
+
+    final camFrame = _cameraFrameIdFromSnapshot(next);
+    if (modelFrame != null && camFrame != null) {
+      _overlayModelCameraGap = (modelFrame - camFrame).abs();
+    }
+  }
+
+  Future<void> _showDebugTextDialog(String title, String content) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text(title),
+        content: SizedBox(
+          width: 640,
+          child: SingleChildScrollView(
+            child: SelectableText(
+              content,
+              style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('닫기'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _debugActionHealth() async {
+    try {
+      await _refreshSidecarProcessStatus();
+      _pushSidecarHistory('CHECK', 'health');
+      _toast('헬스체크 완료');
+    } catch (e) {
+      _pushSidecarHistory('FAIL', 'health: $e');
+      _toast('헬스체크 실패: $e', isError: true);
+    }
+  }
+
+  Future<void> _debugActionWsProbe() async {
+    try {
+      await _waitForSidecarReady();
+      _pushSidecarHistory('CHECK', 'ws probe ok');
+      _toast('WS 프로브 성공');
+    } catch (e) {
+      _pushSidecarHistory('FAIL', 'ws probe: $e');
+      _toast('WS 프로브 실패: $e', isError: true);
+    }
+  }
+
+  Future<void> _debugActionTailLog() async {
+    final ssh = _sshService ??
+        (mounted ? Provider.of<SSHService>(context, listen: false) : null);
+    if (ssh == null || !ssh.isConnected) {
+      _toast('SSH 연결 안됨', isError: true);
+      return;
+    }
+    try {
+      final text = await _sidecarService.tailLog(ssh, lines: 50);
+      _pushSidecarHistory('CHECK', 'tail log');
+      await _showDebugTextDialog('사이드카 로그 tail(50)', text.trim());
+    } catch (e) {
+      _pushSidecarHistory('FAIL', 'tail log: $e');
+      _toast('로그 조회 실패: $e', isError: true);
+    }
+  }
+
+  Future<void> _debugActionRedeploy() async {
+    final ssh = _sshService ??
+        (mounted ? Provider.of<SSHService>(context, listen: false) : null);
+    if (ssh == null || !ssh.isConnected) {
+      _toast('SSH 연결 안됨', isError: true);
+      return;
+    }
+    try {
+      _setSidecarPhase(_SidecarPhase.deploying, message: '수동 재배포 중...');
+      await _sidecarService.deploy(ssh);
+      _sidecarLastDeployAt = DateTime.now();
+      _sidecarLastDeployResult = 'success';
+      _sidecarLocalRevision = await _sidecarService.localRevision();
+      _sidecarRemoteRevision = await _sidecarService.remoteRevision(ssh);
+      _sidecarLastRevisionCheckedAt = DateTime.now();
+      _sidecarRevisionAction = 'manual_deploy';
+      _pushSidecarHistory('MANUAL_DEPLOY', 'ok');
+      await _refreshSidecarProcessStatus();
+      _setSidecarPhase(_SidecarPhase.idle, message: '재배포 완료');
+      _toast('재배포 완료 (sha256:${_shortSidecarRevision(_sidecarLocalRevision)})');
+    } catch (e) {
+      _sidecarLastDeployResult = 'fail';
+      _sidecarRevisionAction = 'manual_deploy_fail';
+      _pushSidecarHistory('FAIL', 'redeploy: $e');
+      _setSidecarPhase(_SidecarPhase.failed, message: e.toString());
+      _toast('재배포 실패: $e', isError: true);
+    }
+  }
+
+  Future<void> _debugActionRestart() async {
+    final ssh = _sshService ??
+        (mounted ? Provider.of<SSHService>(context, listen: false) : null);
+    if (ssh == null || !ssh.isConnected) {
+      _toast('SSH 연결 안됨', isError: true);
+      return;
+    }
+    try {
+      _setSidecarPhase(_SidecarPhase.stopping, message: '수동 재시작(중지)...');
+      await _sidecarService.stop(ssh);
+      _sidecarLastStopAt = DateTime.now();
+      _setSidecarPhase(_SidecarPhase.starting, message: '수동 재시작(시작)...');
+      await _sidecarService.start(ssh);
+      _sidecarLastStartAt = DateTime.now();
+      await _waitForSidecarReady();
+      _startSidecarLoop();
+      _pushSidecarHistory('MANUAL_RESTART', 'ok');
+      await _refreshSidecarProcessStatus();
+      _setSidecarPhase(_SidecarPhase.running, message: '재시작 완료');
+      _toast('재시작 완료');
+    } catch (e) {
+      _pushSidecarHistory('FAIL', 'restart: $e');
+      _setSidecarPhase(_SidecarPhase.failed, message: e.toString());
+      _toast('재시작 실패: $e', isError: true);
+    }
+  }
+
+  Future<bool> _confirmDebugAction({
+    required String title,
+    required String message,
+    String confirmText = '실행',
+  }) async {
+    if (!mounted) return false;
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(confirmText),
+          ),
+        ],
+      ),
+    );
+    return result == true;
+  }
+
+  Future<void> _debugActionResetSidecar() async {
+    final ssh = _sshService ??
+        (mounted ? Provider.of<SSHService>(context, listen: false) : null);
+    if (ssh == null || !ssh.isConnected) {
+      _toast('SSH 연결 안됨', isError: true);
+      return;
+    }
+
+    final confirmed = await _confirmDebugAction(
+      title: '사이드카 테스트 초기화',
+      message: '사이드카 파일/로그를 삭제하고 프로세스 등록도 제거합니다.\n'
+          '완전 초기 상태 테스트용입니다. 계속할까요?',
+      confirmText: '초기화',
+    );
+    if (!confirmed) return;
+
+    try {
+      _setSidecarPhase(_SidecarPhase.stopping, message: '사이드카 초기화 중...');
+      _stopSidecarLoop();
+      await _sidecarService.resetForTesting(ssh,
+          removeManagerRegistration: true);
+      _sidecarLastStopAt = DateTime.now();
+      _sidecarLastDeployAt = null;
+      _sidecarLastDeployResult = '-';
+      _sidecarLocalRevision = null;
+      _sidecarRemoteRevision = null;
+      _sidecarLastRevisionCheckedAt = DateTime.now();
+      _sidecarRevisionAction = 'reset';
+      _sidecarLastBootstrapAt = DateTime.now();
+      _sidecarLastBootstrapResult = 'reset';
+      _sidecarLastBootstrapDetail = 'manual testing reset';
+      await _setSidecarBootstrapDone(false);
+      _pushSidecarHistory('MANUAL_RESET', 'sidecar wiped for clean test');
+      await _refreshSidecarProcessStatus();
+      _setSidecarPhase(_SidecarPhase.idle, message: '사이드카 초기화 완료');
+      _toast('사이드카 초기화 완료');
+    } catch (e) {
+      _pushSidecarHistory('FAIL', 'reset: $e');
+      _setSidecarPhase(_SidecarPhase.failed, message: e.toString());
+      _toast('사이드카 초기화 실패: $e', isError: true);
+    }
+  }
+
+  String _buildDebugSnapshotText() {
+    final process = _sidecarProcessSnapshot;
+    final health = _sidecarHealthSnapshot;
+    return [
+      'time=${DateTime.now().toIso8601String()}',
+      'phase=$_sidecarPhase',
+      'connected=$_sidecarConnected',
+      'cameraQuality=${_adaptiveCameraQualityLabel(_adaptiveCameraQualityMode)} score=$_adaptiveBadScore',
+      'deploy=$_sidecarLastDeployResult at ${_fmtClock(_sidecarLastDeployAt)}',
+      'revision local=${_shortSidecarRevision(_sidecarLocalRevision)} remote=${_shortSidecarRevision(_sidecarRemoteRevision)} action=$_sidecarRevisionAction checked=${_fmtClock(_sidecarLastRevisionCheckedAt)}',
+      'bootstrap=$_sidecarLastBootstrapResult at ${_fmtClock(_sidecarLastBootstrapAt)} done=${_sidecarBootstrapDone ?? false}',
+      'start=${_fmtClock(_sidecarLastStartAt)} stop=${_fmtClock(_sidecarLastStopAt)}',
+      'process=${jsonEncode(process)}',
+      'health=${jsonEncode(health)}',
+      'lastFrame=${_fmtClock(_sidecarLastFrameAt)} fps=${_overlayDebugFps.toStringAsFixed(1)} gap=${_overlayModelCameraGap ?? '-'} drops=$_overlayDropCount',
+      'toggles=path=$_debugShowPathFill lane=$_debugShowLaneLines edge=$_debugShowRoadEdge lead1=$_debugShowLead1 lead2=$_debugShowLead2 radarBadge=$_debugShowRadarBadge radarVector=$_debugShowRadarVector tf=$_debugShowStopDistanceTf state=$_debugShowStateText',
+      'preview=mode=$_debugOverlayPreviewMode scenario=${_overlayPreviewScenarioLabel(_debugOverlayPreviewScenario)} speed=${_debugOverlayPreviewSpeed.toStringAsFixed(2)}x',
+      if ((_sidecarProcessStatusError ?? '').trim().isNotEmpty)
+        'error=${_sidecarProcessStatusError!.trim()}',
+    ].join('\n');
+  }
+
+  Future<void> _copyDebugSnapshot() async {
+    final text = _buildDebugSnapshotText();
+    await Clipboard.setData(ClipboardData(text: text));
+    _pushSidecarHistory('CHECK', 'snapshot copied');
+    _toast('디버그 스냅샷 복사 완료');
+  }
+
+  bool get _isSidecarBusy =>
+      _sidecarPhase == _SidecarPhase.deploying ||
+      _sidecarPhase == _SidecarPhase.starting ||
+      _sidecarPhase == _SidecarPhase.verifying ||
+      _sidecarPhase == _SidecarPhase.stopping;
+
+  bool get _showSidecarStatusBanner =>
+      !_debugOverlayPreviewMode &&
+      (_isSidecarBusy ||
+          _sidecarPhase == _SidecarPhase.failed ||
+          (_openpilotOverlayMode && !_sidecarConnected));
+
+  String _sidecarStatusTitle() {
+    if (_sidecarPhase == _SidecarPhase.failed) return '사이드카 준비 실패';
+    if (_isSidecarBusy) return '사이드카 준비 중...';
+    if (_openpilotOverlayMode && !_sidecarConnected) return '사이드카 연결 대기 중...';
+    if (_sidecarPhase == _SidecarPhase.running) return '사이드카 실행 중';
+    return '사이드카 비활성';
+  }
+
+  Color _sidecarStatusColor() {
+    if (_sidecarPhase == _SidecarPhase.failed) return const Color(0xCC7A1010);
+    if (_isSidecarBusy) return const Color(0xCC1C2532);
+    return const Color(0xCC1E3A2A);
+  }
+
+  void _setSidecarPhase(
+    _SidecarPhase phase, {
+    String? message,
+  }) {
+    final busy = phase == _SidecarPhase.deploying ||
+        phase == _SidecarPhase.starting ||
+        phase == _SidecarPhase.verifying ||
+        phase == _SidecarPhase.stopping;
     if (mounted) {
       setState(() {
-        _sidecarTransitioning = active;
-        if (active) {
+        _sidecarPhase = phase;
+        _sidecarPhaseMessage = message;
+        _sidecarTransitioning = busy;
+        if (busy) {
           _cameraError = null;
         }
       });
     } else {
-      _sidecarTransitioning = active;
-      if (active) {
+      _sidecarPhase = phase;
+      _sidecarPhaseMessage = message;
+      _sidecarTransitioning = busy;
+      if (busy) {
         _cameraError = null;
       }
     }
   }
 
-  void _toast(String message) {
+  void _toast(
+    String message, {
+    bool isError = false,
+    Duration duration = const Duration(seconds: 2),
+  }) {
     if (!mounted) return;
-    CustomToast.show(context, message);
+    _hudNoticeTimer?.cancel();
+    setState(() {
+      _hudNoticeMessage = message;
+      _hudNoticeIsError = isError;
+    });
+    _hudNoticeTimer = Timer(duration, () {
+      if (!mounted) return;
+      setState(() {
+        _hudNoticeMessage = null;
+        _hudNoticeIsError = false;
+      });
+    });
   }
 
-  Future<void> _waitForSidecarReady() async {
-    final deadline = DateTime.now().add(const Duration(seconds: 10));
+  _M3 _rotationFromEulerForVideo(List<double> rpy) {
+    if (rpy.length < 3) return const _M3.identity();
+    final roll = rpy[0];
+    final pitch = rpy[1];
+    final yaw = rpy[2];
+
+    final cr = math.cos(roll);
+    final sr = math.sin(roll);
+    final cp = math.cos(pitch);
+    final sp = math.sin(pitch);
+    final cy = math.cos(yaw);
+    final sy = math.sin(yaw);
+
+    final rx = _M3(
+      1.0,
+      0.0,
+      0.0,
+      0.0,
+      cr,
+      -sr,
+      0.0,
+      sr,
+      cr,
+    );
+    final ry = _M3(
+      cp,
+      0.0,
+      sp,
+      0.0,
+      1.0,
+      0.0,
+      -sp,
+      0.0,
+      cp,
+    );
+    final rz = _M3(
+      cy,
+      -sy,
+      0.0,
+      sy,
+      cy,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+    );
+    return rz.multiply(ry).multiply(rx);
+  }
+
+  _M3 _intrinsicForVideo(Size source, bool wideCam) {
+    final sx = source.width / 1928.0;
+    final sy = source.height / 1208.0;
+    final focal = wideCam ? 567.0 : 2648.0;
+    return _M3(
+      focal * sx,
+      0.0,
+      964.0 * sx,
+      0.0,
+      focal * sy,
+      604.0 * sy,
+      0.0,
+      0.0,
+      1.0,
+    );
+  }
+
+  _DriveVideoPlacement _buildVideoPlacement({
+    required Size source,
+    required Size viewport,
+    required _DriveOverlaySnapshot snapshot,
+    required _DriveCameraKind cameraKind,
+    required bool coverViewport,
+    required bool openpilotTransform,
+  }) {
+    final fitScale = coverViewport
+        ? math.max(
+            viewport.width / source.width, viewport.height / source.height)
+        : math.min(
+            viewport.width / source.width, viewport.height / source.height);
+
+    var scale = fitScale;
+    var xOffset = 0.0;
+    var yOffset = 0.0;
+    var dx = (viewport.width - source.width * scale) * 0.5;
+    var dy = (viewport.height - source.height * scale) * 0.5;
+
+    if (openpilotTransform) {
+      final wideCam = cameraKind == _DriveCameraKind.wideRoad;
+      final zoom = wideCam ? 2.0 : 1.1;
+      scale = fitScale * zoom;
+
+      final intrinsic = _intrinsicForVideo(source, wideCam);
+      final deviceFromCalib =
+          _rotationFromEulerForVideo(snapshot.calibrationRpy);
+      final wideFromDevice = wideCam
+          ? _rotationFromEulerForVideo(snapshot.wideFromDeviceEuler)
+          : const _M3.identity();
+      final viewFromCalib = wideCam
+          ? _viewFromDevice.multiply(wideFromDevice.multiply(deviceFromCalib))
+          : _viewFromDevice.multiply(deviceFromCalib);
+      final calibTransform = intrinsic.multiply(viewFromCalib);
+      final inf = calibTransform.transform(const _V3(1000.0, 0.0, 0.0));
+      if (inf.z.isFinite && inf.z.abs() > 1e-6) {
+        final centerX = intrinsic.m02;
+        final centerY = intrinsic.m12;
+        final maxXOffset =
+            math.max(0.0, centerX * scale - viewport.width * 0.5 - 5.0);
+        final maxYOffset =
+            math.max(0.0, centerY * scale - viewport.height * 0.5 - 5.0);
+        xOffset = (((inf.x / inf.z) - centerX) * scale)
+            .clamp(-maxXOffset, maxXOffset)
+            .toDouble();
+        yOffset = (((inf.y / inf.z) - centerY) * scale)
+            .clamp(-maxYOffset, maxYOffset)
+            .toDouble();
+        dx = (viewport.width * 0.5 - xOffset) - (centerX * scale);
+        dy = (viewport.height * 0.5 - yOffset) - (centerY * scale);
+      } else {
+        dx = (viewport.width - source.width * scale) * 0.5;
+        dy = (viewport.height - source.height * scale) * 0.5;
+      }
+    }
+
+    return _DriveVideoPlacement(
+      left: dx,
+      top: dy,
+      width: source.width * scale,
+      height: source.height * scale,
+      scale: scale,
+      xOffset: xOffset,
+      yOffset: yOffset,
+    );
+  }
+
+  Future<void> _waitForSidecarReady({
+    Duration timeout = const Duration(seconds: 10),
+    Duration pollInterval = const Duration(milliseconds: 300),
+    Duration healthTimeout = const Duration(seconds: 2),
+    Duration wsTimeout = const Duration(seconds: 2),
+  }) async {
+    Future<void> probeHealth() async {
+      final client = HttpClient()..connectionTimeout = healthTimeout;
+      try {
+        final request = await client.getUrl(_sidecarHttpUri('/health')).timeout(
+              healthTimeout,
+            );
+        final response = await request.close().timeout(healthTimeout);
+        final body = await utf8.decodeStream(response).timeout(healthTimeout);
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          throw Exception('health http ${response.statusCode}');
+        }
+        final decoded =
+            body.trim().isEmpty ? <String, dynamic>{} : jsonDecode(body);
+        if (decoded is! Map || decoded['ok'] != true) {
+          throw Exception('health not ok');
+        }
+      } finally {
+        client.close(force: true);
+      }
+    }
+
+    final deadline = DateTime.now().add(timeout);
     Object? lastError;
     while (DateTime.now().isBefore(deadline)) {
       try {
-        final health = await _sidecarGetJson('/health');
-        if (health['ok'] != true) {
-          throw Exception('health not ok');
-        }
+        await probeHealth();
 
         WebSocket? ws;
         try {
-          ws = await WebSocket.connect(_liveCameraWsUrl).timeout(
-            const Duration(seconds: 2),
-          );
+          ws = await WebSocket.connect(_liveCameraWsUrl).timeout(wsTimeout);
         } finally {
           await ws?.close();
         }
         return;
       } catch (e) {
         lastError = e;
-        await Future<void>.delayed(const Duration(milliseconds: 300));
+        await Future<void>.delayed(pollInterval);
       }
     }
     throw Exception('ready timeout: $lastError');
   }
 
-  Future<void> _ensureSidecarRuntime() async {
+  Future<void> _ensureSidecarRuntime({String reason = 'auto'}) async {
     if (!_openpilotOverlayMode || _cameraSuspendedByLifecycle) return;
+    if (_debugOverlayPreviewMode) return;
+    if (_disableDmGateBlocked || _disableDmGateChecking) return;
     if (_sidecarAutoManaging) return;
-    final ssh =
-        _sshService ?? (mounted ? Provider.of<SSHService>(context, listen: false) : null);
+    _cancelDelayedSidecarStop();
+    final ssh = _sshService ??
+        (mounted ? Provider.of<SSHService>(context, listen: false) : null);
     if (ssh == null || !ssh.isConnected) return;
     _sidecarAutoManaging = true;
-    _suppressCameraErrors = false;
-    _setSidecarTransitioning(true, hold: const Duration(seconds: 8));
+    _suppressCameraErrors = true;
+    _pushSidecarHistory('AUTO_RUNTIME', 'start reason=$reason');
+    _setSidecarPhase(
+      _SidecarPhase.verifying,
+      message: '사이드카 실행 상태를 확인하는 중입니다.',
+    );
     if (mounted) {
       setState(() => _cameraLoading = true);
     } else {
       _cameraLoading = true;
     }
     try {
-      await _sidecarService.deploy(ssh);
-      await _sidecarService.start(ssh);
-      await _waitForSidecarReady();
+      await _ensureSidecarRevisionUpToDate(ssh);
+      final statusRaw = await _sidecarService.status(ssh);
+      final status = _parseStatusPairs(statusRaw);
+      final running = status['running'] == '1';
+      final listening = status['listening'] == '1';
+      if (running && listening) {
+        _pushSidecarHistory('AUTO_RUNTIME', 'reuse running/listening runtime');
+      } else {
+        _setSidecarPhase(
+          _SidecarPhase.starting,
+          message: running || listening ? '사이드카 런타임 복구 중...' : '사이드카 시작 중...',
+        );
+        try {
+          await _sidecarService.start(ssh);
+          _sidecarLastStartAt = DateTime.now();
+          _pushSidecarHistory('AUTO_START', 'start ok');
+        } catch (startError) {
+          _pushSidecarHistory('AUTO_START_FAIL', '$startError');
+          var recoveredByBootstrap = false;
+          if (!_autoDeployDuringHudRuntime) {
+            recoveredByBootstrap = await _tryAutoBootstrapSidecar(
+              ssh,
+              startError: startError,
+            );
+            if (recoveredByBootstrap) {
+              _setSidecarPhase(
+                _SidecarPhase.starting,
+                message: '사이드카 시작 중...',
+              );
+              await _sidecarService.start(ssh);
+              _sidecarLastStartAt = DateTime.now();
+              _pushSidecarHistory('AUTO_START', 'start ok (after bootstrap)');
+            }
+          }
+          if (recoveredByBootstrap) {
+            // no-op; startup recovered
+          } else if (_autoDeployDuringHudRuntime) {
+            _setSidecarPhase(
+              _SidecarPhase.deploying,
+              message: '사이드카 배포/복구 중...',
+            );
+            await _sidecarService.deploy(ssh);
+            _sidecarLastDeployAt = DateTime.now();
+            _sidecarLastDeployResult = 'success';
+            _pushSidecarHistory('AUTO_DEPLOY', 'ok');
+            _setSidecarPhase(
+              _SidecarPhase.starting,
+              message: '사이드카 시작 중...',
+            );
+            await _sidecarService.start(ssh);
+            _sidecarLastStartAt = DateTime.now();
+            _pushSidecarHistory('AUTO_RESTART', 'start ok (after deploy)');
+          } else {
+            rethrow;
+          }
+        }
+      }
+
       _startSidecarLoop();
-      _setSidecarTransitioning(true, hold: const Duration(seconds: 2));
+      _setSidecarPhase(
+        _SidecarPhase.verifying,
+        message: '카메라 스트림 연결 확인 중...',
+      );
+      try {
+        await _waitForSidecarReady(
+          timeout: const Duration(milliseconds: 2200),
+          pollInterval: const Duration(milliseconds: 150),
+          healthTimeout: const Duration(milliseconds: 700),
+          wsTimeout: const Duration(milliseconds: 700),
+        );
+        _setSidecarPhase(
+          _SidecarPhase.running,
+          message: '사이드카 실행 중',
+        );
+      } catch (e) {
+        _pushSidecarHistory('READY_DEFER', '$e');
+        _setSidecarPhase(
+          _SidecarPhase.running,
+          message: '사이드카 연결 대기 중...',
+        );
+      }
+      unawaited(_refreshSidecarProcessStatus());
+      _clearSidecarRecoverySchedule();
+      _suppressCameraErrors = false;
     } catch (e) {
+      if (_autoDeployDuringHudRuntime) {
+        _sidecarLastDeployResult = 'fail';
+      }
+      _pushSidecarHistory('FAIL', 'auto runtime: $e');
+      _setSidecarPhase(
+        _SidecarPhase.failed,
+        message: e.toString(),
+      );
+      _scheduleSidecarRuntimeRecovery(reason: 'runtime_failed');
       if (mounted) {
-        CustomToast.show(context, '사이드카 자동 준비 실패: $e', isError: true);
+        _toast(
+          '사이드카 자동 준비 실패: $e',
+          isError: true,
+          duration: const Duration(seconds: 5),
+        );
       }
     } finally {
       _sidecarAutoManaging = false;
     }
   }
 
-  Future<void> _stopSidecarProcessIfNeeded() async {
+  Future<void> _stopSidecarProcessIfNeeded({bool force = false}) async {
     if (_sidecarAutoManaging) return;
-    final ssh =
-        _sshService ?? (mounted ? Provider.of<SSHService>(context, listen: false) : null);
-    if (ssh == null || !ssh.isConnected) return;
+    if (_residentSidecarManaged && !force) {
+      _pushSidecarHistory('AUTO_STOP_SKIP', 'resident sidecar mode');
+      _setSidecarPhase(_SidecarPhase.idle);
+      return;
+    }
+    _cancelDelayedSidecarStop();
+    _clearSidecarRecoverySchedule();
+    final ssh = _sshService ??
+        (mounted ? Provider.of<SSHService>(context, listen: false) : null);
+    if (ssh == null || !ssh.isConnected) {
+      _setSidecarPhase(_SidecarPhase.idle);
+      return;
+    }
     _sidecarAutoManaging = true;
+    _pushSidecarHistory('AUTO_STOP', 'start');
+    _setSidecarPhase(
+      _SidecarPhase.stopping,
+      message: '사이드카 프로세스를 중지하는 중입니다.',
+    );
     try {
       await _sidecarService.stop(ssh);
+      _sidecarLastStopAt = DateTime.now();
+      _pushSidecarHistory('AUTO_STOP', 'ok');
+      unawaited(_refreshSidecarProcessStatus());
     } catch (_) {
       // Ignore stop errors during lifecycle transitions.
     } finally {
       _sidecarAutoManaging = false;
+      _setSidecarPhase(_SidecarPhase.idle);
     }
   }
 
   Future<void> _openDebugOptionsPopup() async {
+    if (!_hudDebugMenuEnabled) {
+      _toast('디버그 메뉴가 비활성화되어 있습니다.');
+      return;
+    }
     if (!mounted) return;
-    await showModalBottomSheet<void>(
+    final bootstrapDone = await _isSidecarBootstrapDone();
+    if (!mounted) return;
+    unawaited(_refreshSidecarProcessStatus());
+    var refreshing = false;
+    var actionRunning = false;
+    var selectedGroup = 0;
+
+    await showDialog<void>(
       context: context,
-      showDragHandle: true,
-      backgroundColor: const Color(0xFF11141A),
       builder: (sheetContext) {
         return StatefulBuilder(
           builder: (context, setLocalState) {
             final debugEnabled =
                 !_temporaryLimitedHudControls && _overlayVerifyMode;
-            final maxSheetHeight =
-                MediaQuery.of(sheetContext).size.height * 0.78;
-            return SafeArea(
-              child: ConstrainedBox(
-                constraints: BoxConstraints(maxHeight: maxSheetHeight),
-                child: SingleChildScrollView(
-                  child: Padding(
-                    padding: EdgeInsets.fromLTRB(
-                      16,
-                      4,
-                      16,
-                      16 + MediaQuery.of(sheetContext).viewInsets.bottom,
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
+            final process = _sidecarProcessSnapshot;
+            final health = _sidecarHealthSnapshot;
+            final running = process.isEmpty
+                ? '-'
+                : ((process['running'] == '1') ? '실행' : '중지');
+            final listening = process.isEmpty
+                ? '-'
+                : ((process['listening'] == '1') ? 'LISTEN' : '닫힘');
+            final method = (process['method'] ?? '-').trim().isEmpty
+                ? '-'
+                : (process['method'] ?? '-');
+            final pid = (process['pid'] ?? '').trim().isEmpty
+                ? '-'
+                : (process['pid'] ?? '-');
+            final healthOk =
+                health.isEmpty ? '-' : ((health['ok'] == true) ? 'ok' : 'fail');
+            final healthProfile = (health['profile']?.toString() ?? '-');
+            final healthClients = (health['clients']?.toString() ?? '-');
+            final wsState = _sidecarConnected ? 'connected' : 'disconnected';
+            final lastFrameAt = _fmtClock(_sidecarLastFrameAt);
+            final lastFrameAgo = _sidecarLastFrameAt == null
+                ? '-'
+                : '${DateTime.now().difference(_sidecarLastFrameAt!).inMilliseconds}ms 전';
+            final remoteHash = (process['remote_hash'] ??
+                    process['hash'] ??
+                    process['version'] ??
+                    process['commit'] ??
+                    '-')
+                .toString();
+            final uptime = (process['uptime'] ??
+                    process['uptime_sec'] ??
+                    process['uptime_s'] ??
+                    '-')
+                .toString();
+            final bootstrapConfigured =
+                ((_sidecarBootstrapDone ?? bootstrapDone) ? '완료' : '미완료');
+            final bootstrapLastResult = _sidecarLastBootstrapResult;
+            final bootstrapLastAt = _fmtClock(_sidecarLastBootstrapAt);
+            final bootstrapLastDetail =
+                _sidecarLastBootstrapDetail.trim().isEmpty
+                    ? '-'
+                    : _sidecarLastBootstrapDetail.trim();
+
+            var relayState = '-';
+            final relayRaw = health['cameraRelay'];
+            if (relayRaw is Map) {
+              final relay = Map<String, dynamic>.from(relayRaw);
+              final relayMode = relay['mode']?.toString() ?? '-';
+              final relayRunning = relay['running']?.toString() ?? '-';
+              final relayQuality = relay['qualityMode']?.toString() ?? '-';
+              relayState =
+                  'mode:$relayMode quality:$relayQuality running:$relayRunning';
+            }
+
+            final history = _sidecarHistory.take(10).toList(growable: false);
+            final layerToggleEnabled = _openpilotOverlayMode;
+
+            Future<void> runAction(Future<void> Function() action) async {
+              if (actionRunning) return;
+              setLocalState(() => actionRunning = true);
+              try {
+                await action();
+                await _refreshSidecarProcessStatus();
+              } finally {
+                if (sheetContext.mounted) {
+                  setLocalState(() => actionRunning = false);
+                }
+              }
+            }
+
+            Widget sectionCard(
+              String title,
+              Widget child, {
+              Widget? trailing,
+            }) {
+              return Container(
+                width: double.infinity,
+                margin: const EdgeInsets.only(bottom: 14),
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF171B24),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.white12),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
                       children: [
-                        SwitchListTile(
-                          value: _coverViewportPreferred,
-                          onChanged: _temporaryLimitedHudControls
-                              ? null
-                              : (value) {
-                                  _setViewportFitMode(value);
-                                  setLocalState(() {});
-                                },
-                          title: const Text('크롭(cover) 기본'),
+                        Expanded(
+                          child: Text(
+                            title,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
                         ),
-                        SwitchListTile(
-                          value: _overlayVerifyMode,
-                          onChanged: _temporaryLimitedHudControls
-                              ? null
-                              : (value) {
-                                  _setOverlayVerifyMode(value);
-                                  setLocalState(() {});
-                                },
-                          title: const Text('정합 검증'),
-                        ),
-                        SwitchListTile(
-                          value: _debugShowGuides,
-                          onChanged: debugEnabled
-                              ? (value) {
-                                  _setDebugGuides(value);
-                                  setLocalState(() {});
-                                }
-                              : null,
-                          title: const Text('그리드/가이드'),
-                        ),
-                        SwitchListTile(
-                          value: _debugShowVerifyPanel,
-                          onChanged: debugEnabled
-                              ? (value) {
-                                  _setDebugVerifyPanel(value);
-                                  setLocalState(() {});
-                                }
-                              : null,
-                          title: const Text('우측 정보창'),
-                        ),
-                        SwitchListTile(
-                          value: _debugShowViewportFrame,
-                          onChanged: debugEnabled
-                              ? (value) {
-                                  _setDebugViewportFrame(value);
-                                  setLocalState(() {});
-                                }
-                              : null,
-                          title: const Text('레터박스 프레임'),
+                        if (trailing != null) trailing,
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    child,
+                  ],
+                ),
+              );
+            }
+
+            Widget layerSwitch(
+              String title,
+              bool value,
+              ValueChanged<bool>? onChanged,
+            ) {
+              return SwitchListTile(
+                dense: false,
+                contentPadding: EdgeInsets.zero,
+                value: value,
+                onChanged: onChanged,
+                title: Text(title),
+              );
+            }
+
+            Widget groupNavItem({
+              required int index,
+              required IconData icon,
+              required String label,
+            }) {
+              final selected = selectedGroup == index;
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(10),
+                  onTap: () => setLocalState(() => selectedGroup = index),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 120),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: selected
+                          ? const Color(0xFF7A5644)
+                          : const Color(0xFF151A23),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color:
+                            selected ? const Color(0xFFD6A88C) : Colors.white12,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(icon, size: 18, color: Colors.white),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            label,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
                         ),
                       ],
                     ),
                   ),
+                ),
+              );
+            }
+
+            final maxHeight = MediaQuery.of(sheetContext).size.height * 0.92;
+            final screenSize = MediaQuery.of(sheetContext).size;
+            final maxWidth = math.min(screenSize.width * 0.94, 1160.0);
+            final sidebarWidth = screenSize.width < 920 ? 136.0 : 176.0;
+
+            return Dialog(
+              backgroundColor: const Color(0xFF11141A),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(18),
+                side: const BorderSide(color: Colors.white12),
+              ),
+              insetPadding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+              child: ConstrainedBox(
+                constraints:
+                    BoxConstraints(maxHeight: maxHeight, maxWidth: maxWidth),
+                child: Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 10, 8),
+                      child: Row(
+                        children: [
+                          const Expanded(
+                            child: Text(
+                              'HUD 디버그',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 19,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                          if (refreshing || actionRunning)
+                            const Padding(
+                              padding: EdgeInsets.only(right: 8),
+                              child: SizedBox(
+                                width: 16,
+                                height: 16,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
+                              ),
+                            ),
+                          IconButton(
+                            onPressed: () => Navigator.of(sheetContext).pop(),
+                            icon: const Icon(Icons.close_rounded,
+                                color: Colors.white70),
+                            tooltip: '닫기',
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 1, color: Colors.white12),
+                    Expanded(
+                      child: Row(
+                        children: [
+                          Container(
+                            width: sidebarWidth,
+                            color: const Color(0xFF11151D),
+                            child: ListView(
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              children: [
+                                groupNavItem(
+                                  index: 0,
+                                  icon: Icons.dashboard_outlined,
+                                  label: '개요',
+                                ),
+                                groupNavItem(
+                                  index: 1,
+                                  icon: Icons.layers_outlined,
+                                  label: '레이어',
+                                ),
+                                groupNavItem(
+                                  index: 2,
+                                  icon: Icons.build_circle_outlined,
+                                  label: '점검',
+                                ),
+                                groupNavItem(
+                                  index: 3,
+                                  icon: Icons.history,
+                                  label: '이력',
+                                ),
+                                groupNavItem(
+                                  index: 4,
+                                  icon: Icons.slideshow_outlined,
+                                  label: '프리뷰',
+                                ),
+                              ],
+                            ),
+                          ),
+                          const VerticalDivider(
+                              width: 1, color: Colors.white12),
+                          Expanded(
+                            child: Column(
+                              children: [
+                                Container(
+                                  width: double.infinity,
+                                  padding:
+                                      const EdgeInsets.fromLTRB(14, 10, 14, 10),
+                                  color: const Color(0xFF121824),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Wrap(
+                                        spacing: 8,
+                                        runSpacing: 8,
+                                        children: [
+                                          _debugMetricPill(
+                                              '단계', _sidecarStatusTitle()),
+                                          _debugMetricPill('WS', wsState),
+                                          _debugMetricPill(
+                                              '최근 프레임', lastFrameAgo),
+                                          _debugMetricPill(
+                                            '성능',
+                                            'fps ${_overlayDebugFps.toStringAsFixed(1)} · gap ${_overlayModelCameraGap ?? '-'}',
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        _sidecarPhaseMessage ?? '상태 메시지 없음',
+                                        style: const TextStyle(
+                                          color: Colors.white70,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const Divider(height: 1, color: Colors.white12),
+                                Expanded(
+                                  child: SingleChildScrollView(
+                                    padding: EdgeInsets.fromLTRB(
+                                      14,
+                                      10,
+                                      14,
+                                      16 +
+                                          MediaQuery.of(sheetContext)
+                                              .viewInsets
+                                              .bottom +
+                                          8,
+                                    ),
+                                    child: Column(
+                                      children: [
+                                        if (selectedGroup == 0)
+                                          sectionCard(
+                                            '배포/런타임 상태',
+                                            Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                _statusLine(
+                                                    '점검 시각',
+                                                    _fmtClock(
+                                                        _sidecarProcessCheckedAt)),
+                                                _statusLine('단계',
+                                                    _sidecarStatusTitle()),
+                                                _statusLine('프로세스',
+                                                    '$running / $listening'),
+                                                _statusLine('실행 방식', method),
+                                                _statusLine('PID', pid),
+                                                _statusLine('Uptime', uptime),
+                                                _statusLine(
+                                                    '원격 해시/버전', remoteHash),
+                                                _statusLine('헬스',
+                                                    'ok:$healthOk profile:$healthProfile clients:$healthClients'),
+                                                _statusLine('WS', wsState),
+                                                _statusLine('최근 프레임',
+                                                    '$lastFrameAt ($lastFrameAgo)'),
+                                                _statusLine('성능',
+                                                    'fps:${_overlayDebugFps.toStringAsFixed(1)}  gap:${_overlayModelCameraGap ?? '-'}  drop:$_overlayDropCount'),
+                                                _statusLine(
+                                                    '카메라 릴레이', relayState),
+                                                _statusLine('배포 결과',
+                                                    '$_sidecarLastDeployResult @ ${_fmtClock(_sidecarLastDeployAt)}'),
+                                                _statusLine(
+                                                    'SHA (Local)',
+                                                    _shortSidecarRevision(
+                                                        _sidecarLocalRevision)),
+                                                _statusLine(
+                                                    'SHA (Remote)',
+                                                    _shortSidecarRevision(
+                                                        _sidecarRemoteRevision)),
+                                                _statusLine('Revision 동작',
+                                                    _sidecarRevisionAction),
+                                                _statusLine(
+                                                    'Revision 점검시각',
+                                                    _fmtClock(
+                                                        _sidecarLastRevisionCheckedAt)),
+                                                _statusLine(
+                                                    '최근 시작',
+                                                    _fmtClock(
+                                                        _sidecarLastStartAt)),
+                                                _statusLine(
+                                                    '최근 중지',
+                                                    _fmtClock(
+                                                        _sidecarLastStopAt)),
+                                                if ((_sidecarProcessStatusError ??
+                                                        '')
+                                                    .trim()
+                                                    .isNotEmpty)
+                                                  Padding(
+                                                    padding:
+                                                        const EdgeInsets.only(
+                                                            top: 6),
+                                                    child: Text(
+                                                      _sidecarProcessStatusError!
+                                                          .trim(),
+                                                      style: const TextStyle(
+                                                        color:
+                                                            Color(0xFFFF9AA5),
+                                                        fontSize: 11,
+                                                      ),
+                                                    ),
+                                                  ),
+                                              ],
+                                            ),
+                                            trailing: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                IconButton(
+                                                  onPressed: refreshing ||
+                                                          actionRunning
+                                                      ? null
+                                                      : () async {
+                                                          setLocalState(() =>
+                                                              refreshing =
+                                                                  true);
+                                                          await _refreshSidecarProcessStatus();
+                                                          if (!sheetContext
+                                                              .mounted) {
+                                                            return;
+                                                          }
+                                                          setLocalState(() =>
+                                                              refreshing =
+                                                                  false);
+                                                        },
+                                                  icon: const Icon(
+                                                      Icons.refresh_rounded,
+                                                      size: 18,
+                                                      color: Colors.white70),
+                                                  tooltip: '상태 새로고침',
+                                                ),
+                                                IconButton(
+                                                  onPressed: actionRunning
+                                                      ? null
+                                                      : () async {
+                                                          await runAction(
+                                                              _copyDebugSnapshot);
+                                                        },
+                                                  icon: const Icon(
+                                                      Icons
+                                                          .content_copy_rounded,
+                                                      size: 17,
+                                                      color: Colors.white70),
+                                                  tooltip: '디버그 스냅샷 복사',
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        if (selectedGroup == 0)
+                                          sectionCard(
+                                            '최초설정 상태',
+                                            Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                _statusLine('최초설정 완료(로컬)',
+                                                    bootstrapConfigured),
+                                                _statusLine('마지막 자동설정 결과',
+                                                    bootstrapLastResult),
+                                                _statusLine('마지막 자동설정 시각',
+                                                    bootstrapLastAt),
+                                                _statusLine(
+                                                    '상세', bootstrapLastDetail),
+                                                const SizedBox(height: 6),
+                                                const Text(
+                                                  '사이드카 미배포 감지 시 자동설정(배포)을 1회 수행합니다.',
+                                                  style: TextStyle(
+                                                    color: Colors.white60,
+                                                    fontSize: 11,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        if (selectedGroup == 1)
+                                          sectionCard(
+                                            '그래픽 레이어 토글',
+                                            Column(
+                                              children: [
+                                                if (!layerToggleEnabled)
+                                                  const Padding(
+                                                    padding: EdgeInsets.only(
+                                                        bottom: 6),
+                                                    child: Align(
+                                                      alignment:
+                                                          Alignment.centerLeft,
+                                                      child: Text(
+                                                        '현재 WebRTC 모드라 레이어 토글이 비활성화됩니다.',
+                                                        style: TextStyle(
+                                                          color: Colors.white54,
+                                                          fontSize: 11,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  ),
+                                                const Align(
+                                                  alignment:
+                                                      Alignment.centerLeft,
+                                                  child: Padding(
+                                                    padding: EdgeInsets.only(
+                                                        top: 2, bottom: 4),
+                                                    child: Text(
+                                                      '주행 경로',
+                                                      style: TextStyle(
+                                                        color: Colors.white70,
+                                                        fontSize: 12,
+                                                        fontWeight:
+                                                            FontWeight.w700,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                                layerSwitch(
+                                                  'Path Fill',
+                                                  _debugShowPathFill,
+                                                  layerToggleEnabled
+                                                      ? (value) {
+                                                          setState(() =>
+                                                              _debugShowPathFill =
+                                                                  value);
+                                                          setLocalState(() {});
+                                                        }
+                                                      : null,
+                                                ),
+                                                layerSwitch(
+                                                  'Lane Lines',
+                                                  _debugShowLaneLines,
+                                                  layerToggleEnabled
+                                                      ? (value) {
+                                                          setState(() =>
+                                                              _debugShowLaneLines =
+                                                                  value);
+                                                          setLocalState(() {});
+                                                        }
+                                                      : null,
+                                                ),
+                                                layerSwitch(
+                                                  'Road Edge',
+                                                  _debugShowRoadEdge,
+                                                  layerToggleEnabled
+                                                      ? (value) {
+                                                          setState(() =>
+                                                              _debugShowRoadEdge =
+                                                                  value);
+                                                          setLocalState(() {});
+                                                        }
+                                                      : null,
+                                                ),
+                                                const Divider(
+                                                    color: Colors.white12,
+                                                    height: 10),
+                                                const Align(
+                                                  alignment:
+                                                      Alignment.centerLeft,
+                                                  child: Padding(
+                                                    padding: EdgeInsets.only(
+                                                        top: 2, bottom: 4),
+                                                    child: Text(
+                                                      '리드/레이더',
+                                                      style: TextStyle(
+                                                        color: Colors.white70,
+                                                        fontSize: 12,
+                                                        fontWeight:
+                                                            FontWeight.w700,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                                layerSwitch(
+                                                  'Lead1',
+                                                  _debugShowLead1,
+                                                  layerToggleEnabled
+                                                      ? (value) {
+                                                          setState(() =>
+                                                              _debugShowLead1 =
+                                                                  value);
+                                                          setLocalState(() {});
+                                                        }
+                                                      : null,
+                                                ),
+                                                layerSwitch(
+                                                  'Lead2',
+                                                  _debugShowLead2,
+                                                  layerToggleEnabled
+                                                      ? (value) {
+                                                          setState(() =>
+                                                              _debugShowLead2 =
+                                                                  value);
+                                                          setLocalState(() {});
+                                                        }
+                                                      : null,
+                                                ),
+                                                layerSwitch(
+                                                  'Radar Badge',
+                                                  _debugShowRadarBadge,
+                                                  layerToggleEnabled
+                                                      ? (value) {
+                                                          setState(() =>
+                                                              _debugShowRadarBadge =
+                                                                  value);
+                                                          setLocalState(() {});
+                                                        }
+                                                      : null,
+                                                ),
+                                                layerSwitch(
+                                                  'Radar Vector',
+                                                  _debugShowRadarVector,
+                                                  layerToggleEnabled
+                                                      ? (value) {
+                                                          setState(() =>
+                                                              _debugShowRadarVector =
+                                                                  value);
+                                                          setLocalState(() {});
+                                                        }
+                                                      : null,
+                                                ),
+                                                layerSwitch(
+                                                  'Stop-distance (TF)',
+                                                  _debugShowStopDistanceTf,
+                                                  layerToggleEnabled
+                                                      ? (value) {
+                                                          setState(() =>
+                                                              _debugShowStopDistanceTf =
+                                                                  value);
+                                                          setLocalState(() {});
+                                                        }
+                                                      : null,
+                                                ),
+                                                layerSwitch(
+                                                  'State Text',
+                                                  _debugShowStateText,
+                                                  layerToggleEnabled
+                                                      ? (value) {
+                                                          setState(() =>
+                                                              _debugShowStateText =
+                                                                  value);
+                                                          setLocalState(() {});
+                                                        }
+                                                      : null,
+                                                ),
+                                                const Divider(
+                                                    color: Colors.white12,
+                                                    height: 10),
+                                                const Align(
+                                                  alignment:
+                                                      Alignment.centerLeft,
+                                                  child: Padding(
+                                                    padding: EdgeInsets.only(
+                                                        top: 2, bottom: 4),
+                                                    child: Text(
+                                                      '정합/검증',
+                                                      style: TextStyle(
+                                                        color: Colors.white70,
+                                                        fontSize: 12,
+                                                        fontWeight:
+                                                            FontWeight.w700,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                                const Divider(
+                                                    color: Colors.white12,
+                                                    height: 14),
+                                                layerSwitch(
+                                                  '크롭(cover) 기본',
+                                                  _coverViewportPreferred,
+                                                  _temporaryLimitedHudControls
+                                                      ? null
+                                                      : (value) {
+                                                          _setViewportFitMode(
+                                                              value);
+                                                          setLocalState(() {});
+                                                        },
+                                                ),
+                                                layerSwitch(
+                                                  '정합 검증',
+                                                  _overlayVerifyMode,
+                                                  _temporaryLimitedHudControls
+                                                      ? null
+                                                      : (value) {
+                                                          _setOverlayVerifyMode(
+                                                              value);
+                                                          setLocalState(() {});
+                                                        },
+                                                ),
+                                                layerSwitch(
+                                                  '그리드/가이드',
+                                                  _debugShowGuides,
+                                                  debugEnabled
+                                                      ? (value) {
+                                                          _setDebugGuides(
+                                                              value);
+                                                          setLocalState(() {});
+                                                        }
+                                                      : null,
+                                                ),
+                                                layerSwitch(
+                                                  '우측 정보창',
+                                                  _debugShowVerifyPanel,
+                                                  debugEnabled
+                                                      ? (value) {
+                                                          _setDebugVerifyPanel(
+                                                              value);
+                                                          setLocalState(() {});
+                                                        }
+                                                      : null,
+                                                ),
+                                                layerSwitch(
+                                                  '레터박스 프레임',
+                                                  _debugShowViewportFrame,
+                                                  debugEnabled
+                                                      ? (value) {
+                                                          _setDebugViewportFrame(
+                                                              value);
+                                                          setLocalState(() {});
+                                                        }
+                                                      : null,
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        if (selectedGroup == 3)
+                                          sectionCard(
+                                            '자동화 이력 (최근 10개)',
+                                            Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                if (history.isEmpty)
+                                                  const Text(
+                                                    '이력 없음',
+                                                    style: TextStyle(
+                                                      color: Colors.white54,
+                                                      fontSize: 12,
+                                                    ),
+                                                  )
+                                                else
+                                                  ...history.map(
+                                                    (line) => Padding(
+                                                      padding:
+                                                          const EdgeInsets.only(
+                                                              bottom: 3),
+                                                      child: Text(
+                                                        line,
+                                                        style: const TextStyle(
+                                                          color: Colors.white70,
+                                                          fontSize: 11,
+                                                          fontFamily:
+                                                              'monospace',
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  ),
+                                              ],
+                                            ),
+                                          ),
+                                        if (selectedGroup == 2)
+                                          sectionCard(
+                                            '즉시 점검',
+                                            Column(
+                                              children: [
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: OutlinedButton.icon(
+                                                    onPressed: actionRunning
+                                                        ? null
+                                                        : () => runAction(
+                                                            _debugActionHealth),
+                                                    icon: const Icon(Icons
+                                                        .health_and_safety_outlined),
+                                                    label: const Text('헬스체크'),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: OutlinedButton.icon(
+                                                    onPressed: actionRunning
+                                                        ? null
+                                                        : () => runAction(
+                                                            _debugActionWsProbe),
+                                                    icon: const Icon(
+                                                        Icons.wifi_tethering),
+                                                    label: const Text('WS 프로브'),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: OutlinedButton.icon(
+                                                    onPressed: actionRunning
+                                                        ? null
+                                                        : () => runAction(
+                                                            _debugActionTailLog),
+                                                    icon: const Icon(
+                                                        Icons.subject),
+                                                    label: const Text(
+                                                        '로그 tail 50'),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: OutlinedButton.icon(
+                                                    onPressed: actionRunning
+                                                        ? null
+                                                        : () => runAction(
+                                                            _debugActionRedeploy),
+                                                    icon: const Icon(Icons
+                                                        .system_update_alt_rounded),
+                                                    label: const Text('재배포'),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: OutlinedButton.icon(
+                                                    onPressed: actionRunning
+                                                        ? null
+                                                        : () => runAction(
+                                                            _debugActionRestart),
+                                                    icon: const Icon(Icons
+                                                        .restart_alt_rounded),
+                                                    label: const Text('재시작'),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: FilledButton.icon(
+                                                    style:
+                                                        FilledButton.styleFrom(
+                                                      backgroundColor:
+                                                          const Color(
+                                                              0xFF7A2A2A),
+                                                    ),
+                                                    onPressed: actionRunning
+                                                        ? null
+                                                        : () => runAction(
+                                                            _debugActionResetSidecar),
+                                                    icon: const Icon(Icons
+                                                        .delete_forever_rounded),
+                                                    label: const Text(
+                                                        '사이드카 초기화(테스트)'),
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        if (selectedGroup == 4)
+                                          sectionCard(
+                                            '그래픽 프리뷰 (개발용)',
+                                            Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                layerSwitch(
+                                                  '프리뷰 모드 사용 (alive/카메라 없이)',
+                                                  _debugOverlayPreviewMode,
+                                                  (value) {
+                                                    _setOverlayPreviewMode(
+                                                        value);
+                                                    setLocalState(() {});
+                                                  },
+                                                ),
+                                                const SizedBox(height: 8),
+                                                DropdownButtonFormField<
+                                                    _OverlayPreviewScenario>(
+                                                  initialValue:
+                                                      _debugOverlayPreviewScenario,
+                                                  decoration:
+                                                      const InputDecoration(
+                                                    labelText: '시나리오',
+                                                    border:
+                                                        OutlineInputBorder(),
+                                                    isDense: true,
+                                                  ),
+                                                  dropdownColor:
+                                                      const Color(0xFF171B24),
+                                                  style: const TextStyle(
+                                                      color: Colors.white),
+                                                  items: _OverlayPreviewScenario
+                                                      .values
+                                                      .map(
+                                                        (scenario) =>
+                                                            DropdownMenuItem<
+                                                                _OverlayPreviewScenario>(
+                                                          value: scenario,
+                                                          child: Text(
+                                                            _overlayPreviewScenarioLabel(
+                                                                scenario),
+                                                          ),
+                                                        ),
+                                                      )
+                                                      .toList(growable: false),
+                                                  onChanged:
+                                                      _debugOverlayPreviewMode
+                                                          ? (next) {
+                                                              if (next ==
+                                                                  null) {
+                                                                return;
+                                                              }
+                                                              setState(() {
+                                                                _debugOverlayPreviewScenario =
+                                                                    next;
+                                                              });
+                                                              _tickOverlayPreview();
+                                                              setLocalState(
+                                                                  () {});
+                                                            }
+                                                          : null,
+                                                ),
+                                                const SizedBox(height: 12),
+                                                Text(
+                                                  '애니메이션 속도 ${_debugOverlayPreviewSpeed.toStringAsFixed(2)}x',
+                                                  style: const TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 12,
+                                                  ),
+                                                ),
+                                                Slider(
+                                                  min: 0.5,
+                                                  max: 2.0,
+                                                  divisions: 15,
+                                                  value:
+                                                      _debugOverlayPreviewSpeed,
+                                                  label:
+                                                      _debugOverlayPreviewSpeed
+                                                          .toStringAsFixed(2),
+                                                  onChanged:
+                                                      _debugOverlayPreviewMode
+                                                          ? (value) {
+                                                              setState(() {
+                                                                _debugOverlayPreviewSpeed =
+                                                                    value;
+                                                              });
+                                                              setLocalState(
+                                                                  () {});
+                                                            }
+                                                          : null,
+                                                ),
+                                                const SizedBox(height: 6),
+                                                Wrap(
+                                                  spacing: 8,
+                                                  runSpacing: 8,
+                                                  children: [
+                                                    OutlinedButton.icon(
+                                                      onPressed:
+                                                          _debugOverlayPreviewMode
+                                                              ? () {
+                                                                  _tickOverlayPreview();
+                                                                  setLocalState(
+                                                                      () {});
+                                                                }
+                                                              : null,
+                                                      icon: const Icon(Icons
+                                                          .refresh_rounded),
+                                                      label: const Text(
+                                                          '프레임 새로고침'),
+                                                    ),
+                                                  ],
+                                                ),
+                                                const SizedBox(height: 8),
+                                                const Text(
+                                                  '프리뷰는 실차 데이터와 분리된 mock 렌더입니다.\n디자인/배치 확인용으로만 사용하세요.',
+                                                  style: TextStyle(
+                                                    color: Colors.white54,
+                                                    fontSize: 11,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
               ),
             );
@@ -2319,6 +5335,52 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
         );
       },
     );
+  }
+
+  Widget _buildDriveCameraSurface() {
+    if (_cameraSuspendedByLifecycle) {
+      return const ColoredBox(color: Colors.black);
+    }
+    if (_debugOverlayPreviewMode) {
+      return _buildOverlayPreviewBackdrop();
+    }
+    if (!_hudModeLoaded) {
+      return const ColoredBox(color: Colors.black);
+    }
+    if (_openpilotOverlayMode && !_sidecarConnected) {
+      return const ColoredBox(color: Colors.black);
+    }
+    if (_useNativeLiveCamera) {
+      return AndroidView(
+        key: ValueKey<String>(
+          'native-live-${widget.hostIp}-$_liveCameraName',
+        ),
+        viewType: 'carrotlink/native_drive_video',
+        creationParams: <String, dynamic>{
+          'wsUrl': _liveCameraWsUrl,
+        },
+        creationParamsCodec: const StandardMessageCodec(),
+        onPlatformViewCreated: (viewId) {
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            _nativeCameraViewId = viewId;
+            _cameraLoading = true;
+            _cameraError = null;
+          });
+          if (_useNativeOverlayRenderer) {
+            unawaited(
+              _pushNativeOverlay(
+                _overlayNotifier.value,
+                force: true,
+              ),
+            );
+          }
+        },
+      );
+    }
+    return WebViewWidget(controller: _cameraController);
   }
 
   @override
@@ -2377,18 +5439,17 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                             padding: const EdgeInsets.only(bottom: 4),
                             child: Column(
                               children: [
-                                IconButton(
-                                  onPressed: _temporaryLimitedHudControls
-                                      ? null
-                                      : _openDebugOptionsPopup,
-                                  icon: Icon(
-                                    Icons.tune,
-                                    color: _temporaryLimitedHudControls
-                                        ? Colors.white38
-                                        : const Color(0xFF8FE7FF),
+                                if (_hudDebugMenuEnabled)
+                                  IconButton(
+                                    onPressed: _temporaryLimitedHudControls
+                                        ? null
+                                        : _openDebugOptionsPopup,
+                                    icon: const Icon(
+                                      Icons.tune,
+                                      color: Color(0xFF8FE7FF),
+                                    ),
+                                    tooltip: '디버그 옵션',
                                   ),
-                                  tooltip: '디버그 옵션',
-                                ),
                               ],
                             ),
                           ),
@@ -2402,24 +5463,34 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                       color: Colors.black,
                       child: LayoutBuilder(
                         builder: (context, viewport) {
-                          final sourceW = _cameraSourceSize.width > 1
+                          var sourceW = _cameraSourceSize.width > 1
                               ? _cameraSourceSize.width
                               : 1928.0;
-                          final sourceH = _cameraSourceSize.height > 1
+                          var sourceH = _cameraSourceSize.height > 1
                               ? _cameraSourceSize.height
                               : 1208.0;
+                          if ((sourceW - 1928.0).abs() <= 16.0 &&
+                              (sourceH - 1208.0).abs() <= 16.0) {
+                            sourceW = 1928.0;
+                            sourceH = 1208.0;
+                          }
                           final vw = viewport.maxWidth;
                           final vh = viewport.maxHeight;
                           if (vw <= 1 || vh <= 1) {
                             return const SizedBox.shrink();
                           }
-                          final scale = _coverViewport
-                              ? math.max(vw / sourceW, vh / sourceH)
-                              : math.min(vw / sourceW, vh / sourceH);
-                          final drawW = sourceW * scale;
-                          final drawH = sourceH * scale;
-                          final left = (vw - drawW) * 0.5;
-                          final top = (vh - drawH) * 0.5;
+                          final placement = _buildVideoPlacement(
+                            source: Size(sourceW, sourceH),
+                            viewport: Size(vw, vh),
+                            snapshot: _overlayNotifier.value,
+                            cameraKind: _liveCameraKind,
+                            coverViewport: _coverViewport,
+                            openpilotTransform: _openpilotOverlayMode,
+                          );
+                          final drawW = placement.width;
+                          final drawH = placement.height;
+                          final left = placement.left;
+                          final top = placement.top;
                           final drawSize = Size(drawW, drawH);
                           if ((_nativeOverlaySize.width - drawW).abs() > 0.5 ||
                               (_nativeOverlaySize.height - drawH).abs() > 0.5) {
@@ -2445,61 +5516,11 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                   child: Stack(
                                     children: [
                                       Positioned.fill(
-                                        child: _cameraSuspendedByLifecycle
-                                            ? const ColoredBox(
-                                                color: Colors.black,
-                                              )
-                                            : (!_hudModeLoaded
-                                                ? const ColoredBox(
-                                                    color: Colors.black,
-                                                  )
-                                                : (_openpilotOverlayMode &&
-                                                    !_sidecarConnected
-                                                ? const ColoredBox(
-                                                    color: Colors.black,
-                                                  )
-                                                : (_useNativeLiveCamera
-                                                    ? AndroidView(
-                                                        key: ValueKey<String>(
-                                                          'native-live-${widget.hostIp}-$_liveCameraName',
-                                                        ),
-                                                        viewType:
-                                                            'carrotlink/native_drive_video',
-                                                        creationParams: <String,
-                                                            dynamic>{
-                                                          'wsUrl':
-                                                              _liveCameraWsUrl,
-                                                        },
-                                                        creationParamsCodec:
-                                                            const StandardMessageCodec(),
-                                                        onPlatformViewCreated:
-                                                            (viewId) {
-                                                          if (!mounted) return;
-                                                          setState(() {
-                                                            _nativeCameraViewId =
-                                                                viewId;
-                                                            _cameraLoading =
-                                                                true;
-                                                            _cameraError = null;
-                                                          });
-                                                          if (_useNativeOverlayRenderer) {
-                                                            unawaited(
-                                                              _pushNativeOverlay(
-                                                                _overlayNotifier
-                                                                    .value,
-                                                                force: true,
-                                                              ),
-                                                            );
-                                                          }
-                                                        },
-                                                      )
-                                                    : WebViewWidget(
-                                                        controller:
-                                                            _cameraController,
-                                                      )))),
+                                        child: _buildDriveCameraSurface(),
                                       ),
-                                      if (_openpilotOverlayMode &&
-                                          !_useNativeOverlayRenderer)
+                                      if ((_openpilotOverlayMode &&
+                                              !_useNativeOverlayRenderer) ||
+                                          _debugOverlayPreviewMode)
                                         Positioned.fill(
                                           child: ValueListenableBuilder<
                                               _DriveOverlaySnapshot>(
@@ -2519,13 +5540,31 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                                     showDebugGuides:
                                                         _overlayVerifyMode &&
                                                             _debugShowGuides,
+                                                    showPathFill:
+                                                        _debugShowPathFill,
+                                                    showLaneLines:
+                                                        _debugShowLaneLines,
+                                                    showRoadEdge:
+                                                        _debugShowRoadEdge,
+                                                    showLead1: _debugShowLead1,
+                                                    showLead2: _debugShowLead2,
+                                                    showRadarBadge:
+                                                        _debugShowRadarBadge,
+                                                    showRadarVector:
+                                                        _debugShowRadarVector,
+                                                    showStopDistanceTf:
+                                                        _debugShowStopDistanceTf,
+                                                    showStateText:
+                                                        _debugShowStateText,
                                                   ),
                                                 ),
                                               );
                                             },
                                           ),
                                         ),
-                                      if (_cameraLoading)
+                                      if (_cameraLoading &&
+                                          !_cameraStalled &&
+                                          !_debugOverlayPreviewMode)
                                         const Positioned.fill(
                                           child: ColoredBox(
                                             color: Colors.black45,
@@ -2536,48 +5575,153 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                             ),
                                           ),
                                         ),
+                                      if (_cameraStalled &&
+                                          !_debugOverlayPreviewMode)
+                                        Positioned(
+                                          top: 10,
+                                          right: 10,
+                                          child: Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 10,
+                                              vertical: 6,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xCC4A2E12),
+                                              borderRadius:
+                                                  BorderRadius.circular(10),
+                                              border: Border.all(
+                                                color: const Color(0x88FFD27A),
+                                              ),
+                                            ),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                const Icon(
+                                                  Icons.network_check_rounded,
+                                                  color: Color(0xFFFFD27A),
+                                                  size: 14,
+                                                ),
+                                                const SizedBox(width: 6),
+                                                Text(
+                                                  _cameraStallBadgeText(),
+                                                  style: const TextStyle(
+                                                    color: Color(0xFFFFE6B8),
+                                                    fontSize: 11,
+                                                    fontWeight: FontWeight.w600,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ),
                                     ],
                                   ),
                                 ),
-                                if (_sidecarTransitioning)
+                                if (_showSidecarStatusBanner)
                                   Positioned(
                                     left: 16,
                                     right: 16,
-                                    bottom: 16,
-                                    child: Container(
-                                      padding: const EdgeInsets.all(10),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xCC2C2C2C),
-                                        borderRadius: BorderRadius.circular(10),
-                                        border:
-                                            Border.all(color: Colors.white24),
-                                      ),
-                                      child: const Text(
-                                        '사이드카 재시작 중...',
-                                        style: TextStyle(
-                                          color: Colors.white,
-                                        ),
-                                      ),
-                                    ),
-                                  )
-                                else if (_openpilotOverlayMode &&
-                                    !_sidecarConnected)
-                                  Positioned(
-                                    left: 16,
-                                    right: 16,
-                                    bottom: 16,
-                                    child: Container(
-                                      padding: const EdgeInsets.all(10),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xCC1C2532),
-                                        borderRadius: BorderRadius.circular(10),
-                                        border:
-                                            Border.all(color: Colors.white24),
-                                      ),
-                                      child: const Text(
-                                        '사이드카 자동 준비 중...',
-                                        style: TextStyle(
-                                          color: Colors.white,
+                                    bottom: 12,
+                                    child: Align(
+                                      alignment: Alignment.bottomCenter,
+                                      child: ConstrainedBox(
+                                        constraints:
+                                            const BoxConstraints(maxWidth: 560),
+                                        child: Container(
+                                          padding: const EdgeInsets.fromLTRB(
+                                              10, 8, 10, 8),
+                                          decoration: BoxDecoration(
+                                            color: _sidecarStatusColor(),
+                                            borderRadius:
+                                                BorderRadius.circular(10),
+                                            border: Border.all(
+                                                color: Colors.white24),
+                                          ),
+                                          child: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Row(
+                                                children: [
+                                                  Icon(
+                                                    _sidecarPhase ==
+                                                            _SidecarPhase.failed
+                                                        ? Icons.error_outline
+                                                        : (_sidecarPhase ==
+                                                                _SidecarPhase
+                                                                    .stopping
+                                                            ? Icons
+                                                                .stop_circle_outlined
+                                                            : (_sidecarPhase ==
+                                                                    _SidecarPhase
+                                                                        .running
+                                                                ? Icons
+                                                                    .check_circle_outline
+                                                                : Icons
+                                                                    .hourglass_top_rounded)),
+                                                    color: Colors.white,
+                                                    size: 16,
+                                                  ),
+                                                  const SizedBox(width: 6),
+                                                  Expanded(
+                                                    child: Text(
+                                                      _sidecarStatusTitle(),
+                                                      maxLines: 1,
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                      style: const TextStyle(
+                                                        color: Colors.white,
+                                                        fontSize: 13,
+                                                        fontWeight:
+                                                            FontWeight.w600,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                              if (_sidecarPhase ==
+                                                      _SidecarPhase.failed &&
+                                                  (_sidecarPhaseMessage ?? '')
+                                                      .trim()
+                                                      .isNotEmpty)
+                                                Padding(
+                                                  padding:
+                                                      const EdgeInsets.only(
+                                                          top: 3),
+                                                  child: Text(
+                                                    _sidecarPhaseMessage!
+                                                        .trim(),
+                                                    maxLines: 2,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                    style: const TextStyle(
+                                                      color: Colors.white70,
+                                                      fontSize: 11,
+                                                    ),
+                                                  ),
+                                                ),
+                                              if (_isSidecarBusy) ...[
+                                                const SizedBox(height: 6),
+                                                const ClipRRect(
+                                                  borderRadius:
+                                                      BorderRadius.all(
+                                                          Radius.circular(999)),
+                                                  child:
+                                                      LinearProgressIndicator(
+                                                    minHeight: 2,
+                                                    backgroundColor:
+                                                        Color(0x553A4C63),
+                                                    valueColor:
+                                                        AlwaysStoppedAnimation<
+                                                            Color>(
+                                                      Color(0xFF69C8FF),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
+                                            ],
+                                          ),
                                         ),
                                       ),
                                     ),
@@ -2601,7 +5745,76 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                       ),
                                     ),
                                   )
-                                else if (_cameraError != null)
+                                else if (_disableDmGateChecking &&
+                                    !_debugOverlayPreviewMode)
+                                  Positioned(
+                                    left: 16,
+                                    right: 16,
+                                    bottom: 16,
+                                    child: Container(
+                                      padding: const EdgeInsets.all(10),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xCC1C2532),
+                                        borderRadius: BorderRadius.circular(10),
+                                        border:
+                                            Border.all(color: Colors.white24),
+                                      ),
+                                      child: const Text(
+                                        'DisableDM 값 확인 중...',
+                                        style: TextStyle(color: Colors.white),
+                                      ),
+                                    ),
+                                  )
+                                else if (_disableDmGateBlocked &&
+                                    !_debugOverlayPreviewMode)
+                                  Positioned(
+                                    left: 16,
+                                    right: 16,
+                                    bottom: 16,
+                                    child: Container(
+                                      padding: const EdgeInsets.all(10),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xCC7A1010),
+                                        borderRadius: BorderRadius.circular(10),
+                                        border:
+                                            Border.all(color: Colors.white24),
+                                      ),
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            '오픈파일럿 그래픽 모드는 DisableDM=2가 필요합니다. '
+                                            '(현재: ${(_disableDmCurrentValue ?? '').trim().isEmpty ? '확인 불가' : _disableDmCurrentValue})',
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 8),
+                                          Wrap(
+                                            spacing: 8,
+                                            runSpacing: 8,
+                                            children: [
+                                              FilledButton.tonal(
+                                                onPressed: () async {
+                                                  await _openDisableDmSettingsFromDrive();
+                                                  if (!mounted) return;
+                                                  await _applyHudModeRuntimeWithDisableDmGate();
+                                                },
+                                                child: const Text('설정으로 이동'),
+                                              ),
+                                              OutlinedButton(
+                                                onPressed: _exitScreen,
+                                                child: const Text('닫기'),
+                                              ),
+                                            ],
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  )
+                                else if (_cameraError != null &&
+                                    !_debugOverlayPreviewMode)
                                   Positioned(
                                     left: 16,
                                     right: 16,
@@ -2616,6 +5829,29 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                       ),
                                       child: Text(
                                         _cameraError!,
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                    ),
+                                  )
+                                else if (_hudNoticeMessage != null)
+                                  Positioned(
+                                    left: 16,
+                                    right: 16,
+                                    bottom: 16,
+                                    child: Container(
+                                      padding: const EdgeInsets.all(10),
+                                      decoration: BoxDecoration(
+                                        color: _hudNoticeIsError
+                                            ? const Color(0xCC7A1010)
+                                            : const Color(0xCC1C2532),
+                                        borderRadius: BorderRadius.circular(10),
+                                        border:
+                                            Border.all(color: Colors.white24),
+                                      ),
+                                      child: Text(
+                                        _hudNoticeMessage!,
                                         style: const TextStyle(
                                           color: Colors.white,
                                         ),
@@ -2686,6 +5922,85 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       ),
     );
   }
+}
+
+class _PreviewRoadBackdropPainter extends CustomPainter {
+  const _PreviewRoadBackdropPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final skyRect = Offset.zero & Size(size.width, size.height * 0.58);
+    final roadRect =
+        Rect.fromLTWH(0, size.height * 0.34, size.width, size.height * 0.66);
+    final skyPaint = Paint()
+      ..shader = const LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: <Color>[
+          Color(0xFF6F88A6),
+          Color(0xFF444D58),
+        ],
+      ).createShader(skyRect);
+    final roadPaint = Paint()
+      ..shader = const LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: <Color>[
+          Color(0xFF3E444C),
+          Color(0xFF1D2127),
+        ],
+      ).createShader(roadRect);
+    canvas.drawRect(
+        Offset.zero & size, Paint()..color = const Color(0xFF0E1117));
+    canvas.drawRect(skyRect, skyPaint);
+    canvas.drawRect(roadRect, roadPaint);
+
+    final horizonY = size.height * 0.34;
+    final roadPath = Path()
+      ..moveTo(size.width * 0.08, size.height)
+      ..lineTo(size.width * 0.92, size.height)
+      ..lineTo(size.width * 0.59, horizonY)
+      ..lineTo(size.width * 0.41, horizonY)
+      ..close();
+    canvas.drawPath(
+      roadPath,
+      Paint()
+        ..color = const Color(0xFF2A2F36)
+        ..style = PaintingStyle.fill,
+    );
+
+    final lanePaint = Paint()
+      ..color = const Color(0xCCF7F7F7)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.0;
+    final dashPaint = Paint()
+      ..color = const Color(0xCCFFFFFF)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.6;
+    canvas.drawLine(
+      Offset(size.width * 0.28, size.height),
+      Offset(size.width * 0.47, horizonY),
+      lanePaint,
+    );
+    canvas.drawLine(
+      Offset(size.width * 0.72, size.height),
+      Offset(size.width * 0.53, horizonY),
+      lanePaint,
+    );
+    for (var i = 0; i < 7; i++) {
+      final t0 = i / 7.0;
+      final t1 = (i + 0.5) / 7.0;
+      final x0 = size.width * 0.5;
+      final y0 = size.height + ((horizonY - size.height) * t0);
+      final x1 = size.width * 0.5;
+      final y1 = size.height + ((horizonY - size.height) * t1);
+      canvas.drawLine(Offset(x0, y0), Offset(x1, y1), dashPaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _PreviewRoadBackdropPainter oldDelegate) =>
+      false;
 }
 
 class _DriveOverlaySnapshot {
@@ -3165,9 +6480,14 @@ class _DriveOverlaySnapshot {
     var calibrationRpy = const <double>[];
     var wideFromDeviceEuler = const <double>[];
     var pathOffsetZ = 1.22;
-    void applyCalibration(dynamic raw) {
-      if (raw is! Map) return;
+    bool applyCalibration(dynamic raw) {
+      if (raw is! Map) return false;
       final map = Map<String, dynamic>.from(raw);
+      final calStatus = _asInt(map['calStatus']);
+      // openpilot UI parity: apply calibration only when CALIBRATED(1).
+      if (calStatus != null && calStatus != 1) {
+        return false;
+      }
       final rpy = _asDoubleList(map['rpyCalib']);
       if (rpy.length >= 3) {
         calibrationRpy = rpy.take(3).toList(growable: false);
@@ -3180,12 +6500,15 @@ class _DriveOverlaySnapshot {
       if (h != null && h.isFinite && h > 0.3 && h < 4.0) {
         pathOffsetZ = h;
       }
+      return calibrationRpy.length >= 3 && wideFromDeviceEuler.length >= 3;
     }
 
+    var liveApplied = false;
     if (liveCalibration is Map) {
-      applyCalibration(liveCalibration);
+      liveApplied = applyCalibration(liveCalibration);
     }
-    if (calibrationRpy.length < 3 || wideFromDeviceEuler.length < 3) {
+    if (!liveApplied &&
+        (calibrationRpy.length < 3 || wideFromDeviceEuler.length < 3)) {
       applyCalibration(cachedCalibration);
     }
 
@@ -3340,6 +6663,15 @@ class _DriveOverlayPainter extends CustomPainter {
   final _DriveCameraKind cameraKind;
   final bool coverViewport;
   final bool showDebugGuides;
+  final bool showPathFill;
+  final bool showLaneLines;
+  final bool showRoadEdge;
+  final bool showLead1;
+  final bool showLead2;
+  final bool showRadarBadge;
+  final bool showRadarVector;
+  final bool showStopDistanceTf;
+  final bool showStateText;
 
   static const double _baseSourceWidth = 1928.0;
   static const double _baseSourceHeight = 1208.0;
@@ -3363,6 +6695,15 @@ class _DriveOverlayPainter extends CustomPainter {
     required this.cameraKind,
     required this.coverViewport,
     this.showDebugGuides = false,
+    this.showPathFill = true,
+    this.showLaneLines = true,
+    this.showRoadEdge = true,
+    this.showLead1 = true,
+    this.showLead2 = true,
+    this.showRadarBadge = true,
+    this.showRadarVector = true,
+    this.showStopDistanceTf = true,
+    this.showStateText = true,
   });
 
   _M3 _rotationFromEuler(List<double> rpy) {
@@ -3431,6 +6772,34 @@ class _DriveOverlayPainter extends CustomPainter {
     );
   }
 
+  _M3 _calibTransformForSource(Size source) {
+    final wideCam = cameraKind == _DriveCameraKind.wideRoad;
+    final intrinsic = _intrinsicForSource(source, wideCam);
+    final deviceFromCalib = _rotationFromEuler(snapshot.calibrationRpy);
+    final wideFromDevice = wideCam
+        ? _rotationFromEuler(snapshot.wideFromDeviceEuler)
+        : const _M3.identity();
+    final viewFromCalib = wideCam
+        ? _viewFromDevice.multiply(wideFromDevice.multiply(deviceFromCalib))
+        : _viewFromDevice.multiply(deviceFromCalib);
+    return intrinsic.multiply(viewFromCalib);
+  }
+
+  _SourceCanvasPlacement _sourceToCanvasPlacementProjected({
+    required Size source,
+    required Size canvas,
+  }) {
+    final wideCam = cameraKind == _DriveCameraKind.wideRoad;
+    final intrinsic = _intrinsicForSource(source, wideCam);
+    final calibTransform = _calibTransformForSource(source);
+    return _sourceToCanvasPlacement(
+      source: source,
+      canvas: canvas,
+      intrinsic: intrinsic,
+      calibTransform: calibTransform,
+    );
+  }
+
   Color _pathColorFromIndex(int idx) {
     final n = idx % 10;
     switch (n) {
@@ -3489,6 +6858,20 @@ class _DriveOverlayPainter extends CustomPainter {
     return const Size(_baseSourceWidth, _baseSourceHeight);
   }
 
+  // -------------------------------------------------------------------------
+  // Projection/Mapping invariants (MUST NOT change in adaptive UI refactors)
+  //
+  // This block is the source-of-truth for camera->overlay geometric alignment.
+  // Keep these equations and transform order stable unless doing explicit
+  // projection-engine work with field validation:
+  // - _sourceToCanvasPlacement
+  // - _sourceToCanvasPlacementFromDisplayTransform
+  // - _buildTransform
+  // - _mapToScreen
+  //
+  // Adaptive/responsive changes must be limited to surrounding UI shells
+  // (dock/panel/popup/safe-area spacing), not these math paths.
+  // -------------------------------------------------------------------------
   _SourceCanvasPlacement _sourceToCanvasPlacement({
     required Size source,
     required Size canvas,
@@ -3547,52 +6930,68 @@ class _DriveOverlayPainter extends CustomPainter {
     );
   }
 
-  _SourceCanvasPlacement _sourceToCanvasPlacementSimple({
+  _SourceCanvasPlacement _sourceToCanvasPlacementFromDisplayTransform({
     required Size source,
     required Size canvas,
+    required Map<String, dynamic>? displayTransform,
   }) {
     final sx = canvas.width / source.width;
     final sy = canvas.height / source.height;
-    final scale = coverViewport ? math.max(sx, sy) : math.min(sx, sy);
-    final drawW = source.width * scale;
-    final drawH = source.height * scale;
-    final dx = (canvas.width - drawW) * 0.5;
-    final dy = (canvas.height - drawH) * 0.5;
+    final fitScale = coverViewport ? math.max(sx, sy) : math.min(sx, sy);
+    final baseDrawW = source.width * fitScale;
+    final baseDrawH = source.height * fitScale;
+    final baseDx = (canvas.width - baseDrawW) * 0.5;
+    final baseDy = (canvas.height - baseDrawH) * 0.5;
+
+    final zoomRaw = displayTransform == null
+        ? null
+        : _DriveOverlaySnapshot._asDouble(displayTransform['zoom']);
+    final txRaw = displayTransform == null
+        ? null
+        : _DriveOverlaySnapshot._asDouble(displayTransform['tx']);
+    final tyRaw = displayTransform == null
+        ? null
+        : _DriveOverlaySnapshot._asDouble(displayTransform['ty']);
+    final xOffsetRaw = displayTransform == null
+        ? null
+        : _DriveOverlaySnapshot._asDouble(displayTransform['xOffset']);
+    final yOffsetRaw = displayTransform == null
+        ? null
+        : _DriveOverlaySnapshot._asDouble(displayTransform['yOffset']);
+
+    final zoom =
+        (zoomRaw != null && zoomRaw.isFinite && zoomRaw > 0.1) ? zoomRaw : 1.0;
+    final tx = (txRaw != null && txRaw.isFinite)
+        ? txRaw
+        : ((source.width - (source.width * zoom)) * 0.5);
+    final ty = (tyRaw != null && tyRaw.isFinite)
+        ? tyRaw
+        : ((source.height - (source.height * zoom)) * 0.5);
+
     return _SourceCanvasPlacement(
       transform: _M3(
-        scale,
+        fitScale * zoom,
         0.0,
-        dx,
+        (fitScale * tx) + baseDx,
         0.0,
-        scale,
-        dy,
+        fitScale * zoom,
+        (fitScale * ty) + baseDy,
         0.0,
         0.0,
         1.0,
       ),
-      scale: scale,
-      xOffset: 0.0,
-      yOffset: 0.0,
+      scale: fitScale * zoom,
+      xOffset: (xOffsetRaw != null && xOffsetRaw.isFinite) ? xOffsetRaw : 0.0,
+      yOffset: (yOffsetRaw != null && yOffsetRaw.isFinite) ? yOffsetRaw : 0.0,
     );
   }
 
   _ProjectionTransform _buildTransform(Size size) {
-    final wideCam = cameraKind == _DriveCameraKind.wideRoad;
     final src = _effectiveSourceSize;
-    final intrinsic = _intrinsicForSource(src, wideCam);
-    final deviceFromCalib = _rotationFromEuler(snapshot.calibrationRpy);
-    final wideFromDevice = wideCam
-        ? _rotationFromEuler(snapshot.wideFromDeviceEuler)
-        : const _M3.identity();
-    final viewFromCalib = wideCam
-        ? _viewFromDevice.multiply(wideFromDevice.multiply(deviceFromCalib))
-        : _viewFromDevice.multiply(deviceFromCalib);
-    final calibTransform = intrinsic.multiply(viewFromCalib);
-    final placement = _sourceToCanvasPlacement(
+    final calibTransform = _calibTransformForSource(src);
+    final placement = _sourceToCanvasPlacementProjected(
       source: src,
       canvas: size,
-      intrinsic: intrinsic,
-      calibTransform: calibTransform,
     );
     final sourceToCanvas = placement.transform;
     // Keep projection math aligned with openpilot-style transform pipeline:
@@ -4160,6 +7559,15 @@ class _DriveOverlayPainter extends CustomPainter {
     required Size canvasSize,
     required bool coverViewport,
     bool showDebugGuides = false,
+    bool showPathFill = true,
+    bool showLaneLines = true,
+    bool showRoadEdge = true,
+    bool showLead1 = true,
+    bool showLead2 = true,
+    bool showRadarBadge = true,
+    bool showRadarVector = true,
+    bool showStopDistanceTf = true,
+    bool showStateText = true,
   }) {
     final painter = _DriveOverlayPainter(
       snapshot: snapshot,
@@ -4168,6 +7576,15 @@ class _DriveOverlayPainter extends CustomPainter {
       cameraKind: cameraKind,
       coverViewport: coverViewport,
       showDebugGuides: showDebugGuides,
+      showPathFill: showPathFill,
+      showLaneLines: showLaneLines,
+      showRoadEdge: showRoadEdge,
+      showLead1: showLead1,
+      showLead2: showLead2,
+      showRadarBadge: showRadarBadge,
+      showRadarVector: showRadarVector,
+      showStopDistanceTf: showStopDistanceTf,
+      showStateText: showStateText,
     );
     return painter._buildNativeOverlayPayload(canvasSize);
   }
@@ -4335,14 +7752,19 @@ class _DriveOverlayPainter extends CustomPainter {
     required Size canvasSize,
     required double sourceWidth,
     required double sourceHeight,
+    Map<String, dynamic>? displayTransform,
   }) {
     if (sourcePoints.isEmpty) return const <Offset>[];
     final srcW = (sourceWidth > 1.0) ? sourceWidth : _baseSourceWidth;
     final srcH = (sourceHeight > 1.0) ? sourceHeight : _baseSourceHeight;
     final source = Size(srcW, srcH);
-    final placement = _sourceToCanvasPlacementSimple(
+    // Invariant: sidecar points are already projected in source pixel space.
+    // Only apply the same display transform used by the camera layer.
+    // Do not insert extra projection/normalization here for UI-only changes.
+    final placement = _sourceToCanvasPlacementFromDisplayTransform(
       source: source,
       canvas: canvasSize,
+      displayTransform: displayTransform,
     );
     final out = <Offset>[];
     for (final p in sourcePoints) {
@@ -4371,6 +7793,10 @@ class _DriveOverlayPainter extends CustomPainter {
         _DriveOverlaySnapshot._asDouble(cam['sourceWidth']) ?? _baseSourceWidth;
     final sourceHeight = _DriveOverlaySnapshot._asDouble(cam['sourceHeight']) ??
         _baseSourceHeight;
+    final displayTransformRaw = cam['displayTransform'];
+    final displayTransform = displayTransformRaw is Map
+        ? Map<String, dynamic>.from(displayTransformRaw)
+        : null;
     var sidecarPathMode =
         _DriveOverlaySnapshot._asInt(cam['pathMode']) ?? snapshot.pathMode;
     var sidecarPathColor =
@@ -4403,7 +7829,7 @@ class _DriveOverlayPainter extends CustomPainter {
     final labels = <Map<String, dynamic>>[];
 
     final laneRaw = cam['lanePolygons'];
-    if (laneRaw is List) {
+    if (showLaneLines && laneRaw is List) {
       for (final item in laneRaw) {
         if (item is! Map) continue;
         final points = _mapSourcePointsToCanvas(
@@ -4411,6 +7837,7 @@ class _DriveOverlayPainter extends CustomPainter {
           canvasSize: size,
           sourceWidth: sourceWidth,
           sourceHeight: sourceHeight,
+          displayTransform: displayTransform,
         );
         if (points.length < 3) continue;
         final probability =
@@ -4434,7 +7861,7 @@ class _DriveOverlayPainter extends CustomPainter {
     }
 
     final edgeRaw = cam['roadEdgePolygons'];
-    if (edgeRaw is List) {
+    if (showRoadEdge && edgeRaw is List) {
       for (final item in edgeRaw) {
         if (item is! Map) continue;
         final points = _mapSourcePointsToCanvas(
@@ -4442,6 +7869,7 @@ class _DriveOverlayPainter extends CustomPainter {
           canvasSize: size,
           sourceWidth: sourceWidth,
           sourceHeight: sourceHeight,
+          displayTransform: displayTransform,
         );
         if (points.length < 3) continue;
         final std = _DriveOverlaySnapshot._asDouble(item['std']) ?? 1.0;
@@ -4454,6 +7882,7 @@ class _DriveOverlayPainter extends CustomPainter {
       canvasSize: size,
       sourceWidth: sourceWidth,
       sourceHeight: sourceHeight,
+      displayTransform: displayTransform,
     );
     if (trackVertices.length < 3 && snapshot.path.length >= 2) {
       final transform = _buildTransform(size);
@@ -4478,7 +7907,7 @@ class _DriveOverlayPainter extends CustomPainter {
         trackVertices = fallbackTrack;
       }
     }
-    if (trackVertices.length >= 3) {
+    if (showPathFill && trackVertices.length >= 3) {
       _collectPathPolygonsByMode(
         polygons,
         trackVertices,
@@ -4493,8 +7922,15 @@ class _DriveOverlayPainter extends CustomPainter {
       canvasSize: size,
       sourceWidth: sourceWidth,
       sourceHeight: sourceHeight,
+      displayTransform: displayTransform,
       polygons: polygons,
       labels: labels,
+      showLead1: showLead1,
+      showLead2: showLead2,
+      showRadarBadge: showRadarBadge,
+      showRadarVector: showRadarVector,
+      showStopDistanceTf: showStopDistanceTf,
+      showStateText: showStateText,
     );
 
     if (showDebugGuides) {
@@ -4535,60 +7971,64 @@ class _DriveOverlayPainter extends CustomPainter {
     final polygons = <Map<String, dynamic>>[];
     List<Map<String, dynamic>>? labels;
 
-    for (var i = 0; i < snapshot.laneLines.length; i++) {
-      final ln = snapshot.laneLines[i];
-      var lineWidth = 0.025;
-      if (i == 1 && snapshot.leftLaneLine >= 20) {
-        lineWidth = 0.05;
-      }
-      final poly = _mapLineToPolygonVertices(
-        transform,
-        ln.line,
-        lineWidth,
-        0.0,
-        laneMaxIdx,
-      );
-      if (poly == null) continue;
-      final alpha = ln.probability > 0.3 ? (220.0 / 255.0) : 0.0;
-      if (alpha <= 0.0) continue;
-      Color laneColor = Colors.white;
-      if (i == 1 && snapshot.leftLaneLine >= 20) {
-        laneColor = const Color(0xFFFFD95E);
-      } else if (i == 2 && snapshot.rightLaneLine >= 20) {
-        laneColor = const Color(0xFFFFD95E);
-      }
-      polygons.add(_encodePolygon(
-        poly,
-        laneColor.withValues(alpha: alpha),
-      ));
-      if (i == 1 && (snapshot.leftLaneLine % 10) == 4) {
-        final doublePoly = _mapLineToPolygonVertices(
+    if (showLaneLines) {
+      for (var i = 0; i < snapshot.laneLines.length; i++) {
+        final ln = snapshot.laneLines[i];
+        var lineWidth = 0.025;
+        if (i == 1 && snapshot.leftLaneLine >= 20) {
+          lineWidth = 0.05;
+        }
+        final poly = _mapLineToPolygonVertices(
           transform,
           ln.line,
           lineWidth,
           0.0,
           laneMaxIdx,
-          lineCenterShift: -0.3,
         );
-        if (doublePoly != null) {
-          polygons.add(_encodePolygon(
-            doublePoly,
-            laneColor.withValues(alpha: alpha),
-          ));
+        if (poly == null) continue;
+        final alpha = ln.probability > 0.3 ? (220.0 / 255.0) : 0.0;
+        if (alpha <= 0.0) continue;
+        Color laneColor = Colors.white;
+        if (i == 1 && snapshot.leftLaneLine >= 20) {
+          laneColor = const Color(0xFFFFD95E);
+        } else if (i == 2 && snapshot.rightLaneLine >= 20) {
+          laneColor = const Color(0xFFFFD95E);
+        }
+        polygons.add(_encodePolygon(
+          poly,
+          laneColor.withValues(alpha: alpha),
+        ));
+        if (i == 1 && (snapshot.leftLaneLine % 10) == 4) {
+          final doublePoly = _mapLineToPolygonVertices(
+            transform,
+            ln.line,
+            lineWidth,
+            0.0,
+            laneMaxIdx,
+            lineCenterShift: -0.3,
+          );
+          if (doublePoly != null) {
+            polygons.add(_encodePolygon(
+              doublePoly,
+              laneColor.withValues(alpha: alpha),
+            ));
+          }
         }
       }
     }
 
-    for (final edge in snapshot.roadEdges) {
-      final poly = _mapLineToPolygonVertices(
-        transform,
-        edge.line,
-        0.025,
-        0.0,
-        laneMaxIdx,
-      );
-      if (poly == null) continue;
-      polygons.add(_encodePolygon(poly, _roadEdgeColor(edge.std)));
+    if (showRoadEdge) {
+      for (final edge in snapshot.roadEdges) {
+        final poly = _mapLineToPolygonVertices(
+          transform,
+          edge.line,
+          0.025,
+          0.0,
+          laneMaxIdx,
+        );
+        if (poly == null) continue;
+        polygons.add(_encodePolygon(poly, _roadEdgeColor(edge.std)));
+      }
     }
 
     final pathMode = snapshot.pathMode;
@@ -4605,7 +8045,7 @@ class _DriveOverlayPainter extends CustomPainter {
       startDistance: startDistance,
       allowInvert: false,
     );
-    if (trackVertices != null && trackVertices.length >= 3) {
+    if (showPathFill && trackVertices != null && trackVertices.length >= 3) {
       final colorIdx = snapshot.pathColor;
       final brakeLights = snapshot.brakeLights;
       _collectPathPolygonsByMode(
@@ -5071,6 +8511,31 @@ class _DriveOverlayPainter extends CustomPainter {
     ];
   }
 
+  List<Offset> _roundedRectVertices(
+    Rect rect, {
+    double radius = 15.0,
+    int segmentsPerCorner = 4,
+  }) {
+    if (rect.width <= 0.0 || rect.height <= 0.0) return const <Offset>[];
+    final r = math.min(radius, math.min(rect.width, rect.height) * 0.5);
+    final seg = math.max(2, segmentsPerCorner);
+    final points = <Offset>[];
+    void addArc(Offset center, double start, double end) {
+      for (var i = 0; i <= seg; i++) {
+        final t = i / seg;
+        final a = start + ((end - start) * t);
+        points.add(Offset(
+            center.dx + (math.cos(a) * r), center.dy + (math.sin(a) * r)));
+      }
+    }
+
+    addArc(Offset(rect.right - r, rect.top + r), -math.pi / 2.0, 0.0);
+    addArc(Offset(rect.right - r, rect.bottom - r), 0.0, math.pi / 2.0);
+    addArc(Offset(rect.left + r, rect.bottom - r), math.pi / 2.0, math.pi);
+    addArc(Offset(rect.left + r, rect.top + r), math.pi, math.pi * 1.5);
+    return points;
+  }
+
   List<Offset> _circleVertices(
     Offset center,
     double radius, {
@@ -5156,13 +8621,54 @@ class _DriveOverlayPainter extends CustomPainter {
     required Size canvasSize,
     required double sourceWidth,
     required double sourceHeight,
+    required Map<String, dynamic>? displayTransform,
     required List<Map<String, dynamic>> polygons,
     required List<Map<String, dynamic>> labels,
+    required bool showLead1,
+    required bool showLead2,
+    required bool showRadarBadge,
+    required bool showRadarVector,
+    required bool showStopDistanceTf,
+    required bool showStateText,
   }) {
     final meta = cam['meta'];
     final showRadarInfo = meta is Map
         ? (_DriveOverlaySnapshot._asInt(meta['showRadarInfo']) ?? 0)
         : 0;
+    final xState =
+        meta is Map ? (_DriveOverlaySnapshot._asInt(meta['xState']) ?? 0) : 0;
+    final trafficState = meta is Map
+        ? (_DriveOverlaySnapshot._asInt(meta['trafficState']) ?? 0)
+        : 0;
+    final longActive = meta is Map
+        ? _boolFromDynamic(meta['longActive'], fallback: false)
+        : false;
+    final vEgoMps = meta is Map
+        ? (_DriveOverlaySnapshot._asDouble(meta['vEgoMps']) ?? 0.0)
+        : 0.0;
+
+    var drawDistanceBadges = true;
+    String? stateText;
+    if (longActive) {
+      if (xState == 3 || xState == 5) {
+        drawDistanceBadges = false;
+        if (vEgoMps < 1.0) {
+          stateText = trafficState >= 1000 ? 'Signal Error' : 'Signal Ready';
+        } else {
+          stateText = 'Signal slowing';
+        }
+      } else if (xState == 4) {
+        drawDistanceBadges = false;
+        stateText = 'E2E주행중';
+      } else if (xState == 0 || xState == 1 || xState == 2) {
+        drawDistanceBadges = true;
+      } else {
+        drawDistanceBadges = false;
+      }
+    }
+    final badgeTextColor = xState == 0
+        ? Colors.white
+        : (xState == 1 ? const Color(0xFFB0B0B0) : const Color(0xFF23D55D));
 
     Offset? mapSingleSourcePoint(dynamic raw) {
       if (raw is! List || raw.length < 2) return null;
@@ -5174,19 +8680,14 @@ class _DriveOverlayPainter extends CustomPainter {
         canvasSize: canvasSize,
         sourceWidth: sourceWidth,
         sourceHeight: sourceHeight,
+        displayTransform: displayTransform,
       );
       if (mapped.isEmpty) return null;
       return mapped.first;
     }
 
-    Offset? mapBadgeFromAnchor(dynamic rawAnchor, double dx, double dy) {
-      if (rawAnchor is! List || rawAnchor.length < 2) return null;
-      final ax = _DriveOverlaySnapshot._asDouble(rawAnchor[0]);
-      final ay = _DriveOverlaySnapshot._asDouble(rawAnchor[1]);
-      if (ax == null || ay == null) return null;
-      return mapSingleSourcePoint(<double>[ax + dx, ay + dy]);
-    }
-
+    Offset? leadPrimaryCenter;
+    Rect? leadPrimaryBounds;
     final leadRaw = cam['leadAreaBoxes'];
     if (leadRaw is List) {
       for (final item in leadRaw) {
@@ -5197,21 +8698,40 @@ class _DriveOverlayPainter extends CustomPainter {
           canvasSize: canvasSize,
           sourceWidth: sourceWidth,
           sourceHeight: sourceHeight,
+          displayTransform: displayTransform,
         );
         if (mapped.length < 3) continue;
         final bounds = _verticesBounds(mapped);
         if (bounds == null) continue;
 
         final kind = lead['kind']?.toString() ?? 'leadOne';
+        if (kind == 'leadOne' && !showLead1) continue;
+        if (kind == 'leadTwo' && !showLead2) continue;
         final status = _DriveOverlaySnapshot._asInt(lead['status']) ?? 0;
         final radarDetected = _boolFromDynamic(lead['radar']);
         final radarTrackId =
             _DriveOverlaySnapshot._asInt(lead['radarTrackId']) ?? -1;
         final isLeadScc = radarTrackId < 1;
+        final strokeArgb =
+            _DriveOverlaySnapshot._asInt(lead['strokeColorArgb']);
+        final fillArgb = _DriveOverlaySnapshot._asInt(lead['fillColorArgb']);
 
         Color strokeColor;
         Color fillColor;
-        if (kind == 'leadTwo') {
+        if (strokeArgb != null || fillArgb != null) {
+          strokeColor = strokeArgb != null
+              ? Color(strokeArgb)
+              : (kind == 'leadTwo'
+                  ? const Color(0xFFB68A3A)
+                  : const Color(0xFFFFA726));
+          fillColor = fillArgb != null
+              ? Color(fillArgb)
+              : (kind == 'leadTwo'
+                  ? (status >= 2
+                      ? const Color(0x66FF3B30)
+                      : const Color(0x33000000))
+                  : const Color(0x33000000));
+        } else if (kind == 'leadTwo') {
           strokeColor = const Color(0xFFB68A3A);
           fillColor =
               status >= 2 ? const Color(0x66FF3B30) : const Color(0x33000000);
@@ -5226,55 +8746,158 @@ class _DriveOverlayPainter extends CustomPainter {
         }
         polygons.add(
           _encodePolygon(
-            mapped,
+            _roundedRectVertices(bounds, radius: 15.0, segmentsPerCorner: 4),
             fillColor,
             strokeColor: strokeColor,
-            strokeWidth: 2.6,
+            strokeWidth: 3.0,
           ),
         );
 
         if (kind == 'leadOne') {
+          leadPrimaryBounds ??= bounds;
+          leadPrimaryCenter ??=
+              mapSingleSourcePoint(lead['anchorCenter']) ?? bounds.center;
           final radarDist =
               _DriveOverlaySnapshot._asDouble(lead['radarDistance']) ?? 0.0;
           final visionDist =
               _DriveOverlaySnapshot._asDouble(lead['visionDistance']) ?? 0.0;
-          final anchorRaw = lead['anchorCenter'];
           final radarBadgeCenter =
-              mapSingleSourcePoint(lead['radarBadgeCenter']) ??
-                  mapBadgeFromAnchor(anchorRaw, -80.0, 60.0);
+              mapSingleSourcePoint(lead['radarBadgeCenter']);
           final visionBadgeCenter =
-              mapSingleSourcePoint(lead['visionBadgeCenter']) ??
-                  mapBadgeFromAnchor(anchorRaw, 80.0, 60.0);
-          final badgeY = bounds.bottom + 24.0;
-          if (radarDist > 0.0) {
+              mapSingleSourcePoint(lead['visionBadgeCenter']);
+          final radarBadgeColorArgb =
+              _DriveOverlaySnapshot._asInt(lead['radarBadgeColorArgb']);
+          final visionBadgeColorArgb =
+              _DriveOverlaySnapshot._asInt(lead['visionBadgeColorArgb']);
+          final canvasBadgeDx =
+              (bounds.width * 0.62).clamp(64.0, 140.0).toDouble();
+          final canvasBadgeY = bounds.bottom +
+              (bounds.height * 0.32).clamp(18.0, 48.0).toDouble();
+          if (drawDistanceBadges && showRadarBadge && radarDist > 0.0) {
             _appendBadge(
               polygons,
               labels,
-              center:
-                  radarBadgeCenter ?? Offset(bounds.center.dx - 84.0, badgeY),
+              center: radarBadgeCenter ??
+                  Offset(bounds.center.dx - canvasBadgeDx, canvasBadgeY),
               text: radarDist.toStringAsFixed(1),
-              fillColor:
-                  isLeadScc ? const Color(0xFFFF3B30) : const Color(0xFFFFA726),
-              textColor: Colors.white,
+              fillColor: radarBadgeColorArgb != null
+                  ? Color(radarBadgeColorArgb)
+                  : (isLeadScc
+                      ? const Color(0xFFFF3B30)
+                      : const Color(0xFFFFA726)),
+              textColor: badgeTextColor,
             );
           }
-          if (visionDist > 0.0) {
+          if (drawDistanceBadges && showRadarBadge && visionDist > 0.0) {
             _appendBadge(
               polygons,
               labels,
-              center:
-                  visionBadgeCenter ?? Offset(bounds.center.dx + 84.0, badgeY),
+              center: visionBadgeCenter ??
+                  Offset(bounds.center.dx + canvasBadgeDx, canvasBadgeY),
               text: visionDist.toStringAsFixed(1),
-              fillColor: const Color(0xFF3D7BFF),
-              textColor: Colors.white,
+              fillColor: visionBadgeColorArgb != null
+                  ? Color(visionBadgeColorArgb)
+                  : const Color(0xFF3D7BFF),
+              textColor: badgeTextColor,
             );
           }
         }
       }
     }
 
+    final tfRaw = cam['tfMarker'];
+    if (showStopDistanceTf && tfRaw is Map) {
+      final tf = Map<String, dynamic>.from(tfRaw);
+      final mapped = _mapSourcePointsToCanvas(
+        _decodeOverlayPoints(tf['points']),
+        canvasSize: canvasSize,
+        sourceWidth: sourceWidth,
+        sourceHeight: sourceHeight,
+        displayTransform: displayTransform,
+      );
+      if (mapped.length >= 2) {
+        final left = mapped.first;
+        final right = mapped.last;
+        _appendDebugLinePolygon(
+          polygons,
+          a: left,
+          b: right,
+          color: Colors.white,
+          thickness: 3.0,
+        );
+        final dist = _DriveOverlaySnapshot._asDouble(tf['distance']) ?? 0.0;
+        final tFollow = _DriveOverlaySnapshot._asDouble(tf['tFollow']) ?? 0.0;
+        if (dist > 0.0) {
+          _appendOverlayLabel(
+            labels,
+            anchor: right,
+            text: '${dist.toStringAsFixed(1)}(${tFollow.toStringAsFixed(2)})',
+            color: Colors.white,
+            size: 20.0,
+            centered: false,
+          );
+        }
+      }
+    }
+
+    if (showStateText && stateText != null) {
+      dynamic leadOneAnchorRaw;
+      if (leadRaw is List) {
+        for (final e in leadRaw) {
+          if (e is Map && (e['kind']?.toString() ?? 'leadOne') == 'leadOne') {
+            leadOneAnchorRaw = e;
+            break;
+          }
+        }
+      }
+      Offset? stateAnchor;
+      if (leadOneAnchorRaw is Map) {
+        final stateCenterRaw = leadOneAnchorRaw['stateTextCenter'];
+        stateAnchor = mapSingleSourcePoint(stateCenterRaw);
+      }
+      if (stateAnchor == null && leadOneAnchorRaw is Map) {
+        final raw = leadOneAnchorRaw['anchorCenter'];
+        final anchorWidthSrc =
+            _DriveOverlaySnapshot._asDouble(leadOneAnchorRaw['anchorWidth']);
+        final sourceStateDy = (anchorWidthSrc != null && anchorWidthSrc > 0.0)
+            ? (anchorWidthSrc * 0.52).clamp(52.0, 140.0).toDouble()
+            : 60.0;
+        if (raw is List && raw.length >= 2) {
+          final ax = _DriveOverlaySnapshot._asDouble(raw[0]);
+          final ay = _DriveOverlaySnapshot._asDouble(raw[1]);
+          if (ax != null && ay != null) {
+            stateAnchor =
+                mapSingleSourcePoint(<double>[ax, ay + sourceStateDy]);
+          }
+        }
+      }
+      final primaryCenter = leadPrimaryCenter;
+      final anchor = stateAnchor ??
+          (primaryCenter != null
+              ? Offset(
+                  primaryCenter.dx,
+                  (leadPrimaryBounds?.bottom ?? primaryCenter.dy) +
+                      ((leadPrimaryBounds?.height ?? 72.0) * 0.72)
+                          .clamp(36.0, 92.0)
+                          .toDouble(),
+                )
+              : Offset(canvasSize.width * 0.5, canvasSize.height * 0.72));
+      _appendOverlayLabel(
+        labels,
+        anchor: anchor,
+        text: stateText,
+        color: Colors.white,
+        size: 34.0,
+        centered: true,
+      );
+    }
+
     final radarRaw = cam['radarTargets'];
-    if (showRadarInfo <= 0 || radarRaw is! List) return;
+    if (showRadarInfo <= 0 ||
+        radarRaw is! List ||
+        (!showRadarBadge && !showRadarVector)) {
+      return;
+    }
     for (final item in radarRaw) {
       if (item is! Map) continue;
       final radar = Map<String, dynamic>.from(item);
@@ -5291,7 +8914,7 @@ class _DriveOverlayPainter extends CustomPainter {
           _DriveOverlaySnapshot._asDouble(radar['modelProb']) ?? 0.0;
 
       final future = mapSingleSourcePoint(radar['future']);
-      if (future != null && speedAbs > 3.0) {
+      if (showRadarVector && future != null && speedAbs > 3.0) {
         _appendDebugLinePolygon(
           polygons,
           a: center,
@@ -5309,7 +8932,7 @@ class _DriveOverlayPainter extends CustomPainter {
         );
       }
 
-      if (speedAbs > 3.0) {
+      if (showRadarBadge && speedAbs > 3.0) {
         final speedKph =
             _DriveOverlaySnapshot._asDouble(radar['speedKphSigned']) ??
                 (vSigned * 3.6);
@@ -5702,11 +9325,88 @@ class _DriveOverlayPainter extends CustomPainter {
     canvas.drawRect(bounds, rectPaint);
   }
 
+  void _drawEncodedOverlayPayload(
+    Canvas canvas,
+    Map<String, dynamic> payload,
+  ) {
+    final polygonsRaw = payload['polygons'];
+    if (polygonsRaw is List) {
+      for (final item in polygonsRaw) {
+        if (item is! Map) continue;
+        final points = _decodeOverlayPoints(item['points']);
+        if (points.length < 3) continue;
+        final fillInt = _DriveOverlaySnapshot._asInt(item['fillColor']) ??
+            const Color(0x00000000).toARGB32();
+        final strokeInt = _DriveOverlaySnapshot._asInt(item['strokeColor']);
+        final strokeWidth =
+            (_DriveOverlaySnapshot._asDouble(item['strokeWidth']) ?? 0.0)
+                .clamp(0.0, 20.0);
+        final path = _pathFromVertices(points);
+        final fillColor = Color(fillInt);
+        final fillAlpha = (fillColor.a * 255.0).round().clamp(0, 255);
+        if (fillAlpha > 0) {
+          canvas.drawPath(
+            path,
+            Paint()
+              ..style = PaintingStyle.fill
+              ..color = fillColor,
+          );
+        }
+        if (strokeInt != null && strokeWidth > 0.0) {
+          canvas.drawPath(
+            path,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = strokeWidth
+              ..color = Color(strokeInt),
+          );
+        }
+      }
+    }
+
+    final labelsRaw = payload['labels'];
+    if (labelsRaw is! List || labelsRaw.isEmpty) return;
+    final tp = TextPainter(
+      textDirection: TextDirection.ltr,
+      textAlign: TextAlign.left,
+    );
+    for (final item in labelsRaw) {
+      if (item is! Map) continue;
+      final dx = _DriveOverlaySnapshot._asDouble(item['x']);
+      final dy = _DriveOverlaySnapshot._asDouble(item['y']);
+      final text = item['text']?.toString() ?? '';
+      if (dx == null || dy == null || text.isEmpty) continue;
+      final colorInt = _DriveOverlaySnapshot._asInt(item['color']) ??
+          const Color(0xFFFFFFFF).toARGB32();
+      final sizePx = (_DriveOverlaySnapshot._asDouble(item['size']) ?? 16.0)
+          .clamp(8.0, 72.0);
+      final centered = _boolFromDynamic(item['centered']);
+      tp.text = TextSpan(
+        text: text,
+        style: TextStyle(
+          color: Color(colorInt),
+          fontSize: sizePx,
+          fontWeight: FontWeight.w700,
+        ),
+      );
+      tp.layout(maxWidth: 360.0);
+      final paintOffset = centered
+          ? Offset(dx - (tp.width * 0.5), dy - (tp.height * 0.5))
+          : Offset(dx, dy - tp.height);
+      tp.paint(canvas, paintOffset);
+    }
+  }
+
   @override
   void paint(
     Canvas canvas,
     Size size,
   ) {
+    final sidecarPayload = _buildNativeOverlayPayloadFromSidecar2d(size);
+    if (sidecarPayload != null) {
+      _drawEncodedOverlayPayload(canvas, sidecarPayload);
+      return;
+    }
     if (snapshot.path.length < 2) return;
     final transform = _buildTransform(size);
     final modelMax = snapshot.path.x.isNotEmpty ? snapshot.path.x.last : 0.0;
@@ -5718,58 +9418,62 @@ class _DriveOverlayPainter extends CustomPainter {
         ? _getPathLengthIdx(laneBaseX, maxDistance)
         : _getPathLengthIdx(snapshot.path.x, maxDistance);
 
-    final laneFill = Paint()..style = PaintingStyle.fill;
-    for (var i = 0; i < snapshot.laneLines.length; i++) {
-      final ln = snapshot.laneLines[i];
-      var lineWidth = 0.025;
-      if (i == 1 && snapshot.leftLaneLine >= 20) {
-        lineWidth = 0.05;
-      }
-      final poly = _mapLineToPolygon(
-        transform,
-        ln.line,
-        lineWidth,
-        0.0,
-        laneMaxIdx,
-      );
-      if (poly == null) continue;
-      final alpha = ln.probability > 0.3 ? (220.0 / 255.0) : 0.0;
-      if (alpha <= 0.0) continue;
-      Color laneColor = Colors.white;
-      if (i == 1 && snapshot.leftLaneLine >= 20) {
-        laneColor = const Color(0xFFFFD95E);
-      } else if (i == 2 && snapshot.rightLaneLine >= 20) {
-        laneColor = const Color(0xFFFFD95E);
-      }
-      laneFill.color = laneColor.withValues(alpha: alpha);
-      canvas.drawPath(poly, laneFill);
-      if (i == 1 && (snapshot.leftLaneLine % 10) == 4) {
-        final doublePoly = _mapLineToPolygon(
+    if (showLaneLines) {
+      final laneFill = Paint()..style = PaintingStyle.fill;
+      for (var i = 0; i < snapshot.laneLines.length; i++) {
+        final ln = snapshot.laneLines[i];
+        var lineWidth = 0.025;
+        if (i == 1 && snapshot.leftLaneLine >= 20) {
+          lineWidth = 0.05;
+        }
+        final poly = _mapLineToPolygon(
           transform,
           ln.line,
           lineWidth,
           0.0,
           laneMaxIdx,
-          lineCenterShift: -0.3,
         );
-        if (doublePoly != null) {
-          canvas.drawPath(doublePoly, laneFill);
+        if (poly == null) continue;
+        final alpha = ln.probability > 0.3 ? (220.0 / 255.0) : 0.0;
+        if (alpha <= 0.0) continue;
+        Color laneColor = Colors.white;
+        if (i == 1 && snapshot.leftLaneLine >= 20) {
+          laneColor = const Color(0xFFFFD95E);
+        } else if (i == 2 && snapshot.rightLaneLine >= 20) {
+          laneColor = const Color(0xFFFFD95E);
+        }
+        laneFill.color = laneColor.withValues(alpha: alpha);
+        canvas.drawPath(poly, laneFill);
+        if (i == 1 && (snapshot.leftLaneLine % 10) == 4) {
+          final doublePoly = _mapLineToPolygon(
+            transform,
+            ln.line,
+            lineWidth,
+            0.0,
+            laneMaxIdx,
+            lineCenterShift: -0.3,
+          );
+          if (doublePoly != null) {
+            canvas.drawPath(doublePoly, laneFill);
+          }
         }
       }
     }
 
-    final edgeFill = Paint()..style = PaintingStyle.fill;
-    for (final edge in snapshot.roadEdges) {
-      final poly = _mapLineToPolygon(
-        transform,
-        edge.line,
-        0.025,
-        0.0,
-        laneMaxIdx,
-      );
-      if (poly == null) continue;
-      edgeFill.color = _roadEdgeColor(edge.std);
-      canvas.drawPath(poly, edgeFill);
+    if (showRoadEdge) {
+      final edgeFill = Paint()..style = PaintingStyle.fill;
+      for (final edge in snapshot.roadEdges) {
+        final poly = _mapLineToPolygon(
+          transform,
+          edge.line,
+          0.025,
+          0.0,
+          laneMaxIdx,
+        );
+        if (poly == null) continue;
+        edgeFill.color = _roadEdgeColor(edge.std);
+        canvas.drawPath(poly, edgeFill);
+      }
     }
 
     final pathMode = snapshot.pathMode;
@@ -5786,7 +9490,7 @@ class _DriveOverlayPainter extends CustomPainter {
       startDistance: startDistance,
       allowInvert: false,
     );
-    if (trackVertices != null) {
+    if (showPathFill && trackVertices != null) {
       _drawPathByMode(canvas, trackVertices);
     }
     if (showDebugGuides) {
@@ -5806,7 +9510,16 @@ class _DriveOverlayPainter extends CustomPainter {
         oldDelegate.sourceSize != sourceSize ||
         oldDelegate.cameraKind != cameraKind ||
         oldDelegate.coverViewport != coverViewport ||
-        oldDelegate.showDebugGuides != showDebugGuides;
+        oldDelegate.showDebugGuides != showDebugGuides ||
+        oldDelegate.showPathFill != showPathFill ||
+        oldDelegate.showLaneLines != showLaneLines ||
+        oldDelegate.showRoadEdge != showRoadEdge ||
+        oldDelegate.showLead1 != showLead1 ||
+        oldDelegate.showLead2 != showLead2 ||
+        oldDelegate.showRadarBadge != showRadarBadge ||
+        oldDelegate.showRadarVector != showRadarVector ||
+        oldDelegate.showStopDistanceTf != showStopDistanceTf ||
+        oldDelegate.showStateText != showStateText;
   }
 }
 
@@ -5821,6 +9534,26 @@ class _ProjectionTransform {
     required this.carSpaceTransform,
     required this.clip,
     required this.sourceScale,
+    required this.xOffset,
+    required this.yOffset,
+  });
+}
+
+class _DriveVideoPlacement {
+  final double left;
+  final double top;
+  final double width;
+  final double height;
+  final double scale;
+  final double xOffset;
+  final double yOffset;
+
+  const _DriveVideoPlacement({
+    required this.left,
+    required this.top,
+    required this.width,
+    required this.height,
+    required this.scale,
     required this.xOffset,
     required this.yOffset,
   });
@@ -5962,6 +9695,6 @@ Future<void> _driveSidecarWorkerMain(Map<String, dynamic> config) async {
         await socket?.close();
       } catch (_) {}
     }
-    await Future<void>.delayed(const Duration(seconds: 2));
+    await Future<void>.delayed(const Duration(milliseconds: 350));
   }
 }

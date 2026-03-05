@@ -257,12 +257,14 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     });
   }
 
-  void _openWebRtcView(SSHService ssh) {
+  Future<void> _openWebRtcView(SSHService ssh) async {
     final host = (ssh.connectedIp ?? ssh.targetIp ?? '').trim();
     if (host.isEmpty) {
       CustomToast.show(context, '연결 IP를 먼저 확인하세요.', isError: true);
       return;
     }
+
+    if (!mounted) return;
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => LiveDriveCanvasScreen(hostIp: host),

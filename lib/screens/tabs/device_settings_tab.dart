@@ -5,7 +5,14 @@ import 'carrot_backup_tab.dart';
 import 'carrot_settings_tab.dart';
 
 class DeviceSettingsTab extends StatefulWidget {
-  const DeviceSettingsTab({super.key});
+  final int initialTabIndex;
+  final String? initialFocusItemName;
+
+  const DeviceSettingsTab({
+    super.key,
+    this.initialTabIndex = 0,
+    this.initialFocusItemName,
+  });
 
   @override
   State<DeviceSettingsTab> createState() => _DeviceSettingsTabState();
@@ -18,7 +25,9 @@ class _DeviceSettingsTabState extends State<DeviceSettingsTab>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    final initialIndex = widget.initialTabIndex.clamp(0, 1).toInt();
+    _tabController =
+        TabController(length: 2, vsync: this, initialIndex: initialIndex);
     _tabController.addListener(_onTabChanged);
   }
 
@@ -48,9 +57,11 @@ class _DeviceSettingsTabState extends State<DeviceSettingsTab>
         Expanded(
           child: TabBarView(
             controller: _tabController,
-            children: const [
-              CarrotSettingsTab(),
-              CarrotBackupTab(),
+            children: [
+              CarrotSettingsTab(
+                initialFocusItemName: widget.initialFocusItemName,
+              ),
+              const CarrotBackupTab(),
             ],
           ),
         ),

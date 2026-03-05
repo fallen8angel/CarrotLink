@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.PerformanceHintManager
 import android.util.Log
 import android.view.Surface
 import android.view.SurfaceHolder
@@ -153,13 +154,23 @@ class NativeDriveVideoView(
   @Volatile private var currentHeight = 0
   @Volatile private var connectAttempts = 0
   @Volatile private var lastPacketAtMs = 0L
+  @Volatile private var lastDecodedAtMs = 0L
   private val pendingFrameIds: ArrayDeque<Int> = ArrayDeque()
+  @Volatile private var frameStallStrikes = 0
 
   private var reconnectRunnable: Runnable? = null
   private var frameWatchdogRunnable: Runnable? = null
   private val cameraName: String = parseCameraName(wsUrl)
   private val frameWatchdogIntervalMs = 1000L
-  private val frameStallTimeoutMs = 2500L
+  private val frameStallTimeoutMs = 7000L
+  private val frameDecodeStallTimeoutMs = 6500L
+  private val frameStallStrikeLimit = 4
+  private val frameHardReconnectMs = 24000L
+  private val frameDecodeHardReconnectMs = 18000L
+  private val frameStallStateEmitEvery = 2
+  @Volatile private var hintedFrameRate = 30f
+  @Volatile private var performanceHintTargetNs = 33_333_333L
+  @Volatile private var performanceHintSession: PerformanceHintManager.Session? = null
 
   init {
     rootView.addView(
@@ -177,6 +188,7 @@ class NativeDriveVideoView(
         ),
     )
     surfaceView.holder.addCallback(this)
+    ensurePerformanceHintSession()
     NativeDriveVideoPlugin.registerView(viewId, this)
     emitState("init")
   }
@@ -188,6 +200,8 @@ class NativeDriveVideoView(
     clearReconnect()
     stopFrameWatchdog()
     closeSocket()
+    clearSurfaceFrameRateHint()
+    closePerformanceHintSession()
     releaseDecoder()
     clearOverlay()
     try {
@@ -200,6 +214,7 @@ class NativeDriveVideoView(
 
   override fun surfaceCreated(holder: SurfaceHolder) {
     surface = holder.surface
+    applySurfaceFrameRateHint(hintedFrameRate)
     emitState("surface_created")
     connect()
   }
@@ -210,6 +225,7 @@ class NativeDriveVideoView(
 
   override fun surfaceDestroyed(holder: SurfaceHolder) {
     surface = null
+    clearSurfaceFrameRateHint()
     emitState("surface_destroyed")
     stopFrameWatchdog()
     closeSocket()
@@ -225,37 +241,57 @@ class NativeDriveVideoView(
     }
     closeSocket()
     connectAttempts += 1
+    frameStallStrikes = 0
     emitState("connecting")
     val request = Request.Builder().url(wsUrl).build()
-    webSocket =
+    val newSocket =
         okHttpClient.newWebSocket(
             request,
             object : WebSocketListener() {
               override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (!isCurrentSocket(webSocket)) return
                 lastPacketAtMs = System.currentTimeMillis()
+                lastDecodedAtMs = lastPacketAtMs
+                frameStallStrikes = 0
                 startFrameWatchdog()
                 emitState("connected")
               }
 
               override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                if (!isCurrentSocket(webSocket)) return
                 lastPacketAtMs = System.currentTimeMillis()
+                frameStallStrikes = 0
                 val copy = bytes.toByteArray()
                 decodeHandler.post { handlePacket(copy) }
               }
 
-              override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+              override fun onFailure(
+                  webSocket: WebSocket,
+                  t: Throwable,
+                  response: Response?,
+              ) {
+                if (!isCurrentSocket(webSocket)) return
                 stopFrameWatchdog()
+                this@NativeDriveVideoView.webSocket = null
                 emitError("socket_failure:${t.message ?: "unknown"}")
+                releaseDecoder()
                 scheduleReconnect(900)
               }
 
               override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (!isCurrentSocket(webSocket)) return
                 stopFrameWatchdog()
+                this@NativeDriveVideoView.webSocket = null
                 emitState("closed:$code")
                 scheduleReconnect(900)
               }
             },
         )
+    webSocket = newSocket
+  }
+
+  private fun isCurrentSocket(callbackSocket: WebSocket?): Boolean {
+    return callbackSocket != null && callbackSocket === webSocket
   }
 
   private fun scheduleReconnect(delayMs: Long) {
@@ -280,6 +316,7 @@ class NativeDriveVideoView(
   private fun startFrameWatchdog() {
     stopFrameWatchdog()
     lastPacketAtMs = System.currentTimeMillis()
+    lastDecodedAtMs = lastPacketAtMs
     frameWatchdogRunnable =
         object : Runnable {
           override fun run() {
@@ -289,14 +326,31 @@ class NativeDriveVideoView(
               stopFrameWatchdog()
               return
             }
-            val elapsedMs = System.currentTimeMillis() - lastPacketAtMs
-            if (webSocket != null && elapsedMs > frameStallTimeoutMs) {
-              emitError("frame_stall_${elapsedMs}ms")
-              stopFrameWatchdog()
-              closeSocket()
-              releaseDecoder()
-              scheduleReconnect(250)
-              return
+            val now = System.currentTimeMillis()
+            val elapsedPacketMs = now - lastPacketAtMs
+            val elapsedDecodedMs = now - lastDecodedAtMs
+            val packetStalled = elapsedPacketMs > frameStallTimeoutMs
+            val decodeStalled = codecConfigured && elapsedDecodedMs > frameDecodeStallTimeoutMs
+            if (webSocket != null && (packetStalled || decodeStalled)) {
+              frameStallStrikes += 1
+              if (frameStallStrikes == 1 || frameStallStrikes % frameStallStateEmitEvery == 0) {
+                emitState("stalling_pkt_${elapsedPacketMs}ms_dec_${elapsedDecodedMs}ms")
+              }
+              val packetHardStall = elapsedPacketMs > frameHardReconnectMs
+              val decodeHardStall = codecConfigured && elapsedDecodedMs > frameDecodeHardReconnectMs
+              if ((packetHardStall || decodeHardStall) && frameStallStrikes >= frameStallStrikeLimit) {
+                emitError("frame_stall_pkt_${elapsedPacketMs}ms_dec_${elapsedDecodedMs}ms")
+                stopFrameWatchdog()
+                closeSocket()
+                releaseDecoder()
+                scheduleReconnect(350)
+                return
+              }
+            } else {
+              if (frameStallStrikes > 0) {
+                emitState("recovered")
+              }
+              frameStallStrikes = 0
             }
             reconnectHandler.postDelayed(this, frameWatchdogIntervalMs)
           }
@@ -369,6 +423,7 @@ class NativeDriveVideoView(
 
     val width = meta.optInt("width", 0).coerceAtLeast(0)
     val height = meta.optInt("height", 0).coerceAtLeast(0)
+    updateFrameRateHintFromMeta(meta)
     if (width > 0 && height > 0 && (width != currentWidth || height != currentHeight)) {
       currentWidth = width
       currentHeight = height
@@ -415,6 +470,8 @@ class NativeDriveVideoView(
       format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, width * height)
       localCodec.configure(format, s, null, 0)
       localCodec.start()
+      applySurfaceFrameRateHint(hintedFrameRate)
+      ensurePerformanceHintSession()
       codec = localCodec
       codecConfigured = true
       waitingKeyFrame = true
@@ -439,19 +496,22 @@ class NativeDriveVideoView(
       if (frameId >= 0) {
         pendingFrameIds.addLast(frameId)
       }
-      drainOutput(localCodec)
+      val decodeStartNs = System.nanoTime()
+      drainOutput(localCodec, decodeStartNs)
     } catch (t: Throwable) {
       emitError("decoder_queue_failed:${t.message ?: "unknown"}")
       releaseDecoder()
     }
   }
 
-  private fun drainOutput(localCodec: MediaCodec) {
+  private fun drainOutput(localCodec: MediaCodec, decodeStartNs: Long) {
     val info = MediaCodec.BufferInfo()
     while (true) {
       val outIndex = localCodec.dequeueOutputBuffer(info, 0)
       when {
         outIndex >= 0 -> {
+          lastDecodedAtMs = System.currentTimeMillis()
+          reportPerformanceActualWork((System.nanoTime() - decodeStartNs).coerceAtLeast(1_000_000L))
           val renderedFrameId = if (pendingFrameIds.isEmpty()) -1 else pendingFrameIds.removeFirst()
           if (renderedFrameId >= 0) {
             emitFrame(renderedFrameId)
@@ -629,6 +689,123 @@ class NativeDriveVideoView(
       }
     } catch (_: Throwable) {
       fallback
+    }
+  }
+
+  private fun updateFrameRateHintFromMeta(meta: JSONObject) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+    val byFps = meta.optDouble("fps", 0.0).toFloat()
+    val byFrameRate = meta.optDouble("frameRate", 0.0).toFloat()
+    val raw = if (byFps > 0f) byFps else byFrameRate
+    if (raw <= 0f) return
+    val normalized =
+        when {
+          raw >= 90f -> 120f
+          raw >= 50f -> 60f
+          raw >= 28f -> 30f
+          else -> 24f
+        }
+    if (kotlin.math.abs(normalized - hintedFrameRate) < 0.1f) return
+    hintedFrameRate = normalized
+    applySurfaceFrameRateHint(hintedFrameRate)
+    updatePerformanceHintTarget(hintedFrameRate)
+  }
+
+  private fun applySurfaceFrameRateHint(targetFps: Float) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+    val rate = targetFps.coerceIn(15f, 120f)
+    try {
+      invokeSetFrameRateReflective(surfaceView, rate)
+      val localSurface = surface
+      if (localSurface != null && localSurface.isValid) {
+        invokeSetFrameRateReflective(localSurface, rate)
+      }
+    } catch (t: Throwable) {
+      Log.w(NATIVE_VIDEO_TAG, "applySurfaceFrameRateHint failed", t)
+    }
+  }
+
+  private fun clearSurfaceFrameRateHint() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+    try {
+      invokeSetFrameRateReflective(surfaceView, 0f)
+      val localSurface = surface
+      if (localSurface != null && localSurface.isValid) {
+        invokeSetFrameRateReflective(localSurface, 0f)
+      }
+    } catch (_: Throwable) {
+    }
+  }
+
+  private fun invokeSetFrameRateReflective(target: Any, fps: Float) {
+    // Keep build compatibility even when compileSdk does not expose setFrameRate APIs.
+    try {
+      val cls = target.javaClass
+      val threeArgs =
+          cls.methods.firstOrNull { method ->
+            method.name == "setFrameRate" && method.parameterTypes.size == 3
+          }
+      if (threeArgs != null) {
+        threeArgs.invoke(target, fps, 0, 0)
+        return
+      }
+      val twoArgs =
+          cls.methods.firstOrNull { method ->
+            method.name == "setFrameRate" && method.parameterTypes.size == 2
+          }
+      if (twoArgs != null) {
+        twoArgs.invoke(target, fps, 0)
+      }
+    } catch (_: Throwable) {
+    }
+  }
+
+  private fun ensurePerformanceHintSession() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+    if (performanceHintSession != null) return
+    try {
+      val manager = rootView.context.getSystemService(PerformanceHintManager::class.java) ?: return
+      val decodeTid = decodeThread.threadId
+      if (decodeTid <= 0) return
+      performanceHintSession =
+          manager.createHintSession(intArrayOf(decodeTid), performanceHintTargetNs)
+      emitState("perf_hint_on_tid_$decodeTid")
+    } catch (t: Throwable) {
+      Log.w(NATIVE_VIDEO_TAG, "ensurePerformanceHintSession failed", t)
+      performanceHintSession = null
+    }
+  }
+
+  private fun updatePerformanceHintTarget(fps: Float) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+    val clamped = fps.coerceIn(15f, 120f)
+    val targetNs = (1_000_000_000f / clamped).toLong().coerceIn(8_000_000L, 66_000_000L)
+    performanceHintTargetNs = targetNs
+    try {
+      performanceHintSession?.updateTargetWorkDuration(targetNs)
+    } catch (_: Throwable) {
+    }
+  }
+
+  private fun reportPerformanceActualWork(actualWorkNs: Long) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+    if (actualWorkNs <= 0L) return
+    try {
+      performanceHintSession?.reportActualWorkDuration(actualWorkNs.coerceIn(1_000_000L, 200_000_000L))
+    } catch (_: Throwable) {
+    }
+  }
+
+  private fun closePerformanceHintSession() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+      performanceHintSession = null
+      return
+    }
+    try {
+      performanceHintSession?.close()
+    } catch (_: Throwable) {
+    } finally {
+      performanceHintSession = null
     }
   }
 }

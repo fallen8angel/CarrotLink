@@ -2,13 +2,14 @@
 set -euo pipefail
 
 BASE="${CARROTLINK_SIDECAR_BASE:-/data/openpilot/selfdrive/carrot}"
-PROFILE="${CARROTLINK_SIDECAR_PROFILE:-p1}"
+PROFILE="${CARROTLINK_SIDECAR_PROFILE:-p2}"
 HOST="${CARROTLINK_SIDECAR_HOST:-0.0.0.0}"
 PORT="${CARROTLINK_SIDECAR_PORT:-7766}"
+CAMERA_QUALITY_MODE="${CARROTLINK_CAMERA_QUALITY_MODE:-stable}"
 
 REPO="${CARROTLINK_OPENPILOT_REPO:-}"
 if [ -z "${REPO}" ]; then
-  for d in /data/openpilot /home/comma/openpilot; do
+  for d in /data/openpilot /home/comma/openpilot /data/media/0/openpilot /data/openpilot_source/openpilot; do
     if [ -d "${d}" ]; then
       REPO="${d}"
       break
@@ -34,5 +35,6 @@ export CARROTLINK_SIDECAR_BASE="${BASE}"
 export CARROTLINK_SIDECAR_PROFILE="${PROFILE}"
 export CARROTLINK_SIDECAR_HOST="${HOST}"
 export CARROTLINK_SIDECAR_PORT="${PORT}"
+export CARROTLINK_CAMERA_QUALITY_MODE="${CAMERA_QUALITY_MODE}"
 
 exec python3 "${BASE}/carrot_linkview.py"

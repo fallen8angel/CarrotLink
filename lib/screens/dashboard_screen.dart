@@ -79,7 +79,11 @@ class _DashboardScreenState extends State<DashboardScreen>
         reason: 'dashboard_init',
       ),
     );
-    _tryAutoConnect();
+    _tryAutoConnect(
+      silent: true,
+      force: true,
+      reason: 'app_start',
+    );
     _startReconnectLoop();
     _setupDiscoveryListener();
     _setupConnectivityListener();
@@ -169,6 +173,7 @@ class _DashboardScreenState extends State<DashboardScreen>
           debounce: const Duration(seconds: 6),
         );
         final ssh = Provider.of<SSHService>(context, listen: false);
+        ssh.notifyNetworkChanged(source: 'dashboard_connectivity');
 
         // 연결이 끊어진 상태면 즉시 재연결 시도
         if (!ssh.isConnected && !ssh.isConnecting) {
@@ -260,18 +265,24 @@ class _DashboardScreenState extends State<DashboardScreen>
     }
   }
 
-  void _startDiscoveryIfNeeded({bool force = false}) {
+  void _startDiscoveryIfNeeded({
+    bool force = false,
+    bool aggressive = false,
+    Duration timeout = const Duration(seconds: 45),
+  }) {
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (ssh.manualDisconnectRequested) {
       return;
     }
-    debugPrint('[Dashboard] Starting IP discovery...');
+    debugPrint(
+      '[Dashboard] Starting IP discovery... force=$force aggressive=$aggressive timeout=${timeout.inSeconds}s',
+    );
     unawaited(
       ssh.startDiscovery(
         forceRestart: force,
-        timeout: const Duration(seconds: 45),
+        timeout: timeout,
         source: 'dashboard_auto',
-        manualSession: false,
+        manualSession: aggressive,
       ),
     );
   }
@@ -399,8 +410,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   void _startReconnectLoop() {
     _reconnectTimer?.cancel();
     // Discovery/auto reconnect sync loop (broadcast-first).
-    _reconnectTimer =
-        Timer.periodic(const Duration(seconds: 10), (timer) async {
+    _reconnectTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
       final ssh = Provider.of<SSHService>(context, listen: false);
       if (!ssh.isConnected && !ssh.isConnecting) {
         await _tryAutoConnect(silent: true, reason: 'timer');
@@ -443,7 +453,7 @@ class _DashboardScreenState extends State<DashboardScreen>
 
     _isAutoConnectRunning = true;
     try {
-      if (!silent) {
+      if (!silent && reason != 'app_start' && reason != 'connectivity') {
         // Small delay to allow UI to settle and user to see initial state
         await Future.delayed(const Duration(milliseconds: 500));
       }
@@ -469,7 +479,19 @@ class _DashboardScreenState extends State<DashboardScreen>
       ssh.resumeAutoReconnect();
       _diag.info('autoconnect',
           'Broadcast sync reason=$reason candidate=${ssh.serviceCandidateIp}');
-      _startDiscoveryIfNeeded(force: force);
+      final fastStart = reason == 'app_start';
+      final aggressive = fastStart ||
+          reason == 'connectivity' ||
+          reason == 'resume' ||
+          reason == 'network_reconnected' ||
+          force;
+      _startDiscoveryIfNeeded(
+        force: force || aggressive,
+        aggressive: aggressive,
+        timeout: aggressive
+            ? const Duration(seconds: 60)
+            : const Duration(seconds: 45),
+      );
       _markReconnectSuccess();
     } catch (e) {
       _markReconnectFailure();

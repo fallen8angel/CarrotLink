@@ -56,7 +56,12 @@ class _CarrotSettingSearchHit {
 }
 
 class CarrotSettingsTab extends StatefulWidget {
-  const CarrotSettingsTab({super.key});
+  final String? initialFocusItemName;
+
+  const CarrotSettingsTab({
+    super.key,
+    this.initialFocusItemName,
+  });
 
   @override
   State<CarrotSettingsTab> createState() => _CarrotSettingsTabState();
@@ -77,6 +82,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
   final List<_CarrotSettingFavorite> _favorites = <_CarrotSettingFavorite>[];
   String? _activeHost;
   int _loadEpoch = 0;
+  bool _initialFocusHandled = false;
 
   @override
   bool get wantKeepAlive => true;
@@ -265,6 +271,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
         _currentCar = values['CarSelected3']?.toString();
         _error = null;
       });
+      _scheduleInitialFocusIfNeeded();
     } catch (e) {
       if (!mounted || epoch != _loadEpoch) return;
       if (!silent) {
@@ -330,6 +337,50 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
       }
     }
     return out;
+  }
+
+  void _scheduleInitialFocusIfNeeded() {
+    if (_initialFocusHandled) return;
+    final targetItemName = widget.initialFocusItemName?.trim() ?? '';
+    if (targetItemName.isEmpty) {
+      _initialFocusHandled = true;
+      return;
+    }
+    final bundle = _bundle;
+    if (bundle == null) return;
+
+    CarrotSettingsGroupMeta? targetGroup;
+    for (final group in bundle.groups) {
+      final items =
+          bundle.itemsByGroup[group.group] ?? const <CarrotSettingItemMeta>[];
+      if (items.any((item) => item.name == targetItemName)) {
+        targetGroup = group;
+        break;
+      }
+    }
+
+    _initialFocusHandled = true;
+    if (targetGroup == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        CustomToast.show(
+          context,
+          '요청한 설정 항목($targetItemName)을 찾지 못했습니다.',
+          isError: true,
+        );
+      });
+      return;
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(
+        _openGroupScreen(
+          targetGroup!,
+          focusItemName: targetItemName,
+        ),
+      );
+    });
   }
 
   Future<void> _openGroupScreen(
