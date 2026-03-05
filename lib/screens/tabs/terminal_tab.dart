@@ -655,6 +655,10 @@ class _TerminalScreenState extends State<TerminalScreen>
     super.build(context);
     final connected = context.watch<SSHService>().isConnected;
     final macros = Provider.of<MacroService>(context).macros;
+    final viewport = MediaQuery.sizeOf(context);
+    final compactHeightMode = viewport.height < 560;
+    final hideMacroStrip = viewport.height < 500;
+    final macroStripHeight = compactHeightMode ? 42.0 : 50.0;
 
     return Column(
       children: [
@@ -664,7 +668,8 @@ class _TerminalScreenState extends State<TerminalScreen>
           color: Theme.of(context).colorScheme.surfaceContainer,
           child: LayoutBuilder(
             builder: (context, constraints) {
-              final compactToolbar = constraints.maxWidth < 560;
+              final compactToolbar =
+                  constraints.maxWidth < 560 || compactHeightMode;
               final sessionButton = !_isSessionActive
                   ? ElevatedButton.icon(
                       onPressed: () => _startTerminal(),
@@ -803,7 +808,8 @@ class _TerminalScreenState extends State<TerminalScreen>
                 if (_showVirtualKeys)
                   Container(
                     color: Theme.of(context).colorScheme.surfaceContainerHigh,
-                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    padding: EdgeInsets.symmetric(
+                        vertical: compactHeightMode ? 2 : 4),
                     child: SingleChildScrollView(
                       scrollDirection: Axis.horizontal,
                       child: Row(
@@ -831,10 +837,11 @@ class _TerminalScreenState extends State<TerminalScreen>
                   ),
 
                 // Quick Macros
-                if (macros.isNotEmpty)
+                if (macros.isNotEmpty && !hideMacroStrip)
                   Container(
-                    height: 50,
-                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    height: macroStripHeight,
+                    padding: EdgeInsets.symmetric(
+                        vertical: compactHeightMode ? 2 : 4),
                     child: ListView.builder(
                       scrollDirection: Axis.horizontal,
                       padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -848,7 +855,7 @@ class _TerminalScreenState extends State<TerminalScreen>
                             style: ElevatedButton.styleFrom(
                               padding:
                                   const EdgeInsets.symmetric(horizontal: 12),
-                              minimumSize: const Size(0, 36),
+                              minimumSize: Size(0, compactHeightMode ? 30 : 36),
                             ),
                             child: Text(macro.name),
                           ),

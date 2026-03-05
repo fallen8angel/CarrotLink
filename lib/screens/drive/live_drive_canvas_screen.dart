@@ -5971,30 +5971,64 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     );
   }
 
+  bool _shouldHideHudForTinyViewport(
+    UiWindowInfo window,
+    BoxConstraints constraints, {
+    required bool isLandscape,
+  }) {
+    final width = constraints.maxWidth;
+    final height = constraints.maxHeight;
+    final shortest = math.min(width, height);
+
+    // Hide HUD only for truly tiny multi-window cases.
+    // Full-screen compact portrait must keep HUD visible.
+    if (shortest < 300) {
+      return true;
+    }
+    if (height < 300) {
+      return true;
+    }
+    if (isLandscape && width < 560) {
+      return true;
+    }
+    if (!isLandscape && height < 560 && width < 430) {
+      return true;
+    }
+    if (!isLandscape && window.windowClass != UiWindowClass.compact) {
+      return false;
+    }
+    if (isLandscape && height < 360) {
+      return true;
+    }
+    return false;
+  }
+
   double _computeLandscapeHudOverlaySize(UiWindowInfo window, Size drawSize) {
     final base = math.min(drawSize.width, drawSize.height);
     final ratio = switch (window.windowClass) {
-      UiWindowClass.compact => 0.30,
-      UiWindowClass.medium => 0.285,
-      UiWindowClass.expanded => 0.275,
-      UiWindowClass.large => 0.265,
-      UiWindowClass.extraLarge => 0.255,
+      UiWindowClass.compact => 0.36,
+      UiWindowClass.medium => 0.34,
+      UiWindowClass.expanded => 0.32,
+      UiWindowClass.large => 0.30,
+      UiWindowClass.extraLarge => 0.28,
     };
     final minSize = switch (window.windowClass) {
-      UiWindowClass.compact => 124.0,
-      UiWindowClass.medium => 136.0,
-      UiWindowClass.expanded => 144.0,
-      UiWindowClass.large => 154.0,
-      UiWindowClass.extraLarge => 164.0,
+      UiWindowClass.compact => 220.0,
+      UiWindowClass.medium => 240.0,
+      UiWindowClass.expanded => 260.0,
+      UiWindowClass.large => 280.0,
+      UiWindowClass.extraLarge => 300.0,
     };
     final maxSize = switch (window.windowClass) {
-      UiWindowClass.compact => 196.0,
-      UiWindowClass.medium => 212.0,
-      UiWindowClass.expanded => 228.0,
-      UiWindowClass.large => 244.0,
-      UiWindowClass.extraLarge => 258.0,
+      UiWindowClass.compact => 420.0,
+      UiWindowClass.medium => 440.0,
+      UiWindowClass.expanded => 470.0,
+      UiWindowClass.large => 500.0,
+      UiWindowClass.extraLarge => 540.0,
     };
-    return (base * ratio).clamp(minSize, maxSize).toDouble();
+    final viewportCap = drawSize.height * 0.58;
+    final upperBound = math.max(minSize, math.min(maxSize, viewportCap));
+    return (base * ratio).clamp(minSize, upperBound).toDouble();
   }
 
   Widget _buildLandscapeHudOverlay(UiWindowInfo window, Size drawSize) {
@@ -6066,6 +6100,11 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                         )
                         .toDouble()
                     : 0.0;
+                final hideHudForTinyViewport = _shouldHideHudForTinyViewport(
+                  window,
+                  constraints,
+                  isLandscape: isLandscapeLayout,
+                );
 
                 final mainContent = Row(
                   children: [
@@ -6463,7 +6502,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                       ],
                                     ),
                                   ),
-                                  if (isLandscapeLayout)
+                                  if (isLandscapeLayout &&
+                                      !hideHudForTinyViewport)
                                     Positioned(
                                       left: overlayInset,
                                       bottom: (showBottomStatusBanners
@@ -6920,6 +6960,20 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                 );
 
                 if (isLandscapeLayout) {
+                  return Stack(
+                    children: [
+                      Positioned.fill(child: mainContent),
+                      if (_hudDebugMenuEnabled)
+                        Positioned(
+                          right: fabInset,
+                          bottom: fabBottom,
+                          child: debugFab,
+                        ),
+                    ],
+                  );
+                }
+
+                if (hideHudForTinyViewport) {
                   return Stack(
                     children: [
                       Positioned.fill(child: mainContent),

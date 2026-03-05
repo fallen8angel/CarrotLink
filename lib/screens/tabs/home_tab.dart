@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:provider/provider.dart';
@@ -278,15 +279,17 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     final window = UiWindowInfo.of(context);
     return Consumer<SSHService>(
       builder: (context, ssh, child) {
+        final media = MediaQuery.of(context);
+        final compactStatusStack = window.windowClass == UiWindowClass.compact;
         final statusFontSize = switch (window.windowClass) {
-          UiWindowClass.compact => 23.0,
+          UiWindowClass.compact => 20.0,
           UiWindowClass.medium => 24.0,
           UiWindowClass.expanded => 25.0,
           UiWindowClass.large => 26.0,
           UiWindowClass.extraLarge => 27.0,
         };
         final ipFontSize = switch (window.windowClass) {
-          UiWindowClass.compact => 16.0,
+          UiWindowClass.compact => 14.0,
           UiWindowClass.medium => 17.0,
           UiWindowClass.expanded => 18.0,
           UiWindowClass.large => 19.0,
@@ -309,13 +312,17 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
             ssh.targetIp != null;
         final ipFieldText =
             hasIp ? (ssh.connectedIp ?? ssh.targetIp ?? "Unknown") : "연동 필요";
+        final isLandscape = window.isLandscape;
         final homeContentMaxWidth = switch (window.windowClass) {
           UiWindowClass.compact => double.infinity,
-          UiWindowClass.medium => 760.0,
-          UiWindowClass.expanded => 860.0,
-          UiWindowClass.large => 960.0,
-          UiWindowClass.extraLarge => 1060.0,
+          UiWindowClass.medium => isLandscape ? 640.0 : 600.0,
+          UiWindowClass.expanded => isLandscape ? 760.0 : 680.0,
+          UiWindowClass.large => isLandscape ? 840.0 : 740.0,
+          UiWindowClass.extraLarge => isLandscape ? 920.0 : 800.0,
         };
+        final clampedHomeContentMaxWidth = homeContentMaxWidth.isFinite
+            ? math.min(homeContentMaxWidth, media.size.width - 24.0)
+            : homeContentMaxWidth;
         final cardPadding = switch (window.windowClass) {
           UiWindowClass.compact => 14.0,
           UiWindowClass.medium => 16.0,
@@ -335,7 +342,8 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
             // Header Card
             Center(
               child: ConstrainedBox(
-                constraints: BoxConstraints(maxWidth: homeContentMaxWidth),
+                constraints:
+                    BoxConstraints(maxWidth: clampedHomeContentMaxWidth),
                 child: Container(
                   padding: EdgeInsets.all(cardPadding),
                   decoration: BoxDecoration(
@@ -354,111 +362,131 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.center,
-                        children: [
-                          Container(
-                            width: 10,
-                            height: 10,
-                            decoration: BoxDecoration(
-                              color: _statusColor(context, ssh),
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              _statusHeadline(ssh),
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .titleLarge
-                                  ?.copyWith(
-                                    fontWeight: FontWeight.w900,
+                      if (compactStatusStack)
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                Container(
+                                  width: 10,
+                                  height: 10,
+                                  decoration: BoxDecoration(
                                     color: _statusColor(context, ssh),
-                                    fontSize: statusFontSize,
-                                    height: 1.0,
+                                    shape: BoxShape.circle,
                                   ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Flexible(
-                            flex: 5,
-                            child: Container(
-                              padding: EdgeInsets.symmetric(
-                                horizontal: blockGap + 3,
-                                vertical: blockGap - 1,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.black.withValues(alpha: 0.24),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                  color: Colors.white.withValues(alpha: 0.10),
                                 ),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    'IP',
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    _statusHeadline(ssh),
                                     style: Theme.of(context)
                                         .textTheme
-                                        .bodySmall
+                                        .titleLarge
                                         ?.copyWith(
-                                          color: Colors.white
-                                              .withValues(alpha: 0.62),
-                                          fontWeight: FontWeight.w700,
-                                          fontSize: ipChipLabelSize,
+                                          fontWeight: FontWeight.w900,
+                                          color: _statusColor(context, ssh),
+                                          fontSize: statusFontSize,
+                                          height: 1.0,
                                         ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                   ),
-                                  SizedBox(width: blockGap * 0.7),
-                                  Expanded(
-                                    child: Text(
-                                      ipFieldText,
-                                      textAlign: TextAlign.right,
-                                      style: Theme.of(context)
-                                          .textTheme
-                                          .titleMedium
-                                          ?.copyWith(
-                                            color: Colors.white
-                                                .withValues(alpha: 0.9),
-                                            fontWeight: FontWeight.w700,
-                                            fontSize: ipFontSize,
-                                            height: 1.0,
-                                          ),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
+                                ),
+                                if (ssh.isConnected ||
+                                    ssh.connectionStatus
+                                        .startsWith("Connecting"))
+                                  SizedBox(
+                                    width: compactActionSize * 0.88,
+                                    height: compactActionSize * 0.88,
+                                    child: IconButton(
+                                      padding: EdgeInsets.zero,
+                                      tooltip: '연결 해제',
+                                      iconSize: compactActionSize * 0.52,
+                                      color: Colors.white70,
+                                      onPressed: () {
+                                        ssh.disconnect();
+                                        CustomToast.show(
+                                            context, "연결이 해제되었습니다.");
+                                      },
+                                      icon: const Icon(Icons.link_off_rounded),
                                     ),
                                   ),
-                                  if (ssh.isConnected ||
-                                      ssh.connectionStatus
-                                          .startsWith("Connecting")) ...[
-                                    SizedBox(width: blockGap * 0.6),
-                                    SizedBox(
-                                      width: compactActionSize * 0.88,
-                                      height: compactActionSize * 0.88,
-                                      child: IconButton(
-                                        padding: EdgeInsets.zero,
-                                        tooltip: '연결 해제',
-                                        iconSize: compactActionSize * 0.52,
-                                        color: Colors.white70,
-                                        onPressed: () {
-                                          ssh.disconnect();
-                                          CustomToast.show(
-                                              context, "연결이 해제되었습니다.");
-                                        },
-                                        icon:
-                                            const Icon(Icons.link_off_rounded),
-                                      ),
-                                    ),
-                                  ],
-                                ],
+                              ],
+                            ),
+                            SizedBox(height: blockGap),
+                            _buildIpField(
+                              context: context,
+                              blockGap: blockGap,
+                              ipChipLabelSize: ipChipLabelSize,
+                              ipFieldText: ipFieldText,
+                              ipFontSize: ipFontSize,
+                            ),
+                          ],
+                        )
+                      else
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Container(
+                              width: 10,
+                              height: 10,
+                              decoration: BoxDecoration(
+                                color: _statusColor(context, ssh),
+                                shape: BoxShape.circle,
                               ),
                             ),
-                          ),
-                        ],
-                      ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                _statusHeadline(ssh),
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .titleLarge
+                                    ?.copyWith(
+                                      fontWeight: FontWeight.w900,
+                                      color: _statusColor(context, ssh),
+                                      fontSize: statusFontSize,
+                                      height: 1.0,
+                                    ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Flexible(
+                              flex: 5,
+                              child: _buildIpField(
+                                context: context,
+                                blockGap: blockGap,
+                                ipChipLabelSize: ipChipLabelSize,
+                                ipFieldText: ipFieldText,
+                                ipFontSize: ipFontSize,
+                              ),
+                            ),
+                            if (ssh.isConnected ||
+                                ssh.connectionStatus
+                                    .startsWith("Connecting")) ...[
+                              SizedBox(width: blockGap * 0.6),
+                              SizedBox(
+                                width: compactActionSize * 0.88,
+                                height: compactActionSize * 0.88,
+                                child: IconButton(
+                                  padding: EdgeInsets.zero,
+                                  tooltip: '연결 해제',
+                                  iconSize: compactActionSize * 0.52,
+                                  color: Colors.white70,
+                                  onPressed: () {
+                                    ssh.disconnect();
+                                    CustomToast.show(context, "연결이 해제되었습니다.");
+                                  },
+                                  icon: const Icon(Icons.link_off_rounded),
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
                       SizedBox(height: blockGap),
                       Divider(
                         height: 1,
@@ -514,7 +542,8 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
             SizedBox(height: tokens.sectionGap),
             Center(
               child: ConstrainedBox(
-                constraints: BoxConstraints(maxWidth: homeContentMaxWidth),
+                constraints:
+                    BoxConstraints(maxWidth: clampedHomeContentMaxWidth),
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: () => _openWebRtcView(ssh),
@@ -591,6 +620,55 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
               fontWeight: FontWeight.w700,
               fontSize: valueSize,
               height: 1.0,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildIpField({
+    required BuildContext context,
+    required double blockGap,
+    required double ipChipLabelSize,
+    required String ipFieldText,
+    required double ipFontSize,
+  }) {
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: blockGap + 3,
+        vertical: blockGap - 1,
+      ),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.24),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.10),
+        ),
+      ),
+      child: Row(
+        children: [
+          Text(
+            'IP',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Colors.white.withValues(alpha: 0.62),
+                  fontWeight: FontWeight.w700,
+                  fontSize: ipChipLabelSize,
+                ),
+          ),
+          SizedBox(width: blockGap * 0.7),
+          Expanded(
+            child: Text(
+              ipFieldText,
+              textAlign: TextAlign.right,
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    color: Colors.white.withValues(alpha: 0.9),
+                    fontWeight: FontWeight.w700,
+                    fontSize: ipFontSize,
+                    height: 1.0,
+                  ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
           ),
         ],

@@ -2507,8 +2507,10 @@ class _LogsSubHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final viewport = MediaQuery.sizeOf(context);
     final window = UiWindowInfo.of(context);
     final tokens = UiLayoutTokens.of(context);
+    final compactHeaderMode = viewport.width < 420 || viewport.height < 360;
     final headerHorizontalPadding = window.isCompact
         ? 14.0
         : tokens.screenPadding.clamp(14.0, 26.0).toDouble();
@@ -2556,13 +2558,15 @@ class _LogsSubHeader extends StatelessWidget {
           ),
         ),
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            child: Column(
+      child: compactHeaderMode
+          ? Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                if (trailing != null)
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: trailing!,
+                  ),
                 Text(
                   title,
                   style: Theme.of(context).textTheme.titleSmall?.copyWith(
@@ -2578,11 +2582,34 @@ class _LogsSubHeader extends StatelessWidget {
                   ),
                 ),
               ],
+            )
+          : Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                              fontWeight: FontWeight.w700,
+                            ),
+                      ),
+                      SizedBox(height: descriptionTopGap),
+                      Text(
+                        description,
+                        style: TextStyle(
+                          fontSize: descriptionFontSize,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (trailing != null) trailing!,
+              ],
             ),
-          ),
-          if (trailing != null) trailing!,
-        ],
-      ),
     );
   }
 }

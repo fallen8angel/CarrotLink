@@ -605,7 +605,8 @@ class _DashboardScreenState extends State<DashboardScreen>
   @override
   Widget build(BuildContext context) {
     final window = UiWindowInfo.of(context);
-    final useRail = window.isExpandedOrAbove;
+    final viewport = MediaQuery.sizeOf(context);
+    final useRail = window.isExpandedOrAbove && viewport.height >= 560;
 
     return WillPopScope(
       onWillPop: () async {

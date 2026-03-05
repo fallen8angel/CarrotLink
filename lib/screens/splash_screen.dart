@@ -42,11 +42,10 @@ class _SplashScreenState extends State<SplashScreen> {
     final hasRequiredPermissions = await _hasRequiredPermissions();
     final needsOnboarding = isFirstRun || !hasRequiredPermissions;
 
-    // Only keep the long splash effect when the user is heading into
-    // onboarding/permissions. Normal launches should restore quickly.
-    if (needsOnboarding) {
-      await Future.delayed(const Duration(milliseconds: 1500));
-    }
+    // Always keep Flutter splash visible for a short minimum duration so
+    // users can actually perceive the 2nd-stage splash screen.
+    final splashMs = needsOnboarding ? 1500 : 450;
+    await Future.delayed(Duration(milliseconds: splashMs));
     unawaited(StorageLayoutService.instance.ensureBaseFolders());
 
     if (mounted) {

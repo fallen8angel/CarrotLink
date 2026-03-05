@@ -240,15 +240,13 @@ class _HomeHudPreviewCardState extends State<HomeHudPreviewCard> {
 
     final hudCore = LayoutBuilder(
       builder: (context, constraints) {
+        final finiteW =
+            constraints.maxWidth.isFinite ? constraints.maxWidth : 340.0;
+        final finiteH =
+            constraints.maxHeight.isFinite ? constraints.maxHeight : finiteW;
         final side = widget.fillParent
-            ? math
-                .min(
-                  constraints.maxWidth * 0.45,
-                  constraints.maxHeight * 1.25,
-                )
-                .clamp(260.0, 520.0)
-                .toDouble()
-            : constraints.maxWidth;
+            ? math.min(finiteW, finiteH).clamp(170.0, 560.0).toDouble()
+            : finiteW;
         final scale = side / 340.0;
         final metricGap = 8 * scale;
         final bodyTopGap = 8 * scale;
@@ -665,39 +663,61 @@ class _HudMiniMetric extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final labelFont = math.max(10.0, 13.0 * scale);
+    final valueFont = math.max(12.0, 18.0 * scale);
     return Container(
       padding: EdgeInsets.symmetric(
-        vertical: 6 * scale,
-        horizontal: 8 * scale,
+        vertical: math.max(3, 6 * scale),
+        horizontal: math.max(4, 8 * scale),
       ),
       decoration: BoxDecoration(
         color: const Color(0xFF1E9A44),
         borderRadius: BorderRadius.circular(10 * scale),
         border: Border.all(color: Colors.black38, width: 1.5 * scale),
       ),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text(
-            label,
-            style: TextStyle(
-              color: Colors.white,
-              fontWeight: FontWeight.w900,
-              fontSize: math.max(11, 14 * scale),
-              height: 1.0,
-            ),
-          ),
-          SizedBox(height: 2 * scale),
-          Text(
-            value,
-            style: TextStyle(
-              color: Colors.white,
-              fontWeight: FontWeight.w900,
-              fontSize: math.max(14, 18 * scale),
-              height: 1.0,
-            ),
-          ),
-        ],
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          return Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              SizedBox(
+                width: constraints.maxWidth,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    softWrap: false,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w900,
+                      fontSize: labelFont,
+                      height: 1.0,
+                    ),
+                  ),
+                ),
+              ),
+              SizedBox(height: 2 * scale),
+              SizedBox(
+                width: constraints.maxWidth,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    value,
+                    maxLines: 1,
+                    softWrap: false,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w900,
+                      fontSize: valueFont,
+                      height: 1.0,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }

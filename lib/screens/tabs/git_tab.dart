@@ -1767,6 +1767,8 @@ class _GitTabState extends State<GitTab> {
 
   @override
   Widget build(BuildContext context) {
+    final viewportSize = MediaQuery.sizeOf(context);
+    final shortViewport = viewportSize.height < 620;
     final connected = context.watch<SSHService>().isConnected;
     final window = UiWindowInfo.of(context);
     final tokens = UiLayoutTokens.of(context);
@@ -1782,13 +1784,17 @@ class _GitTabState extends State<GitTab> {
     final logContainerRadius = window.isCompact ? 8.0 : 10.0;
     final logLineFontSize = window.isCompact ? 12.0 : 13.0;
     final actionSpacing = window.isCompact ? tokens.itemGap + 2 : 10.0;
-    final actionPanelMaxHeight = switch (window.windowClass) {
+    final baseActionPanelMaxHeight = switch (window.windowClass) {
       UiWindowClass.compact => 340.0,
       UiWindowClass.medium => 300.0,
       UiWindowClass.expanded => 230.0,
       UiWindowClass.large => 220.0,
       UiWindowClass.extraLarge => 210.0,
     };
+    final actionPanelMaxHeight =
+        (viewportSize.height * (shortViewport ? 0.30 : 0.36))
+            .clamp(140.0, baseActionPanelMaxHeight)
+            .toDouble();
     final actionButtonExtent = switch (window.windowClass) {
       UiWindowClass.compact => 76.0,
       UiWindowClass.medium => 74.0,
@@ -1796,7 +1802,8 @@ class _GitTabState extends State<GitTab> {
       UiWindowClass.large => 68.0,
       UiWindowClass.extraLarge => 66.0,
     };
-    final useWideSplit = window.isExpandedOrAbove && window.isLandscape;
+    final useWideSplit =
+        window.isExpandedOrAbove && window.isLandscape && !shortViewport;
     final actionPaneWidth = switch (window.windowClass) {
       UiWindowClass.compact => 300.0,
       UiWindowClass.medium => 320.0,
@@ -2037,7 +2044,14 @@ class _GitTabState extends State<GitTab> {
                       bottomPanelPadding,
                       0,
                     ),
-                    child: buildActionBody(),
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight: actionPanelMaxHeight,
+                      ),
+                      child: SingleChildScrollView(
+                        child: buildActionBody(),
+                      ),
+                    ),
                   ),
                 ),
               ),
