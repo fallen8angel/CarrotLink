@@ -11,6 +11,8 @@ import '../ui/adaptive/window_class.dart';
 class HomeHudPreviewCard extends StatefulWidget {
   final String? deviceIp;
   final bool enabled;
+  final bool fillParent;
+  final bool matchParentWidth;
   final double? fallbackCpuTempC;
   final double? fallbackMemPct;
   final double? fallbackDiskPct;
@@ -19,6 +21,8 @@ class HomeHudPreviewCard extends StatefulWidget {
     super.key,
     this.deviceIp,
     this.enabled = true,
+    this.fillParent = false,
+    this.matchParentWidth = false,
     this.fallbackCpuTempC,
     this.fallbackMemPct,
     this.fallbackDiskPct,
@@ -234,360 +238,372 @@ class _HomeHudPreviewCardState extends State<HomeHudPreviewCard> {
       ),
     );
 
-    return MediaQuery(
-      data: clampedMedia,
-      child: Center(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: maxCardWidth),
-          child: AspectRatio(
-            aspectRatio: 1,
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final side = constraints.maxWidth;
-                final scale = side / 340.0;
-                final metricGap = 8 * scale;
-                final bodyTopGap = 8 * scale;
-                final metricHeight = 54 * scale;
-                final mainSpeedFont = 78 * scale;
-                final setSpeedFont = 44 * scale;
-                final tempSourceFont = 32 * scale;
-                final tempSpeedFont = 52 * scale;
-                final gearColor = _snapshot.gear.trim().toUpperCase() == 'P'
-                    ? const Color(0xFF22FF61)
-                    : Colors.white;
+    final hudCore = LayoutBuilder(
+      builder: (context, constraints) {
+        final side = widget.fillParent
+            ? math
+                .min(
+                  constraints.maxWidth * 0.45,
+                  constraints.maxHeight * 1.25,
+                )
+                .clamp(260.0, 520.0)
+                .toDouble()
+            : constraints.maxWidth;
+        final scale = side / 340.0;
+        final metricGap = 8 * scale;
+        final bodyTopGap = 8 * scale;
+        final metricHeight = 54 * scale;
+        final mainSpeedFont = 78 * scale;
+        final setSpeedFont = 44 * scale;
+        final tempSourceFont = 32 * scale;
+        final tempSpeedFont = 52 * scale;
+        final gearColor = _snapshot.gear.trim().toUpperCase() == 'P'
+            ? const Color(0xFF22FF61)
+            : Colors.white;
 
-                return Container(
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF010A18),
-                    borderRadius: BorderRadius.circular(20 * scale),
-                    border: Border.all(color: Colors.white70, width: 2 * scale),
-                  ),
-                  child: Padding(
-                    padding: EdgeInsets.all(10 * scale),
-                    child: Column(
-                      children: [
-                        SizedBox(
-                          height: metricHeight,
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: _HudMiniMetric(
-                                  label: 'CPU',
-                                  value: _fmtCpu(
-                                    _snapshot.cpuTempC ??
-                                        widget.fallbackCpuTempC,
-                                  ),
-                                  scale: scale,
-                                ),
-                              ),
-                              SizedBox(width: metricGap),
-                              Expanded(
-                                child: _HudMiniMetric(
-                                  label: 'MEM',
-                                  value: _fmtMem(effectiveMemPct),
-                                  scale: scale,
-                                ),
-                              ),
-                              SizedBox(width: metricGap),
-                              Expanded(
-                                child: _HudMiniMetric(
-                                  label: effectiveDiskLabel,
-                                  value: _fmtDisk(
-                                      effectiveDiskValue, effectiveDiskLabel),
-                                  scale: scale,
-                                ),
-                              ),
-                            ],
+        return Container(
+          decoration: BoxDecoration(
+            color: const Color(0xFF010A18),
+            borderRadius: BorderRadius.circular(20 * scale),
+            border: Border.all(color: Colors.white70, width: 2 * scale),
+          ),
+          child: Padding(
+            padding: EdgeInsets.all(10 * scale),
+            child: Column(
+              children: [
+                SizedBox(
+                  height: metricHeight,
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: _HudMiniMetric(
+                          label: 'CPU',
+                          value: _fmtCpu(
+                            _snapshot.cpuTempC ?? widget.fallbackCpuTempC,
                           ),
+                          scale: scale,
                         ),
-                        SizedBox(height: bodyTopGap),
-                        Expanded(
-                          child: LayoutBuilder(
-                            builder: (context, bodyConstraints) {
-                              final w = bodyConstraints.maxWidth;
-                              final h = bodyConstraints.maxHeight;
-                              final bodyScale = math.min(w / 320.0, h / 230.0);
+                      ),
+                      SizedBox(width: metricGap),
+                      Expanded(
+                        child: _HudMiniMetric(
+                          label: 'MEM',
+                          value: _fmtMem(effectiveMemPct),
+                          scale: scale,
+                        ),
+                      ),
+                      SizedBox(width: metricGap),
+                      Expanded(
+                        child: _HudMiniMetric(
+                          label: effectiveDiskLabel,
+                          value:
+                              _fmtDisk(effectiveDiskValue, effectiveDiskLabel),
+                          scale: scale,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                SizedBox(height: bodyTopGap),
+                Expanded(
+                  child: LayoutBuilder(
+                    builder: (context, bodyConstraints) {
+                      final w = bodyConstraints.maxWidth;
+                      final h = bodyConstraints.maxHeight;
+                      final bodyScale = math.min(w / 320.0, h / 230.0);
 
-                              double px(double r) => w * r;
-                              double py(double r) => h * r;
+                      double px(double r) => w * r;
+                      double py(double r) => h * r;
 
-                              return Stack(
-                                children: [
-                                  Positioned.fill(
-                                    child: Padding(
-                                      padding: EdgeInsets.fromLTRB(
-                                        px(0.08),
-                                        py(0.12),
-                                        px(0.14),
-                                        py(0.18),
-                                      ),
-                                      child: Opacity(
-                                        opacity: 0.95,
-                                        child: Image.asset(
-                                          'assets/speed_bg.png',
-                                          fit: BoxFit.contain,
-                                          errorBuilder: (_, __, ___) =>
-                                              const SizedBox(),
-                                        ),
-                                      ),
-                                    ),
+                      return Stack(
+                        children: [
+                          Positioned.fill(
+                            child: Padding(
+                              padding: EdgeInsets.fromLTRB(
+                                px(0.08),
+                                py(0.12),
+                                px(0.14),
+                                py(0.18),
+                              ),
+                              child: Opacity(
+                                opacity: 0.95,
+                                child: Image.asset(
+                                  'assets/speed_bg.png',
+                                  fit: BoxFit.contain,
+                                  errorBuilder: (_, __, ___) =>
+                                      const SizedBox(),
+                                ),
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            left: px(0.01),
+                            top: py(0.00),
+                            child: Container(
+                              width: 20 * bodyScale,
+                              height: 20 * bodyScale,
+                              decoration: BoxDecoration(
+                                color: _signalColor(_snapshot.tlight),
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: Colors.black54,
+                                  width: 1.5 * scale,
+                                ),
+                              ),
+                            ),
+                          ),
+                          if (_snapshot.redDot)
+                            Positioned(
+                              left: px(0.09),
+                              top: py(0.10),
+                              child: Container(
+                                width: 14 * scale,
+                                height: 14 * scale,
+                                decoration: const BoxDecoration(
+                                  color: Color(0xFFFF2A2A),
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                            ),
+                          Positioned(
+                            left: px(0.10),
+                            top: py(0.19),
+                            child: Text(
+                              _fmtMainSpeed(_snapshot.vEgoKph),
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w900,
+                                fontSize: mainSpeedFont * 0.92,
+                                letterSpacing: -2 * scale,
+                                height: 0.92,
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            right: px(0.12),
+                            top: py(0.045),
+                            child: SizedBox(
+                              width: px(0.24),
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.centerRight,
+                                child: Text(
+                                  _snapshot.tempSource,
+                                  style: TextStyle(
+                                    color: const Color(0xFF22FF61),
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: tempSourceFont * 0.68,
+                                    height: 0.95,
                                   ),
-                                  Positioned(
-                                    left: px(0.01),
-                                    top: py(0.00),
-                                    child: Container(
-                                      width: 20 * bodyScale,
-                                      height: 20 * bodyScale,
-                                      decoration: BoxDecoration(
-                                        color: _signalColor(_snapshot.tlight),
-                                        shape: BoxShape.circle,
-                                        border: Border.all(
-                                          color: Colors.black54,
-                                          width: 1.5 * scale,
-                                        ),
-                                      ),
-                                    ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            right: px(0.07),
+                            top: py(0.11),
+                            child: SizedBox(
+                              width: px(0.20),
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.centerRight,
+                                child: Text(
+                                  _fmtTempSpeed(_snapshot.tempSpeedKph),
+                                  style: TextStyle(
+                                    color: tempColor,
+                                    fontWeight: FontWeight.w900,
+                                    fontSize: tempSpeedFont * 0.74,
+                                    height: 0.95,
                                   ),
-                                  if (_snapshot.redDot)
-                                    Positioned(
-                                      left: px(0.09),
-                                      top: py(0.10),
-                                      child: Container(
-                                        width: 14 * scale,
-                                        height: 14 * scale,
-                                        decoration: const BoxDecoration(
-                                          color: Color(0xFFFF2A2A),
-                                          shape: BoxShape.circle,
-                                        ),
-                                      ),
-                                    ),
-                                  Positioned(
-                                    left: px(0.10),
-                                    top: py(0.19),
-                                    child: Text(
-                                      _fmtMainSpeed(_snapshot.vEgoKph),
+                                ),
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            left: px(0.56),
+                            top: py(0.305),
+                            child: SizedBox(
+                              width: px(0.13),
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.centerRight,
+                                child: Text(
+                                  _fmtSetSpeed(_snapshot.vSetKph),
+                                  style: TextStyle(
+                                    color: const Color(0xFF22FF61),
+                                    fontWeight: FontWeight.w900,
+                                    fontSize: setSpeedFont * 0.8,
+                                    height: 0.95,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            right: px(0.00),
+                            top: py(0.27),
+                            child: Container(
+                              width: 44 * bodyScale,
+                              height: 72 * bodyScale,
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                borderRadius:
+                                    BorderRadius.circular(16 * bodyScale),
+                                border: Border.all(
+                                  color: Colors.white70,
+                                  width: 2 * bodyScale,
+                                ),
+                              ),
+                              child: Text(
+                                _snapshot.gear,
+                                style: TextStyle(
+                                  color: gearColor,
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 54 * bodyScale,
+                                  height: 0.95,
+                                ),
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            right: 0,
+                            bottom: py(0.00),
+                            child: Column(
+                              children: List.generate(
+                                4,
+                                (idx) => Container(
+                                  margin:
+                                      EdgeInsets.only(bottom: 6 * bodyScale),
+                                  width: 42 * bodyScale,
+                                  height: 11 * bodyScale,
+                                  decoration: BoxDecoration(
+                                    color: idx >= 4 - barsOn
+                                        ? const Color(0xFF1CFF57)
+                                        : const Color(0xFF505862),
+                                    borderRadius:
+                                        BorderRadius.circular(3 * bodyScale),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            left: 0,
+                            right: px(0.18),
+                            bottom: py(0.00),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: [
+                                Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      'GPS',
                                       style: TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w900,
-                                        fontSize: mainSpeedFont * 0.92,
-                                        letterSpacing: -2 * scale,
-                                        height: 0.92,
+                                        color: _snapshot.gpsOk
+                                            ? Colors.white
+                                            : Colors.white54,
+                                        fontWeight: FontWeight.w800,
+                                        fontSize: 22 * bodyScale,
                                       ),
                                     ),
-                                  ),
-                                  Positioned(
-                                    right: px(0.12),
-                                    top: py(0.045),
-                                    child: SizedBox(
-                                      width: px(0.24),
-                                      child: FittedBox(
-                                        fit: BoxFit.scaleDown,
-                                        alignment: Alignment.centerRight,
-                                        child: Text(
-                                          _snapshot.tempSource,
-                                          style: TextStyle(
-                                            color: const Color(0xFF22FF61),
-                                            fontWeight: FontWeight.w800,
-                                            fontSize: tempSourceFont * 0.68,
-                                            height: 0.95,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                  Positioned(
-                                    right: px(0.07),
-                                    top: py(0.11),
-                                    child: SizedBox(
-                                      width: px(0.20),
-                                      child: FittedBox(
-                                        fit: BoxFit.scaleDown,
-                                        alignment: Alignment.centerRight,
-                                        child: Text(
-                                          _fmtTempSpeed(_snapshot.tempSpeedKph),
-                                          style: TextStyle(
-                                            color: tempColor,
-                                            fontWeight: FontWeight.w900,
-                                            fontSize: tempSpeedFont * 0.74,
-                                            height: 0.95,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                  Positioned(
-                                    left: px(0.56),
-                                    top: py(0.305),
-                                    child: SizedBox(
-                                      width: px(0.13),
-                                      child: FittedBox(
-                                        fit: BoxFit.scaleDown,
-                                        alignment: Alignment.centerRight,
-                                        child: Text(
-                                          _fmtSetSpeed(_snapshot.vSetKph),
-                                          style: TextStyle(
-                                            color: const Color(0xFF22FF61),
-                                            fontWeight: FontWeight.w900,
-                                            fontSize: setSpeedFont * 0.8,
-                                            height: 0.95,
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                  Positioned(
-                                    right: px(0.00),
-                                    top: py(0.27),
-                                    child: Container(
-                                      width: 44 * bodyScale,
-                                      height: 72 * bodyScale,
+                                    SizedBox(height: 2 * bodyScale),
+                                    Container(
+                                      width: 96 * bodyScale,
+                                      height: 34 * bodyScale,
                                       alignment: Alignment.center,
                                       decoration: BoxDecoration(
+                                        color: driveModeBg,
                                         borderRadius: BorderRadius.circular(
-                                            16 * bodyScale),
+                                            14 * bodyScale),
                                         border: Border.all(
-                                          color: Colors.white70,
-                                          width: 2 * bodyScale,
+                                          color: Colors.black38,
+                                          width: 1.5 * bodyScale,
                                         ),
                                       ),
                                       child: Text(
-                                        _snapshot.gear,
+                                        _snapshot.driveModeName,
                                         style: TextStyle(
-                                          color: gearColor,
-                                          fontWeight: FontWeight.w900,
-                                          fontSize: 54 * bodyScale,
-                                          height: 0.95,
+                                          color: driveModeFg,
+                                          fontWeight: FontWeight.w700,
+                                          fontSize: 19 * bodyScale,
                                         ),
                                       ),
                                     ),
-                                  ),
-                                  Positioned(
-                                    right: 0,
-                                    bottom: py(0.00),
-                                    child: Column(
-                                      children: List.generate(
-                                        4,
-                                        (idx) => Container(
-                                          margin: EdgeInsets.only(
-                                              bottom: 6 * bodyScale),
-                                          width: 42 * bodyScale,
-                                          height: 11 * bodyScale,
-                                          decoration: BoxDecoration(
-                                            color: idx >= 4 - barsOn
-                                                ? const Color(0xFF1CFF57)
-                                                : const Color(0xFF505862),
-                                            borderRadius: BorderRadius.circular(
-                                                3 * bodyScale),
-                                          ),
+                                  ],
+                                ),
+                                const Spacer(),
+                                Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      'LIMIT',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w800,
+                                        fontSize: 22 * bodyScale,
+                                      ),
+                                    ),
+                                    SizedBox(height: 2 * bodyScale),
+                                    Container(
+                                      width: 90 * bodyScale,
+                                      height: 34 * bodyScale,
+                                      alignment: Alignment.center,
+                                      decoration: BoxDecoration(
+                                        color: _snapshot.speedLimitOver
+                                            ? const Color(0xFFFF2A2A)
+                                            : const Color(0xFF010A18),
+                                        borderRadius: BorderRadius.circular(
+                                            14 * bodyScale),
+                                        border: Border.all(
+                                          color: Colors.black45,
+                                          width: 1.5 * bodyScale,
+                                        ),
+                                      ),
+                                      child: Text(
+                                        _fmtLimit(_snapshot.speedLimitKph),
+                                        style: TextStyle(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.w700,
+                                          fontSize: 20 * bodyScale,
                                         ),
                                       ),
                                     ),
-                                  ),
-                                  Positioned(
-                                    left: 0,
-                                    right: px(0.18),
-                                    bottom: py(0.00),
-                                    child: Row(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.end,
-                                      children: [
-                                        Column(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            Text(
-                                              'GPS',
-                                              style: TextStyle(
-                                                color: _snapshot.gpsOk
-                                                    ? Colors.white
-                                                    : Colors.white54,
-                                                fontWeight: FontWeight.w800,
-                                                fontSize: 22 * bodyScale,
-                                              ),
-                                            ),
-                                            SizedBox(height: 2 * bodyScale),
-                                            Container(
-                                              width: 96 * bodyScale,
-                                              height: 34 * bodyScale,
-                                              alignment: Alignment.center,
-                                              decoration: BoxDecoration(
-                                                color: driveModeBg,
-                                                borderRadius:
-                                                    BorderRadius.circular(
-                                                        14 * bodyScale),
-                                                border: Border.all(
-                                                  color: Colors.black38,
-                                                  width: 1.5 * bodyScale,
-                                                ),
-                                              ),
-                                              child: Text(
-                                                _snapshot.driveModeName,
-                                                style: TextStyle(
-                                                  color: driveModeFg,
-                                                  fontWeight: FontWeight.w700,
-                                                  fontSize: 19 * bodyScale,
-                                                ),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                        const Spacer(),
-                                        Column(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            Text(
-                                              'LIMIT',
-                                              style: TextStyle(
-                                                color: Colors.white,
-                                                fontWeight: FontWeight.w800,
-                                                fontSize: 22 * bodyScale,
-                                              ),
-                                            ),
-                                            SizedBox(height: 2 * bodyScale),
-                                            Container(
-                                              width: 90 * bodyScale,
-                                              height: 34 * bodyScale,
-                                              alignment: Alignment.center,
-                                              decoration: BoxDecoration(
-                                                color: _snapshot.speedLimitOver
-                                                    ? const Color(0xFFFF2A2A)
-                                                    : const Color(0xFF010A18),
-                                                borderRadius:
-                                                    BorderRadius.circular(
-                                                        14 * bodyScale),
-                                                border: Border.all(
-                                                  color: Colors.black45,
-                                                  width: 1.5 * bodyScale,
-                                                ),
-                                              ),
-                                              child: Text(
-                                                _fmtLimit(
-                                                    _snapshot.speedLimitKph),
-                                                style: TextStyle(
-                                                  color: Colors.white,
-                                                  fontWeight: FontWeight.w700,
-                                                  fontSize: 20 * bodyScale,
-                                                ),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                              );
-                            },
+                                  ],
+                                ),
+                              ],
+                            ),
                           ),
-                        ),
-                      ],
-                    ),
+                        ],
+                      );
+                    },
                   ),
-                );
-              },
+                ),
+              ],
             ),
           ),
-        ),
-      ),
+        );
+      },
+    );
+
+    return MediaQuery(
+      data: clampedMedia,
+      child: widget.fillParent
+          ? SizedBox.expand(child: hudCore)
+          : Center(
+              child: widget.matchParentWidth
+                  ? AspectRatio(
+                      aspectRatio: 1,
+                      child: hudCore,
+                    )
+                  : ConstrainedBox(
+                      constraints: BoxConstraints(maxWidth: maxCardWidth),
+                      child: AspectRatio(
+                        aspectRatio: 1,
+                        child: hudCore,
+                      ),
+                    ),
+            ),
     );
   }
 }

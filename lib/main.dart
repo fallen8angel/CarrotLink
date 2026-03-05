@@ -27,11 +27,10 @@ void main() async {
     SystemNavigator.pop();
   });
 
-  // Allow portrait + landscape for adaptive layouts on foldables/tablets.
+  // Keep app-wide orientation portrait-only.
+  // Drive(HUD) screen temporarily enables landscape while active.
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
-    DeviceOrientation.landscapeLeft,
-    DeviceOrientation.landscapeRight,
   ]);
 
   runApp(

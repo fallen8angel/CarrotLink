@@ -20,6 +20,7 @@ import '../../services/ssh_service.dart';
 import '../../ui/adaptive/display_feature_utils.dart';
 import '../../ui/adaptive/layout_tokens.dart';
 import '../../ui/adaptive/window_class.dart';
+import '../../widgets/home_hud_preview_card.dart';
 import '../tabs/device_settings_tab.dart';
 
 enum _DriveCameraKind { road, wideRoad }
@@ -71,6 +72,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       MethodChannel('carrotlink/native_drive_video_control');
   static const bool _hudDebugMenuEnabled = true;
   static const bool _temporaryLimitedHudControls = false;
+  static const bool _showDriveDock = false;
   // Sidecar is treated as an externally managed resident process on comma.
   static const bool _residentSidecarManaged = true;
   static const bool _autoDeployDuringHudRuntime = false;
@@ -79,7 +81,9 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const String _sidecarRevisionNotifiedPrefKey =
       'sidecar_revision_notified_v1';
   static const String _hudDebugLayerTogglesPrefKey =
-      'hud_debug_layer_toggles_v1';
+      'hud_debug_layer_toggles_v3';
+  static const String _hudDebugLayerTogglesInitPrefKey =
+      'hud_debug_layer_toggles_init_v3';
   static const _M3 _viewFromDevice = _M3(
     0.0,
     1.0,
@@ -798,13 +802,20 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   Future<void> _loadHudDebugLayerToggles() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_hudDebugLayerTogglesPrefKey);
-      if (raw == null || raw.trim().isEmpty) return;
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map) return;
-      final map = Map<String, dynamic>.from(decoded);
-      bool readBool(String key, bool fallback) {
-        final value = map[key];
+      const defaults = <String, bool>{
+        'pathFill': true,
+        'laneLines': true,
+        'roadEdge': true,
+        'lead1': false,
+        'lead2': false,
+        'radarBadge': false,
+        'radarVector': false,
+        'stopDistanceTf': true,
+        'stateText': true,
+      };
+
+      bool readBool(Map<String, dynamic> source, String key, bool fallback) {
+        final value = source[key];
         if (value is bool) return value;
         if (value is num) return value != 0;
         if (value is String) {
@@ -815,32 +826,64 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
         return fallback;
       }
 
-      if (!mounted) {
-        _debugShowPathFill = readBool('pathFill', _debugShowPathFill);
-        _debugShowLaneLines = readBool('laneLines', _debugShowLaneLines);
-        _debugShowRoadEdge = readBool('roadEdge', _debugShowRoadEdge);
-        _debugShowLead1 = readBool('lead1', _debugShowLead1);
-        _debugShowLead2 = readBool('lead2', _debugShowLead2);
-        _debugShowRadarBadge = readBool('radarBadge', _debugShowRadarBadge);
-        _debugShowRadarVector = readBool('radarVector', _debugShowRadarVector);
-        _debugShowStopDistanceTf =
-            readBool('stopDistanceTf', _debugShowStopDistanceTf);
-        _debugShowStateText = readBool('stateText', _debugShowStateText);
+      void applyMap(Map<String, dynamic> map) {
+        if (!mounted) {
+          _debugShowPathFill = readBool(map, 'pathFill', defaults['pathFill']!);
+          _debugShowLaneLines =
+              readBool(map, 'laneLines', defaults['laneLines']!);
+          _debugShowRoadEdge = readBool(map, 'roadEdge', defaults['roadEdge']!);
+          _debugShowLead1 = readBool(map, 'lead1', defaults['lead1']!);
+          _debugShowLead2 = readBool(map, 'lead2', defaults['lead2']!);
+          _debugShowRadarBadge =
+              readBool(map, 'radarBadge', defaults['radarBadge']!);
+          _debugShowRadarVector =
+              readBool(map, 'radarVector', defaults['radarVector']!);
+          _debugShowStopDistanceTf =
+              readBool(map, 'stopDistanceTf', defaults['stopDistanceTf']!);
+          _debugShowStateText =
+              readBool(map, 'stateText', defaults['stateText']!);
+          return;
+        }
+
+        setState(() {
+          _debugShowPathFill = readBool(map, 'pathFill', defaults['pathFill']!);
+          _debugShowLaneLines =
+              readBool(map, 'laneLines', defaults['laneLines']!);
+          _debugShowRoadEdge = readBool(map, 'roadEdge', defaults['roadEdge']!);
+          _debugShowLead1 = readBool(map, 'lead1', defaults['lead1']!);
+          _debugShowLead2 = readBool(map, 'lead2', defaults['lead2']!);
+          _debugShowRadarBadge =
+              readBool(map, 'radarBadge', defaults['radarBadge']!);
+          _debugShowRadarVector =
+              readBool(map, 'radarVector', defaults['radarVector']!);
+          _debugShowStopDistanceTf =
+              readBool(map, 'stopDistanceTf', defaults['stopDistanceTf']!);
+          _debugShowStateText =
+              readBool(map, 'stateText', defaults['stateText']!);
+        });
+      }
+
+      final initialized =
+          prefs.getBool(_hudDebugLayerTogglesInitPrefKey) ?? false;
+      if (!initialized) {
+        applyMap(Map<String, dynamic>.from(defaults));
+        await prefs.setString(
+            _hudDebugLayerTogglesPrefKey, jsonEncode(defaults));
+        await prefs.setBool(_hudDebugLayerTogglesInitPrefKey, true);
         return;
       }
 
-      setState(() {
-        _debugShowPathFill = readBool('pathFill', _debugShowPathFill);
-        _debugShowLaneLines = readBool('laneLines', _debugShowLaneLines);
-        _debugShowRoadEdge = readBool('roadEdge', _debugShowRoadEdge);
-        _debugShowLead1 = readBool('lead1', _debugShowLead1);
-        _debugShowLead2 = readBool('lead2', _debugShowLead2);
-        _debugShowRadarBadge = readBool('radarBadge', _debugShowRadarBadge);
-        _debugShowRadarVector = readBool('radarVector', _debugShowRadarVector);
-        _debugShowStopDistanceTf =
-            readBool('stopDistanceTf', _debugShowStopDistanceTf);
-        _debugShowStateText = readBool('stateText', _debugShowStateText);
-      });
+      final raw = prefs.getString(_hudDebugLayerTogglesPrefKey);
+      if (raw == null || raw.trim().isEmpty) {
+        applyMap(Map<String, dynamic>.from(defaults));
+        return;
+      }
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) {
+        applyMap(Map<String, dynamic>.from(defaults));
+        return;
+      }
+      applyMap(Map<String, dynamic>.from(decoded));
     } catch (_) {}
   }
 
@@ -859,6 +902,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
         'stateText': _debugShowStateText,
       };
       await prefs.setString(_hudDebugLayerTogglesPrefKey, jsonEncode(payload));
+      await prefs.setBool(_hudDebugLayerTogglesInitPrefKey, true);
     } catch (_) {}
   }
 
@@ -1460,8 +1504,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   Future<void> _restorePortraitOrientation() async {
     await SystemChrome.setPreferredOrientations(const [
       DeviceOrientation.portraitUp,
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
     ]);
   }
 
@@ -1478,7 +1520,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   }
 
   Future<void> _loadAndApplyLandscapeOrientation() async {
-    // Follow system/user rotation. Do not force landscape lock inside HUD.
+    // Drive screen only: allow portrait + landscape while this screen is active.
     await _lockLandscapeOrientations();
   }
 
@@ -1621,8 +1663,11 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   }
 
   Future<void> _lockLandscapeOrientations() async {
-    // Keep both portrait/landscape allowed (same as app-level policy).
-    await _restorePortraitOrientation();
+    await SystemChrome.setPreferredOrientations(const [
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
   }
 
   Future<void> _exitScreen() async {
@@ -3696,7 +3741,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
         vertical: verticalPadding,
       ),
       decoration: BoxDecoration(
-        color: const Color(0xFF171B24),
+        color: const Color(0xFF231A14),
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: Colors.white12),
       ),
@@ -4012,7 +4057,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
 
   Color _sidecarStatusColor() {
     if (_sidecarPhase == _SidecarPhase.failed) return const Color(0xCC7A1010);
-    if (_isSidecarBusy) return const Color(0xCC1C2532);
+    if (_isSidecarBusy) return const Color(0xCC4A2E12);
     return const Color(0xCC1E3A2A);
   }
 
@@ -4419,6 +4464,13 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     var refreshing = false;
     var actionRunning = false;
     var selectedGroup = 0;
+    const debugDialogBg = Color(0xFF17120F);
+    const debugNavBg = Color(0xFF211A15);
+    const debugCardBg = Color(0xFF1F1712);
+    const debugCardBgAlt = Color(0xFF231A14);
+    const debugPanelBg = Color(0xFF1D1612);
+    const debugSelectedBg = Color(0xFF7A5644);
+    const debugSelectedBorder = Color(0xFFD6A88C);
 
     await showDialog<void>(
       context: context,
@@ -4526,13 +4578,10 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                     padding: const EdgeInsets.symmetric(
                         horizontal: 10, vertical: 10),
                     decoration: BoxDecoration(
-                      color: selected
-                          ? const Color(0xFF7A5644)
-                          : const Color(0xFF151A23),
+                      color: selected ? debugSelectedBg : debugNavBg,
                       borderRadius: BorderRadius.circular(10),
                       border: Border.all(
-                        color:
-                            selected ? const Color(0xFFD6A88C) : Colors.white12,
+                        color: selected ? debugSelectedBorder : Colors.white12,
                       ),
                     ),
                     child: Row(
@@ -4628,7 +4677,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                 margin: EdgeInsets.only(bottom: window.isCompact ? 12 : 14),
                 padding: cardPadding,
                 decoration: BoxDecoration(
-                  color: const Color(0xFF171B24),
+                  color: debugCardBg,
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(color: Colors.white12),
                 ),
@@ -4665,7 +4714,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
               return Container(
                 padding: EdgeInsets.all(statusCardPadding),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF121824),
+                  color: debugCardBgAlt,
                   borderRadius: BorderRadius.circular(statusCardRadius),
                   border: Border.all(color: Colors.white12),
                 ),
@@ -4737,10 +4786,10 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
               return ChoiceChip(
                 selected: selected,
                 onSelected: (_) => setLocalState(() => selectedGroup = index),
-                selectedColor: const Color(0xFF7A5644),
-                backgroundColor: const Color(0xFF151A23),
+                selectedColor: debugSelectedBg,
+                backgroundColor: debugNavBg,
                 side: BorderSide(
-                  color: selected ? const Color(0xFFD6A88C) : Colors.white12,
+                  color: selected ? debugSelectedBorder : Colors.white12,
                 ),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(10),
@@ -4763,7 +4812,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
             }
 
             return Dialog(
-              backgroundColor: const Color(0xFF11141A),
+              backgroundColor: debugDialogBg,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(18),
                 side: const BorderSide(color: Colors.white12),
@@ -4817,7 +4866,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                           contentHorizontalPadding,
                           8,
                         ),
-                        color: const Color(0xFF11151D),
+                        color: debugPanelBg,
                         child: SingleChildScrollView(
                           scrollDirection: Axis.horizontal,
                           child: Row(
@@ -4863,7 +4912,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                           if (isWideDialog) ...[
                             Container(
                               width: sidebarWidth,
-                              color: const Color(0xFF11151D),
+                              color: debugPanelBg,
                               child: ListView(
                                 padding:
                                     const EdgeInsets.symmetric(vertical: 8),
@@ -4912,7 +4961,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                     contentHorizontalPadding,
                                     10,
                                   ),
-                                  color: const Color(0xFF121824),
+                                  color: debugCardBgAlt,
                                   child: Column(
                                     crossAxisAlignment:
                                         CrossAxisAlignment.start,
@@ -5122,7 +5171,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                                     (
                                                       label: '배포 결과',
                                                       value:
-                                                          '$_sidecarLastDeployResult',
+                                                          _sidecarLastDeployResult,
                                                       color: null
                                                     ),
                                                     (
@@ -5647,8 +5696,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                                         OutlineInputBorder(),
                                                     isDense: true,
                                                   ),
-                                                  dropdownColor:
-                                                      const Color(0xFF171B24),
+                                                  dropdownColor: debugCardBg,
                                                   style: const TextStyle(
                                                       color: Colors.white),
                                                   items: _OverlayPreviewScenario
@@ -5809,6 +5857,162 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     return WebViewWidget(controller: _cameraController);
   }
 
+  String? _cameraCenterNoticeMessage() {
+    if (_debugOverlayPreviewMode) return null;
+    if (!_hudModeLoaded) return 'HUD 모드 설정을 불러오는 중입니다.';
+    if (_openpilotOverlayMode && _disableDmGateChecking) {
+      return 'DisableDM 값을 확인하는 중입니다.';
+    }
+    if (_openpilotOverlayMode && _disableDmGateBlocked) {
+      // Keep the actionable bottom warning card instead of duplicating center text.
+      return null;
+    }
+    if (_openpilotOverlayMode && !_sidecarConnected) {
+      return '사이드카 연결 대기 중입니다.';
+    }
+    final err = _cameraError?.trim();
+    if (err != null && err.isNotEmpty) {
+      return err;
+    }
+    final notice = _hudNoticeMessage?.trim();
+    if (notice != null && notice.isNotEmpty) {
+      return notice;
+    }
+    if (_cameraStalled) {
+      return _cameraStallBadgeText();
+    }
+    if (_openpilotOverlayMode && _sidecarConnected) {
+      final last = _sidecarLastFrameAt;
+      if (last == null) {
+        return '사이드카 프레임 대기 중입니다.';
+      }
+      final elapsedMs = DateTime.now().difference(last).inMilliseconds;
+      if (elapsedMs >= 2200) {
+        return '사이드카 프레임 지연 ${((elapsedMs / 1000.0)).toStringAsFixed(1)}s';
+      }
+    }
+    if (!_cameraLoading && _lastCameraFrameId == null) {
+      return '로드카메라 프레임 대기 중입니다.';
+    }
+    return null;
+  }
+
+  double _computePortraitHudHeight(
+      UiWindowInfo window, BoxConstraints constraints) {
+    final width = constraints.maxWidth;
+    final height = constraints.maxHeight;
+    final aspect = height / math.max(1.0, width);
+    var ratio = switch (window.windowClass) {
+      UiWindowClass.compact => 0.365,
+      UiWindowClass.medium => 0.35,
+      UiWindowClass.expanded => 0.338,
+      UiWindowClass.large => 0.328,
+      UiWindowClass.extraLarge => 0.32,
+    };
+
+    if (aspect >= 2.05) {
+      ratio += 0.015;
+    } else if (aspect >= 1.9) {
+      ratio += 0.008;
+    } else if (aspect <= 1.55) {
+      ratio -= 0.02;
+    } else if (aspect <= 1.7) {
+      ratio -= 0.012;
+    }
+
+    if (window.shortestSide >= 720) {
+      ratio -= 0.01;
+    } else if (window.shortestSide <= 380) {
+      ratio += 0.01;
+    }
+
+    final minHeight = switch (window.windowClass) {
+      UiWindowClass.compact => 200.0,
+      UiWindowClass.medium => 212.0,
+      UiWindowClass.expanded => 224.0,
+      UiWindowClass.large => 234.0,
+      UiWindowClass.extraLarge => 244.0,
+    };
+    final maxHeight = switch (window.windowClass) {
+      UiWindowClass.compact => math.min(460.0, height * 0.44),
+      UiWindowClass.medium => math.min(470.0, height * 0.43),
+      UiWindowClass.expanded => math.min(480.0, height * 0.42),
+      UiWindowClass.large => math.min(500.0, height * 0.41),
+      UiWindowClass.extraLarge => math.min(520.0, height * 0.4),
+    };
+
+    return (height * ratio).clamp(minHeight, maxHeight).toDouble();
+  }
+
+  Widget _buildPortraitHudPanel(UiWindowInfo window) {
+    final panelPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 6.0,
+      UiWindowClass.medium => 8.0,
+      UiWindowClass.expanded => 10.0,
+      UiWindowClass.large || UiWindowClass.extraLarge => 12.0,
+    };
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xFF0A0E16),
+        border:
+            Border(top: BorderSide(color: Colors.white.withValues(alpha: 0.2))),
+      ),
+      child: Padding(
+        padding:
+            EdgeInsets.fromLTRB(panelPadding, panelPadding, panelPadding, 0),
+        child: HomeHudPreviewCard(
+          deviceIp: widget.hostIp,
+          enabled: true,
+          fillParent: true,
+          key: ValueKey<String>(
+              'drive_hud_panel_${window.windowClass.name}_${widget.hostIp}'),
+        ),
+      ),
+    );
+  }
+
+  double _computeLandscapeHudOverlaySize(UiWindowInfo window, Size drawSize) {
+    final base = math.min(drawSize.width, drawSize.height);
+    final ratio = switch (window.windowClass) {
+      UiWindowClass.compact => 0.30,
+      UiWindowClass.medium => 0.285,
+      UiWindowClass.expanded => 0.275,
+      UiWindowClass.large => 0.265,
+      UiWindowClass.extraLarge => 0.255,
+    };
+    final minSize = switch (window.windowClass) {
+      UiWindowClass.compact => 124.0,
+      UiWindowClass.medium => 136.0,
+      UiWindowClass.expanded => 144.0,
+      UiWindowClass.large => 154.0,
+      UiWindowClass.extraLarge => 164.0,
+    };
+    final maxSize = switch (window.windowClass) {
+      UiWindowClass.compact => 196.0,
+      UiWindowClass.medium => 212.0,
+      UiWindowClass.expanded => 228.0,
+      UiWindowClass.large => 244.0,
+      UiWindowClass.extraLarge => 258.0,
+    };
+    return (base * ratio).clamp(minSize, maxSize).toDouble();
+  }
+
+  Widget _buildLandscapeHudOverlay(UiWindowInfo window, Size drawSize) {
+    final size = _computeLandscapeHudOverlaySize(window, drawSize);
+    return SizedBox(
+      width: size,
+      height: size,
+      child: HomeHudPreviewCard(
+        deviceIp: widget.hostIp,
+        enabled: true,
+        fillParent: true,
+        key: ValueKey<String>(
+          'drive_hud_overlay_${window.windowClass.name}_${widget.hostIp}',
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final window = UiWindowInfo.of(context);
@@ -5853,68 +6057,72 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                   UiWindowClass.large || UiWindowClass.extraLarge => 128.0,
                 };
 
-                final dockWidth = (constraints.maxWidth * dockRatio)
-                    .clamp(
-                      dockMin,
-                      dockMax,
-                    )
-                    .toDouble();
+                final isLandscapeLayout = window.isLandscape;
+                final dockWidth = isLandscapeLayout
+                    ? (constraints.maxWidth * dockRatio)
+                        .clamp(
+                          dockMin,
+                          dockMax,
+                        )
+                        .toDouble()
+                    : 0.0;
 
-                return Row(
+                final mainContent = Row(
                   children: [
-                    Container(
-                      width: dockWidth,
-                      decoration: const BoxDecoration(
-                        color: Color(0xFF11141A),
-                        border: Border(
-                          right: BorderSide(color: Colors.white24),
+                    if (_showDriveDock && isLandscapeLayout)
+                      Container(
+                        width: dockWidth,
+                        decoration: const BoxDecoration(
+                          color: Color(0xFF11141A),
+                          border: Border(
+                            right: BorderSide(color: Colors.white24),
+                          ),
                         ),
-                      ),
-                      child: Column(
-                        children: [
-                          const SizedBox(height: 8),
-                          IconButton(
-                            onPressed: _exitScreen,
-                            icon: const Icon(Icons.arrow_back,
-                                color: Colors.white),
-                            tooltip: '나가기',
-                          ),
-                          const SizedBox(height: 6),
-                          Container(
-                            width: 8,
-                            height: 8,
-                            decoration: BoxDecoration(
-                              color: _sidecarConnected
-                                  ? const Color(0xFF24FF67)
-                                  : const Color(0xFFFF4C4C),
-                              shape: BoxShape.circle,
+                        child: Column(
+                          children: [
+                            const SizedBox(height: 8),
+                            IconButton(
+                              onPressed: _exitScreen,
+                              icon: const Icon(Icons.arrow_back,
+                                  color: Colors.white),
+                              tooltip: '나가기',
                             ),
-                          ),
-                          const SizedBox(height: 10),
-                          Expanded(
-                            child: SingleChildScrollView(
-                              padding: const EdgeInsets.only(bottom: 4),
-                              child: Column(
-                                children: [
-                                  if (_hudDebugMenuEnabled)
-                                    IconButton(
-                                      onPressed: _temporaryLimitedHudControls
-                                          ? null
-                                          : _openDebugOptionsPopup,
-                                      icon: const Icon(
-                                        Icons.tune,
-                                        color: Color(0xFF8FE7FF),
-                                      ),
-                                      tooltip: '디버그 옵션',
-                                    ),
-                                ],
+                            const SizedBox(height: 6),
+                            Container(
+                              width: 8,
+                              height: 8,
+                              decoration: BoxDecoration(
+                                color: _sidecarConnected
+                                    ? const Color(0xFF24FF67)
+                                    : const Color(0xFFFF4C4C),
+                                shape: BoxShape.circle,
                               ),
                             ),
-                          ),
-                          const SizedBox(height: 8),
-                        ],
+                            const SizedBox(height: 10),
+                            Expanded(
+                              child: SingleChildScrollView(
+                                padding: const EdgeInsets.only(bottom: 4),
+                                child: Column(
+                                  children: [
+                                    if (_hudDebugMenuEnabled)
+                                      IconButton(
+                                        onPressed: _temporaryLimitedHudControls
+                                            ? null
+                                            : _openDebugOptionsPopup,
+                                        icon: const Icon(
+                                          Icons.tune,
+                                          color: Color(0xFF8FE7FF),
+                                        ),
+                                        tooltip: '디버그 옵션',
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                          ],
+                        ),
                       ),
-                    ),
                     Expanded(
                       child: ColoredBox(
                         color: Colors.black,
@@ -6107,6 +6315,13 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                               UiWindowClass.extraLarge =>
                                 12.5,
                             };
+                            final centerNoticeMessage =
+                                _cameraCenterNoticeMessage();
+                            final hasCenterNotice =
+                                centerNoticeMessage != null &&
+                                    !_debugOverlayPreviewMode;
+                            final showBottomStatusBanners =
+                                !hasCenterNotice || _disableDmGateBlocked;
                             final drawSize = Size(drawW, drawH);
                             if ((_nativeOverlaySize.width - drawW).abs() >
                                     0.5 ||
@@ -6198,11 +6413,73 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                               ),
                                             ),
                                           ),
+                                        if (hasCenterNotice)
+                                          Positioned.fill(
+                                            child: IgnorePointer(
+                                              child: Center(
+                                                child: ConstrainedBox(
+                                                  constraints: BoxConstraints(
+                                                    maxWidth:
+                                                        statusBannerMaxWidth,
+                                                  ),
+                                                  child: Container(
+                                                    margin:
+                                                        EdgeInsets.symmetric(
+                                                      horizontal:
+                                                          overlayInset * 0.5,
+                                                    ),
+                                                    padding: EdgeInsets.all(
+                                                        statusAlertPadding),
+                                                    decoration: BoxDecoration(
+                                                      color: const Color(
+                                                          0xCC1F1712),
+                                                      borderRadius:
+                                                          BorderRadius.circular(
+                                                              statusBannerRadius),
+                                                      border: Border.all(
+                                                          color:
+                                                              Colors.white24),
+                                                    ),
+                                                    child: Text(
+                                                      centerNoticeMessage,
+                                                      textAlign:
+                                                          TextAlign.center,
+                                                      maxLines: 3,
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                      style: TextStyle(
+                                                        color: Colors.white,
+                                                        fontSize:
+                                                            statusBannerBodyFont,
+                                                        fontWeight:
+                                                            FontWeight.w600,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          ),
                                       ],
                                     ),
                                   ),
+                                  if (isLandscapeLayout)
+                                    Positioned(
+                                      left: overlayInset,
+                                      bottom: (showBottomStatusBanners
+                                              ? 72.0
+                                              : 0.0) +
+                                          (overlayInset * 0.25),
+                                      child: IgnorePointer(
+                                        child: _buildLandscapeHudOverlay(
+                                          window,
+                                          Size(vw, vh),
+                                        ),
+                                      ),
+                                    ),
                                   if (_cameraStalled &&
-                                      !_debugOverlayPreviewMode)
+                                      !_debugOverlayPreviewMode &&
+                                      !hasCenterNotice)
                                     Positioned(
                                       top: overlayInset,
                                       left: overlayInset,
@@ -6241,7 +6518,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                               children: [
                                                 Icon(
                                                   Icons.network_check_rounded,
-                                                  color: Color(0xFFFFD27A),
+                                                  color:
+                                                      const Color(0xFFFFD27A),
                                                   size: stallBadgeIconSize,
                                                 ),
                                                 SizedBox(
@@ -6253,7 +6531,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                                     overflow:
                                                         TextOverflow.ellipsis,
                                                     style: TextStyle(
-                                                      color: Color(0xFFFFE6B8),
+                                                      color: const Color(
+                                                          0xFFFFE6B8),
                                                       fontSize:
                                                           stallBadgeFontSize,
                                                       fontWeight:
@@ -6267,7 +6546,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                         ),
                                       ),
                                     ),
-                                  if (_showSidecarStatusBanner)
+                                  if (showBottomStatusBanners &&
+                                      _showSidecarStatusBanner)
                                     Positioned(
                                       left: overlayInset,
                                       right: overlayInset,
@@ -6376,9 +6656,10 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                                       minHeight:
                                                           statusBannerProgressHeight,
                                                       backgroundColor:
-                                                          Color(0x553A4C63),
+                                                          const Color(
+                                                              0x553A4C63),
                                                       valueColor:
-                                                          AlwaysStoppedAnimation<
+                                                          const AlwaysStoppedAnimation<
                                                               Color>(
                                                         Color(0xFF69C8FF),
                                                       ),
@@ -6391,7 +6672,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                         ),
                                       ),
                                     )
-                                  else if (!_hudModeLoaded)
+                                  else if (showBottomStatusBanners &&
+                                      !_hudModeLoaded)
                                     Positioned(
                                       left: overlayInset,
                                       right: overlayInset,
@@ -6400,7 +6682,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                         padding:
                                             EdgeInsets.all(statusAlertPadding),
                                         decoration: BoxDecoration(
-                                          color: const Color(0xCC1C2532),
+                                          color: const Color(0xCC1F1712),
                                           borderRadius: BorderRadius.circular(
                                               statusBannerRadius),
                                           border:
@@ -6415,7 +6697,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                         ),
                                       ),
                                     )
-                                  else if (_disableDmGateChecking &&
+                                  else if (showBottomStatusBanners &&
+                                      _disableDmGateChecking &&
                                       !_debugOverlayPreviewMode)
                                     Positioned(
                                       left: overlayInset,
@@ -6425,7 +6708,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                         padding:
                                             EdgeInsets.all(statusAlertPadding),
                                         decoration: BoxDecoration(
-                                          color: const Color(0xCC1C2532),
+                                          color: const Color(0xCC1F1712),
                                           borderRadius: BorderRadius.circular(
                                               statusBannerRadius),
                                           border:
@@ -6440,7 +6723,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                         ),
                                       ),
                                     )
-                                  else if (_disableDmGateBlocked &&
+                                  else if (showBottomStatusBanners &&
+                                      _disableDmGateBlocked &&
                                       !_debugOverlayPreviewMode)
                                     Positioned(
                                       left: overlayInset,
@@ -6491,7 +6775,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                         ),
                                       ),
                                     )
-                                  else if (_cameraError != null &&
+                                  else if (showBottomStatusBanners &&
+                                      _cameraError != null &&
                                       !_debugOverlayPreviewMode)
                                     Positioned(
                                       left: overlayInset,
@@ -6516,7 +6801,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                         ),
                                       ),
                                     )
-                                  else if (_hudNoticeMessage != null)
+                                  else if (showBottomStatusBanners &&
+                                      _hudNoticeMessage != null)
                                     Positioned(
                                       left: overlayInset,
                                       right: overlayInset,
@@ -6527,7 +6813,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                         decoration: BoxDecoration(
                                           color: _hudNoticeIsError
                                               ? const Color(0xCC7A1010)
-                                              : const Color(0xCC1C2532),
+                                              : const Color(0xCC1F1712),
                                           borderRadius: BorderRadius.circular(
                                               statusBannerRadius),
                                           border:
@@ -6573,11 +6859,11 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                           padding: EdgeInsets.all(
                                               statusAlertPadding),
                                           decoration: BoxDecoration(
-                                            color: const Color(0xCC0B111A),
+                                            color: const Color(0xCC1B140F),
                                             borderRadius: BorderRadius.circular(
                                                 statusBannerRadius),
                                             border: Border.all(
-                                              color: const Color(0xFF2F5D8C),
+                                              color: const Color(0xFF9A6C4A),
                                             ),
                                           ),
                                           child: SelectableText(
@@ -6585,7 +6871,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                             style: TextStyle(
                                               fontFamily: 'monospace',
                                               fontSize: statusBannerBodyFont,
-                                              color: Color(0xFFEAF3FF),
+                                              color: const Color(0xFFFFE9D2),
                                               height: 1.25,
                                             ),
                                           ),
@@ -6598,6 +6884,77 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                           },
                         ),
                       ),
+                    ),
+                  ],
+                );
+
+                final fabInset = switch (window.windowClass) {
+                  UiWindowClass.compact => 12.0,
+                  UiWindowClass.medium => 14.0,
+                  UiWindowClass.expanded => 16.0,
+                  UiWindowClass.large || UiWindowClass.extraLarge => 18.0,
+                };
+                final hasCenterNotice = _cameraCenterNoticeMessage() != null &&
+                    !_debugOverlayPreviewMode;
+                final hasBottomStatusBanner =
+                    (!hasCenterNotice || _disableDmGateBlocked) &&
+                        (_showSidecarStatusBanner ||
+                            !_hudModeLoaded ||
+                            _disableDmGateChecking ||
+                            _disableDmGateBlocked ||
+                            (_cameraError?.isNotEmpty ?? false) ||
+                            _hudNoticeMessage != null);
+                final fabBottom =
+                    hasBottomStatusBanner ? (fabInset + 72.0) : fabInset;
+                final debugFab = FloatingActionButton.small(
+                  heroTag: isLandscapeLayout
+                      ? 'drive_debug_fab_landscape'
+                      : 'drive_debug_fab_portrait',
+                  tooltip: 'HUD 디버그',
+                  onPressed: _temporaryLimitedHudControls
+                      ? null
+                      : _openDebugOptionsPopup,
+                  backgroundColor: const Color(0xCC2A1A12),
+                  foregroundColor: const Color(0xFFFFB07A),
+                  child: const Icon(Icons.tune_rounded),
+                );
+
+                if (isLandscapeLayout) {
+                  return Stack(
+                    children: [
+                      Positioned.fill(child: mainContent),
+                      if (_hudDebugMenuEnabled)
+                        Positioned(
+                          right: fabInset,
+                          bottom: fabBottom,
+                          child: debugFab,
+                        ),
+                    ],
+                  );
+                }
+
+                final portraitHudHeight =
+                    _computePortraitHudHeight(window, constraints);
+
+                return Column(
+                  children: [
+                    Expanded(
+                      child: Stack(
+                        children: [
+                          Positioned.fill(child: mainContent),
+                          if (_hudDebugMenuEnabled)
+                            Positioned(
+                              right: fabInset,
+                              bottom: fabBottom,
+                              child: debugFab,
+                            ),
+                        ],
+                      ),
+                    ),
+                    SizedBox(
+                      width: double.infinity,
+                      height: portraitHudHeight,
+                      child: _buildPortraitHudPanel(window),
                     ),
                   ],
                 );
