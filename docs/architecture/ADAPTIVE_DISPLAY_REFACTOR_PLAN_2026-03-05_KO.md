@@ -159,3 +159,15 @@
 - **구조는 교체**: 하드코딩에서 size class + 토큰 + display feature 대응 구조로 점진 전환
 - **순서는 보수적**: 공통 유틸 → Home/HUD → 나머지 탭
 
+## 9. 진행 현황 (2026-03-05)
+
+- 완료:
+  - `lib/ui/adaptive/window_class.dart` 추가
+  - `lib/ui/adaptive/layout_tokens.dart` 추가
+  - `lib/ui/adaptive/display_feature_utils.dart` 추가
+  - `HomeTab` 리스트 패딩/간격을 토큰 기반으로 1차 전환
+
+- 미완료(다음 페이즈):
+  - Dashboard/Settings/Git/Logs 탭의 토큰 기반 치환
+  - HUD 주행화면 주변 UI(도크/배너/디버그 팝업) 적응형화
+  - 폴더블 hinge 회피 규칙 실적용
