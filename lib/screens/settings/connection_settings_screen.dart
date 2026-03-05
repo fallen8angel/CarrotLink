@@ -10,6 +10,8 @@ import '../../services/github_service.dart';
 import '../../services/key_backup_service.dart';
 import '../../services/ssh_key_helper.dart';
 import '../../services/ssh_service.dart';
+import '../../ui/adaptive/layout_tokens.dart';
+import '../../ui/adaptive/window_class.dart';
 import '../../widgets/custom_toast.dart';
 import '../github_login_screen.dart';
 

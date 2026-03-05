@@ -14,6 +14,7 @@ import '../../services/carrot_server_settings_service.dart';
 import '../../services/google_drive_service.dart';
 import '../../services/ssh_service.dart';
 import '../../services/storage_layout_service.dart';
+import '../../ui/adaptive/window_class.dart';
 import '../../widgets/custom_toast.dart';
 
 enum _BackupSource { local, cloud }
@@ -77,6 +78,62 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
           _selectedBranch == _allBranches || item.branch == _selectedBranch;
       return dateOk && branchOk;
     }).toList();
+  }
+
+  ({
+    double filterMinHeight,
+    double sourceSwitchMinHeight,
+    double segmentMinHeight,
+    double controlHorizontalPadding,
+    double controlInnerPadding,
+    double labelFontSize,
+    double valueFontSize,
+  }) _uiMetrics(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    return (
+      filterMinHeight: switch (window.windowClass) {
+        UiWindowClass.compact => 36.0,
+        UiWindowClass.medium => 38.0,
+        UiWindowClass.expanded => 40.0,
+        UiWindowClass.large || UiWindowClass.extraLarge => 42.0,
+      },
+      sourceSwitchMinHeight: switch (window.windowClass) {
+        UiWindowClass.compact => 40.0,
+        UiWindowClass.medium => 42.0,
+        UiWindowClass.expanded => 44.0,
+        UiWindowClass.large || UiWindowClass.extraLarge => 46.0,
+      },
+      segmentMinHeight: switch (window.windowClass) {
+        UiWindowClass.compact => 34.0,
+        UiWindowClass.medium => 36.0,
+        UiWindowClass.expanded => 38.0,
+        UiWindowClass.large || UiWindowClass.extraLarge => 40.0,
+      },
+      controlHorizontalPadding: switch (window.windowClass) {
+        UiWindowClass.compact => 8.0,
+        UiWindowClass.medium => 10.0,
+        UiWindowClass.expanded => 10.0,
+        UiWindowClass.large || UiWindowClass.extraLarge => 12.0,
+      },
+      controlInnerPadding: switch (window.windowClass) {
+        UiWindowClass.compact => 2.0,
+        UiWindowClass.medium => 2.5,
+        UiWindowClass.expanded => 3.0,
+        UiWindowClass.large || UiWindowClass.extraLarge => 3.0,
+      },
+      labelFontSize: switch (window.windowClass) {
+        UiWindowClass.compact => 12.0,
+        UiWindowClass.medium => 12.5,
+        UiWindowClass.expanded => 13.0,
+        UiWindowClass.large || UiWindowClass.extraLarge => 13.5,
+      },
+      valueFontSize: switch (window.windowClass) {
+        UiWindowClass.compact => 12.0,
+        UiWindowClass.medium => 12.5,
+        UiWindowClass.expanded => 13.0,
+        UiWindowClass.large || UiWindowClass.extraLarge => 13.5,
+      },
+    );
   }
 
   @override
@@ -467,64 +524,71 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
     final keys = values.keys.map((e) => e.toString()).toList()..sort();
     final action = await showDialog<_BackupDialogAction>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(item.branch),
-        content: SizedBox(
-          width: double.maxFinite,
-          height: 360,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                '${item.timeLabel} · ${keys.length}개 키',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+      builder: (context) {
+        final media = MediaQuery.of(context);
+        final dialogHeight = (media.size.height *
+                (media.size.width > media.size.height ? 0.72 : 0.58))
+            .clamp(300.0, 620.0)
+            .toDouble();
+        return AlertDialog(
+          title: Text(item.branch),
+          content: SizedBox(
+            width: double.maxFinite,
+            height: dialogHeight,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${item.timeLabel} · ${keys.length}개 키',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
                 ),
-              ),
-              const SizedBox(height: 8),
-              const Divider(height: 1),
-              const SizedBox(height: 8),
-              Expanded(
-                child: ListView.separated(
-                  itemCount: keys.length,
-                  separatorBuilder: (_, __) => const SizedBox(height: 8),
-                  itemBuilder: (context, index) {
-                    final key = keys[index];
-                    final value = values[key];
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          key,
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
+                const SizedBox(height: 8),
+                const Divider(height: 1),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: ListView.separated(
+                    itemCount: keys.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 8),
+                    itemBuilder: (context, index) {
+                      final key = keys[index];
+                      final value = values[key];
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            key,
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          value?.toString() ?? '(없음)',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color:
-                                Theme.of(context).colorScheme.onSurfaceVariant,
+                          const SizedBox(height: 2),
+                          Text(
+                            value?.toString() ?? '(없음)',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
                           ),
-                        ),
-                      ],
-                    );
-                  },
+                        ],
+                      );
+                    },
+                  ),
                 ),
-              ),
-              const SizedBox(height: 10),
-              const Divider(height: 1),
-              const SizedBox(height: 8),
-              Align(
-                alignment: Alignment.centerRight,
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
+                const SizedBox(height: 10),
+                const Divider(height: 1),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    alignment: WrapAlignment.end,
                     children: [
                       TextButton(
                         onPressed: () {
@@ -558,11 +622,11 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
                     ],
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
     FocusManager.instance.primaryFocus?.unfocus();
 
@@ -782,9 +846,10 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
     required List<String> options,
     required ValueChanged<String> onChanged,
   }) {
+    final ui = _uiMetrics(context);
     return Container(
-      height: 36,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
+      constraints: BoxConstraints(minHeight: ui.filterMinHeight),
+      padding: EdgeInsets.symmetric(horizontal: ui.controlHorizontalPadding),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(8),
@@ -797,7 +862,7 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
           Text(
             '$label ',
             style: TextStyle(
-              fontSize: 12,
+              fontSize: ui.labelFontSize,
               color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
           ),
@@ -808,7 +873,7 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
                 isExpanded: true,
                 isDense: true,
                 style: TextStyle(
-                  fontSize: 12,
+                  fontSize: ui.valueFontSize,
                   color: Theme.of(context).colorScheme.onSurface,
                 ),
                 items: options
@@ -833,6 +898,7 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
   }
 
   Widget _buildSourceSwitch() {
+    final ui = _uiMetrics(context);
     Widget segment({
       required String text,
       required bool selected,
@@ -842,7 +908,7 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
         child: GestureDetector(
           onTap: onTap,
           child: Container(
-            height: 36,
+            constraints: BoxConstraints(minHeight: ui.segmentMinHeight),
             decoration: BoxDecoration(
               color: selected
                   ? Theme.of(context).colorScheme.primaryContainer
@@ -853,7 +919,7 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
             child: Text(
               text,
               style: TextStyle(
-                fontSize: 12,
+                fontSize: ui.valueFontSize,
                 fontWeight: FontWeight.w700,
                 color: selected
                     ? Theme.of(context).colorScheme.onPrimaryContainer
@@ -866,8 +932,8 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
     }
 
     return Container(
-      height: 40,
-      padding: const EdgeInsets.all(2),
+      constraints: BoxConstraints(minHeight: ui.sourceSwitchMinHeight),
+      padding: EdgeInsets.all(ui.controlInnerPadding),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(10),
@@ -904,11 +970,10 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
           children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-              child: Row(
-                children: [
-                  Expanded(child: _buildSourceSwitch()),
-                  const SizedBox(width: 8),
-                  OutlinedButton.icon(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final compactActions = constraints.maxWidth < 680;
+                  final driveButton = OutlinedButton.icon(
                     onPressed: _isDriveAuthBusy
                         ? null
                         : () => _toggleDriveLink(isSignedIn),
@@ -919,9 +984,10 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
                     ),
                     label: Text(
                       _isDriveAuthBusy ? '처리중' : (isSignedIn ? '연동됨' : '구글 연동'),
+                      overflow: TextOverflow.ellipsis,
                     ),
-                  ),
-                  PopupMenuButton<String>(
+                  );
+                  final menuButton = PopupMenuButton<String>(
                     tooltip: '메뉴',
                     onSelected: (value) {
                       if (value == 'sync') {
@@ -941,8 +1007,32 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
                       PopupMenuItem(
                           value: 'both', child: Text('로컬+클라우드 전체 삭제')),
                     ],
-                  ),
-                ],
+                  );
+
+                  if (!compactActions) {
+                    return Row(
+                      children: [
+                        Expanded(child: _buildSourceSwitch()),
+                        const SizedBox(width: 8),
+                        driveButton,
+                        menuButton,
+                      ],
+                    );
+                  }
+
+                  return Column(
+                    children: [
+                      _buildSourceSwitch(),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Expanded(child: driveButton),
+                          menuButton,
+                        ],
+                      ),
+                    ],
+                  );
+                },
               ),
             ),
             if (backupService.isBackingUp)
@@ -952,33 +1042,56 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
               ),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: _buildCompactFilter(
-                      label: '날짜',
-                      value: _selectedDate,
-                      options: _dateOptions,
-                      onChanged: (value) =>
-                          setState(() => _selectedDate = value),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _buildCompactFilter(
-                      label: '브랜치',
-                      value: _selectedBranch,
-                      options: _branchOptions,
-                      onChanged: (value) =>
-                          setState(() => _selectedBranch = value),
-                    ),
-                  ),
-                  IconButton(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final compactFilters = constraints.maxWidth < 640;
+                  final dateFilter = _buildCompactFilter(
+                    label: '날짜',
+                    value: _selectedDate,
+                    options: _dateOptions,
+                    onChanged: (value) => setState(() => _selectedDate = value),
+                  );
+                  final branchFilter = _buildCompactFilter(
+                    label: '브랜치',
+                    value: _selectedBranch,
+                    options: _branchOptions,
+                    onChanged: (value) =>
+                        setState(() => _selectedBranch = value),
+                  );
+                  final refreshButton = IconButton(
                     onPressed: _isLoading ? null : _refreshActive,
                     icon: const Icon(Icons.refresh),
                     tooltip: '새로고침',
-                  ),
-                ],
+                  );
+
+                  if (!compactFilters) {
+                    return Row(
+                      children: [
+                        Expanded(child: dateFilter),
+                        const SizedBox(width: 8),
+                        Expanded(child: branchFilter),
+                        refreshButton,
+                      ],
+                    );
+                  }
+
+                  return Column(
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(child: dateFilter),
+                          const SizedBox(width: 8),
+                          Expanded(child: branchFilter),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: refreshButton,
+                      ),
+                    ],
+                  );
+                },
               ),
             ),
             Expanded(child: _buildList(isSignedIn: isSignedIn)),

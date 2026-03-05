@@ -662,68 +662,95 @@ class _TerminalScreenState extends State<TerminalScreen>
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
           color: Theme.of(context).colorScheme.surfaceContainer,
-          child: Row(
-            children: [
-              IconButton(
-                icon: const Icon(Icons.remove),
-                onPressed: () => _updateFontSize(_fontSize - 2),
-                tooltip: "글자 작게",
-              ),
-              Text("${_fontSize.toInt()}pt"),
-              IconButton(
-                icon: const Icon(Icons.add),
-                onPressed: () => _updateFontSize(_fontSize + 2),
-                tooltip: "글자 크게",
-              ),
-              Container(
-                height: 24,
-                width: 1,
-                color: Colors.grey.withValues(alpha: 0.5),
-                margin: const EdgeInsets.symmetric(horizontal: 8),
-              ),
-              IconButton(
-                icon: const Icon(Icons.copy),
-                onPressed: _copySelection,
-                tooltip: "복사",
-              ),
-              IconButton(
-                icon: const Icon(Icons.paste),
-                onPressed: _paste,
-                tooltip: "붙여넣기",
-              ),
-              IconButton(
-                icon: Icon(
-                    _showVirtualKeys ? Icons.keyboard_hide : Icons.keyboard),
-                onPressed: () =>
-                    setState(() => _showVirtualKeys = !_showVirtualKeys),
-                tooltip: "가상 키보드",
-              ),
-              const Spacer(),
-              if (!_isSessionActive)
-                ElevatedButton.icon(
-                  onPressed: () => _startTerminal(),
-                  icon: const Icon(Icons.refresh, size: 16),
-                  label: const Text("연결"),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.green,
-                    foregroundColor: Colors.white,
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  ),
-                )
-              else
-                ElevatedButton.icon(
-                  onPressed: () => _stopTerminal(manual: true),
-                  icon: const Icon(Icons.close, size: 16),
-                  label: const Text("끊기"),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red,
-                    foregroundColor: Colors.white,
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  ),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final compactToolbar = constraints.maxWidth < 560;
+              final sessionButton = !_isSessionActive
+                  ? ElevatedButton.icon(
+                      onPressed: () => _startTerminal(),
+                      icon: const Icon(Icons.refresh, size: 16),
+                      label: const Text("연결"),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 8),
+                      ),
+                    )
+                  : ElevatedButton.icon(
+                      onPressed: () => _stopTerminal(manual: true),
+                      icon: const Icon(Icons.close, size: 16),
+                      label: const Text("끊기"),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 8),
+                      ),
+                    );
+
+              final toolbarActions = <Widget>[
+                IconButton(
+                  icon: const Icon(Icons.remove),
+                  onPressed: () => _updateFontSize(_fontSize - 2),
+                  tooltip: "글자 작게",
                 ),
-            ],
+                Text("${_fontSize.toInt()}pt"),
+                IconButton(
+                  icon: const Icon(Icons.add),
+                  onPressed: () => _updateFontSize(_fontSize + 2),
+                  tooltip: "글자 크게",
+                ),
+                Container(
+                  height: 24,
+                  width: 1,
+                  color: Colors.grey.withValues(alpha: 0.5),
+                  margin: const EdgeInsets.symmetric(horizontal: 8),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.copy),
+                  onPressed: _copySelection,
+                  tooltip: "복사",
+                ),
+                IconButton(
+                  icon: const Icon(Icons.paste),
+                  onPressed: _paste,
+                  tooltip: "붙여넣기",
+                ),
+                IconButton(
+                  icon: Icon(
+                      _showVirtualKeys ? Icons.keyboard_hide : Icons.keyboard),
+                  onPressed: () =>
+                      setState(() => _showVirtualKeys = !_showVirtualKeys),
+                  tooltip: "가상 키보드",
+                ),
+              ];
+
+              if (!compactToolbar) {
+                return Row(
+                  children: [
+                    ...toolbarActions,
+                    const Spacer(),
+                    sessionButton,
+                  ],
+                );
+              }
+
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(children: toolbarActions),
+                  ),
+                  const SizedBox(height: 4),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: sessionButton,
+                  ),
+                ],
+              );
+            },
           ),
         ),
         Expanded(

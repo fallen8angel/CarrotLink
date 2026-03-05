@@ -6,6 +6,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../ui/adaptive/window_class.dart';
+
 class HomeHudPreviewCard extends StatefulWidget {
   final String? deviceIp;
   final bool enabled;
@@ -196,6 +198,8 @@ class _HomeHudPreviewCardState extends State<HomeHudPreviewCard> {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final media = MediaQuery.of(context);
     final effectiveMemPct = _snapshot.memPct ?? widget.fallbackMemPct;
     final effectiveDiskValue = _snapshot.diskValue ?? widget.fallbackDiskPct;
     final effectiveDiskLabel = _snapshot.diskValue != null
@@ -205,15 +209,36 @@ class _HomeHudPreviewCardState extends State<HomeHudPreviewCard> {
     final driveModeBg = _driveModeBg(_snapshot.driveModeKind);
     final driveModeFg = _driveModeFg(_snapshot.driveModeKind);
     final barsOn = _snapshot.tfBars.clamp(0, 4);
-
-    final noScaleMedia =
-        MediaQuery.of(context).copyWith(textScaler: TextScaler.noScaling);
+    final maxCardWidthByClass = switch (window.windowClass) {
+      UiWindowClass.compact => 340.0,
+      UiWindowClass.medium => 380.0,
+      UiWindowClass.expanded => 420.0,
+      UiWindowClass.large => 460.0,
+      UiWindowClass.extraLarge => 500.0,
+    };
+    final landscapeCap = media.orientation == Orientation.landscape
+        ? (media.size.height * 0.46).clamp(260.0, 420.0).toDouble()
+        : maxCardWidthByClass;
+    final maxCardWidth = math.min(maxCardWidthByClass, landscapeCap);
+    final maxScale = switch (window.windowClass) {
+      UiWindowClass.compact => 1.12,
+      UiWindowClass.medium => 1.16,
+      UiWindowClass.expanded => 1.2,
+      UiWindowClass.large => 1.22,
+      UiWindowClass.extraLarge => 1.24,
+    };
+    final clampedMedia = media.copyWith(
+      textScaler: media.textScaler.clamp(
+        minScaleFactor: 0.9,
+        maxScaleFactor: maxScale,
+      ),
+    );
 
     return MediaQuery(
-      data: noScaleMedia,
+      data: clampedMedia,
       child: Center(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 340),
+          constraints: BoxConstraints(maxWidth: maxCardWidth),
           child: AspectRatio(
             aspectRatio: 1,
             child: LayoutBuilder(

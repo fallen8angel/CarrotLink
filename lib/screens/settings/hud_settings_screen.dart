@@ -133,21 +133,50 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
                 ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
-                  child: SegmentedButton<String>(
-                    segments: const <ButtonSegment<String>>[
-                      ButtonSegment<String>(
-                        value: HudDriveSettingsService.modeWebrtc,
-                        label: Text('WebRTC'),
-                      ),
-                      ButtonSegment<String>(
-                        value: HudDriveSettingsService.modeOpenpilotOverlay,
-                        label: Text('오픈파일럿 그래픽'),
-                      ),
-                    ],
-                    selected: <String>{_defaultDriveMode},
-                    onSelectionChanged: (selected) {
-                      if (selected.isEmpty) return;
-                      unawaited(_changeDefaultMode(selected.first));
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final compact = constraints.maxWidth < 420;
+                      if (!compact) {
+                        return SegmentedButton<String>(
+                          segments: const <ButtonSegment<String>>[
+                            ButtonSegment<String>(
+                              value: HudDriveSettingsService.modeWebrtc,
+                              label: Text('WebRTC'),
+                            ),
+                            ButtonSegment<String>(
+                              value:
+                                  HudDriveSettingsService.modeOpenpilotOverlay,
+                              label: Text('오픈파일럿 그래픽'),
+                            ),
+                          ],
+                          selected: <String>{_defaultDriveMode},
+                          onSelectionChanged: (selected) {
+                            if (selected.isEmpty) return;
+                            unawaited(_changeDefaultMode(selected.first));
+                          },
+                        );
+                      }
+
+                      return Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          ChoiceChip(
+                            label: const Text('WebRTC'),
+                            selected: _defaultDriveMode ==
+                                HudDriveSettingsService.modeWebrtc,
+                            onSelected: (_) => unawaited(_changeDefaultMode(
+                                HudDriveSettingsService.modeWebrtc)),
+                          ),
+                          ChoiceChip(
+                            label: const Text('오픈파일럿 그래픽'),
+                            selected: _defaultDriveMode ==
+                                HudDriveSettingsService.modeOpenpilotOverlay,
+                            onSelected: (_) => unawaited(_changeDefaultMode(
+                                HudDriveSettingsService.modeOpenpilotOverlay)),
+                          ),
+                        ],
+                      );
                     },
                   ),
                 ),

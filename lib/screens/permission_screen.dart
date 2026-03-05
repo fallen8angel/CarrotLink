@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../ui/adaptive/layout_tokens.dart';
+import '../ui/adaptive/window_class.dart';
 import '../services/storage_layout_service.dart';
 import 'dashboard_screen.dart';
 
@@ -98,13 +100,14 @@ class _PermissionScreenState extends State<PermissionScreen> {
     if (!widget.fromSettings) {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool('is_first_run', false);
-      
+
       if (mounted) {
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(builder: (context) => const DashboardScreen()),
         );
       }
     } else {
+      if (!mounted) return;
       Navigator.pop(context);
     }
   }
@@ -125,85 +128,123 @@ class _PermissionScreenState extends State<PermissionScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: widget.fromSettings 
-          ? AppBar(title: const Text("권한 설정")) 
-          : null,
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              if (!widget.fromSettings) ...[
-                const SizedBox(height: 40),
-                const Icon(Icons.security, size: 80, color: Color(0xFFFF6D00)),
-                const SizedBox(height: 24),
-                Text(
-                  "권한 설정",
-                  style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  "안정적인 연결/백업을 위해\n다음 권한을 확인해주세요.",
-                  style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                    color: Colors.grey,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                if (Platform.isAndroid) ...[
-                  const SizedBox(height: 12),
-                  Text(
-                    "${_grantedPermissionCount()}/${_requiredPermissionCount()} 권한 허용됨",
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: Colors.grey[500],
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-                const SizedBox(height: 40),
-              ],
-              
-              _buildPermissionItem(
-                icon: Icons.notifications_active,
-                title: "알림 권한",
-                description: "백그라운드 서비스 상태를 표시하기 위해 필요합니다.",
-                isGranted: _notificationGranted,
-                onTap: _requestNotification,
-              ),
-              const SizedBox(height: 16),
-              _buildPermissionItem(
-                icon: Icons.battery_alert,
-                title: "배터리 최적화 제외",
-                description: "화면이 꺼져도 연결이 끊기지 않도록 합니다.",
-                isGranted: _batteryGranted,
-                onTap: _requestBattery,
-              ),
-              const SizedBox(height: 16),
-              _buildPermissionItem(
-                icon: Icons.folder_open,
-                title: "저장소 접근",
-                description: "SSH 키 백업/복원을 위해 필요합니다.",
-                isGranted: _storageGranted,
-                onTap: _requestStorage,
-              ),
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final maxContentWidth = switch (window.windowClass) {
+      UiWindowClass.compact => 560.0,
+      UiWindowClass.medium => 640.0,
+      UiWindowClass.expanded => 760.0,
+      UiWindowClass.large => 840.0,
+      UiWindowClass.extraLarge => 920.0,
+    };
+    final screenPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 16.0,
+      UiWindowClass.medium => 20.0,
+      UiWindowClass.expanded => 24.0,
+      UiWindowClass.large => 28.0,
+      UiWindowClass.extraLarge => 32.0,
+    };
+    final headerIconSize = switch (window.windowClass) {
+      UiWindowClass.compact => 68.0,
+      UiWindowClass.medium => 74.0,
+      _ => 80.0,
+    };
 
-              const Spacer(),
-              
-              ElevatedButton(
-                onPressed: _finish,
-                child: Text(widget.fromSettings ? "완료" : "시작하기"),
-              ),
-              if (!widget.fromSettings)
-                TextButton(
-                  onPressed: _finish,
-                  child: const Text("나중에 설정하기", style: TextStyle(color: Colors.grey)),
+    return Scaffold(
+      appBar: widget.fromSettings ? AppBar(title: const Text("권한 설정")) : null,
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, _) {
+            return Align(
+              alignment: Alignment.topCenter,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: maxContentWidth),
+                child: SingleChildScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  padding: EdgeInsets.all(screenPadding),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (!widget.fromSettings) ...[
+                        SizedBox(height: tokens.sectionGap + 14),
+                        Icon(Icons.security,
+                            size: headerIconSize,
+                            color: const Color(0xFFFF6D00)),
+                        SizedBox(height: tokens.sectionGap + 10),
+                        Text(
+                          "권한 설정",
+                          style: Theme.of(context)
+                              .textTheme
+                              .headlineMedium
+                              ?.copyWith(
+                                fontWeight: FontWeight.bold,
+                              ),
+                          textAlign: TextAlign.center,
+                        ),
+                        SizedBox(height: tokens.itemGap + 8),
+                        Text(
+                          "안정적인 연결/백업을 위해\n다음 권한을 확인해주세요.",
+                          style: Theme.of(context)
+                              .textTheme
+                              .bodyLarge
+                              ?.copyWith(color: Colors.grey),
+                          textAlign: TextAlign.center,
+                        ),
+                        if (Platform.isAndroid) ...[
+                          SizedBox(height: tokens.itemGap + 4),
+                          Text(
+                            "${_grantedPermissionCount()}/${_requiredPermissionCount()} 권한 허용됨",
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodyMedium
+                                ?.copyWith(color: Colors.grey[500]),
+                            textAlign: TextAlign.center,
+                          ),
+                        ],
+                        SizedBox(height: tokens.sectionGap + 14),
+                      ],
+                      _buildPermissionItem(
+                        icon: Icons.notifications_active,
+                        title: "알림 권한",
+                        description: "백그라운드 서비스 상태를 표시하기 위해 필요합니다.",
+                        isGranted: _notificationGranted,
+                        onTap: _requestNotification,
+                      ),
+                      SizedBox(height: tokens.itemGap + 8),
+                      _buildPermissionItem(
+                        icon: Icons.battery_alert,
+                        title: "배터리 최적화 제외",
+                        description: "화면이 꺼져도 연결이 끊기지 않도록 합니다.",
+                        isGranted: _batteryGranted,
+                        onTap: _requestBattery,
+                      ),
+                      SizedBox(height: tokens.itemGap + 8),
+                      _buildPermissionItem(
+                        icon: Icons.folder_open,
+                        title: "저장소 접근",
+                        description: "SSH 키 백업/복원을 위해 필요합니다.",
+                        isGranted: _storageGranted,
+                        onTap: _requestStorage,
+                      ),
+                      SizedBox(height: tokens.sectionGap + 4),
+                      ElevatedButton(
+                        onPressed: _finish,
+                        child: Text(widget.fromSettings ? "완료" : "시작하기"),
+                      ),
+                      if (!widget.fromSettings)
+                        TextButton(
+                          onPressed: _finish,
+                          child: const Text(
+                            "나중에 설정하기",
+                            style: TextStyle(color: Colors.grey),
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
-            ],
-          ),
+              ),
+            );
+          },
         ),
       ),
     );
@@ -216,51 +257,102 @@ class _PermissionScreenState extends State<PermissionScreen> {
     required bool isGranted,
     required VoidCallback onTap,
   }) {
+    final window = UiWindowInfo.of(context);
+    final titleFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 15.0,
+      UiWindowClass.medium => 16.0,
+      _ => 17.0,
+    };
+    final descFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.5,
+      _ => 13.0,
+    };
+
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surfaceContainer,
         borderRadius: BorderRadius.circular(12),
-        border: isGranted 
-            ? Border.all(color: Colors.green.withOpacity(0.5)) 
+        border: isGranted
+            ? Border.all(color: Colors.green.withValues(alpha: 0.5))
             : null,
       ),
-      child: Row(
-        children: [
-          Container(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final compact = constraints.maxWidth < 380;
+          final statusIcon = Container(
             padding: const EdgeInsets.all(10),
             decoration: BoxDecoration(
-              color: isGranted ? Colors.green.withOpacity(0.1) : Colors.grey.withOpacity(0.1),
+              color: isGranted
+                  ? Colors.green.withValues(alpha: 0.1)
+                  : Colors.grey.withValues(alpha: 0.1),
               shape: BoxShape.circle,
             ),
             child: Icon(
               isGranted ? Icons.check : icon,
               color: isGranted ? Colors.green : Colors.grey,
             ),
-          ),
-          const SizedBox(width: 16),
-          Expanded(
+          );
+
+          final descriptionBlock = Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
                   title,
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: titleFontSize,
+                  ),
                 ),
                 const SizedBox(height: 4),
                 Text(
                   description,
-                  style: TextStyle(color: Colors.grey[400], fontSize: 12),
+                  style: TextStyle(
+                      color: Colors.grey[400], fontSize: descFontSize),
                 ),
               ],
             ),
-          ),
-          if (!isGranted)
-            TextButton(
-              onPressed: onTap,
-              child: const Text("허용"),
-            ),
-        ],
+          );
+
+          if (!compact) {
+            return Row(
+              children: [
+                statusIcon,
+                const SizedBox(width: 16),
+                descriptionBlock,
+                if (!isGranted)
+                  TextButton(
+                    onPressed: onTap,
+                    child: const Text("허용"),
+                  ),
+              ],
+            );
+          }
+
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  statusIcon,
+                  const SizedBox(width: 12),
+                  descriptionBlock,
+                ],
+              ),
+              if (!isGranted)
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: onTap,
+                    child: const Text("허용"),
+                  ),
+                ),
+            ],
+          );
+        },
       ),
     );
   }

@@ -23,6 +23,7 @@ import 'tabs/device_settings_tab.dart';
 import 'tabs/terminal_tab.dart';
 import 'tabs/logs_tab.dart';
 import 'settings_screen.dart';
+import '../../ui/adaptive/window_class.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -402,6 +403,82 @@ class _DashboardScreenState extends State<DashboardScreen>
     ];
   }
 
+  List<NavigationRailDestination> _buildRailDestinations(SSHService ssh) {
+    return [
+      const NavigationRailDestination(
+        icon: Icon(Icons.home_outlined),
+        selectedIcon: Icon(Icons.home),
+        label: Text('홈'),
+      ),
+      const NavigationRailDestination(
+        icon: Icon(Icons.settings_outlined),
+        selectedIcon: Icon(Icons.settings),
+        label: Text('설정'),
+      ),
+      NavigationRailDestination(
+        icon: Badge(
+          isLabelVisible: ssh.hasGitUpdate,
+          label: const Text("!"),
+          child: const Icon(Icons.tune_outlined),
+        ),
+        selectedIcon: Badge(
+          isLabelVisible: ssh.hasGitUpdate,
+          label: const Text("!"),
+          child: const Icon(Icons.tune),
+        ),
+        label: const Text('메뉴'),
+      ),
+      const NavigationRailDestination(
+        icon: Icon(Icons.terminal_outlined),
+        selectedIcon: Icon(Icons.terminal),
+        label: Text('콘솔'),
+      ),
+      const NavigationRailDestination(
+        icon: Icon(Icons.article_outlined),
+        selectedIcon: Icon(Icons.article),
+        label: Text('로그'),
+      ),
+    ];
+  }
+
+  List<NavigationDestination> _buildBottomDestinations(SSHService ssh) {
+    return [
+      const NavigationDestination(
+        icon: Icon(Icons.home_outlined),
+        selectedIcon: Icon(Icons.home),
+        label: '홈',
+      ),
+      const NavigationDestination(
+        icon: Icon(Icons.settings_outlined),
+        selectedIcon: Icon(Icons.settings),
+        label: '설정',
+      ),
+      NavigationDestination(
+        icon: Badge(
+          isLabelVisible: ssh.hasGitUpdate,
+          label: const Text("!"),
+          child: const Icon(Icons.tune_outlined),
+        ),
+        selectedIcon: Badge(
+          isLabelVisible: ssh.hasGitUpdate,
+          label: const Text("!"),
+          child: const Icon(Icons.tune),
+        ),
+        label: '메뉴',
+      ),
+      const NavigationDestination(
+        icon: Icon(Icons.terminal_outlined),
+        selectedIcon: Icon(Icons.terminal),
+        label: '콘솔',
+      ),
+      const NavigationDestination(
+        icon: Icon(Icons.article_outlined),
+        selectedIcon: Icon(Icons.article),
+        label: '로그',
+      ),
+    ];
+  }
+
   Future<void> _persistLastTabIndex(int index) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_lastDashboardTabIndexKey, index);
@@ -527,6 +604,9 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final useRail = window.isExpandedOrAbove;
+
     return WillPopScope(
       onWillPop: () async {
         if (await _handleNestedBackStack()) {
@@ -568,63 +648,52 @@ class _DashboardScreenState extends State<DashboardScreen>
             ),
           ],
         ),
-        body: Column(
-          children: [
-            Expanded(
-              child: IndexedStack(
+        body: useRail
+            ? Consumer<SSHService>(
+                builder: (context, ssh, child) {
+                  return Row(
+                    children: [
+                      NavigationRail(
+                        selectedIndex: _currentIndex,
+                        useIndicator: true,
+                        labelType: NavigationRailLabelType.all,
+                        onDestinationSelected: (idx) {
+                          _dismissKeyboard();
+                          setState(() => _currentIndex = idx);
+                          unawaited(_persistLastTabIndex(idx));
+                        },
+                        destinations: _buildRailDestinations(ssh),
+                      ),
+                      const VerticalDivider(width: 1),
+                      Expanded(
+                        child: IndexedStack(
+                          index: _currentIndex,
+                          children: _buildTabs(),
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              )
+            : IndexedStack(
                 index: _currentIndex,
                 children: _buildTabs(),
               ),
-            ),
-          ],
-        ),
-        bottomNavigationBar: Consumer<SSHService>(
-          builder: (context, ssh, child) {
-            return NavigationBar(
-              selectedIndex: _currentIndex,
-              onDestinationSelected: (idx) {
-                _dismissKeyboard();
-                setState(() => _currentIndex = idx);
-                unawaited(_persistLastTabIndex(idx));
-              },
-              destinations: [
-                const NavigationDestination(
-                  icon: Icon(Icons.home_outlined),
-                  selectedIcon: Icon(Icons.home),
-                  label: '홈',
-                ),
-                const NavigationDestination(
-                  icon: Icon(Icons.settings_outlined),
-                  selectedIcon: Icon(Icons.settings),
-                  label: '설정',
-                ),
-                NavigationDestination(
-                  icon: Badge(
-                    isLabelVisible: ssh.hasGitUpdate,
-                    label: const Text("!"),
-                    child: const Icon(Icons.tune_outlined),
-                  ),
-                  selectedIcon: Badge(
-                    isLabelVisible: ssh.hasGitUpdate,
-                    label: const Text("!"),
-                    child: const Icon(Icons.tune),
-                  ),
-                  label: '메뉴',
-                ),
-                const NavigationDestination(
-                  icon: Icon(Icons.terminal_outlined),
-                  selectedIcon: Icon(Icons.terminal),
-                  label: '콘솔',
-                ),
-                const NavigationDestination(
-                  icon: Icon(Icons.article_outlined),
-                  selectedIcon: Icon(Icons.article),
-                  label: '로그',
-                ),
-              ],
-            );
-          },
-        ),
+        bottomNavigationBar: useRail
+            ? null
+            : Consumer<SSHService>(
+                builder: (context, ssh, child) {
+                  return NavigationBar(
+                    selectedIndex: _currentIndex,
+                    onDestinationSelected: (idx) {
+                      _dismissKeyboard();
+                      setState(() => _currentIndex = idx);
+                      unawaited(_persistLastTabIndex(idx));
+                    },
+                    destinations: _buildBottomDestinations(ssh),
+                  );
+                },
+              ),
       ),
     );
   }

@@ -13,16 +13,18 @@ class GithubVerificationScreen extends StatefulWidget {
   });
 
   @override
-  State<GithubVerificationScreen> createState() => _GithubVerificationScreenState();
+  State<GithubVerificationScreen> createState() =>
+      _GithubVerificationScreenState();
 }
 
 class _GithubVerificationScreenState extends State<GithubVerificationScreen> {
   late final WebViewController _controller;
   bool _isLoading = true;
   bool _showCodeInput = true;
-  
+
   // 8자리 코드 입력을 위한 컨트롤러들 (하이픈 제외 8자리)
-  final List<TextEditingController> _codeControllers = List.generate(8, (_) => TextEditingController());
+  final List<TextEditingController> _codeControllers =
+      List.generate(8, (_) => TextEditingController());
   final List<FocusNode> _focusNodes = List.generate(8, (_) => FocusNode());
 
   @override
@@ -103,7 +105,10 @@ class _GithubVerificationScreenState extends State<GithubVerificationScreen> {
   void _pasteCode() async {
     final clipboardData = await Clipboard.getData(Clipboard.kTextPlain);
     if (clipboardData?.text != null) {
-      String code = clipboardData!.text!.replaceAll('-', '').replaceAll(' ', '').toUpperCase();
+      String code = clipboardData!.text!
+          .replaceAll('-', '')
+          .replaceAll(' ', '')
+          .toUpperCase();
       if (code.length >= 8) {
         for (int i = 0; i < 8; i++) {
           _codeControllers[i].text = code[i];
@@ -116,7 +121,8 @@ class _GithubVerificationScreenState extends State<GithubVerificationScreen> {
   void _copyCodeToClipboard() {
     Clipboard.setData(ClipboardData(text: widget.userCode));
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("코드가 복사되었습니다"), duration: Duration(seconds: 1)),
+      const SnackBar(
+          content: Text("코드가 복사되었습니다"), duration: Duration(seconds: 1)),
     );
   }
 
@@ -124,7 +130,7 @@ class _GithubVerificationScreenState extends State<GithubVerificationScreen> {
   Widget build(BuildContext context) {
     // 하이픈 제거한 코드
     final codeWithoutHyphen = widget.userCode.replaceAll('-', '');
-    
+
     return Scaffold(
       appBar: AppBar(
         title: const Text("GitHub 인증"),
@@ -154,14 +160,18 @@ class _GithubVerificationScreenState extends State<GithubVerificationScreen> {
               ),
               child: Column(
                 children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
+                  Wrap(
+                    alignment: WrapAlignment.center,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 8,
+                    runSpacing: 6,
                     children: [
                       const Text("인증 코드: ", style: TextStyle(fontSize: 14)),
                       GestureDetector(
                         onTap: _copyCodeToClipboard,
                         child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 6),
                           decoration: BoxDecoration(
                             color: Colors.black87,
                             borderRadius: BorderRadius.circular(6),
@@ -178,7 +188,6 @@ class _GithubVerificationScreenState extends State<GithubVerificationScreen> {
                           ),
                         ),
                       ),
-                      const SizedBox(width: 8),
                       IconButton(
                         icon: const Icon(Icons.copy, size: 20),
                         onPressed: _copyCodeToClipboard,
@@ -192,19 +201,45 @@ class _GithubVerificationScreenState extends State<GithubVerificationScreen> {
                     style: TextStyle(fontSize: 11, color: Colors.grey),
                   ),
                   const SizedBox(height: 12),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      // 첫 4자리
-                      ...List.generate(4, (index) => _buildCodeBox(index, codeWithoutHyphen)),
-                      // 하이픈
-                      const Padding(
-                        padding: EdgeInsets.symmetric(horizontal: 8),
-                        child: Text("-", style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-                      ),
-                      // 나머지 4자리
-                      ...List.generate(4, (index) => _buildCodeBox(index + 4, codeWithoutHyphen)),
-                    ],
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      final compactCodeUi = constraints.maxWidth < 440;
+                      return SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            ...List.generate(
+                              4,
+                              (index) => _buildCodeBox(
+                                index,
+                                codeWithoutHyphen,
+                                compact: compactCodeUi,
+                              ),
+                            ),
+                            Padding(
+                              padding: EdgeInsets.symmetric(
+                                  horizontal: compactCodeUi ? 6 : 8),
+                              child: Text(
+                                "-",
+                                style: TextStyle(
+                                  fontSize: compactCodeUi ? 20 : 24,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                            ...List.generate(
+                              4,
+                              (index) => _buildCodeBox(
+                                index + 4,
+                                codeWithoutHyphen,
+                                compact: compactCodeUi,
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
                   ),
                   const SizedBox(height: 8),
                   TextButton.icon(
@@ -230,13 +265,13 @@ class _GithubVerificationScreenState extends State<GithubVerificationScreen> {
     );
   }
 
-  Widget _buildCodeBox(int index, String expectedCode) {
-    final isCorrect = index < expectedCode.length && 
-                      _codeControllers[index].text.toUpperCase() == expectedCode[index];
-    
+  Widget _buildCodeBox(int index, String expectedCode, {bool compact = false}) {
+    final isCorrect = index < expectedCode.length &&
+        _codeControllers[index].text.toUpperCase() == expectedCode[index];
+
     return Container(
-      width: 36,
-      height: 44,
+      width: compact ? 32 : 36,
+      height: compact ? 40 : 44,
       margin: const EdgeInsets.symmetric(horizontal: 2),
       child: RawKeyboardListener(
         focusNode: FocusNode(),
@@ -253,13 +288,13 @@ class _GithubVerificationScreenState extends State<GithubVerificationScreen> {
             UpperCaseTextFormatter(),
           ],
           style: TextStyle(
-            fontSize: 18,
+            fontSize: compact ? 16 : 18,
             fontWeight: FontWeight.bold,
             color: isCorrect ? Colors.green : null,
           ),
           decoration: InputDecoration(
             counterText: "",
-            contentPadding: const EdgeInsets.symmetric(vertical: 10),
+            contentPadding: EdgeInsets.symmetric(vertical: compact ? 8 : 10),
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(8),
               borderSide: BorderSide(
@@ -277,7 +312,7 @@ class _GithubVerificationScreenState extends State<GithubVerificationScreen> {
               borderSide: const BorderSide(color: Colors.blue, width: 2),
             ),
             filled: true,
-            fillColor: isCorrect ? Colors.green.withOpacity(0.1) : null,
+            fillColor: isCorrect ? Colors.green.withValues(alpha: 0.1) : null,
           ),
           onChanged: (value) => _onCodeChanged(index, value),
         ),
@@ -289,7 +324,8 @@ class _GithubVerificationScreenState extends State<GithubVerificationScreen> {
 // 대문자 변환 포맷터
 class UpperCaseTextFormatter extends TextInputFormatter {
   @override
-  TextEditingValue formatEditUpdate(TextEditingValue oldValue, TextEditingValue newValue) {
+  TextEditingValue formatEditUpdate(
+      TextEditingValue oldValue, TextEditingValue newValue) {
     return TextEditingValue(
       text: newValue.text.toUpperCase(),
       selection: newValue.selection,

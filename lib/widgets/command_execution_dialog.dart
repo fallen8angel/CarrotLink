@@ -35,9 +35,9 @@ class _CommandExecutionDialogState extends State<CommandExecutionDialog> {
 
   void _startExecution() {
     final ssh = Provider.of<SSHService>(context, listen: false);
-    
+
     _logs.add("> ${widget.command}");
-    
+
     try {
       final stream = ssh.executeCommandStream(
         widget.command,
@@ -49,7 +49,7 @@ class _CommandExecutionDialogState extends State<CommandExecutionDialog> {
               _logs.add("\n[Process exited with code $code]");
             });
             _scrollToBottom();
-            
+
             if (widget.autoClose && code == 0) {
               Future.delayed(const Duration(seconds: 1), () {
                 if (mounted) Navigator.pop(context, true);
@@ -114,7 +114,11 @@ class _CommandExecutionDialogState extends State<CommandExecutionDialog> {
   @override
   Widget build(BuildContext context) {
     final isSuccess = _exitCode == 0;
-    final isError = _exitCode != null && _exitCode != 0;
+    final media = MediaQuery.of(context);
+    final dialogHeight = (media.size.height *
+            (media.size.width > media.size.height ? 0.62 : 0.44))
+        .clamp(220.0, 460.0)
+        .toDouble();
 
     return AlertDialog(
       title: Row(
@@ -135,7 +139,7 @@ class _CommandExecutionDialogState extends State<CommandExecutionDialog> {
       ),
       content: Container(
         width: double.maxFinite,
-        height: 300,
+        height: dialogHeight,
         decoration: BoxDecoration(
           color: Colors.black,
           borderRadius: BorderRadius.circular(8),
@@ -173,7 +177,8 @@ class _CommandExecutionDialogState extends State<CommandExecutionDialog> {
               _subscription?.cancel();
               Navigator.pop(context, false);
             },
-            child: const Text("숨기기"), // "Cancel" might imply killing the process, which we can't guarantee here
+            child: const Text(
+                "숨기기"), // "Cancel" might imply killing the process, which we can't guarantee here
           ),
       ],
     );

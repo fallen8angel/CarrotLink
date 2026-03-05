@@ -94,10 +94,14 @@ class FileExplorerTopToolbar extends StatelessWidget {
                     ? controller.batchMessage
                     : '${controller.batchProgressText}  ${controller.batchMessage}',
                 style: const TextStyle(fontSize: 12, color: Colors.grey),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
             ),
             const SizedBox(height: 4),
-            Row(
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
               children: [
                 TextButton.icon(
                   onPressed: onToggleBatchPause,
@@ -117,16 +121,24 @@ class FileExplorerTopToolbar extends StatelessWidget {
           ],
           if (!controller.isBatchBusy && controller.hasRetryableFailures) ...[
             const SizedBox(height: 6),
-            Row(
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                Text(
-                  '${controller.retryLabel} 실패 ${controller.retryableFailureCount}건',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ConstrainedBox(
+                  constraints:
+                      const BoxConstraints(minWidth: 120, maxWidth: 280),
+                  child: Text(
+                    '${controller.retryLabel} 실패 ${controller.retryableFailureCount}건',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                const SizedBox(width: 8),
                 TextButton.icon(
                   onPressed: onRetryFailedTransfers,
                   icon: const Icon(Icons.refresh),

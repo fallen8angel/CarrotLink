@@ -27,9 +27,11 @@ void main() async {
     SystemNavigator.pop();
   });
 
-  // Lock orientation to portrait up
+  // Allow portrait + landscape for adaptive layouts on foldables/tablets.
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
   ]);
 
   runApp(
@@ -113,7 +115,7 @@ class CarrotLinkApp extends StatelessWidget {
         navigationBarTheme: NavigationBarThemeData(
           labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
           height: 80,
-          indicatorColor: const Color(0xFFFF6D00).withOpacity(0.2),
+          indicatorColor: const Color(0xFFFF6D00).withValues(alpha: 0.2),
           iconTheme: WidgetStateProperty.resolveWith((states) {
             if (states.contains(WidgetState.selected)) {
               return const IconThemeData(color: Color(0xFFFF6D00));

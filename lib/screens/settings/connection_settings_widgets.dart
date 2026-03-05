@@ -1,15 +1,142 @@
 part of 'connection_settings_screen.dart';
 
 extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
-  static const double _sectionSpacing = 16;
-  static const double _buttonHeight = 44;
-  static const BoxConstraints _iconActionConstraints =
-      BoxConstraints.tightFor(width: 36, height: 36);
+  ({
+    double sectionSpacing,
+    double sectionHeaderGap,
+    double cardPadding,
+    double buttonHeight,
+    EdgeInsets pagePadding,
+    BoxConstraints iconActionConstraints,
+    double iconActionIconSize,
+    double textCaption,
+    double textBody,
+    double textTitle,
+    double monoText,
+    double gapXs,
+    double gapSm,
+    double gapMd,
+    double gapLg,
+    double statusDotSize,
+    double spinnerSize,
+  }) _adaptiveMetrics(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final sectionSpacing = switch (window.windowClass) {
+      UiWindowClass.compact => 16.0,
+      UiWindowClass.medium => 18.0,
+      _ => 20.0,
+    };
+    final sectionHeaderGap = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 14.0,
+      _ => 16.0,
+    };
+    final cardPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 14.0,
+      _ => 16.0,
+    };
+    final buttonHeight = switch (window.windowClass) {
+      UiWindowClass.compact => 44.0,
+      UiWindowClass.medium => 46.0,
+      _ => 48.0,
+    };
+    final iconSide = switch (window.windowClass) {
+      UiWindowClass.compact => 36.0,
+      UiWindowClass.medium => 38.0,
+      _ => 40.0,
+    };
+    final iconActionIconSize = switch (window.windowClass) {
+      UiWindowClass.compact => 18.0,
+      UiWindowClass.medium => 19.0,
+      _ => 20.0,
+    };
+    final textCaption = switch (window.windowClass) {
+      UiWindowClass.compact => 11.0,
+      UiWindowClass.medium => 11.5,
+      _ => 12.0,
+    };
+    final textBody = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.5,
+      _ => 13.0,
+    };
+    final textTitle = switch (window.windowClass) {
+      UiWindowClass.compact => 13.0,
+      UiWindowClass.medium => 13.5,
+      _ => 14.0,
+    };
+    final monoText = switch (window.windowClass) {
+      UiWindowClass.compact => 11.0,
+      UiWindowClass.medium => 11.5,
+      _ => 12.0,
+    };
+    final gapXs = switch (window.windowClass) {
+      UiWindowClass.compact => 4.0,
+      UiWindowClass.medium => 5.0,
+      _ => 6.0,
+    };
+    final gapSm = switch (window.windowClass) {
+      UiWindowClass.compact => 6.0,
+      UiWindowClass.medium => 7.0,
+      _ => 8.0,
+    };
+    final gapMd = switch (window.windowClass) {
+      UiWindowClass.compact => 8.0,
+      UiWindowClass.medium => 10.0,
+      _ => 12.0,
+    };
+    final gapLg = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 14.0,
+      _ => 16.0,
+    };
+    final statusDotSize = switch (window.windowClass) {
+      UiWindowClass.compact => 10.0,
+      UiWindowClass.medium => 11.0,
+      _ => 12.0,
+    };
+    final spinnerSize = switch (window.windowClass) {
+      UiWindowClass.compact => 14.0,
+      UiWindowClass.medium => 15.0,
+      _ => 16.0,
+    };
+    return (
+      sectionSpacing: sectionSpacing,
+      sectionHeaderGap: sectionHeaderGap,
+      cardPadding: cardPadding,
+      buttonHeight: buttonHeight,
+      pagePadding: EdgeInsets.fromLTRB(
+        tokens.screenPadding,
+        tokens.screenPadding,
+        tokens.screenPadding,
+        MediaQuery.of(context).padding.bottom + 28,
+      ),
+      iconActionConstraints:
+          BoxConstraints.tightFor(width: iconSide, height: iconSide),
+      iconActionIconSize: iconActionIconSize,
+      textCaption: textCaption,
+      textBody: textBody,
+      textTitle: textTitle,
+      monoText: monoText,
+      gapXs: gapXs,
+      gapSm: gapSm,
+      gapMd: gapMd,
+      gapLg: gapLg,
+      statusDotSize: statusDotSize,
+      spinnerSize: spinnerSize,
+    );
+  }
 
-  ButtonStyle _primaryButtonStyle() {
+  ButtonStyle _primaryButtonStyle(BuildContext context) {
+    final metrics = _adaptiveMetrics(context);
     return ElevatedButton.styleFrom(
-      minimumSize: const Size.fromHeight(_buttonHeight),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      minimumSize: Size.fromHeight(metrics.buttonHeight),
+      padding: EdgeInsets.symmetric(
+        horizontal: metrics.gapLg,
+        vertical: metrics.gapMd,
+      ),
     );
   }
 
@@ -19,50 +146,51 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
     required VoidCallback? onPressed,
     Color? color,
   }) {
+    final metrics = _adaptiveMetrics(context);
     return IconButton(
       tooltip: tooltip,
       onPressed: onPressed,
-      icon: Icon(icon, size: 20, color: color),
-      constraints: _iconActionConstraints,
+      icon: Icon(icon, size: metrics.iconActionIconSize, color: color),
+      constraints: metrics.iconActionConstraints,
       visualDensity: VisualDensity.compact,
       padding: EdgeInsets.zero,
     );
   }
 
   Widget _buildScreen(BuildContext context) {
+    final metrics = _adaptiveMetrics(context);
     final ssh = Provider.of<SSHService>(context);
     final githubFeaturesEnabled = _isGitHubLoggedIn;
-    final bottomPadding = MediaQuery.of(context).padding.bottom + 28;
 
     return Scaffold(
       appBar: AppBar(title: const Text('연결 설정')),
       body: ListView(
-        padding: EdgeInsets.fromLTRB(16, 16, 16, bottomPadding),
+        padding: metrics.pagePadding,
         children: [
           Text("1. 기기 연결", style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 12),
+          SizedBox(height: metrics.sectionHeaderGap),
           _buildConnectionSection(ssh),
           if (!githubFeaturesEnabled) ...[
-            const SizedBox(height: 12),
+            SizedBox(height: metrics.sectionHeaderGap),
             _buildLoginRequiredNotice(),
           ],
-          const SizedBox(height: _sectionSpacing),
+          SizedBox(height: metrics.sectionSpacing),
           Text("2. GitHub 연동", style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 12),
+          SizedBox(height: metrics.sectionHeaderGap),
           _buildGitHubSection(),
-          const SizedBox(height: _sectionSpacing),
+          SizedBox(height: metrics.sectionSpacing),
           Text("3. SSH Key", style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 12),
+          SizedBox(height: metrics.sectionHeaderGap),
           _buildManualKeySection(),
-          const SizedBox(height: _sectionSpacing),
+          SizedBox(height: metrics.sectionSpacing),
           Text("4. GitHub SSH 키 관리",
               style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 12),
+          SizedBox(height: metrics.sectionHeaderGap),
           _buildFeatureGate(
             enabled: githubFeaturesEnabled,
             child: _buildGitHubKeyManagerSection(),
           ),
-          const SizedBox(height: _sectionSpacing),
+          SizedBox(height: metrics.sectionSpacing),
         ],
       ),
     );
@@ -79,22 +207,24 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
   }
 
   Widget _buildLoginRequiredNotice() {
+    final metrics = _adaptiveMetrics(context);
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: EdgeInsets.all(metrics.cardPadding),
       decoration: BoxDecoration(
-        color: Colors.grey.withOpacity(0.06),
+        color: Colors.grey.withValues(alpha: 0.06),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.grey.withOpacity(0.35)),
+        border: Border.all(color: Colors.grey.withValues(alpha: 0.35)),
       ),
       child: Row(
         children: [
           Icon(Icons.info_outline,
-              color: Theme.of(context).colorScheme.primary, size: 18),
-          const SizedBox(width: 8),
-          const Expanded(
+              color: Theme.of(context).colorScheme.primary,
+              size: metrics.iconActionIconSize),
+          SizedBox(width: metrics.gapMd),
+          Expanded(
             child: Text(
               "GitHub 로그인 시 키 자동관리/자동연결 기능이 활성화됩니다.",
-              style: TextStyle(fontSize: 12),
+              style: TextStyle(fontSize: metrics.textBody),
             ),
           ),
         ],
@@ -113,6 +243,7 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
   }
 
   Widget _buildConnectionSection(SSHService ssh) {
+    final metrics = _adaptiveMetrics(context);
     final isConnecting = ssh.isConnecting;
     final isConnected = ssh.isConnected;
     final statusColor = isConnected
@@ -120,11 +251,11 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
         : (isConnecting ? Colors.orange : Colors.grey);
 
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: EdgeInsets.all(metrics.cardPadding),
       decoration: BoxDecoration(
-        color: Colors.grey.withOpacity(0.05),
+        color: Colors.grey.withValues(alpha: 0.05),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.grey.withOpacity(0.2)),
+        border: Border.all(color: Colors.grey.withValues(alpha: 0.2)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -165,16 +296,17 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
               ),
             ),
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: metrics.gapMd),
           Row(
             children: [
-              Icon(Icons.circle, size: 10, color: statusColor),
-              const SizedBox(width: 6),
+              Icon(Icons.circle,
+                  size: metrics.statusDotSize, color: statusColor),
+              SizedBox(width: metrics.gapSm),
               Expanded(
                 child: Text(
                   ssh.connectionStatus,
                   style: TextStyle(
-                    fontSize: 11,
+                    fontSize: metrics.textCaption,
                     color: Colors.grey[700],
                   ),
                   maxLines: 1,
@@ -182,35 +314,35 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
                 ),
               ),
               if (isConnecting)
-                const SizedBox(
-                  width: 14,
-                  height: 14,
+                SizedBox(
+                  width: metrics.spinnerSize,
+                  height: metrics.spinnerSize,
                   child: CircularProgressIndicator(strokeWidth: 2),
                 ),
             ],
           ),
-          const SizedBox(height: 4),
+          SizedBox(height: metrics.gapXs),
           Text(
             "검색 상태: ${_compactDiscoveryStatus(ssh)}",
             style: TextStyle(
-              fontSize: 11,
+              fontSize: metrics.textCaption,
               color: Colors.grey[700],
             ),
           ),
-          const SizedBox(height: 12),
+          SizedBox(height: metrics.gapLg),
           Row(
             children: [
               Expanded(
                 child: ElevatedButton(
-                  style: _primaryButtonStyle(),
+                  style: _primaryButtonStyle(context),
                   onPressed: (isConnected || isConnecting) ? null : _connect,
                   child: const Text('연결'),
                 ),
               ),
-              const SizedBox(width: 12),
+              SizedBox(width: metrics.gapLg),
               Expanded(
                 child: ElevatedButton(
-                  style: _primaryButtonStyle(),
+                  style: _primaryButtonStyle(context),
                   onPressed: (isConnected || isConnecting) ? _disconnect : null,
                   child: const Text('연결 해제'),
                 ),
@@ -233,30 +365,34 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
   }
 
   Widget _buildManualKeySection() {
+    final metrics = _adaptiveMetrics(context);
     final activeLabel = _currentKeyType == 'generated'
         ? "현재 적용: ${_activeGeneratedTitle ?? _activeGeneratedId ?? 'GitHub 키'}"
         : (_currentKeyType == 'manual' ? "현재 적용: 수동 키" : "현재 적용: 없음");
 
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: EdgeInsets.all(metrics.cardPadding),
       decoration: BoxDecoration(
-        color: Colors.grey.withOpacity(0.05),
+        color: Colors.grey.withValues(alpha: 0.05),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.grey.withOpacity(0.2)),
+        border: Border.all(color: Colors.grey.withValues(alpha: 0.2)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
             activeLabel,
-            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+            style: TextStyle(
+              fontSize: metrics.textBody,
+              fontWeight: FontWeight.w600,
+            ),
           ),
-          const SizedBox(height: 6),
-          const Text(
+          SizedBox(height: metrics.gapSm),
+          Text(
             "개인키(PEM)를 입력하거나 수정한 뒤 저장/적용하세요.",
-            style: TextStyle(fontSize: 11, color: Colors.grey),
+            style: TextStyle(fontSize: metrics.textCaption, color: Colors.grey),
           ),
-          const SizedBox(height: 12),
+          SizedBox(height: metrics.gapLg),
           TextField(
             controller: _manualKeyController,
             readOnly: !_isManualKeyEditing,
@@ -273,32 +409,35 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
                   '-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----',
               border: OutlineInputBorder(),
             ),
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+            style:
+                TextStyle(fontFamily: 'monospace', fontSize: metrics.monoText),
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: metrics.gapMd),
           Row(
             children: [
               Expanded(
                 child: ElevatedButton(
-                  style: _primaryButtonStyle(),
+                  style: _primaryButtonStyle(context),
                   onPressed: () => unawaited(_handleManualKeyPrimaryButton()),
                   child: Text(_isManualKeyEditing ? "키 저장/적용" : "키 적용/수정"),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 6),
+          SizedBox(height: metrics.gapSm),
           Text(
             "입력 키가 GitHub 공개키와 일치하면 해당 GitHub 키로 자동 매칭됩니다.",
-            style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+            style: TextStyle(
+                fontSize: metrics.textCaption, color: Colors.grey[600]),
           ),
           Padding(
-            padding: const EdgeInsets.only(top: 4),
+            padding: EdgeInsets.only(top: metrics.gapXs),
             child: Text(
               _isManualKeyEditing
                   ? "수정 후 같은 버튼을 다시 누르면 저장/적용됩니다."
                   : "버튼을 누르면 편집 모드로 전환됩니다.",
-              style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+              style: TextStyle(
+                  fontSize: metrics.textCaption, color: Colors.grey[500]),
             ),
           ),
         ],
@@ -307,21 +446,22 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
   }
 
   Widget _buildGitHubSection() {
+    final metrics = _adaptiveMetrics(context);
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: EdgeInsets.all(metrics.cardPadding),
       decoration: BoxDecoration(
-        color: Colors.grey.withOpacity(0.05),
+        color: Colors.grey.withValues(alpha: 0.05),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.grey.withOpacity(0.2)),
+        border: Border.all(color: Colors.grey.withValues(alpha: 0.2)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
+          Text(
             "로그인하면 GitHub 키 동기화/관리 기능이 활성화됩니다.",
-            style: TextStyle(fontSize: 11, color: Colors.grey),
+            style: TextStyle(fontSize: metrics.textCaption, color: Colors.grey),
           ),
-          const SizedBox(height: 12),
+          SizedBox(height: metrics.gapLg),
           if (!_isGitHubLoggedIn)
             SizedBox(
               width: double.infinity,
@@ -330,7 +470,7 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
                 icon: const Icon(Icons.login),
                 label: const Text("GitHub 로그인"),
                 style: ElevatedButton.styleFrom(
-                    minimumSize: const Size.fromHeight(_buttonHeight),
+                    minimumSize: Size.fromHeight(metrics.buttonHeight),
                     backgroundColor: Colors.black87,
                     foregroundColor: Colors.white),
               ),
@@ -339,16 +479,19 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
             Row(
               children: [
                 Icon(Icons.check_circle,
-                    color: Theme.of(context).colorScheme.primary, size: 16),
-                const SizedBox(width: 8),
-                const Text("GitHub 로그인됨", style: TextStyle(fontSize: 12)),
+                    color: Theme.of(context).colorScheme.primary,
+                    size: metrics.iconActionIconSize - 2),
+                SizedBox(width: metrics.gapMd),
+                Text("GitHub 로그인됨",
+                    style: TextStyle(fontSize: metrics.textBody)),
                 const Spacer(),
                 TextButton(
                   onPressed: () async {
                     await _githubService.clearToken();
                     await _checkGitHubLogin();
                   },
-                  child: const Text("로그아웃", style: TextStyle(fontSize: 12)),
+                  child: Text("로그아웃",
+                      style: TextStyle(fontSize: metrics.textBody)),
                 ),
               ],
             ),
@@ -359,6 +502,7 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
   }
 
   Widget _buildGitHubKeyManagerSection() {
+    final metrics = _adaptiveMetrics(context);
     final activeGenerated =
         _currentKeyType == 'generated' && _activeGeneratedId != null;
     final activeText = activeGenerated
@@ -366,11 +510,11 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
         : (_currentKeyType == 'manual' ? "활성 키: 수동 입력 키" : "활성 키: 없음");
 
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: EdgeInsets.all(metrics.cardPadding),
       decoration: BoxDecoration(
-        color: Colors.grey.withOpacity(0.05),
+        color: Colors.grey.withValues(alpha: 0.05),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.grey.withOpacity(0.2)),
+        border: Border.all(color: Colors.grey.withValues(alpha: 0.2)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -380,8 +524,10 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
               Expanded(
                 child: Text(
                   activeText,
-                  style: const TextStyle(
-                      fontSize: 12, fontWeight: FontWeight.w600),
+                  style: TextStyle(
+                    fontSize: metrics.textBody,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
               _compactIconButton(
@@ -407,30 +553,31 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
               ),
             ],
           ),
-          const SizedBox(height: 4),
+          SizedBox(height: metrics.gapXs),
           Text(
             "GitHub 키 ${_keys.length}개",
-            style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+            style: TextStyle(
+                fontSize: metrics.textCaption, color: Colors.grey[500]),
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: metrics.gapMd),
           if (_keys.isEmpty)
             Container(
               width: double.infinity,
-              padding: const EdgeInsets.all(10),
+              padding: EdgeInsets.all(metrics.cardPadding - 2),
               decoration: BoxDecoration(
-                color: Colors.grey.withOpacity(0.08),
+                color: Colors.grey.withValues(alpha: 0.08),
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: const Text(
+              child: Text(
                 "GitHub에 등록된 SSH 키가 없습니다.",
-                style: TextStyle(fontSize: 12),
+                style: TextStyle(fontSize: metrics.textBody),
               ),
             )
           else
             Container(
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.grey.withOpacity(0.2)),
+                border: Border.all(color: Colors.grey.withValues(alpha: 0.2)),
               ),
               child: ListView.separated(
                 shrinkWrap: true,
@@ -438,7 +585,7 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
                 itemCount: _keys.length,
                 separatorBuilder: (_, __) => Divider(
                   height: 1,
-                  color: Colors.grey.withOpacity(0.2),
+                  color: Colors.grey.withValues(alpha: 0.2),
                 ),
                 itemBuilder: (context, index) {
                   final key = _keys[index];
@@ -463,12 +610,12 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
                       keyTitle,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 13),
+                      style: TextStyle(fontSize: metrics.textTitle),
                     ),
                     subtitle: Text(
                       "ID:$keyId · ${hasLocalPrivate ? "로컬 개인키 있음" : "개인키 없음"}",
                       style: TextStyle(
-                        fontSize: 11,
+                        fontSize: metrics.textCaption,
                         color: hasLocalPrivate
                             ? Colors.grey[500]
                             : Colors.orange[300],
@@ -498,10 +645,11 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
                 },
               ),
             ),
-          const SizedBox(height: 6),
+          SizedBox(height: metrics.gapSm),
           Text(
             "개인키가 없는 항목은 적용할 수 없습니다. SSH Key 섹션에 개인키를 넣으면 자동 매칭됩니다.",
-            style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+            style: TextStyle(
+                fontSize: metrics.textCaption, color: Colors.grey[500]),
           ),
         ],
       ),

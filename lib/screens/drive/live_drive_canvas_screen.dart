@@ -17,6 +17,9 @@ import 'package:webview_flutter/webview_flutter.dart';
 import '../../services/hud_drive_settings_service.dart';
 import '../../services/sidecar_service.dart';
 import '../../services/ssh_service.dart';
+import '../../ui/adaptive/display_feature_utils.dart';
+import '../../ui/adaptive/layout_tokens.dart';
+import '../../ui/adaptive/window_class.dart';
 import '../tabs/device_settings_tab.dart';
 
 enum _DriveCameraKind { road, wideRoad }
@@ -71,12 +74,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   // Sidecar is treated as an externally managed resident process on comma.
   static const bool _residentSidecarManaged = true;
   static const bool _autoDeployDuringHudRuntime = false;
-  static const String _landscapeOrientationPrefKey =
-      'hud_last_landscape_orientation';
   static const String _sidecarBootstrapDonePrefKey =
       'sidecar_bootstrap_done_v1';
   static const String _sidecarRevisionNotifiedPrefKey =
       'sidecar_revision_notified_v1';
+  static const String _hudDebugLayerTogglesPrefKey =
+      'hud_debug_layer_toggles_v1';
   static const _M3 _viewFromDevice = _M3(
     0.0,
     1.0,
@@ -184,10 +187,10 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   bool _debugShowPathFill = true;
   bool _debugShowLaneLines = true;
   bool _debugShowRoadEdge = true;
-  bool _debugShowLead1 = true;
-  bool _debugShowLead2 = true;
-  bool _debugShowRadarBadge = true;
-  bool _debugShowRadarVector = true;
+  bool _debugShowLead1 = false;
+  bool _debugShowLead2 = false;
+  bool _debugShowRadarBadge = false;
+  bool _debugShowRadarVector = false;
   bool _debugShowStopDistanceTf = true;
   bool _debugShowStateText = true;
   Map<String, String> _sidecarProcessSnapshot = <String, String>{};
@@ -224,8 +227,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   bool _disableDmGateBlocked = false;
   bool _disableDmGateChecking = false;
   String? _disableDmCurrentValue;
-  DeviceOrientation _preferredLandscapeOrientation =
-      DeviceOrientation.landscapeLeft;
   _AdaptiveCameraQualityMode _adaptiveCameraQualityMode =
       _AdaptiveCameraQualityMode.stable;
   int _adaptiveBadScore = 0;
@@ -380,6 +381,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     }
     unawaited(_enableScreenAwake());
     unawaited(_loadAndApplyLandscapeOrientation());
+    unawaited(_loadHudDebugLayerToggles());
     unawaited(_loadHudDefaultMode());
   }
 
@@ -420,12 +422,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       _stopAdaptiveCameraQualityLoop(resetMode: true);
       unawaited(_applyHudModeRuntimeWithDisableDmGate());
     }
-  }
-
-  @override
-  void didChangeMetrics() {
-    super.didChangeMetrics();
-    _rememberLandscapeOrientationFromView();
   }
 
   Future<void> _loadHudDefaultMode() async {
@@ -797,6 +793,79 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     if (_debugShowViewportFrame == enabled) return;
     setState(() => _debugShowViewportFrame = enabled);
     _toast(enabled ? '레터박스 프레임 ON' : '레터박스 프레임 OFF');
+  }
+
+  Future<void> _loadHudDebugLayerToggles() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_hudDebugLayerTogglesPrefKey);
+      if (raw == null || raw.trim().isEmpty) return;
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return;
+      final map = Map<String, dynamic>.from(decoded);
+      bool readBool(String key, bool fallback) {
+        final value = map[key];
+        if (value is bool) return value;
+        if (value is num) return value != 0;
+        if (value is String) {
+          final norm = value.trim().toLowerCase();
+          if (norm == 'true' || norm == '1') return true;
+          if (norm == 'false' || norm == '0') return false;
+        }
+        return fallback;
+      }
+
+      if (!mounted) {
+        _debugShowPathFill = readBool('pathFill', _debugShowPathFill);
+        _debugShowLaneLines = readBool('laneLines', _debugShowLaneLines);
+        _debugShowRoadEdge = readBool('roadEdge', _debugShowRoadEdge);
+        _debugShowLead1 = readBool('lead1', _debugShowLead1);
+        _debugShowLead2 = readBool('lead2', _debugShowLead2);
+        _debugShowRadarBadge = readBool('radarBadge', _debugShowRadarBadge);
+        _debugShowRadarVector = readBool('radarVector', _debugShowRadarVector);
+        _debugShowStopDistanceTf =
+            readBool('stopDistanceTf', _debugShowStopDistanceTf);
+        _debugShowStateText = readBool('stateText', _debugShowStateText);
+        return;
+      }
+
+      setState(() {
+        _debugShowPathFill = readBool('pathFill', _debugShowPathFill);
+        _debugShowLaneLines = readBool('laneLines', _debugShowLaneLines);
+        _debugShowRoadEdge = readBool('roadEdge', _debugShowRoadEdge);
+        _debugShowLead1 = readBool('lead1', _debugShowLead1);
+        _debugShowLead2 = readBool('lead2', _debugShowLead2);
+        _debugShowRadarBadge = readBool('radarBadge', _debugShowRadarBadge);
+        _debugShowRadarVector = readBool('radarVector', _debugShowRadarVector);
+        _debugShowStopDistanceTf =
+            readBool('stopDistanceTf', _debugShowStopDistanceTf);
+        _debugShowStateText = readBool('stateText', _debugShowStateText);
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _saveHudDebugLayerToggles() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final payload = <String, bool>{
+        'pathFill': _debugShowPathFill,
+        'laneLines': _debugShowLaneLines,
+        'roadEdge': _debugShowRoadEdge,
+        'lead1': _debugShowLead1,
+        'lead2': _debugShowLead2,
+        'radarBadge': _debugShowRadarBadge,
+        'radarVector': _debugShowRadarVector,
+        'stopDistanceTf': _debugShowStopDistanceTf,
+        'stateText': _debugShowStateText,
+      };
+      await prefs.setString(_hudDebugLayerTogglesPrefKey, jsonEncode(payload));
+    } catch (_) {}
+  }
+
+  void _onLayerToggleChanged(StateSetter setLocalState, VoidCallback update) {
+    setState(update);
+    setLocalState(() {});
+    unawaited(_saveHudDebugLayerToggles());
   }
 
   void _clearSidecarRecoverySchedule() {
@@ -1391,6 +1460,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   Future<void> _restorePortraitOrientation() async {
     await SystemChrome.setPreferredOrientations(const [
       DeviceOrientation.portraitUp,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
     ]);
   }
 
@@ -1407,41 +1478,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   }
 
   Future<void> _loadAndApplyLandscapeOrientation() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final saved =
-          (prefs.getString(_landscapeOrientationPrefKey) ?? '').toLowerCase();
-      if (saved == 'right') {
-        _preferredLandscapeOrientation = DeviceOrientation.landscapeRight;
-      } else if (saved == 'left') {
-        _preferredLandscapeOrientation = DeviceOrientation.landscapeLeft;
-      }
-    } catch (_) {}
+    // Follow system/user rotation. Do not force landscape lock inside HUD.
     await _lockLandscapeOrientations();
-    _rememberLandscapeOrientationFromView();
-  }
-
-  DeviceOrientation? _inferLandscapeOrientationFromView() {
-    final views = WidgetsBinding.instance.platformDispatcher.views;
-    if (views.isEmpty) return null;
-    final view = views.first;
-    final left = view.padding.left + view.viewPadding.left;
-    final right = view.padding.right + view.viewPadding.right;
-    const epsilon = 0.1;
-    if ((left - right).abs() <= epsilon) return null;
-    return left > right
-        ? DeviceOrientation.landscapeLeft
-        : DeviceOrientation.landscapeRight;
-  }
-
-  Future<void> _savePreferredLandscapeOrientation(
-      DeviceOrientation orientation) async {
-    final value =
-        orientation == DeviceOrientation.landscapeRight ? 'right' : 'left';
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_landscapeOrientationPrefKey, value);
-    } catch (_) {}
   }
 
   Future<bool> _isSidecarBootstrapDone() async {
@@ -1582,22 +1620,9 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     }
   }
 
-  void _rememberLandscapeOrientationFromView() {
-    final inferred = _inferLandscapeOrientationFromView();
-    if (inferred == null || inferred == _preferredLandscapeOrientation) return;
-    _preferredLandscapeOrientation = inferred;
-    unawaited(_savePreferredLandscapeOrientation(inferred));
-  }
-
   Future<void> _lockLandscapeOrientations() async {
-    final primary = _preferredLandscapeOrientation;
-    final secondary = primary == DeviceOrientation.landscapeLeft
-        ? DeviceOrientation.landscapeRight
-        : DeviceOrientation.landscapeLeft;
-    await SystemChrome.setPreferredOrientations([
-      primary,
-      secondary,
-    ]);
+    // Keep both portrait/landscape allowed (same as app-level policy).
+    await _restorePortraitOrientation();
   }
 
   Future<void> _exitScreen() async {
@@ -3605,25 +3630,33 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     });
   }
 
-  Widget _statusLine(String label, String value) {
+  Widget _statusLine(
+    String label,
+    String value, {
+    double labelWidth = 126,
+    double labelFontSize = 13,
+    double valueFontSize = 13,
+    EdgeInsets? padding,
+    Color? valueColor,
+  }) {
     return Padding(
-      padding: const EdgeInsets.only(top: 4),
+      padding: padding ?? const EdgeInsets.only(top: 4),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
-            width: 126,
+            width: labelWidth,
             child: Text(
               label,
-              style: const TextStyle(color: Colors.white60, fontSize: 13),
+              style: TextStyle(color: Colors.white60, fontSize: labelFontSize),
             ),
           ),
           Expanded(
             child: Text(
               value,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 13,
+              style: TextStyle(
+                color: valueColor ?? Colors.white,
+                fontSize: valueFontSize,
                 fontWeight: FontWeight.w500,
               ),
             ),
@@ -3634,9 +3667,34 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   }
 
   Widget _debugMetricPill(String label, String value) {
+    final window = UiWindowInfo.of(context);
+    final minWidth = switch (window.windowClass) {
+      UiWindowClass.compact => 102.0,
+      UiWindowClass.medium => 108.0,
+      UiWindowClass.expanded => 114.0,
+      UiWindowClass.large => 120.0,
+      UiWindowClass.extraLarge => 128.0,
+    };
+    final horizontalPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 8.0,
+      UiWindowClass.medium => 9.0,
+      UiWindowClass.expanded => 10.0,
+      UiWindowClass.large => 10.0,
+      UiWindowClass.extraLarge => 11.0,
+    };
+    final verticalPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 8.0,
+      UiWindowClass.medium => 9.0,
+      UiWindowClass.expanded => 10.0,
+      UiWindowClass.large => 10.0,
+      UiWindowClass.extraLarge => 11.0,
+    };
     return Container(
-      constraints: const BoxConstraints(minWidth: 148),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      constraints: BoxConstraints(minWidth: minWidth),
+      padding: EdgeInsets.symmetric(
+        horizontal: horizontalPadding,
+        vertical: verticalPadding,
+      ),
       decoration: BoxDecoration(
         color: const Color(0xFF171B24),
         borderRadius: BorderRadius.circular(10),
@@ -3708,12 +3766,20 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
 
   Future<void> _showDebugTextDialog(String title, String content) async {
     if (!mounted) return;
+    final window = UiWindowInfo.of(context);
+    final dialogMaxWidth = switch (window.windowClass) {
+      UiWindowClass.compact => 420.0,
+      UiWindowClass.medium => 520.0,
+      UiWindowClass.expanded => 620.0,
+      UiWindowClass.large => 700.0,
+      UiWindowClass.extraLarge => 760.0,
+    };
     await showDialog<void>(
       context: context,
       builder: (_) => AlertDialog(
         title: Text(title),
         content: SizedBox(
-          width: 640,
+          width: dialogMaxWidth,
           child: SingleChildScrollView(
             child: SelectableText(
               content,
@@ -4380,7 +4446,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
             final healthProfile = (health['profile']?.toString() ?? '-');
             final healthClients = (health['clients']?.toString() ?? '-');
             final wsState = _sidecarConnected ? 'connected' : 'disconnected';
-            final lastFrameAt = _fmtClock(_sidecarLastFrameAt);
             final lastFrameAgo = _sidecarLastFrameAt == null
                 ? '-'
                 : '${DateTime.now().difference(_sidecarLastFrameAt!).inMilliseconds}ms 전';
@@ -4429,45 +4494,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                   setLocalState(() => actionRunning = false);
                 }
               }
-            }
-
-            Widget sectionCard(
-              String title,
-              Widget child, {
-              Widget? trailing,
-            }) {
-              return Container(
-                width: double.infinity,
-                margin: const EdgeInsets.only(bottom: 14),
-                padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF171B24),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.white12),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            title,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 15,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                        if (trailing != null) trailing,
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    child,
-                  ],
-                ),
-              );
             }
 
             Widget layerSwitch(
@@ -4532,10 +4558,209 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
               );
             }
 
-            final maxHeight = MediaQuery.of(sheetContext).size.height * 0.92;
             final screenSize = MediaQuery.of(sheetContext).size;
-            final maxWidth = math.min(screenSize.width * 0.94, 1160.0);
-            final sidebarWidth = screenSize.width < 920 ? 136.0 : 176.0;
+            final window = UiWindowInfo.of(sheetContext);
+            final tokens = UiLayoutTokens.of(sheetContext);
+            final hingePadding =
+                DisplayFeatureUtils.hingeAwarePadding(sheetContext);
+            final isWideDialog =
+                window.isExpandedOrAbove || screenSize.width >= 980;
+            final baseInset = window.isCompact ? 8.0 : 12.0;
+            final insetPadding = EdgeInsets.only(
+              left: hingePadding.left + baseInset,
+              top: hingePadding.top + (window.isCompact ? 8 : 10),
+              right: hingePadding.right + baseInset,
+              bottom: hingePadding.bottom + (window.isCompact ? 8 : 10),
+            );
+            final availableWidth =
+                screenSize.width - insetPadding.left - insetPadding.right;
+            final availableHeight =
+                screenSize.height - insetPadding.top - insetPadding.bottom;
+            final maxHeight = availableHeight * (isWideDialog ? 0.95 : 0.93);
+            final maxWidth = math.min(
+              availableWidth,
+              isWideDialog ? 1280.0 : 1080.0,
+            );
+            final sidebarWidth = switch (window.windowClass) {
+              UiWindowClass.compact => 0.0,
+              UiWindowClass.medium => 176.0,
+              UiWindowClass.expanded => 198.0,
+              UiWindowClass.large => 220.0,
+              UiWindowClass.extraLarge => 240.0,
+            };
+            final contentHorizontalPadding = window.isCompact
+                ? 12.0
+                : tokens.screenPadding.clamp(12.0, 18.0);
+            final headerPadding = EdgeInsets.fromLTRB(
+              window.isCompact ? 14 : 18,
+              window.isCompact ? 10 : 12,
+              10,
+              window.isCompact ? 8 : 10,
+            );
+            final headerFontSize =
+                window.isCompact ? 18.0 : (isWideDialog ? 20.0 : 19.0);
+            final chipFontSize = window.isCompact ? 11.0 : 12.0;
+            final chipIconSize = window.isCompact ? 15.0 : 16.0;
+            final headerGap = window.isCompact ? 6.0 : 8.0;
+            final chipSpacing = window.isCompact ? 6.0 : 8.0;
+            final statusLabelWidth =
+                window.isCompact ? 96.0 : (isWideDialog ? 128.0 : 110.0);
+            final statusLabelFont = window.isCompact ? 11.0 : 12.0;
+            final statusValueFont = window.isCompact ? 12.0 : 13.0;
+            final statusCardPadding = window.isCompact ? 10.0 : 12.0;
+            final statusCardRadius = window.isCompact ? 10.0 : 12.0;
+            final statusGridSpacing = window.isCompact ? 8.0 : 10.0;
+
+            Widget sectionCard(
+              String title,
+              Widget child, {
+              Widget? trailing,
+            }) {
+              final cardPadding = EdgeInsets.fromLTRB(
+                window.isCompact ? 14 : 16,
+                window.isCompact ? 12 : 14,
+                window.isCompact ? 14 : 16,
+                window.isCompact ? 12 : 14,
+              );
+              final titleFont = window.isCompact ? 14.0 : 15.0;
+              return Container(
+                width: double.infinity,
+                margin: EdgeInsets.only(bottom: window.isCompact ? 12 : 14),
+                padding: cardPadding,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF171B24),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.white12),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            title,
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: titleFont,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                        if (trailing != null) trailing,
+                      ],
+                    ),
+                    SizedBox(height: window.isCompact ? 6 : 8),
+                    child,
+                  ],
+                ),
+              );
+            }
+
+            Widget statusMetricCard(
+              String label,
+              String value, {
+              Color? valueColor,
+            }) {
+              return Container(
+                padding: EdgeInsets.all(statusCardPadding),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF121824),
+                  borderRadius: BorderRadius.circular(statusCardRadius),
+                  border: Border.all(color: Colors.white12),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      label,
+                      style: TextStyle(
+                        color: Colors.white60,
+                        fontSize: statusLabelFont,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      value,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: valueColor ?? Colors.white,
+                        fontSize: statusValueFont + 1,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }
+
+            Widget statusGrid(
+              List<({String label, String value, Color? color})> items, {
+              int? columns,
+            }) {
+              return LayoutBuilder(
+                builder: (context, constraints) {
+                  final targetColumns = columns ??
+                      (constraints.maxWidth >= 760
+                          ? 3
+                          : (constraints.maxWidth >= 520 ? 2 : 1));
+                  final width = (constraints.maxWidth -
+                          statusGridSpacing * (targetColumns - 1)) /
+                      targetColumns;
+                  return Wrap(
+                    spacing: statusGridSpacing,
+                    runSpacing: statusGridSpacing,
+                    children: [
+                      for (final item in items)
+                        SizedBox(
+                          width: width,
+                          child: statusMetricCard(
+                            item.label,
+                            item.value,
+                            valueColor: item.color,
+                          ),
+                        ),
+                    ],
+                  );
+                },
+              );
+            }
+
+            Widget groupNavChip({
+              required int index,
+              required IconData icon,
+              required String label,
+            }) {
+              final selected = selectedGroup == index;
+              return ChoiceChip(
+                selected: selected,
+                onSelected: (_) => setLocalState(() => selectedGroup = index),
+                selectedColor: const Color(0xFF7A5644),
+                backgroundColor: const Color(0xFF151A23),
+                side: BorderSide(
+                  color: selected ? const Color(0xFFD6A88C) : Colors.white12,
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                avatar: Icon(icon, size: chipIconSize, color: Colors.white),
+                label: Text(
+                  label,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: chipFontSize,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                visualDensity: const VisualDensity(
+                  horizontal: -1,
+                  vertical: -1,
+                ),
+              );
+            }
 
             return Dialog(
               backgroundColor: const Color(0xFF11141A),
@@ -4543,23 +4768,22 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                 borderRadius: BorderRadius.circular(18),
                 side: const BorderSide(color: Colors.white12),
               ),
-              insetPadding:
-                  const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+              insetPadding: insetPadding,
               child: ConstrainedBox(
                 constraints:
                     BoxConstraints(maxHeight: maxHeight, maxWidth: maxWidth),
                 child: Column(
                   children: [
                     Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 12, 10, 8),
+                      padding: headerPadding,
                       child: Row(
                         children: [
-                          const Expanded(
+                          Expanded(
                             child: Text(
                               'HUD 디버그',
                               style: TextStyle(
                                 color: Colors.white,
-                                fontSize: 19,
+                                fontSize: headerFontSize,
                                 fontWeight: FontWeight.w800,
                               ),
                             ),
@@ -4584,78 +4808,140 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                       ),
                     ),
                     const Divider(height: 1, color: Colors.white12),
+                    if (!isWideDialog) ...[
+                      Container(
+                        width: double.infinity,
+                        padding: EdgeInsets.fromLTRB(
+                          contentHorizontalPadding,
+                          8,
+                          contentHorizontalPadding,
+                          8,
+                        ),
+                        color: const Color(0xFF11151D),
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(
+                            children: [
+                              groupNavChip(
+                                index: 0,
+                                icon: Icons.dashboard_outlined,
+                                label: '개요',
+                              ),
+                              SizedBox(width: headerGap),
+                              groupNavChip(
+                                index: 1,
+                                icon: Icons.layers_outlined,
+                                label: '레이어',
+                              ),
+                              SizedBox(width: headerGap),
+                              groupNavChip(
+                                index: 2,
+                                icon: Icons.build_circle_outlined,
+                                label: '점검',
+                              ),
+                              SizedBox(width: headerGap),
+                              groupNavChip(
+                                index: 3,
+                                icon: Icons.history,
+                                label: '이력',
+                              ),
+                              SizedBox(width: headerGap),
+                              groupNavChip(
+                                index: 4,
+                                icon: Icons.slideshow_outlined,
+                                label: '프리뷰',
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const Divider(height: 1, color: Colors.white12),
+                    ],
                     Expanded(
                       child: Row(
                         children: [
-                          Container(
-                            width: sidebarWidth,
-                            color: const Color(0xFF11151D),
-                            child: ListView(
-                              padding: const EdgeInsets.symmetric(vertical: 8),
-                              children: [
-                                groupNavItem(
-                                  index: 0,
-                                  icon: Icons.dashboard_outlined,
-                                  label: '개요',
-                                ),
-                                groupNavItem(
-                                  index: 1,
-                                  icon: Icons.layers_outlined,
-                                  label: '레이어',
-                                ),
-                                groupNavItem(
-                                  index: 2,
-                                  icon: Icons.build_circle_outlined,
-                                  label: '점검',
-                                ),
-                                groupNavItem(
-                                  index: 3,
-                                  icon: Icons.history,
-                                  label: '이력',
-                                ),
-                                groupNavItem(
-                                  index: 4,
-                                  icon: Icons.slideshow_outlined,
-                                  label: '프리뷰',
-                                ),
-                              ],
+                          if (isWideDialog) ...[
+                            Container(
+                              width: sidebarWidth,
+                              color: const Color(0xFF11151D),
+                              child: ListView(
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 8),
+                                children: [
+                                  groupNavItem(
+                                    index: 0,
+                                    icon: Icons.dashboard_outlined,
+                                    label: '개요',
+                                  ),
+                                  groupNavItem(
+                                    index: 1,
+                                    icon: Icons.layers_outlined,
+                                    label: '레이어',
+                                  ),
+                                  groupNavItem(
+                                    index: 2,
+                                    icon: Icons.build_circle_outlined,
+                                    label: '점검',
+                                  ),
+                                  groupNavItem(
+                                    index: 3,
+                                    icon: Icons.history,
+                                    label: '이력',
+                                  ),
+                                  groupNavItem(
+                                    index: 4,
+                                    icon: Icons.slideshow_outlined,
+                                    label: '프리뷰',
+                                  ),
+                                ],
+                              ),
                             ),
-                          ),
-                          const VerticalDivider(
-                              width: 1, color: Colors.white12),
+                            const VerticalDivider(
+                              width: 1,
+                              color: Colors.white12,
+                            ),
+                          ],
                           Expanded(
                             child: Column(
                               children: [
                                 Container(
                                   width: double.infinity,
-                                  padding:
-                                      const EdgeInsets.fromLTRB(14, 10, 14, 10),
+                                  padding: EdgeInsets.fromLTRB(
+                                    contentHorizontalPadding,
+                                    10,
+                                    contentHorizontalPadding,
+                                    10,
+                                  ),
                                   color: const Color(0xFF121824),
                                   child: Column(
                                     crossAxisAlignment:
                                         CrossAxisAlignment.start,
                                     children: [
-                                      Wrap(
-                                        spacing: 8,
-                                        runSpacing: 8,
-                                        children: [
-                                          _debugMetricPill(
-                                              '단계', _sidecarStatusTitle()),
-                                          _debugMetricPill('WS', wsState),
-                                          _debugMetricPill(
-                                              '최근 프레임', lastFrameAgo),
-                                          _debugMetricPill(
-                                            '성능',
-                                            'fps ${_overlayDebugFps.toStringAsFixed(1)} · gap ${_overlayModelCameraGap ?? '-'}',
-                                          ),
-                                        ],
+                                      SingleChildScrollView(
+                                        scrollDirection: Axis.horizontal,
+                                        child: Row(
+                                          children: [
+                                            _debugMetricPill(
+                                                '단계', _sidecarStatusTitle()),
+                                            SizedBox(width: chipSpacing),
+                                            _debugMetricPill('WS', wsState),
+                                            SizedBox(width: chipSpacing),
+                                            _debugMetricPill(
+                                                '최근 프레임', lastFrameAgo),
+                                            SizedBox(width: chipSpacing),
+                                            _debugMetricPill(
+                                              '성능',
+                                              'fps ${_overlayDebugFps.toStringAsFixed(1)} · gap ${_overlayModelCameraGap ?? '-'}',
+                                            ),
+                                          ],
+                                        ),
                                       ),
-                                      const SizedBox(height: 8),
+                                      SizedBox(height: headerGap),
                                       Text(
                                         _sidecarPhaseMessage ?? '상태 메시지 없음',
-                                        style: const TextStyle(
+                                        style: TextStyle(
                                           color: Colors.white70,
-                                          fontSize: 12,
+                                          fontSize: chipFontSize,
                                         ),
                                       ),
                                     ],
@@ -4665,9 +4951,9 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                 Expanded(
                                   child: SingleChildScrollView(
                                     padding: EdgeInsets.fromLTRB(
-                                      14,
+                                      contentHorizontalPadding,
                                       10,
-                                      14,
+                                      contentHorizontalPadding,
                                       16 +
                                           MediaQuery.of(sheetContext)
                                               .viewInsets
@@ -4678,57 +4964,89 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                       children: [
                                         if (selectedGroup == 0)
                                           sectionCard(
-                                            '배포/런타임 상태',
+                                            '핵심 상태',
                                             Column(
                                               crossAxisAlignment:
                                                   CrossAxisAlignment.start,
                                               children: [
                                                 _statusLine(
-                                                    '점검 시각',
-                                                    _fmtClock(
-                                                        _sidecarProcessCheckedAt)),
-                                                _statusLine('단계',
-                                                    _sidecarStatusTitle()),
-                                                _statusLine('프로세스',
-                                                    '$running / $listening'),
-                                                _statusLine('실행 방식', method),
-                                                _statusLine('PID', pid),
-                                                _statusLine('Uptime', uptime),
-                                                _statusLine(
-                                                    '원격 해시/버전', remoteHash),
-                                                _statusLine('헬스',
-                                                    'ok:$healthOk profile:$healthProfile clients:$healthClients'),
-                                                _statusLine('WS', wsState),
-                                                _statusLine('최근 프레임',
-                                                    '$lastFrameAt ($lastFrameAgo)'),
-                                                _statusLine('성능',
-                                                    'fps:${_overlayDebugFps.toStringAsFixed(1)}  gap:${_overlayModelCameraGap ?? '-'}  drop:$_overlayDropCount'),
-                                                _statusLine(
-                                                    '카메라 릴레이', relayState),
-                                                _statusLine('배포 결과',
-                                                    '$_sidecarLastDeployResult @ ${_fmtClock(_sidecarLastDeployAt)}'),
-                                                _statusLine(
-                                                    'SHA (Local)',
-                                                    _shortSidecarRevision(
-                                                        _sidecarLocalRevision)),
-                                                _statusLine(
-                                                    'SHA (Remote)',
-                                                    _shortSidecarRevision(
-                                                        _sidecarRemoteRevision)),
-                                                _statusLine('Revision 동작',
-                                                    _sidecarRevisionAction),
-                                                _statusLine(
-                                                    'Revision 점검시각',
-                                                    _fmtClock(
-                                                        _sidecarLastRevisionCheckedAt)),
-                                                _statusLine(
-                                                    '최근 시작',
-                                                    _fmtClock(
-                                                        _sidecarLastStartAt)),
-                                                _statusLine(
-                                                    '최근 중지',
-                                                    _fmtClock(
-                                                        _sidecarLastStopAt)),
+                                                  '점검 시각',
+                                                  _fmtClock(
+                                                      _sidecarProcessCheckedAt),
+                                                  labelWidth: statusLabelWidth,
+                                                  labelFontSize:
+                                                      statusLabelFont,
+                                                  valueFontSize:
+                                                      statusValueFont,
+                                                ),
+                                                SizedBox(height: headerGap),
+                                                statusGrid(
+                                                  [
+                                                    (
+                                                      label: '단계',
+                                                      value:
+                                                          _sidecarStatusTitle(),
+                                                      color: null
+                                                    ),
+                                                    (
+                                                      label: '프로세스',
+                                                      value:
+                                                          '$running / $listening',
+                                                      color: null
+                                                    ),
+                                                    (
+                                                      label: 'WS',
+                                                      value: wsState,
+                                                      color: _sidecarConnected
+                                                          ? const Color(
+                                                              0xFF73E07C)
+                                                          : const Color(
+                                                              0xFFF6B26B)
+                                                    ),
+                                                    (
+                                                      label: '최근 프레임',
+                                                      value: lastFrameAgo,
+                                                      color: null
+                                                    ),
+                                                    (
+                                                      label: '성능',
+                                                      value:
+                                                          'fps ${_overlayDebugFps.toStringAsFixed(1)} · gap ${_overlayModelCameraGap ?? '-'}',
+                                                      color: null
+                                                    ),
+                                                    (
+                                                      label: '헬스',
+                                                      value:
+                                                          'ok:$healthOk profile:$healthProfile clients:$healthClients',
+                                                      color: (healthOk == 'ok')
+                                                          ? const Color(
+                                                              0xFF73E07C)
+                                                          : const Color(
+                                                              0xFFFF8A8A)
+                                                    ),
+                                                    (
+                                                      label: '카메라 릴레이',
+                                                      value: relayState,
+                                                      color: null
+                                                    ),
+                                                    (
+                                                      label: 'Uptime',
+                                                      value: uptime,
+                                                      color: null
+                                                    ),
+                                                    (
+                                                      label: '실행 방식',
+                                                      value: method,
+                                                      color: null
+                                                    ),
+                                                    (
+                                                      label: 'PID',
+                                                      value: pid,
+                                                      color: null
+                                                    ),
+                                                  ],
+                                                  columns: isWideDialog ? 3 : 2,
+                                                ),
                                                 if ((_sidecarProcessStatusError ??
                                                         '')
                                                     .trim()
@@ -4736,7 +5054,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                                   Padding(
                                                     padding:
                                                         const EdgeInsets.only(
-                                                            top: 6),
+                                                            top: 8),
                                                     child: Text(
                                                       _sidecarProcessStatusError!
                                                           .trim(),
@@ -4794,19 +5112,109 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                           ),
                                         if (selectedGroup == 0)
                                           sectionCard(
+                                            '배포/버전 상세',
+                                            Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                statusGrid(
+                                                  [
+                                                    (
+                                                      label: '배포 결과',
+                                                      value:
+                                                          '$_sidecarLastDeployResult',
+                                                      color: null
+                                                    ),
+                                                    (
+                                                      label: '원격 해시/버전',
+                                                      value: remoteHash,
+                                                      color: null
+                                                    ),
+                                                    (
+                                                      label: 'SHA (Local)',
+                                                      value: _shortSidecarRevision(
+                                                          _sidecarLocalRevision),
+                                                      color: null
+                                                    ),
+                                                    (
+                                                      label: 'SHA (Remote)',
+                                                      value: _shortSidecarRevision(
+                                                          _sidecarRemoteRevision),
+                                                      color: null
+                                                    ),
+                                                    (
+                                                      label: 'Revision 동작',
+                                                      value:
+                                                          _sidecarRevisionAction,
+                                                      color: null
+                                                    ),
+                                                    (
+                                                      label: 'Revision 점검',
+                                                      value: _fmtClock(
+                                                          _sidecarLastRevisionCheckedAt),
+                                                      color: null
+                                                    ),
+                                                    (
+                                                      label: '최근 시작',
+                                                      value: _fmtClock(
+                                                          _sidecarLastStartAt),
+                                                      color: null
+                                                    ),
+                                                    (
+                                                      label: '최근 중지',
+                                                      value: _fmtClock(
+                                                          _sidecarLastStopAt),
+                                                      color: null
+                                                    ),
+                                                  ],
+                                                  columns: isWideDialog ? 3 : 2,
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        if (selectedGroup == 0)
+                                          sectionCard(
                                             '최초설정 상태',
                                             Column(
                                               crossAxisAlignment:
                                                   CrossAxisAlignment.start,
                                               children: [
-                                                _statusLine('최초설정 완료(로컬)',
-                                                    bootstrapConfigured),
-                                                _statusLine('마지막 자동설정 결과',
-                                                    bootstrapLastResult),
-                                                _statusLine('마지막 자동설정 시각',
-                                                    bootstrapLastAt),
                                                 _statusLine(
-                                                    '상세', bootstrapLastDetail),
+                                                  '최초설정 완료(로컬)',
+                                                  bootstrapConfigured,
+                                                  labelWidth: statusLabelWidth,
+                                                  labelFontSize:
+                                                      statusLabelFont,
+                                                  valueFontSize:
+                                                      statusValueFont,
+                                                ),
+                                                _statusLine(
+                                                  '마지막 자동설정 결과',
+                                                  bootstrapLastResult,
+                                                  labelWidth: statusLabelWidth,
+                                                  labelFontSize:
+                                                      statusLabelFont,
+                                                  valueFontSize:
+                                                      statusValueFont,
+                                                ),
+                                                _statusLine(
+                                                  '마지막 자동설정 시각',
+                                                  bootstrapLastAt,
+                                                  labelWidth: statusLabelWidth,
+                                                  labelFontSize:
+                                                      statusLabelFont,
+                                                  valueFontSize:
+                                                      statusValueFont,
+                                                ),
+                                                _statusLine(
+                                                  '상세',
+                                                  bootstrapLastDetail,
+                                                  labelWidth: statusLabelWidth,
+                                                  labelFontSize:
+                                                      statusLabelFont,
+                                                  valueFontSize:
+                                                      statusValueFont,
+                                                ),
                                                 const SizedBox(height: 6),
                                                 const Text(
                                                   '사이드카 미배포 감지 시 자동설정(배포)을 1회 수행합니다.',
@@ -4861,10 +5269,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                                   _debugShowPathFill,
                                                   layerToggleEnabled
                                                       ? (value) {
-                                                          setState(() =>
-                                                              _debugShowPathFill =
-                                                                  value);
-                                                          setLocalState(() {});
+                                                          _onLayerToggleChanged(
+                                                            setLocalState,
+                                                            () =>
+                                                                _debugShowPathFill =
+                                                                    value,
+                                                          );
                                                         }
                                                       : null,
                                                 ),
@@ -4873,10 +5283,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                                   _debugShowLaneLines,
                                                   layerToggleEnabled
                                                       ? (value) {
-                                                          setState(() =>
-                                                              _debugShowLaneLines =
-                                                                  value);
-                                                          setLocalState(() {});
+                                                          _onLayerToggleChanged(
+                                                            setLocalState,
+                                                            () =>
+                                                                _debugShowLaneLines =
+                                                                    value,
+                                                          );
                                                         }
                                                       : null,
                                                 ),
@@ -4885,10 +5297,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                                   _debugShowRoadEdge,
                                                   layerToggleEnabled
                                                       ? (value) {
-                                                          setState(() =>
-                                                              _debugShowRoadEdge =
-                                                                  value);
-                                                          setLocalState(() {});
+                                                          _onLayerToggleChanged(
+                                                            setLocalState,
+                                                            () =>
+                                                                _debugShowRoadEdge =
+                                                                    value,
+                                                          );
                                                         }
                                                       : null,
                                                 ),
@@ -4917,10 +5331,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                                   _debugShowLead1,
                                                   layerToggleEnabled
                                                       ? (value) {
-                                                          setState(() =>
-                                                              _debugShowLead1 =
-                                                                  value);
-                                                          setLocalState(() {});
+                                                          _onLayerToggleChanged(
+                                                            setLocalState,
+                                                            () =>
+                                                                _debugShowLead1 =
+                                                                    value,
+                                                          );
                                                         }
                                                       : null,
                                                 ),
@@ -4929,10 +5345,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                                   _debugShowLead2,
                                                   layerToggleEnabled
                                                       ? (value) {
-                                                          setState(() =>
-                                                              _debugShowLead2 =
-                                                                  value);
-                                                          setLocalState(() {});
+                                                          _onLayerToggleChanged(
+                                                            setLocalState,
+                                                            () =>
+                                                                _debugShowLead2 =
+                                                                    value,
+                                                          );
                                                         }
                                                       : null,
                                                 ),
@@ -4941,10 +5359,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                                   _debugShowRadarBadge,
                                                   layerToggleEnabled
                                                       ? (value) {
-                                                          setState(() =>
-                                                              _debugShowRadarBadge =
-                                                                  value);
-                                                          setLocalState(() {});
+                                                          _onLayerToggleChanged(
+                                                            setLocalState,
+                                                            () =>
+                                                                _debugShowRadarBadge =
+                                                                    value,
+                                                          );
                                                         }
                                                       : null,
                                                 ),
@@ -4953,10 +5373,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                                   _debugShowRadarVector,
                                                   layerToggleEnabled
                                                       ? (value) {
-                                                          setState(() =>
-                                                              _debugShowRadarVector =
-                                                                  value);
-                                                          setLocalState(() {});
+                                                          _onLayerToggleChanged(
+                                                            setLocalState,
+                                                            () =>
+                                                                _debugShowRadarVector =
+                                                                    value,
+                                                          );
                                                         }
                                                       : null,
                                                 ),
@@ -4965,10 +5387,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                                   _debugShowStopDistanceTf,
                                                   layerToggleEnabled
                                                       ? (value) {
-                                                          setState(() =>
-                                                              _debugShowStopDistanceTf =
-                                                                  value);
-                                                          setLocalState(() {});
+                                                          _onLayerToggleChanged(
+                                                            setLocalState,
+                                                            () =>
+                                                                _debugShowStopDistanceTf =
+                                                                    value,
+                                                          );
                                                         }
                                                       : null,
                                                 ),
@@ -4977,10 +5401,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                                   _debugShowStateText,
                                                   layerToggleEnabled
                                                       ? (value) {
-                                                          setState(() =>
-                                                              _debugShowStateText =
-                                                                  value);
-                                                          setLocalState(() {});
+                                                          _onLayerToggleChanged(
+                                                            setLocalState,
+                                                            () =>
+                                                                _debugShowStateText =
+                                                                    value,
+                                                          );
                                                         }
                                                       : null,
                                                 ),
@@ -5385,6 +5811,16 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final media = MediaQuery.of(context);
+    final hingeAware = DisplayFeatureUtils.hingeAwarePadding(context);
+    final foldInsets = EdgeInsets.only(
+      left: math.max(0.0, hingeAware.left - media.padding.left),
+      top: math.max(0.0, hingeAware.top - media.padding.top),
+      right: math.max(0.0, hingeAware.right - media.padding.right),
+      bottom: math.max(0.0, hingeAware.bottom - media.padding.bottom),
+    );
+
     return PopScope(
       canPop: true,
       onPopInvokedWithResult: (didPop, _) {
@@ -5394,529 +5830,779 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       child: Scaffold(
         backgroundColor: const Color(0xFF05070C),
         body: SafeArea(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final dockWidth = (constraints.maxWidth * 0.08)
-                  .clamp(
-                    constraints.maxWidth * 0.06,
-                    constraints.maxWidth * 0.12,
-                  )
-                  .toDouble();
+          child: Padding(
+            padding: foldInsets,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final dockRatio = switch (window.windowClass) {
+                  UiWindowClass.compact => 0.14,
+                  UiWindowClass.medium => 0.11,
+                  UiWindowClass.expanded => 0.09,
+                  UiWindowClass.large || UiWindowClass.extraLarge => 0.08,
+                };
+                final dockMin = switch (window.windowClass) {
+                  UiWindowClass.compact => 64.0,
+                  UiWindowClass.medium => 68.0,
+                  UiWindowClass.expanded => 72.0,
+                  UiWindowClass.large || UiWindowClass.extraLarge => 76.0,
+                };
+                final dockMax = switch (window.windowClass) {
+                  UiWindowClass.compact => 104.0,
+                  UiWindowClass.medium => 112.0,
+                  UiWindowClass.expanded => 120.0,
+                  UiWindowClass.large || UiWindowClass.extraLarge => 128.0,
+                };
 
-              return Row(
-                children: [
-                  Container(
-                    width: dockWidth,
-                    decoration: const BoxDecoration(
-                      color: Color(0xFF11141A),
-                      border: Border(
-                        right: BorderSide(color: Colors.white24),
+                final dockWidth = (constraints.maxWidth * dockRatio)
+                    .clamp(
+                      dockMin,
+                      dockMax,
+                    )
+                    .toDouble();
+
+                return Row(
+                  children: [
+                    Container(
+                      width: dockWidth,
+                      decoration: const BoxDecoration(
+                        color: Color(0xFF11141A),
+                        border: Border(
+                          right: BorderSide(color: Colors.white24),
+                        ),
                       ),
-                    ),
-                    child: Column(
-                      children: [
-                        const SizedBox(height: 8),
-                        IconButton(
-                          onPressed: _exitScreen,
-                          icon:
-                              const Icon(Icons.arrow_back, color: Colors.white),
-                          tooltip: '나가기',
-                        ),
-                        const SizedBox(height: 6),
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            color: _sidecarConnected
-                                ? const Color(0xFF24FF67)
-                                : const Color(0xFFFF4C4C),
-                            shape: BoxShape.circle,
+                      child: Column(
+                        children: [
+                          const SizedBox(height: 8),
+                          IconButton(
+                            onPressed: _exitScreen,
+                            icon: const Icon(Icons.arrow_back,
+                                color: Colors.white),
+                            tooltip: '나가기',
                           ),
-                        ),
-                        const SizedBox(height: 10),
-                        Expanded(
-                          child: SingleChildScrollView(
-                            padding: const EdgeInsets.only(bottom: 4),
-                            child: Column(
-                              children: [
-                                if (_hudDebugMenuEnabled)
-                                  IconButton(
-                                    onPressed: _temporaryLimitedHudControls
-                                        ? null
-                                        : _openDebugOptionsPopup,
-                                    icon: const Icon(
-                                      Icons.tune,
-                                      color: Color(0xFF8FE7FF),
-                                    ),
-                                    tooltip: '디버그 옵션',
-                                  ),
-                              ],
+                          const SizedBox(height: 6),
+                          Container(
+                            width: 8,
+                            height: 8,
+                            decoration: BoxDecoration(
+                              color: _sidecarConnected
+                                  ? const Color(0xFF24FF67)
+                                  : const Color(0xFFFF4C4C),
+                              shape: BoxShape.circle,
                             ),
                           ),
-                        ),
-                        const SizedBox(height: 8),
-                      ],
+                          const SizedBox(height: 10),
+                          Expanded(
+                            child: SingleChildScrollView(
+                              padding: const EdgeInsets.only(bottom: 4),
+                              child: Column(
+                                children: [
+                                  if (_hudDebugMenuEnabled)
+                                    IconButton(
+                                      onPressed: _temporaryLimitedHudControls
+                                          ? null
+                                          : _openDebugOptionsPopup,
+                                      icon: const Icon(
+                                        Icons.tune,
+                                        color: Color(0xFF8FE7FF),
+                                      ),
+                                      tooltip: '디버그 옵션',
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                        ],
+                      ),
                     ),
-                  ),
-                  Expanded(
-                    child: ColoredBox(
-                      color: Colors.black,
-                      child: LayoutBuilder(
-                        builder: (context, viewport) {
-                          var sourceW = _cameraSourceSize.width > 1
-                              ? _cameraSourceSize.width
-                              : 1928.0;
-                          var sourceH = _cameraSourceSize.height > 1
-                              ? _cameraSourceSize.height
-                              : 1208.0;
-                          if ((sourceW - 1928.0).abs() <= 16.0 &&
-                              (sourceH - 1208.0).abs() <= 16.0) {
-                            sourceW = 1928.0;
-                            sourceH = 1208.0;
-                          }
-                          final vw = viewport.maxWidth;
-                          final vh = viewport.maxHeight;
-                          if (vw <= 1 || vh <= 1) {
-                            return const SizedBox.shrink();
-                          }
-                          final placement = _buildVideoPlacement(
-                            source: Size(sourceW, sourceH),
-                            viewport: Size(vw, vh),
-                            snapshot: _overlayNotifier.value,
-                            cameraKind: _liveCameraKind,
-                            coverViewport: _coverViewport,
-                            openpilotTransform: _openpilotOverlayMode,
-                          );
-                          final drawW = placement.width;
-                          final drawH = placement.height;
-                          final left = placement.left;
-                          final top = placement.top;
-                          final drawSize = Size(drawW, drawH);
-                          if ((_nativeOverlaySize.width - drawW).abs() > 0.5 ||
-                              (_nativeOverlaySize.height - drawH).abs() > 0.5) {
-                            _nativeOverlaySize = drawSize;
-                            if (_useNativeOverlayRenderer) {
-                              unawaited(
-                                _pushNativeOverlay(
-                                  _overlayNotifier.value,
-                                  force: true,
-                                ),
-                              );
+                    Expanded(
+                      child: ColoredBox(
+                        color: Colors.black,
+                        child: LayoutBuilder(
+                          builder: (context, viewport) {
+                            var sourceW = _cameraSourceSize.width > 1
+                                ? _cameraSourceSize.width
+                                : 1928.0;
+                            var sourceH = _cameraSourceSize.height > 1
+                                ? _cameraSourceSize.height
+                                : 1208.0;
+                            if ((sourceW - 1928.0).abs() <= 16.0 &&
+                                (sourceH - 1208.0).abs() <= 16.0) {
+                              sourceW = 1928.0;
+                              sourceH = 1208.0;
                             }
-                          }
+                            final vw = viewport.maxWidth;
+                            final vh = viewport.maxHeight;
+                            if (vw <= 1 || vh <= 1) {
+                              return const SizedBox.shrink();
+                            }
+                            final placement = _buildVideoPlacement(
+                              source: Size(sourceW, sourceH),
+                              viewport: Size(vw, vh),
+                              snapshot: _overlayNotifier.value,
+                              cameraKind: _liveCameraKind,
+                              coverViewport: _coverViewport,
+                              openpilotTransform: _openpilotOverlayMode,
+                            );
+                            final drawW = placement.width;
+                            final drawH = placement.height;
+                            final left = placement.left;
+                            final top = placement.top;
+                            final overlayInset = switch (window.windowClass) {
+                              UiWindowClass.compact => 12.0,
+                              UiWindowClass.medium => 14.0,
+                              UiWindowClass.expanded =>
+                                window.isLandscape ? 16.0 : 14.0,
+                              UiWindowClass.large ||
+                              UiWindowClass.extraLarge =>
+                                18.0,
+                            };
+                            final overlayBottomInset =
+                                switch (window.windowClass) {
+                              UiWindowClass.compact => 12.0,
+                              UiWindowClass.medium => 14.0,
+                              UiWindowClass.expanded => 16.0,
+                              UiWindowClass.large ||
+                              UiWindowClass.extraLarge =>
+                                18.0,
+                            };
+                            final statusBannerMaxWidth =
+                                switch (window.windowClass) {
+                              UiWindowClass.compact =>
+                                math.min(vw - (overlayInset * 2), 520.0),
+                              UiWindowClass.medium =>
+                                math.min(vw * 0.72, 620.0),
+                              UiWindowClass.expanded =>
+                                math.min(vw * 0.62, 700.0),
+                              UiWindowClass.large ||
+                              UiWindowClass.extraLarge =>
+                                math.min(vw * 0.52, 760.0),
+                            };
+                            final verifyPanelWidth =
+                                switch (window.windowClass) {
+                              UiWindowClass.compact =>
+                                math.min(vw * 0.58, 420.0),
+                              UiWindowClass.medium =>
+                                math.min(vw * 0.52, 470.0),
+                              UiWindowClass.expanded =>
+                                math.min(vw * 0.45, 520.0),
+                              UiWindowClass.large ||
+                              UiWindowClass.extraLarge =>
+                                math.min(vw * 0.38, 580.0),
+                            };
+                            final statusBannerPaddingH =
+                                switch (window.windowClass) {
+                              UiWindowClass.compact => 10.0,
+                              UiWindowClass.medium => 11.0,
+                              UiWindowClass.expanded => 12.0,
+                              UiWindowClass.large ||
+                              UiWindowClass.extraLarge =>
+                                13.0,
+                            };
+                            final statusBannerPaddingV =
+                                switch (window.windowClass) {
+                              UiWindowClass.compact => 8.0,
+                              UiWindowClass.medium => 9.0,
+                              UiWindowClass.expanded => 10.0,
+                              UiWindowClass.large ||
+                              UiWindowClass.extraLarge =>
+                                11.0,
+                            };
+                            final statusBannerRadius =
+                                switch (window.windowClass) {
+                              UiWindowClass.compact => 10.0,
+                              UiWindowClass.medium => 11.0,
+                              UiWindowClass.expanded => 12.0,
+                              UiWindowClass.large ||
+                              UiWindowClass.extraLarge =>
+                                13.0,
+                            };
+                            final statusBannerTitleFont =
+                                switch (window.windowClass) {
+                              UiWindowClass.compact => 13.0,
+                              UiWindowClass.medium => 13.5,
+                              UiWindowClass.expanded => 14.0,
+                              UiWindowClass.large ||
+                              UiWindowClass.extraLarge =>
+                                14.5,
+                            };
+                            final statusBannerBodyFont =
+                                switch (window.windowClass) {
+                              UiWindowClass.compact => 11.0,
+                              UiWindowClass.medium => 11.5,
+                              UiWindowClass.expanded => 12.0,
+                              UiWindowClass.large ||
+                              UiWindowClass.extraLarge =>
+                                12.5,
+                            };
+                            final statusBannerIconSize =
+                                switch (window.windowClass) {
+                              UiWindowClass.compact => 16.0,
+                              UiWindowClass.medium => 17.0,
+                              UiWindowClass.expanded => 18.0,
+                              UiWindowClass.large ||
+                              UiWindowClass.extraLarge =>
+                                19.0,
+                            };
+                            final statusBannerGap =
+                                switch (window.windowClass) {
+                              UiWindowClass.compact => 6.0,
+                              UiWindowClass.medium => 7.0,
+                              UiWindowClass.expanded => 8.0,
+                              UiWindowClass.large ||
+                              UiWindowClass.extraLarge =>
+                                9.0,
+                            };
+                            final statusBannerProgressHeight =
+                                switch (window.windowClass) {
+                              UiWindowClass.compact => 2.0,
+                              UiWindowClass.medium => 2.5,
+                              UiWindowClass.expanded => 3.0,
+                              UiWindowClass.large ||
+                              UiWindowClass.extraLarge =>
+                                3.5,
+                            };
+                            final statusAlertPadding =
+                                switch (window.windowClass) {
+                              UiWindowClass.compact => 10.0,
+                              UiWindowClass.medium => 11.0,
+                              UiWindowClass.expanded => 12.0,
+                              UiWindowClass.large ||
+                              UiWindowClass.extraLarge =>
+                                13.0,
+                            };
+                            final stallBadgePaddingH =
+                                switch (window.windowClass) {
+                              UiWindowClass.compact => 10.0,
+                              UiWindowClass.medium => 11.0,
+                              UiWindowClass.expanded => 12.0,
+                              UiWindowClass.large ||
+                              UiWindowClass.extraLarge =>
+                                13.0,
+                            };
+                            final stallBadgePaddingV =
+                                switch (window.windowClass) {
+                              UiWindowClass.compact => 6.0,
+                              UiWindowClass.medium => 7.0,
+                              UiWindowClass.expanded => 8.0,
+                              UiWindowClass.large ||
+                              UiWindowClass.extraLarge =>
+                                9.0,
+                            };
+                            final stallBadgeIconSize =
+                                switch (window.windowClass) {
+                              UiWindowClass.compact => 14.0,
+                              UiWindowClass.medium => 15.0,
+                              UiWindowClass.expanded => 16.0,
+                              UiWindowClass.large ||
+                              UiWindowClass.extraLarge =>
+                                17.0,
+                            };
+                            final stallBadgeFontSize =
+                                switch (window.windowClass) {
+                              UiWindowClass.compact => 11.0,
+                              UiWindowClass.medium => 11.5,
+                              UiWindowClass.expanded => 12.0,
+                              UiWindowClass.large ||
+                              UiWindowClass.extraLarge =>
+                                12.5,
+                            };
+                            final drawSize = Size(drawW, drawH);
+                            if ((_nativeOverlaySize.width - drawW).abs() >
+                                    0.5 ||
+                                (_nativeOverlaySize.height - drawH).abs() >
+                                    0.5) {
+                              _nativeOverlaySize = drawSize;
+                              if (_useNativeOverlayRenderer) {
+                                unawaited(
+                                  _pushNativeOverlay(
+                                    _overlayNotifier.value,
+                                    force: true,
+                                  ),
+                                );
+                              }
+                            }
 
-                          return ClipRect(
-                            child: Stack(
-                              children: [
-                                Positioned(
-                                  left: left,
-                                  top: top,
-                                  width: drawW,
-                                  height: drawH,
-                                  child: Stack(
-                                    children: [
-                                      Positioned.fill(
-                                        child: _buildDriveCameraSurface(),
-                                      ),
-                                      if ((_openpilotOverlayMode &&
-                                              !_useNativeOverlayRenderer) ||
-                                          _debugOverlayPreviewMode)
-                                        Positioned.fill(
-                                          child: ValueListenableBuilder<
-                                              _DriveOverlaySnapshot>(
-                                            valueListenable: _overlayNotifier,
-                                            builder: (context, overlay, _) {
-                                              return IgnorePointer(
-                                                child: CustomPaint(
-                                                  painter: _DriveOverlayPainter(
-                                                    snapshot: overlay,
-                                                    isConnected:
-                                                        _sidecarConnected,
-                                                    sourceSize:
-                                                        _cameraSourceSize,
-                                                    cameraKind: _liveCameraKind,
-                                                    coverViewport:
-                                                        _coverViewport,
-                                                    showDebugGuides:
-                                                        _overlayVerifyMode &&
-                                                            _debugShowGuides,
-                                                    showPathFill:
-                                                        _debugShowPathFill,
-                                                    showLaneLines:
-                                                        _debugShowLaneLines,
-                                                    showRoadEdge:
-                                                        _debugShowRoadEdge,
-                                                    showLead1: _debugShowLead1,
-                                                    showLead2: _debugShowLead2,
-                                                    showRadarBadge:
-                                                        _debugShowRadarBadge,
-                                                    showRadarVector:
-                                                        _debugShowRadarVector,
-                                                    showStopDistanceTf:
-                                                        _debugShowStopDistanceTf,
-                                                    showStateText:
-                                                        _debugShowStateText,
-                                                  ),
-                                                ),
-                                              );
-                                            },
-                                          ),
-                                        ),
-                                      if (_cameraLoading &&
-                                          !_cameraStalled &&
-                                          !_debugOverlayPreviewMode)
-                                        const Positioned.fill(
-                                          child: ColoredBox(
-                                            color: Colors.black45,
-                                            child: Center(
-                                              child: CircularProgressIndicator(
-                                                strokeWidth: 2,
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                      if (_cameraStalled &&
-                                          !_debugOverlayPreviewMode)
-                                        Positioned(
-                                          top: 10,
-                                          right: 10,
-                                          child: Container(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 10,
-                                              vertical: 6,
-                                            ),
-                                            decoration: BoxDecoration(
-                                              color: const Color(0xCC4A2E12),
-                                              borderRadius:
-                                                  BorderRadius.circular(10),
-                                              border: Border.all(
-                                                color: const Color(0x88FFD27A),
-                                              ),
-                                            ),
-                                            child: Row(
-                                              mainAxisSize: MainAxisSize.min,
-                                              children: [
-                                                const Icon(
-                                                  Icons.network_check_rounded,
-                                                  color: Color(0xFFFFD27A),
-                                                  size: 14,
-                                                ),
-                                                const SizedBox(width: 6),
-                                                Text(
-                                                  _cameraStallBadgeText(),
-                                                  style: const TextStyle(
-                                                    color: Color(0xFFFFE6B8),
-                                                    fontSize: 11,
-                                                    fontWeight: FontWeight.w600,
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                        ),
-                                    ],
-                                  ),
-                                ),
-                                if (_showSidecarStatusBanner)
-                                  Positioned(
-                                    left: 16,
-                                    right: 16,
-                                    bottom: 12,
-                                    child: Align(
-                                      alignment: Alignment.bottomCenter,
-                                      child: ConstrainedBox(
-                                        constraints:
-                                            const BoxConstraints(maxWidth: 560),
-                                        child: Container(
-                                          padding: const EdgeInsets.fromLTRB(
-                                              10, 8, 10, 8),
-                                          decoration: BoxDecoration(
-                                            color: _sidecarStatusColor(),
-                                            borderRadius:
-                                                BorderRadius.circular(10),
-                                            border: Border.all(
-                                                color: Colors.white24),
-                                          ),
-                                          child: Column(
-                                            mainAxisSize: MainAxisSize.min,
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
-                                            children: [
-                                              Row(
-                                                children: [
-                                                  Icon(
-                                                    _sidecarPhase ==
-                                                            _SidecarPhase.failed
-                                                        ? Icons.error_outline
-                                                        : (_sidecarPhase ==
-                                                                _SidecarPhase
-                                                                    .stopping
-                                                            ? Icons
-                                                                .stop_circle_outlined
-                                                            : (_sidecarPhase ==
-                                                                    _SidecarPhase
-                                                                        .running
-                                                                ? Icons
-                                                                    .check_circle_outline
-                                                                : Icons
-                                                                    .hourglass_top_rounded)),
-                                                    color: Colors.white,
-                                                    size: 16,
-                                                  ),
-                                                  const SizedBox(width: 6),
-                                                  Expanded(
-                                                    child: Text(
-                                                      _sidecarStatusTitle(),
-                                                      maxLines: 1,
-                                                      overflow:
-                                                          TextOverflow.ellipsis,
-                                                      style: const TextStyle(
-                                                        color: Colors.white,
-                                                        fontSize: 13,
-                                                        fontWeight:
-                                                            FontWeight.w600,
-                                                      ),
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
-                                              if (_sidecarPhase ==
-                                                      _SidecarPhase.failed &&
-                                                  (_sidecarPhaseMessage ?? '')
-                                                      .trim()
-                                                      .isNotEmpty)
-                                                Padding(
-                                                  padding:
-                                                      const EdgeInsets.only(
-                                                          top: 3),
-                                                  child: Text(
-                                                    _sidecarPhaseMessage!
-                                                        .trim(),
-                                                    maxLines: 2,
-                                                    overflow:
-                                                        TextOverflow.ellipsis,
-                                                    style: const TextStyle(
-                                                      color: Colors.white70,
-                                                      fontSize: 11,
-                                                    ),
-                                                  ),
-                                                ),
-                                              if (_isSidecarBusy) ...[
-                                                const SizedBox(height: 6),
-                                                const ClipRRect(
-                                                  borderRadius:
-                                                      BorderRadius.all(
-                                                          Radius.circular(999)),
-                                                  child:
-                                                      LinearProgressIndicator(
-                                                    minHeight: 2,
-                                                    backgroundColor:
-                                                        Color(0x553A4C63),
-                                                    valueColor:
-                                                        AlwaysStoppedAnimation<
-                                                            Color>(
-                                                      Color(0xFF69C8FF),
-                                                    ),
-                                                  ),
-                                                ),
-                                              ],
-                                            ],
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  )
-                                else if (!_hudModeLoaded)
-                                  Positioned(
-                                    left: 16,
-                                    right: 16,
-                                    bottom: 16,
-                                    child: Container(
-                                      padding: const EdgeInsets.all(10),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xCC1C2532),
-                                        borderRadius: BorderRadius.circular(10),
-                                        border:
-                                            Border.all(color: Colors.white24),
-                                      ),
-                                      child: const Text(
-                                        'HUD 모드 설정을 불러오는 중...',
-                                        style: TextStyle(color: Colors.white),
-                                      ),
-                                    ),
-                                  )
-                                else if (_disableDmGateChecking &&
-                                    !_debugOverlayPreviewMode)
-                                  Positioned(
-                                    left: 16,
-                                    right: 16,
-                                    bottom: 16,
-                                    child: Container(
-                                      padding: const EdgeInsets.all(10),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xCC1C2532),
-                                        borderRadius: BorderRadius.circular(10),
-                                        border:
-                                            Border.all(color: Colors.white24),
-                                      ),
-                                      child: const Text(
-                                        'DisableDM 값 확인 중...',
-                                        style: TextStyle(color: Colors.white),
-                                      ),
-                                    ),
-                                  )
-                                else if (_disableDmGateBlocked &&
-                                    !_debugOverlayPreviewMode)
-                                  Positioned(
-                                    left: 16,
-                                    right: 16,
-                                    bottom: 16,
-                                    child: Container(
-                                      padding: const EdgeInsets.all(10),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xCC7A1010),
-                                        borderRadius: BorderRadius.circular(10),
-                                        border:
-                                            Border.all(color: Colors.white24),
-                                      ),
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            '오픈파일럿 그래픽 모드는 DisableDM=2가 필요합니다. '
-                                            '(현재: ${(_disableDmCurrentValue ?? '').trim().isEmpty ? '확인 불가' : _disableDmCurrentValue})',
-                                            style: const TextStyle(
-                                              color: Colors.white,
-                                            ),
-                                          ),
-                                          const SizedBox(height: 8),
-                                          Wrap(
-                                            spacing: 8,
-                                            runSpacing: 8,
-                                            children: [
-                                              FilledButton.tonal(
-                                                onPressed: () async {
-                                                  await _openDisableDmSettingsFromDrive();
-                                                  if (!mounted) return;
-                                                  await _applyHudModeRuntimeWithDisableDmGate();
-                                                },
-                                                child: const Text('설정으로 이동'),
-                                              ),
-                                              OutlinedButton(
-                                                onPressed: _exitScreen,
-                                                child: const Text('닫기'),
-                                              ),
-                                            ],
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  )
-                                else if (_cameraError != null &&
-                                    !_debugOverlayPreviewMode)
-                                  Positioned(
-                                    left: 16,
-                                    right: 16,
-                                    bottom: 16,
-                                    child: Container(
-                                      padding: const EdgeInsets.all(10),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xCC7A1010),
-                                        borderRadius: BorderRadius.circular(10),
-                                        border:
-                                            Border.all(color: Colors.white24),
-                                      ),
-                                      child: Text(
-                                        _cameraError!,
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                        ),
-                                      ),
-                                    ),
-                                  )
-                                else if (_hudNoticeMessage != null)
-                                  Positioned(
-                                    left: 16,
-                                    right: 16,
-                                    bottom: 16,
-                                    child: Container(
-                                      padding: const EdgeInsets.all(10),
-                                      decoration: BoxDecoration(
-                                        color: _hudNoticeIsError
-                                            ? const Color(0xCC7A1010)
-                                            : const Color(0xCC1C2532),
-                                        borderRadius: BorderRadius.circular(10),
-                                        border:
-                                            Border.all(color: Colors.white24),
-                                      ),
-                                      child: Text(
-                                        _hudNoticeMessage!,
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                if (_overlayVerifyMode &&
-                                    _debugShowViewportFrame &&
-                                    !_coverViewport)
+                            return ClipRect(
+                              child: Stack(
+                                children: [
                                   Positioned(
                                     left: left,
                                     top: top,
                                     width: drawW,
                                     height: drawH,
-                                    child: IgnorePointer(
-                                      child: Container(
-                                        decoration: BoxDecoration(
-                                          border: Border.all(
-                                            color: const Color(0xFF62FF8B),
-                                            width: 2,
+                                    child: Stack(
+                                      children: [
+                                        Positioned.fill(
+                                          child: _buildDriveCameraSurface(),
+                                        ),
+                                        if ((_openpilotOverlayMode &&
+                                                !_useNativeOverlayRenderer) ||
+                                            _debugOverlayPreviewMode)
+                                          Positioned.fill(
+                                            child: ValueListenableBuilder<
+                                                _DriveOverlaySnapshot>(
+                                              valueListenable: _overlayNotifier,
+                                              builder: (context, overlay, _) {
+                                                return IgnorePointer(
+                                                  child: CustomPaint(
+                                                    painter:
+                                                        _DriveOverlayPainter(
+                                                      snapshot: overlay,
+                                                      isConnected:
+                                                          _sidecarConnected,
+                                                      sourceSize:
+                                                          _cameraSourceSize,
+                                                      cameraKind:
+                                                          _liveCameraKind,
+                                                      coverViewport:
+                                                          _coverViewport,
+                                                      showDebugGuides:
+                                                          _overlayVerifyMode &&
+                                                              _debugShowGuides,
+                                                      showPathFill:
+                                                          _debugShowPathFill,
+                                                      showLaneLines:
+                                                          _debugShowLaneLines,
+                                                      showRoadEdge:
+                                                          _debugShowRoadEdge,
+                                                      showLead1:
+                                                          _debugShowLead1,
+                                                      showLead2:
+                                                          _debugShowLead2,
+                                                      showRadarBadge:
+                                                          _debugShowRadarBadge,
+                                                      showRadarVector:
+                                                          _debugShowRadarVector,
+                                                      showStopDistanceTf:
+                                                          _debugShowStopDistanceTf,
+                                                      showStateText:
+                                                          _debugShowStateText,
+                                                    ),
+                                                  ),
+                                                );
+                                              },
+                                            ),
+                                          ),
+                                        if (_cameraLoading &&
+                                            !_cameraStalled &&
+                                            !_debugOverlayPreviewMode)
+                                          const Positioned.fill(
+                                            child: ColoredBox(
+                                              color: Colors.black45,
+                                              child: Center(
+                                                child:
+                                                    CircularProgressIndicator(
+                                                  strokeWidth: 2,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                  if (_cameraStalled &&
+                                      !_debugOverlayPreviewMode)
+                                    Positioned(
+                                      top: overlayInset,
+                                      left: overlayInset,
+                                      right: overlayInset,
+                                      child: Align(
+                                        alignment: Alignment.topRight,
+                                        child: ConstrainedBox(
+                                          constraints: BoxConstraints(
+                                            maxWidth: math.min(
+                                              vw - (overlayInset * 2),
+                                              switch (window.windowClass) {
+                                                UiWindowClass.compact => 220.0,
+                                                UiWindowClass.medium => 260.0,
+                                                UiWindowClass.expanded => 320.0,
+                                                UiWindowClass.large ||
+                                                UiWindowClass.extraLarge =>
+                                                  380.0,
+                                              },
+                                            ),
+                                          ),
+                                          child: Container(
+                                            padding: EdgeInsets.symmetric(
+                                              horizontal: stallBadgePaddingH,
+                                              vertical: stallBadgePaddingV,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xCC4A2E12),
+                                              borderRadius:
+                                                  BorderRadius.circular(
+                                                      statusBannerRadius),
+                                              border: Border.all(
+                                                color: const Color(0x88FFD27A),
+                                              ),
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                Icon(
+                                                  Icons.network_check_rounded,
+                                                  color: Color(0xFFFFD27A),
+                                                  size: stallBadgeIconSize,
+                                                ),
+                                                SizedBox(
+                                                    width: statusBannerGap),
+                                                Expanded(
+                                                  child: Text(
+                                                    _cameraStallBadgeText(),
+                                                    maxLines: 1,
+                                                    overflow:
+                                                        TextOverflow.ellipsis,
+                                                    style: TextStyle(
+                                                      color: Color(0xFFFFE6B8),
+                                                      fontSize:
+                                                          stallBadgeFontSize,
+                                                      fontWeight:
+                                                          FontWeight.w600,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
                                           ),
                                         ),
                                       ),
                                     ),
-                                  ),
-                                if (_overlayVerifyMode &&
-                                    _debugShowVerifyPanel &&
-                                    _overlayVerifyText.isNotEmpty)
-                                  Positioned(
-                                    top: 14,
-                                    right: 14,
-                                    child: IgnorePointer(
-                                      child: Container(
-                                        width: math.min(vw * 0.42, 520),
-                                        padding: const EdgeInsets.all(10),
-                                        decoration: BoxDecoration(
-                                          color: const Color(0xCC0B111A),
-                                          borderRadius:
-                                              BorderRadius.circular(10),
-                                          border: Border.all(
-                                            color: const Color(0xFF2F5D8C),
+                                  if (_showSidecarStatusBanner)
+                                    Positioned(
+                                      left: overlayInset,
+                                      right: overlayInset,
+                                      bottom: overlayBottomInset,
+                                      child: Align(
+                                        alignment: Alignment.bottomCenter,
+                                        child: ConstrainedBox(
+                                          constraints: BoxConstraints(
+                                            maxWidth: statusBannerMaxWidth,
+                                          ),
+                                          child: Container(
+                                            padding: EdgeInsets.fromLTRB(
+                                              statusBannerPaddingH,
+                                              statusBannerPaddingV,
+                                              statusBannerPaddingH,
+                                              statusBannerPaddingV,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: _sidecarStatusColor(),
+                                              borderRadius:
+                                                  BorderRadius.circular(
+                                                      statusBannerRadius),
+                                              border: Border.all(
+                                                  color: Colors.white24),
+                                            ),
+                                            child: Column(
+                                              mainAxisSize: MainAxisSize.min,
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                Row(
+                                                  children: [
+                                                    Icon(
+                                                      _sidecarPhase ==
+                                                              _SidecarPhase
+                                                                  .failed
+                                                          ? Icons.error_outline
+                                                          : (_sidecarPhase ==
+                                                                  _SidecarPhase
+                                                                      .stopping
+                                                              ? Icons
+                                                                  .stop_circle_outlined
+                                                              : (_sidecarPhase ==
+                                                                      _SidecarPhase
+                                                                          .running
+                                                                  ? Icons
+                                                                      .check_circle_outline
+                                                                  : Icons
+                                                                      .hourglass_top_rounded)),
+                                                      color: Colors.white,
+                                                      size:
+                                                          statusBannerIconSize,
+                                                    ),
+                                                    SizedBox(
+                                                        width: statusBannerGap),
+                                                    Expanded(
+                                                      child: Text(
+                                                        _sidecarStatusTitle(),
+                                                        maxLines: 1,
+                                                        overflow: TextOverflow
+                                                            .ellipsis,
+                                                        style: TextStyle(
+                                                          color: Colors.white,
+                                                          fontSize:
+                                                              statusBannerTitleFont,
+                                                          fontWeight:
+                                                              FontWeight.w600,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                                if (_sidecarPhase ==
+                                                        _SidecarPhase.failed &&
+                                                    (_sidecarPhaseMessage ?? '')
+                                                        .trim()
+                                                        .isNotEmpty)
+                                                  Padding(
+                                                    padding: EdgeInsets.only(
+                                                      top:
+                                                          statusBannerGap * 0.5,
+                                                    ),
+                                                    child: Text(
+                                                      _sidecarPhaseMessage!
+                                                          .trim(),
+                                                      maxLines: 2,
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                      style: TextStyle(
+                                                        color: Colors.white70,
+                                                        fontSize:
+                                                            statusBannerBodyFont,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                if (_isSidecarBusy) ...[
+                                                  SizedBox(
+                                                      height: statusBannerGap),
+                                                  ClipRRect(
+                                                    borderRadius:
+                                                        const BorderRadius.all(
+                                                      Radius.circular(999),
+                                                    ),
+                                                    child:
+                                                        LinearProgressIndicator(
+                                                      minHeight:
+                                                          statusBannerProgressHeight,
+                                                      backgroundColor:
+                                                          Color(0x553A4C63),
+                                                      valueColor:
+                                                          AlwaysStoppedAnimation<
+                                                              Color>(
+                                                        Color(0xFF69C8FF),
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ],
+                                            ),
                                           ),
                                         ),
-                                        child: SelectableText(
-                                          _overlayVerifyText,
-                                          style: const TextStyle(
-                                            fontFamily: 'monospace',
-                                            fontSize: 11,
-                                            color: Color(0xFFEAF3FF),
-                                            height: 1.25,
+                                      ),
+                                    )
+                                  else if (!_hudModeLoaded)
+                                    Positioned(
+                                      left: overlayInset,
+                                      right: overlayInset,
+                                      bottom: overlayBottomInset,
+                                      child: Container(
+                                        padding:
+                                            EdgeInsets.all(statusAlertPadding),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xCC1C2532),
+                                          borderRadius: BorderRadius.circular(
+                                              statusBannerRadius),
+                                          border:
+                                              Border.all(color: Colors.white24),
+                                        ),
+                                        child: Text(
+                                          'HUD 모드 설정을 불러오는 중...',
+                                          style: TextStyle(
+                                            color: Colors.white,
+                                            fontSize: statusBannerBodyFont,
+                                          ),
+                                        ),
+                                      ),
+                                    )
+                                  else if (_disableDmGateChecking &&
+                                      !_debugOverlayPreviewMode)
+                                    Positioned(
+                                      left: overlayInset,
+                                      right: overlayInset,
+                                      bottom: overlayBottomInset,
+                                      child: Container(
+                                        padding:
+                                            EdgeInsets.all(statusAlertPadding),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xCC1C2532),
+                                          borderRadius: BorderRadius.circular(
+                                              statusBannerRadius),
+                                          border:
+                                              Border.all(color: Colors.white24),
+                                        ),
+                                        child: Text(
+                                          'DisableDM 값 확인 중...',
+                                          style: TextStyle(
+                                            color: Colors.white,
+                                            fontSize: statusBannerBodyFont,
+                                          ),
+                                        ),
+                                      ),
+                                    )
+                                  else if (_disableDmGateBlocked &&
+                                      !_debugOverlayPreviewMode)
+                                    Positioned(
+                                      left: overlayInset,
+                                      right: overlayInset,
+                                      bottom: overlayBottomInset,
+                                      child: Container(
+                                        padding:
+                                            EdgeInsets.all(statusAlertPadding),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xCC7A1010),
+                                          borderRadius: BorderRadius.circular(
+                                              statusBannerRadius),
+                                          border:
+                                              Border.all(color: Colors.white24),
+                                        ),
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              '오픈파일럿 그래픽 모드는 DisableDM=2가 필요합니다. '
+                                              '(현재: ${(_disableDmCurrentValue ?? '').trim().isEmpty ? '확인 불가' : _disableDmCurrentValue})',
+                                              style: const TextStyle(
+                                                color: Colors.white,
+                                              ),
+                                            ),
+                                            SizedBox(
+                                                height: statusBannerGap + 2),
+                                            Wrap(
+                                              spacing: statusBannerGap + 2,
+                                              runSpacing: statusBannerGap + 2,
+                                              children: [
+                                                FilledButton.tonal(
+                                                  onPressed: () async {
+                                                    await _openDisableDmSettingsFromDrive();
+                                                    if (!mounted) return;
+                                                    await _applyHudModeRuntimeWithDisableDmGate();
+                                                  },
+                                                  child: const Text('설정으로 이동'),
+                                                ),
+                                                OutlinedButton(
+                                                  onPressed: _exitScreen,
+                                                  child: const Text('닫기'),
+                                                ),
+                                              ],
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    )
+                                  else if (_cameraError != null &&
+                                      !_debugOverlayPreviewMode)
+                                    Positioned(
+                                      left: overlayInset,
+                                      right: overlayInset,
+                                      bottom: overlayBottomInset,
+                                      child: Container(
+                                        padding:
+                                            EdgeInsets.all(statusAlertPadding),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xCC7A1010),
+                                          borderRadius: BorderRadius.circular(
+                                              statusBannerRadius),
+                                          border:
+                                              Border.all(color: Colors.white24),
+                                        ),
+                                        child: Text(
+                                          _cameraError!,
+                                          style: TextStyle(
+                                            color: Colors.white,
+                                            fontSize: statusBannerBodyFont,
+                                          ),
+                                        ),
+                                      ),
+                                    )
+                                  else if (_hudNoticeMessage != null)
+                                    Positioned(
+                                      left: overlayInset,
+                                      right: overlayInset,
+                                      bottom: overlayBottomInset,
+                                      child: Container(
+                                        padding:
+                                            EdgeInsets.all(statusAlertPadding),
+                                        decoration: BoxDecoration(
+                                          color: _hudNoticeIsError
+                                              ? const Color(0xCC7A1010)
+                                              : const Color(0xCC1C2532),
+                                          borderRadius: BorderRadius.circular(
+                                              statusBannerRadius),
+                                          border:
+                                              Border.all(color: Colors.white24),
+                                        ),
+                                        child: Text(
+                                          _hudNoticeMessage!,
+                                          style: TextStyle(
+                                            color: Colors.white,
+                                            fontSize: statusBannerBodyFont,
                                           ),
                                         ),
                                       ),
                                     ),
-                                  ),
-                              ],
-                            ),
-                          );
-                        },
+                                  if (_overlayVerifyMode &&
+                                      _debugShowViewportFrame &&
+                                      !_coverViewport)
+                                    Positioned(
+                                      left: left,
+                                      top: top,
+                                      width: drawW,
+                                      height: drawH,
+                                      child: IgnorePointer(
+                                        child: Container(
+                                          decoration: BoxDecoration(
+                                            border: Border.all(
+                                              color: const Color(0xFF62FF8B),
+                                              width: 2,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  if (_overlayVerifyMode &&
+                                      _debugShowVerifyPanel &&
+                                      _overlayVerifyText.isNotEmpty)
+                                    Positioned(
+                                      top: overlayInset,
+                                      right: overlayInset,
+                                      child: IgnorePointer(
+                                        child: Container(
+                                          width: verifyPanelWidth,
+                                          padding: EdgeInsets.all(
+                                              statusAlertPadding),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xCC0B111A),
+                                            borderRadius: BorderRadius.circular(
+                                                statusBannerRadius),
+                                            border: Border.all(
+                                              color: const Color(0xFF2F5D8C),
+                                            ),
+                                          ),
+                                          child: SelectableText(
+                                            _overlayVerifyText,
+                                            style: TextStyle(
+                                              fontFamily: 'monospace',
+                                              fontSize: statusBannerBodyFont,
+                                              color: Color(0xFFEAF3FF),
+                                              height: 1.25,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
                       ),
                     ),
-                  ),
-                ],
-              );
-            },
+                  ],
+                );
+              },
+            ),
           ),
         ),
       ),

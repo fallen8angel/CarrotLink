@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'dart:ui' as ui;
 
@@ -17,30 +18,29 @@ class DisplayFeatureUtils {
     double extraTop = 0;
     double extraBottom = 0;
 
+    const edgeTolerance = 1.0;
     for (final f in features) {
-      // Treat fold/hinge as a non-content area.
       if (f.type != ui.DisplayFeatureType.hinge &&
           f.type != ui.DisplayFeatureType.fold) {
         continue;
       }
       final b = f.bounds;
-      if (b.width > b.height) {
-        // Horizontal fold/hinge.
-        final topHalf = b.center.dy <= (mq.size.height * 0.5);
-        if (topHalf) {
-          extraTop = extraTop > b.bottom ? extraTop : b.bottom;
-        } else {
-          final candidate = mq.size.height - b.top;
-          extraBottom = extraBottom > candidate ? extraBottom : candidate;
+      final isHorizontal = b.width > b.height;
+      if (isHorizontal) {
+        final nearTop = b.top <= edgeTolerance;
+        final nearBottom = (mq.size.height - b.bottom).abs() <= edgeTolerance;
+        if (nearTop) {
+          extraTop = math.max(extraTop, b.bottom);
+        } else if (nearBottom) {
+          extraBottom = math.max(extraBottom, mq.size.height - b.top);
         }
       } else {
-        // Vertical fold/hinge.
-        final leftHalf = b.center.dx <= (mq.size.width * 0.5);
-        if (leftHalf) {
-          extraLeft = extraLeft > b.right ? extraLeft : b.right;
-        } else {
-          final candidate = mq.size.width - b.left;
-          extraRight = extraRight > candidate ? extraRight : candidate;
+        final nearLeft = b.left <= edgeTolerance;
+        final nearRight = (mq.size.width - b.right).abs() <= edgeTolerance;
+        if (nearLeft) {
+          extraLeft = math.max(extraLeft, b.right);
+        } else if (nearRight) {
+          extraRight = math.max(extraRight, mq.size.width - b.left);
         }
       }
     }

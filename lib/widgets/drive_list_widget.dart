@@ -115,15 +115,21 @@ class _DriveListWidgetState extends State<DriveListWidget> {
 
     return Material(
       color: Colors.transparent,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        itemCount: _routes.length,
-        itemBuilder: (context, index) {
-          final route = _routes[index];
-          return SizedBox(
-            width: 200, // Fixed width for horizontal items
-            child: RouteCard(
-                route: route, index: index, onTap: () => _openRoute(route)),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final cardWidth =
+              (constraints.maxWidth * 0.42).clamp(180.0, 280.0).toDouble();
+          return ListView.builder(
+            scrollDirection: Axis.horizontal,
+            itemCount: _routes.length,
+            itemBuilder: (context, index) {
+              final route = _routes[index];
+              return SizedBox(
+                width: cardWidth,
+                child: RouteCard(
+                    route: route, index: index, onTap: () => _openRoute(route)),
+              );
+            },
           );
         },
       ),
@@ -214,50 +220,57 @@ class _RouteCardState extends State<RouteCard> {
       child: DesignCard(
         padding: EdgeInsets.zero,
         onTap: widget.onTap,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              height: 150,
-              width: double.infinity,
-              child: _previewImage != null
-                  ? Image.file(_previewImage!, fit: BoxFit.cover)
-                  : Container(
-                      color: Colors.black12,
-                      child: Center(
-                        child: _loadingImage
-                            ? const SizedBox(
-                                width: 24,
-                                height: 24,
-                                child:
-                                    CircularProgressIndicator(strokeWidth: 2))
-                            : const Icon(Icons.movie,
-                                size: 50, color: Colors.grey),
-                      ),
-                    ),
-            ),
-            Padding(
-              padding: const EdgeInsets.all(12.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    _formatRouteName(widget.route),
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.bold,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final previewHeight =
+                (constraints.maxWidth * 0.55).clamp(120.0, 180.0).toDouble();
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  height: previewHeight,
+                  width: double.infinity,
+                  child: _previewImage != null
+                      ? Image.file(_previewImage!, fit: BoxFit.cover)
+                      : Container(
+                          color: Colors.black12,
+                          child: Center(
+                            child: _loadingImage
+                                ? const SizedBox(
+                                    width: 24,
+                                    height: 24,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2))
+                                : const Icon(Icons.movie,
+                                    size: 50, color: Colors.grey),
+                          ),
                         ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                ),
+                Padding(
+                  padding: const EdgeInsets.all(12.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _formatRouteName(widget.route),
+                        style:
+                            Theme.of(context).textTheme.titleMedium?.copyWith(
+                                  fontWeight: FontWeight.bold,
+                                ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        "자세히 보기",
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    "자세히 보기",
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ],
-              ),
-            ),
-          ],
+                ),
+              ],
+            );
+          },
         ),
       ),
     );

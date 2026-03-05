@@ -148,54 +148,64 @@ class _VideoListWidgetState extends State<VideoListWidget> {
           child: Text("No videos found in /data/media/0/videos"));
     }
 
-    return SizedBox(
-      height: 200, // Fixed height for the list
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        itemCount: _videos.length,
-        itemBuilder: (context, index) {
-          final video = _videos[index];
-          return SizedBox(
-            width: 160,
-            child: Card(
-              child: InkWell(
-                onTap: () => _playVideo(video),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      child: Container(
-                        color: Colors.black12,
-                        child: const Center(
-                          child: Icon(Icons.play_circle_outline, size: 48),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final listHeight = constraints.maxHeight.isFinite
+            ? constraints.maxHeight.clamp(160.0, 280.0).toDouble()
+            : 220.0;
+        final itemWidth =
+            (constraints.maxWidth * 0.38).clamp(150.0, 240.0).toDouble();
+        return SizedBox(
+          height: listHeight,
+          child: ListView.builder(
+            scrollDirection: Axis.horizontal,
+            itemCount: _videos.length,
+            itemBuilder: (context, index) {
+              final video = _videos[index];
+              return SizedBox(
+                width: itemWidth,
+                child: Card(
+                  child: InkWell(
+                    onTap: () => _playVideo(video),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Container(
+                            color: Colors.black12,
+                            child: const Center(
+                              child: Icon(Icons.play_circle_outline, size: 48),
+                            ),
+                          ),
                         ),
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.all(8.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            video.filename,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontWeight: FontWeight.bold),
+                        Padding(
+                          padding: const EdgeInsets.all(8.0),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                video.filename,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.bold),
+                              ),
+                              Text(
+                                _formatSize(video.attr.size ?? 0),
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                            ],
                           ),
-                          Text(
-                            _formatSize(video.attr.size ?? 0),
-                            style: Theme.of(context).textTheme.bodySmall,
-                          ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
-                  ],
+                  ),
                 ),
-              ),
-            ),
-          );
-        },
-      ),
+              );
+            },
+          ),
+        );
+      },
     );
   }
 

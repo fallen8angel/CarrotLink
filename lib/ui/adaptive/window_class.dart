@@ -1,3 +1,5 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 
 enum UiWindowClass {
@@ -13,12 +15,18 @@ class UiWindowInfo {
   final double shortestSide;
   final bool isLandscape;
   final UiWindowClass windowClass;
+  final bool hasHinge;
+  final bool hasVerticalHinge;
+  final bool hasHorizontalHinge;
 
   const UiWindowInfo({
     required this.size,
     required this.shortestSide,
     required this.isLandscape,
     required this.windowClass,
+    this.hasHinge = false,
+    this.hasVerticalHinge = false,
+    this.hasHorizontalHinge = false,
   });
 
   bool get isCompact => windowClass == UiWindowClass.compact;
@@ -30,7 +38,31 @@ class UiWindowInfo {
 
   static UiWindowInfo of(BuildContext context) {
     final mq = MediaQuery.of(context);
-    return fromSize(mq.size);
+    final hasVerticalHinge = mq.displayFeatures.any((f) {
+      if (f.type != ui.DisplayFeatureType.hinge &&
+          f.type != ui.DisplayFeatureType.fold) {
+        return false;
+      }
+      return f.bounds.height >= f.bounds.width;
+    });
+    final hasHorizontalHinge = mq.displayFeatures.any((f) {
+      if (f.type != ui.DisplayFeatureType.hinge &&
+          f.type != ui.DisplayFeatureType.fold) {
+        return false;
+      }
+      return f.bounds.width > f.bounds.height;
+    });
+    final width = mq.size.width;
+    final klass = classifyWidth(width);
+    return UiWindowInfo(
+      size: mq.size,
+      shortestSide: mq.size.shortestSide,
+      isLandscape: mq.size.width >= mq.size.height,
+      windowClass: klass,
+      hasHinge: hasVerticalHinge || hasHorizontalHinge,
+      hasVerticalHinge: hasVerticalHinge,
+      hasHorizontalHinge: hasHorizontalHinge,
+    );
   }
 
   static UiWindowInfo fromSize(Size size) {
