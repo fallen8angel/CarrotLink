@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -14,6 +15,7 @@ import '../../services/carrot_server_settings_service.dart';
 import '../../services/google_drive_service.dart';
 import '../../services/ssh_service.dart';
 import '../../services/storage_layout_service.dart';
+import '../../ui/adaptive/layout_tokens.dart';
 import '../../ui/adaptive/window_class.dart';
 import '../../widgets/custom_toast.dart';
 
@@ -962,14 +964,30 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
   Widget build(BuildContext context) {
     final driveService = Provider.of<GoogleDriveService>(context);
     final backupService = Provider.of<BackupService>(context);
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final ui = _uiMetrics(context);
+    final media = MediaQuery.of(context);
     final isSignedIn = driveService.currentUser != null;
+    final horizontalPadding = tokens.screenPadding.clamp(12.0, 24.0).toDouble();
+    final panelTopPadding = window.isCompact ? 10.0 : 12.0;
+    final sourceSectionGap = window.isCompact ? 8.0 : 9.0;
+    final filterTopPadding = window.isCompact ? 9.0 : 10.0;
+    final filterBottomPadding = window.isCompact ? 7.0 : 8.0;
+    final filterGap = window.isCompact ? 6.0 : 8.0;
+    final fabBottomInset = math.max(16.0, media.padding.bottom + 12.0);
 
     return Stack(
       children: [
         Column(
           children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              padding: EdgeInsets.fromLTRB(
+                horizontalPadding,
+                panelTopPadding,
+                horizontalPadding,
+                0,
+              ),
               child: LayoutBuilder(
                 builder: (context, constraints) {
                   final compactActions = constraints.maxWidth < 680;
@@ -1013,8 +1031,25 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
                     return Row(
                       children: [
                         Expanded(child: _buildSourceSwitch()),
-                        const SizedBox(width: 8),
-                        driveButton,
+                        SizedBox(width: filterGap),
+                        Flexible(
+                          fit: FlexFit.loose,
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(
+                              minHeight: ui.sourceSwitchMinHeight,
+                              minWidth: 98,
+                              maxWidth: switch (window.windowClass) {
+                                UiWindowClass.compact => 132.0,
+                                UiWindowClass.medium => 140.0,
+                                UiWindowClass.expanded => 148.0,
+                                UiWindowClass.large ||
+                                UiWindowClass.extraLarge =>
+                                  156.0,
+                              },
+                            ),
+                            child: driveButton,
+                          ),
+                        ),
                         menuButton,
                       ],
                     );
@@ -1023,7 +1058,7 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
                   return Column(
                     children: [
                       _buildSourceSwitch(),
-                      const SizedBox(height: 8),
+                      SizedBox(height: sourceSectionGap),
                       Row(
                         children: [
                           Expanded(child: driveButton),
@@ -1037,14 +1072,24 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
             ),
             if (backupService.isBackingUp)
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                padding: EdgeInsets.fromLTRB(
+                  horizontalPadding,
+                  sourceSectionGap,
+                  horizontalPadding,
+                  0,
+                ),
                 child: LinearProgressIndicator(value: backupService.progress),
               ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
+              padding: EdgeInsets.fromLTRB(
+                horizontalPadding,
+                filterTopPadding,
+                horizontalPadding,
+                filterBottomPadding,
+              ),
               child: LayoutBuilder(
                 builder: (context, constraints) {
-                  final compactFilters = constraints.maxWidth < 640;
+                  final compactFilters = constraints.maxWidth < 700;
                   final dateFilter = _buildCompactFilter(
                     label: '날짜',
                     value: _selectedDate,
@@ -1063,32 +1108,33 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
                     icon: const Icon(Icons.refresh),
                     tooltip: '새로고침',
                   );
+                  final branchWithRefresh = Row(
+                    children: [
+                      Expanded(child: branchFilter),
+                      SizedBox(width: filterGap),
+                      SizedBox(
+                        width: ui.filterMinHeight + 4,
+                        height: ui.filterMinHeight + 4,
+                        child: refreshButton,
+                      ),
+                    ],
+                  );
 
                   if (!compactFilters) {
                     return Row(
                       children: [
-                        Expanded(child: dateFilter),
-                        const SizedBox(width: 8),
-                        Expanded(child: branchFilter),
-                        refreshButton,
+                        Expanded(flex: 5, child: dateFilter),
+                        SizedBox(width: filterGap),
+                        Expanded(flex: 6, child: branchWithRefresh),
                       ],
                     );
                   }
 
                   return Column(
                     children: [
-                      Row(
-                        children: [
-                          Expanded(child: dateFilter),
-                          const SizedBox(width: 8),
-                          Expanded(child: branchFilter),
-                        ],
-                      ),
-                      const SizedBox(height: 6),
-                      Align(
-                        alignment: Alignment.centerRight,
-                        child: refreshButton,
-                      ),
+                      dateFilter,
+                      SizedBox(height: filterGap),
+                      branchWithRefresh,
                     ],
                   );
                 },
@@ -1098,8 +1144,8 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
           ],
         ),
         Positioned(
-          right: 16,
-          bottom: 16,
+          right: horizontalPadding,
+          bottom: fabBottomInset,
           child: FloatingActionButton(
             heroTag: 'carrot_backup_create_fab',
             onPressed: backupService.isBackingUp ? null : _backupNow,
@@ -1111,6 +1157,10 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
   }
 
   Widget _buildList({required bool isSignedIn}) {
+    final media = MediaQuery.of(context);
+    final listBottomPadding = math.max(86.0, media.padding.bottom + 82.0);
+    final horizontalPadding =
+        UiLayoutTokens.of(context).screenPadding.clamp(12.0, 24.0).toDouble();
     if (_isLoading) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -1138,7 +1188,12 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
     }
 
     return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 86),
+      padding: EdgeInsets.fromLTRB(
+        horizontalPadding,
+        0,
+        horizontalPadding,
+        listBottomPadding,
+      ),
       itemCount: list.length,
       separatorBuilder: (_, __) => const SizedBox(height: 8),
       itemBuilder: (context, index) {

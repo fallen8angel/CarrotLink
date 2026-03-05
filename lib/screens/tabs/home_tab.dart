@@ -323,6 +323,42 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
         final clampedHomeContentMaxWidth = homeContentMaxWidth.isFinite
             ? math.min(homeContentMaxWidth, media.size.width - 24.0)
             : homeContentMaxWidth;
+        final estimatedHeaderHeight = switch (window.windowClass) {
+          UiWindowClass.compact => 242.0,
+          UiWindowClass.medium => 256.0,
+          UiWindowClass.expanded => 272.0,
+          UiWindowClass.large => 286.0,
+          UiWindowClass.extraLarge => 300.0,
+        };
+        final estimatedVerticalChrome =
+            (tokens.screenPadding * 2) + tokens.sectionGap + 34.0;
+        final viewportAwareHudCap = math
+            .max(
+              220.0,
+              media.size.height -
+                  estimatedHeaderHeight -
+                  estimatedVerticalChrome,
+            )
+            .clamp(220.0, 520.0)
+            .toDouble();
+        final hudPreviewMaxWidth = () {
+          if (!window.isLandscape) return clampedHomeContentMaxWidth;
+          final heightRatio = switch (window.windowClass) {
+            UiWindowClass.compact => 0.54,
+            UiWindowClass.medium => 0.50,
+            UiWindowClass.expanded => 0.48,
+            UiWindowClass.large => 0.46,
+            UiWindowClass.extraLarge => 0.44,
+          };
+          final capByHeight = math
+              .min(
+                media.size.height * heightRatio,
+                viewportAwareHudCap,
+              )
+              .clamp(220.0, 520.0)
+              .toDouble();
+          return math.min(clampedHomeContentMaxWidth, capByHeight);
+        }();
         final cardPadding = switch (window.windowClass) {
           UiWindowClass.compact => 14.0,
           UiWindowClass.medium => 16.0,
@@ -542,8 +578,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
             SizedBox(height: tokens.sectionGap),
             Center(
               child: ConstrainedBox(
-                constraints:
-                    BoxConstraints(maxWidth: clampedHomeContentMaxWidth),
+                constraints: BoxConstraints(maxWidth: hudPreviewMaxWidth),
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: () => _openWebRtcView(ssh),

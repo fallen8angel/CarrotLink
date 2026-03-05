@@ -1,12 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/update_service.dart';
+import '../ui/adaptive/layout_tokens.dart';
+import '../ui/adaptive/window_class.dart';
 
 class UpdateDialog extends StatelessWidget {
   const UpdateDialog({super.key});
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
     return Consumer<UpdateService>(
       builder: (context, updateService, child) {
         final release = updateService.latestRelease;
@@ -49,27 +54,35 @@ class UpdateDialog extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text("현재 버전: ${updateService.currentVersion}"),
-                const SizedBox(height: 8),
+                SizedBox(height: tokens.itemGap + 2),
                 if (body.isNotEmpty) ...[
                   const Divider(),
                   const Text("변경 사항:",
                       style: TextStyle(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 4),
-                  Text(body, style: const TextStyle(fontSize: 13)),
+                  SizedBox(height: tokens.itemGap - 2),
+                  Text(
+                    body,
+                    style: TextStyle(fontSize: window.isCompact ? 12.5 : 13),
+                  ),
                 ],
-                const SizedBox(height: 16),
+                SizedBox(height: tokens.sectionGap + 2),
                 if (updateService.isDownloading) ...[
                   LinearProgressIndicator(
                       value: updateService.downloadProgress),
-                  const SizedBox(height: 8),
+                  SizedBox(height: tokens.itemGap + 2),
                   Text(
                       "${(updateService.downloadProgress * 100).toStringAsFixed(0)}%"),
                 ] else if (updateService.downloadedFilePath != null) ...[
-                  const Row(
+                  Row(
                     children: [
-                      Icon(Icons.check_circle, color: Colors.green),
-                      SizedBox(width: 8),
-                      Text("다운로드 완료"),
+                      const Icon(Icons.check_circle, color: Colors.green),
+                      const SizedBox(width: 8),
+                      Text(
+                        "다운로드 완료",
+                        style: TextStyle(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
                     ],
                   ),
                 ],
@@ -79,10 +92,10 @@ class UpdateDialog extends StatelessWidget {
                     child: Text(
                       updateService.statusMessage,
                       style: TextStyle(
-                        fontSize: 12,
+                        fontSize: window.isCompact ? 11.5 : 12,
                         color: updateService.statusMessage.contains("실패")
-                            ? Colors.red
-                            : Colors.grey,
+                            ? scheme.error
+                            : scheme.onSurfaceVariant,
                       ),
                     ),
                   ),

@@ -1263,7 +1263,7 @@ class CameraRelayHub:
       "driverEncodeData",
     ],
   }
-  QUALITY_MODES = ("quality", "stable")
+  QUALITY_MODES = ("low_latency",)
 
   def __init__(self, messaging: Any):
     self.messaging = messaging
@@ -1276,7 +1276,7 @@ class CameraRelayHub:
       cam: {} for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
     }
     self._queues: dict[str, asyncio.Queue[bytes]] = {
-      cam: asyncio.Queue(maxsize=4)
+      cam: asyncio.Queue(maxsize=3)
       for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
     }
     self._frame_count: dict[str, int] = {
@@ -1294,15 +1294,14 @@ class CameraRelayHub:
       for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
     }
     self._quality_mode = self._normalize_quality_mode(
-      os.environ.get("CARROTLINK_CAMERA_QUALITY_MODE", "quality")
+      os.environ.get("CARROTLINK_CAMERA_QUALITY_MODE", "low_latency")
     )
     self._lock = asyncio.Lock()
 
   def _normalize_quality_mode(self, mode: Any) -> str:
-    value = str(mode or "").strip().lower()
-    if value == "stable":
-      return "stable"
-    return "quality"
+    # Single fixed policy: always low-latency mode.
+    _ = str(mode or "").strip().lower()
+    return "low_latency"
 
   def set_quality_mode(self, mode: Any) -> str:
     self._quality_mode = self._normalize_quality_mode(mode)
@@ -1315,10 +1314,8 @@ class CameraRelayHub:
     base = list(self.CAMERA_SERVICE_CANDIDATES.get(camera, []))
     if not base:
       return []
-    if self._quality_mode == "stable":
-      return base
-    # quality mode: prefer full encode first, then livestream fallback.
-    return list(reversed(base))
+    # Always prioritize livestream service first for lower latency.
+    return base
 
   def _pack_frame(self, camera: str, frame: Any) -> bytes:
     header = getattr(frame, "header", b"") or b""
@@ -1463,11 +1460,10 @@ class CameraRelayHub:
     queue = self._queues[camera]
     while True:
       try:
-        quality_mode = self._quality_mode
-        send_timeout = 0.35 if quality_mode == "quality" else 0.25
-        timeout_fail_limit = 5 if quality_mode == "quality" else 4
+        send_timeout = 0.20
+        timeout_fail_limit = 3
         if not self.clients.get(camera):
-          keep_count = 2
+          keep_count = 1
           while queue.qsize() > keep_count:
             try:
               queue.get_nowait()
@@ -1480,6 +1476,15 @@ class CameraRelayHub:
           packet = await asyncio.wait_for(queue.get(), timeout=0.25)
         except asyncio.TimeoutError:
           continue
+        dropped_backlog = 0
+        while queue.qsize() > 0:
+          try:
+            packet = queue.get_nowait()
+            dropped_backlog += 1
+          except Exception:
+            break
+        if dropped_backlog > 0:
+          self._drop_count[camera] += dropped_backlog
 
         stale: list[web.WebSocketResponse] = []
         for ws in list(self.clients.get(camera, set())):
@@ -1534,6 +1539,16 @@ class CameraRelayHub:
 
     ws = web.WebSocketResponse(heartbeat=20, max_msg_size=2 * 1024 * 1024)
     await ws.prepare(request)
+    # Single external viewer policy: keep only one active camera client
+    # per camera channel to avoid duplicate decode fanout load.
+    stale_clients = list(self.clients[camera])
+    for stale in stale_clients:
+      self.clients[camera].discard(stale)
+      self._ws_send_failures.pop(stale, None)
+      try:
+        await stale.close(code=1001, message=b"replaced_by_new_client")
+      except Exception:
+        pass
     self.clients[camera].add(ws)
     await self.ensure_camera_task(camera)
 
@@ -1593,6 +1608,8 @@ class SidecarApp:
       "radarState",
       "roadCameraState",
       "wideRoadCameraState",
+      "carrotMan",
+      "navInstructionCarrot",
     ],
     "p3": [
       "carState",
@@ -1606,6 +1623,8 @@ class SidecarApp:
       "radarState",
       "roadCameraState",
       "wideRoadCameraState",
+      "carrotMan",
+      "navInstructionCarrot",
     ],
     # p4: high-rate alias of p3 services for aggressive HUD refresh.
     "p4": [
@@ -1620,6 +1639,8 @@ class SidecarApp:
       "radarState",
       "roadCameraState",
       "wideRoadCameraState",
+      "carrotMan",
+      "navInstructionCarrot",
     ],
   }
 
@@ -1888,6 +1909,75 @@ class SidecarApp:
   def _payload_wide_road_camera_state(self, rcs: Any) -> dict[str, Any]:
     return self._payload_road_camera_state(rcs)
 
+  def _payload_carrot_man(self, cm: Any) -> dict[str, Any]:
+    navi_paths = str(getattr(cm, "naviPaths", "") or "")
+    # Keep payload bounded when path text is unexpectedly large.
+    if len(navi_paths) > 12000:
+      navi_paths = navi_paths[:12000]
+    return {
+      "activeCarrot": _safe_int(getattr(cm, "activeCarrot", None)),
+      "xTurnInfo": _safe_int(getattr(cm, "xTurnInfo", None)),
+      "xDistToTurn": _safe_float(getattr(cm, "xDistToTurn", None)),
+      "xTurnCountDown": _safe_int(getattr(cm, "xTurnCountDown", None)),
+      "szTBTMainText": str(getattr(cm, "szTBTMainText", "") or ""),
+      "szPosRoadName": str(getattr(cm, "szPosRoadName", "") or ""),
+      "szSdiDescr": str(getattr(cm, "szSdiDescr", "") or ""),
+      "trafficState": _safe_int(getattr(cm, "trafficState", None)),
+      "atcType": str(getattr(cm, "atcType", "") or ""),
+      "remote": str(getattr(cm, "remote", "") or ""),
+      "nRoadLimitSpeed": _safe_int(getattr(cm, "nRoadLimitSpeed", None)),
+      "xSpdType": _safe_int(getattr(cm, "xSpdType", None)),
+      "xSpdLimit": _safe_int(getattr(cm, "xSpdLimit", None)),
+      "xSpdDist": _safe_float(getattr(cm, "xSpdDist", None)),
+      "xSpdCountDown": _safe_int(getattr(cm, "xSpdCountDown", None)),
+      "vTurnSpeed": _safe_float(getattr(cm, "vTurnSpeed", None)),
+      "nGoPosDist": _safe_float(getattr(cm, "nGoPosDist", None)),
+      "nGoPosTime": _safe_float(getattr(cm, "nGoPosTime", None)),
+      "leftSec": _safe_int(getattr(cm, "leftSec", None)),
+      "xPosLat": _safe_float(getattr(cm, "xPosLat", None)),
+      "xPosLon": _safe_float(getattr(cm, "xPosLon", None)),
+      "xPosAngle": _safe_float(getattr(cm, "xPosAngle", None)),
+      "xPosSpeed": _safe_float(getattr(cm, "xPosSpeed", None)),
+      "naviPaths": navi_paths,
+    }
+
+  def _payload_nav_instruction_carrot(self, ni: Any) -> dict[str, Any]:
+    all_maneuvers: list[dict[str, Any]] = []
+    try:
+      for m in list(getattr(ni, "allManeuvers", []))[:8]:
+        if isinstance(m, dict):
+          all_maneuvers.append(
+            {
+              "distance": _safe_float(m.get("distance")),
+              "type": str(m.get("type", "") or ""),
+              "modifier": str(m.get("modifier", "") or ""),
+            }
+          )
+        else:
+          all_maneuvers.append(
+            {
+              "distance": _safe_float(getattr(m, "distance", None)),
+              "type": str(getattr(m, "type", "") or ""),
+              "modifier": str(getattr(m, "modifier", "") or ""),
+            }
+          )
+    except Exception:
+      pass
+    return {
+      "maneuverPrimaryText": str(getattr(ni, "maneuverPrimaryText", "") or ""),
+      "maneuverSecondaryText": str(getattr(ni, "maneuverSecondaryText", "") or ""),
+      "maneuverType": str(getattr(ni, "maneuverType", "") or ""),
+      "maneuverModifier": str(getattr(ni, "maneuverModifier", "") or ""),
+      "maneuverDistance": _safe_float(getattr(ni, "maneuverDistance", None)),
+      "distanceRemaining": _safe_float(getattr(ni, "distanceRemaining", None)),
+      "timeRemaining": _safe_float(getattr(ni, "timeRemaining", None)),
+      "timeRemainingTypical": _safe_float(getattr(ni, "timeRemainingTypical", None)),
+      "speedLimit": _safe_float(getattr(ni, "speedLimit", None)),
+      "speedLimitSign": str(getattr(ni, "speedLimitSign", "") or ""),
+      "showFull": bool(getattr(ni, "showFull", False)),
+      "allManeuvers": all_maneuvers,
+    }
+
   def _payload_model_v2(self, mv2: Any) -> dict[str, Any]:
     out: dict[str, Any] = {}
     try:
@@ -2092,6 +2182,19 @@ class SidecarApp:
       pass
     if self.profile in ("p2", "p3", "p4"):
       try:
+        if self.sm.alive.get("carrotMan", False):
+          payload["carrotMan"] = self._payload_carrot_man(self.sm["carrotMan"])
+      except Exception:
+        pass
+      try:
+        if self.sm.alive.get("navInstructionCarrot", False):
+          payload["navInstructionCarrot"] = self._payload_nav_instruction_carrot(
+            self.sm["navInstructionCarrot"]
+          )
+      except Exception:
+        pass
+    if self.profile in ("p2", "p3", "p4"):
+      try:
         if self.sm.alive.get("modelV2", False):
           payload["modelV2"] = self._payload_model_v2(self.sm["modelV2"])
       except Exception:
@@ -2252,6 +2355,14 @@ class SidecarApp:
     camera_mode = self._normalize_overlay_camera_mode(request.query.get("camera", "both"))
     ws = web.WebSocketResponse(heartbeat=20)
     await ws.prepare(request)
+    # Single external viewer policy: keep one active overlay client.
+    stale_clients = list(self.clients.keys())
+    for stale in stale_clients:
+      self.clients.pop(stale, None)
+      try:
+        await stale.close(code=1001, message=b"replaced_by_new_client")
+      except Exception:
+        pass
     self.clients[ws] = (encoding, camera_mode)
     try:
       await ws.send_str(
@@ -2304,7 +2415,7 @@ class SidecarApp:
     )
 
   async def get_camera_quality(self, request: web.Request) -> web.Response:
-    mode = "quality"
+    mode = "low_latency"
     if self._camera_hub is not None:
       mode = self._camera_hub.get_quality_mode()
     return web.json_response(

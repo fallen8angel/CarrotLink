@@ -1125,19 +1125,21 @@ printf "%s %s %s\n" "$cpu" "$mem" "$disk"
       );
       socket.destroy();
       if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
-      _emitDiscoveredIp(ip);
-      debugPrint("Found openpilot at $ip");
+      final emitted = _emitDiscoveredIp(ip);
+      if (emitted) {
+        debugPrint("Found openpilot at $ip");
+      }
     } catch (e) {
       // Connection failed or timed out
     }
   }
 
-  void _emitDiscoveredIp(String ip) {
+  bool _emitDiscoveredIp(String ip) {
     final now = DateTime.now();
     if (_lastDiscoveredIp == ip &&
         _lastDiscoveredAt != null &&
         now.difference(_lastDiscoveredAt!) < const Duration(seconds: 5)) {
-      return;
+      return false;
     }
 
     _lastDiscoveredIp = ip;
@@ -1152,6 +1154,7 @@ printf "%s %s %s\n" "$cpu" "$mem" "$disk"
       'source': 'active_scan',
       'ts': now.millisecondsSinceEpoch,
     });
+    return true;
   }
 
   bool _isValidIpv4(String ip) {

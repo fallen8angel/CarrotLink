@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import '../ui/adaptive/layout_tokens.dart';
+import '../ui/adaptive/window_class.dart';
 
 class ConnectionRequiredView extends StatelessWidget {
   final String title;
@@ -16,19 +18,21 @@ class ConnectionRequiredView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
     final scheme = Theme.of(context).colorScheme;
     return LayoutBuilder(
       builder: (context, constraints) {
         final compactHeight =
             constraints.maxHeight > 0 && constraints.maxHeight < 220;
-        final margin = compactHeight ? 8.0 : 16.0;
+        final margin = compactHeight ? 8.0 : tokens.itemGap + 8.0;
         final vPadding = compactHeight ? 12.0 : 18.0;
         final iconSize = compactHeight ? 22.0 : 26.0;
         final titleGap = compactHeight ? 6.0 : 8.0;
         final bodyGap = compactHeight ? 4.0 : 6.0;
 
         final content = ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 420),
+          constraints: BoxConstraints(maxWidth: window.isCompact ? 420 : 520),
           child: Container(
             margin: EdgeInsets.all(margin),
             padding: EdgeInsets.symmetric(horizontal: 16, vertical: vPadding),

@@ -17,11 +17,11 @@ import 'package:webview_flutter/webview_flutter.dart';
 import '../../services/hud_drive_settings_service.dart';
 import '../../services/sidecar_service.dart';
 import '../../services/ssh_service.dart';
+import '../../services/storage_layout_service.dart';
 import '../../ui/adaptive/display_feature_utils.dart';
 import '../../ui/adaptive/layout_tokens.dart';
 import '../../ui/adaptive/window_class.dart';
 import '../../widgets/home_hud_preview_card.dart';
-import '../tabs/device_settings_tab.dart';
 
 enum _DriveCameraKind { road, wideRoad }
 
@@ -35,14 +35,8 @@ enum _SidecarPhase {
   failed
 }
 
-enum _DisableDmAction {
-  cancel,
-  openSettings,
-}
-
 enum _AdaptiveCameraQualityMode {
-  quality,
-  stable,
+  lowLatency,
 }
 
 enum _OverlayPreviewScenario {
@@ -70,9 +64,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       EventChannel('carrotlink/native_drive_video_events');
   static const MethodChannel _nativeCameraControlChannel =
       MethodChannel('carrotlink/native_drive_video_control');
+  static const MethodChannel _displayTuningChannel =
+      MethodChannel('carrotlink/display_tuning');
   static const bool _hudDebugMenuEnabled = true;
   static const bool _temporaryLimitedHudControls = false;
   static const bool _showDriveDock = false;
+  static const bool _webCameraSharpenEnabled = true;
   // Sidecar is treated as an externally managed resident process on comma.
   static const bool _residentSidecarManaged = true;
   static const bool _autoDeployDuringHudRuntime = false;
@@ -147,17 +144,28 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const int _cameraFrameStaleUs = 350000;
   static const int _interpMinUs = 12000;
   static const int _interpMaxUs = 90000;
+  static const Duration _cameraDiagCaptureCooldown = Duration(seconds: 12);
   static const Duration _lifecycleSuspendDelay = Duration(milliseconds: 2600);
   static const Duration _backgroundProcessKeepAlive = Duration(seconds: 45);
   static const Duration _backgroundUiResetGrace = Duration(seconds: 8);
-  static const Duration _disableDmCacheTtl = Duration(seconds: 20);
-  static const Duration _adaptiveStartupStableHold = Duration(seconds: 8);
-  static String? _disableDmCachedValue;
-  static DateTime? _disableDmCachedAt;
+  static const String _cameraDiagTmuxTailCommand = '''
+if command -v tmux >/dev/null 2>&1; then
+  echo "== tmux sessions =="
+  tmux ls 2>&1 || true
+  echo
+  if tmux has-session -t comma 2>/dev/null; then
+    echo "== comma:0.0 recent output (last 300 lines) =="
+    tmux capture-pane -pt comma:0.0 -S -300 2>&1 || true
+  else
+    echo "comma session not found"
+  fi
+else
+  echo "tmux not installed"
+fi
+''';
   bool _cameraSuspendedByLifecycle = false;
-  bool _cameraStalled = false;
-  String? _cameraStallReason;
-  DateTime? _cameraStallSince;
+  bool _cameraDiagCaptureInFlight = false;
+  DateTime? _lastCameraDiagCapturedAt;
   int? _lastCameraFrameId;
   int _lastCameraFrameEventUs = 0;
   int? _lastPublishedModelFrameId;
@@ -188,6 +196,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   bool _debugShowGuides = false;
   bool _debugShowVerifyPanel = false;
   bool _debugShowViewportFrame = false;
+  bool _debugShowArOverlay = true;
   bool _debugShowPathFill = true;
   bool _debugShowLaneLines = true;
   bool _debugShowRoadEdge = true;
@@ -228,18 +237,10 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   bool _backgroundUiResetDone = false;
   String _hudDefaultMode = HudDriveSettingsService.modeWebrtc;
   bool _hudModeLoaded = false;
-  bool _disableDmGateBlocked = false;
-  bool _disableDmGateChecking = false;
-  String? _disableDmCurrentValue;
   _AdaptiveCameraQualityMode _adaptiveCameraQualityMode =
-      _AdaptiveCameraQualityMode.stable;
+      _AdaptiveCameraQualityMode.lowLatency;
   int _adaptiveBadScore = 0;
-  DateTime? _adaptiveLastSwitchAt;
-  DateTime? _adaptiveStableSince;
-  DateTime? _adaptiveStartupHoldUntil;
   bool _adaptiveCameraQualityBusy = false;
-  int? _adaptiveLastFrameCount;
-  int? _adaptiveLastDropCount;
   bool _adaptiveCameraQualitySynced = false;
   bool? _sidecarBootstrapDone;
   bool _debugOverlayPreviewMode = false;
@@ -281,10 +282,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   bool get _openpilotOverlayMode =>
       HudDriveSettingsService.isOpenpilotOverlay(_hudDefaultMode);
 
+  String get _modeTagLabel => _openpilotOverlayMode ? 'openpilot' : 'webrtc';
+
   bool get _canUseNativeCamera => !kIsWeb && Platform.isAndroid;
 
   bool get _useNativeLiveCamera =>
-      _canUseNativeCamera && !_nativeCameraUnsupported;
+      _openpilotOverlayMode && _canUseNativeCamera && !_nativeCameraUnsupported;
 
   bool get _useNativeOverlayRenderer =>
       _openpilotOverlayMode && _useNativeLiveCamera && _nativeOverlayEnabled;
@@ -352,18 +355,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
             setState(() {
               _cameraLoading = true;
               _cameraError = null;
-              _cameraStalled = false;
-              _cameraStallReason = null;
-              _cameraStallSince = null;
             });
           },
           onPageFinished: (_) {
             if (!mounted) return;
             setState(() {
               _cameraLoading = false;
-              _cameraStalled = false;
-              _cameraStallReason = null;
-              _cameraStallSince = null;
             });
           },
           onWebResourceError: (error) {
@@ -371,9 +368,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
             setState(() {
               _cameraLoading = false;
               _cameraError = '카메라 로드 실패: ${error.description}';
-              _cameraStalled = false;
-              _cameraStallReason = null;
-              _cameraStallSince = null;
             });
           },
         ),
@@ -384,6 +378,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
           .listen(_handleNativeCameraEvent, onError: (_) {});
     }
     unawaited(_enableScreenAwake());
+    unawaited(_setDisplayHighRefreshPreference(true, reason: 'drive_init'));
     unawaited(_loadAndApplyLandscapeOrientation());
     unawaited(_loadHudDebugLayerToggles());
     unawaited(_loadHudDefaultMode());
@@ -424,7 +419,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       _lastCameraFrameEventUs = 0;
       _lastPublishedModelFrameId = null;
       _stopAdaptiveCameraQualityLoop(resetMode: true);
-      unawaited(_applyHudModeRuntimeWithDisableDmGate());
+      _applyHudModeRuntime();
     }
   }
 
@@ -434,142 +429,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     setState(() {
       _hudDefaultMode = mode;
       _hudModeLoaded = true;
-    });
-    unawaited(_applyHudModeRuntimeWithDisableDmGate());
-  }
-
-  Future<String?> _readDisableDmValue({bool allowCache = true}) async {
-    if (allowCache &&
-        _disableDmCachedAt != null &&
-        DateTime.now().difference(_disableDmCachedAt!) <= _disableDmCacheTtl) {
-      return _disableDmCachedValue;
-    }
-    final ssh = _sshService ??
-        (mounted ? Provider.of<SSHService>(context, listen: false) : null);
-    if (ssh == null || !ssh.isConnected) return null;
-    try {
-      final result = await ssh.executeCommandResult(
-        "bash -lc 'cat /data/params/d/DisableDM 2>/dev/null || true'",
-      );
-      if (!result.isSuccess) return null;
-      final lines = result.output
-          .split(RegExp(r'[\r\n]+'))
-          .map((line) => line.trim())
-          .where((line) => line.isNotEmpty)
-          .toList(growable: false);
-      final value = lines.isEmpty ? '' : lines.last;
-      _disableDmCachedValue = value;
-      _disableDmCachedAt = DateTime.now();
-      return value;
-    } catch (_) {
-      if (allowCache &&
-          _disableDmCachedAt != null &&
-          DateTime.now().difference(_disableDmCachedAt!) <=
-              _disableDmCacheTtl) {
-        return _disableDmCachedValue;
-      }
-      return null;
-    }
-  }
-
-  Future<void> _openDisableDmSettingsFromDrive() async {
-    if (!mounted) return;
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => Scaffold(
-          appBar: AppBar(title: const Text('콤마 설정')),
-          body: const DeviceSettingsTab(
-            initialTabIndex: 0,
-            initialFocusItemName: 'DisableDM',
-          ),
-        ),
-      ),
-    );
-  }
-
-  Future<bool> _ensureDisableDmGateFromDrive({bool interactive = false}) async {
-    final current = await _readDisableDmValue();
-    _disableDmCurrentValue = current;
-    if (current == '2') return true;
-    if (!interactive || !mounted) return false;
-
-    final action = await showDialog<_DisableDmAction>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('진입 조건 필요'),
-        content: Text(
-          '오픈파일럿 그래픽 모드는 DisableDM=2 일 때만 진입할 수 있습니다.\n'
-          '현재 값: ${current == null || current.isEmpty ? '확인 불가' : current}',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(_DisableDmAction.cancel),
-            child: const Text('취소'),
-          ),
-          FilledButton(
-            onPressed: () =>
-                Navigator.of(ctx).pop(_DisableDmAction.openSettings),
-            child: const Text('설정으로 이동'),
-          ),
-        ],
-      ),
-    );
-
-    if (!mounted || action != _DisableDmAction.openSettings) {
-      return false;
-    }
-    await _openDisableDmSettingsFromDrive();
-    final updated = await _readDisableDmValue(allowCache: false);
-    _disableDmCurrentValue = updated;
-    return updated == '2';
-  }
-
-  Future<void> _applyHudModeRuntimeWithDisableDmGate() async {
-    if (!_openpilotOverlayMode) {
-      if (mounted) {
-        setState(() {
-          _disableDmGateBlocked = false;
-          _disableDmGateChecking = false;
-        });
-      } else {
-        _disableDmGateBlocked = false;
-        _disableDmGateChecking = false;
-      }
-      _applyHudModeRuntime();
-      return;
-    }
-
-    if (mounted) {
-      setState(() {
-        _disableDmGateChecking = true;
-      });
-    } else {
-      _disableDmGateChecking = true;
-    }
-    final allowed = await _ensureDisableDmGateFromDrive(interactive: false);
-    if (!mounted) return;
-    if (!allowed) {
-      _stopAdaptiveCameraQualityLoop(resetMode: true);
-      _stopSidecarLoop();
-      if (!_residentSidecarManaged) {
-        unawaited(_stopSidecarProcessIfNeeded());
-      }
-      setState(() {
-        _disableDmGateBlocked = true;
-        _disableDmGateChecking = false;
-        _cameraLoading = false;
-        _cameraError = null;
-      });
-      _setSidecarPhase(
-        _SidecarPhase.failed,
-        message: 'DisableDM=2가 필요합니다.',
-      );
-      return;
-    }
-
-    setState(() {
-      _disableDmGateBlocked = false;
-      _disableDmGateChecking = false;
     });
     _applyHudModeRuntime();
   }
@@ -587,17 +446,11 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
         setState(() {
           _cameraLoading = true;
           _cameraError = null;
-          _cameraStalled = false;
-          _cameraStallReason = null;
-          _cameraStallSince = null;
           _nativeCameraViewId = null;
         });
       } else {
         _cameraLoading = true;
         _cameraError = null;
-        _cameraStalled = false;
-        _cameraStallReason = null;
-        _cameraStallSince = null;
         _nativeCameraViewId = null;
       }
       unawaited(_ensureSidecarRuntime(reason: 'mode_apply'));
@@ -620,7 +473,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       forceNativePush: true,
     );
     unawaited(_clearNativeOverlay());
-    _clearCameraStalled();
     unawaited(_loadCameraSource(force: true));
   }
 
@@ -677,9 +529,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       setState(() {
         _cameraLoading = false;
         _cameraError = null;
-        _cameraStalled = false;
-        _cameraStallReason = null;
-        _cameraStallSince = null;
       });
       return;
     }
@@ -687,22 +536,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       final state = map['state']?.toString() ?? '';
       debugPrint('[DriveCanvas][native] state=$state');
       if (!mounted) return;
-      if (state.startsWith('stalling_')) {
-        _recordAdaptiveNetworkIssue('native_state:$state');
-        _markCameraStalled(state);
-        return;
-      }
-      if (state == 'recovered') {
-        _clearCameraStalled();
-        setState(() {
-          _cameraLoading = false;
-          _cameraError = null;
-        });
-        return;
-      }
       if (state == 'connected' || state.startsWith('decoder_configured')) {
         _sidecarTransitionTimer?.cancel();
-        _clearCameraStalled();
         setState(() {
           _cameraLoading = false;
           _suppressCameraErrors = false;
@@ -718,13 +553,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     if (type == 'camera_error') {
       final reason = map['reason']?.toString().trim() ?? '';
       if (reason.isEmpty) return;
-      if (_isTransientCameraStallReason(reason)) {
-        debugPrint('[DriveCanvas][native] transient stall=$reason');
-        _recordAdaptiveNetworkIssue('native_stall:$reason');
-        if (!mounted) return;
-        _markCameraStalled(reason);
-        return;
-      }
       final unsupported = reason.contains('invalid_ws_url') ||
           reason.contains('decoder_init_failed');
       if ((_sidecarTransitioning || _suppressCameraErrors) && !unsupported) {
@@ -732,9 +560,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
         return;
       }
       debugPrint('[DriveCanvas][native] error=$reason');
-      _recordAdaptiveNetworkIssue('native_error:$reason', severity: 2);
       if (!mounted) return;
-      _clearCameraStalled();
       setState(() {
         _cameraError = '네이티브 디코더 오류: $reason';
         if (reason.contains('invalid_ws_url') ||
@@ -742,6 +568,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
           _nativeCameraUnsupported = true;
         }
       });
+      unawaited(
+        _captureCameraErrorDiagnostics(
+          source: 'native',
+          reason: reason,
+        ),
+      );
       if (_nativeCameraUnsupported) {
         unawaited(_loadCameraSource(force: true));
       }
@@ -803,6 +635,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     try {
       final prefs = await SharedPreferences.getInstance();
       const defaults = <String, bool>{
+        'arOverlay': true,
         'pathFill': true,
         'laneLines': true,
         'roadEdge': true,
@@ -828,6 +661,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
 
       void applyMap(Map<String, dynamic> map) {
         if (!mounted) {
+          _debugShowArOverlay =
+              readBool(map, 'arOverlay', defaults['arOverlay']!);
           _debugShowPathFill = readBool(map, 'pathFill', defaults['pathFill']!);
           _debugShowLaneLines =
               readBool(map, 'laneLines', defaults['laneLines']!);
@@ -846,6 +681,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
         }
 
         setState(() {
+          _debugShowArOverlay =
+              readBool(map, 'arOverlay', defaults['arOverlay']!);
           _debugShowPathFill = readBool(map, 'pathFill', defaults['pathFill']!);
           _debugShowLaneLines =
               readBool(map, 'laneLines', defaults['laneLines']!);
@@ -891,6 +728,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     try {
       final prefs = await SharedPreferences.getInstance();
       final payload = <String, bool>{
+        'arOverlay': _debugShowArOverlay,
         'pathFill': _debugShowPathFill,
         'laneLines': _debugShowLaneLines,
         'roadEdge': _debugShowRoadEdge,
@@ -982,7 +820,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       final currentSize = _sourceSizeForKind(eventCameraKind);
       if ((next.width - currentSize.width).abs() < 0.5 &&
           (next.height - currentSize.height).abs() < 0.5) {
-        _clearCameraStalled();
         return;
       }
       if (!mounted) {
@@ -994,83 +831,29 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       );
       setState(() {
         _updateSourceSize(next, kind: eventCameraKind);
-        _cameraStalled = false;
-        _cameraStallReason = null;
-        _cameraStallSince = null;
       });
       return;
     }
     if (type == 'camera_error') {
       final reason = map['reason']?.toString().trim() ?? '';
       if (reason.isEmpty || !mounted) return;
-      if (_isTransientCameraStallReason(reason)) {
-        debugPrint('[DriveCanvas] transient stall camera_error reason=$reason');
-        _recordAdaptiveNetworkIssue('web_stall:$reason');
-        _markCameraStalled(reason);
-        return;
-      }
       if (_sidecarTransitioning || _suppressCameraErrors) {
         debugPrint('[DriveCanvas] suppressed camera_error reason=$reason');
         return;
       }
       debugPrint('[DriveCanvas] camera_error reason=$reason');
-      _recordAdaptiveNetworkIssue('web_error:$reason', severity: 2);
-      _clearCameraStalled();
       setState(() => _cameraError = '카메라 디코더 오류: $reason');
+      unawaited(
+        _captureCameraErrorDiagnostics(
+          source: 'web',
+          reason: reason,
+        ),
+      );
       return;
     }
     if (type == 'camera_timeline_ready') {
       return;
     }
-  }
-
-  bool _isTransientCameraStallReason(String reason) {
-    final lower = reason.toLowerCase();
-    return lower.startsWith('frame_stall_') ||
-        lower.contains('camera_send_timeout') ||
-        lower.contains('no_frames');
-  }
-
-  void _markCameraStalled(String reason) {
-    final trimmed = reason.trim().isEmpty ? 'frame_stall' : reason.trim();
-    if (mounted) {
-      setState(() {
-        _cameraStalled = true;
-        _cameraStallReason = trimmed;
-        _cameraStallSince = DateTime.now();
-        _cameraLoading = false;
-        _cameraError = null;
-      });
-    } else {
-      _cameraStalled = true;
-      _cameraStallReason = trimmed;
-      _cameraStallSince = DateTime.now();
-      _cameraLoading = false;
-      _cameraError = null;
-    }
-  }
-
-  void _clearCameraStalled() {
-    if (!(_cameraStalled || (_cameraStallReason?.isNotEmpty ?? false))) return;
-    if (mounted) {
-      setState(() {
-        _cameraStalled = false;
-        _cameraStallReason = null;
-        _cameraStallSince = null;
-      });
-    } else {
-      _cameraStalled = false;
-      _cameraStallReason = null;
-      _cameraStallSince = null;
-    }
-  }
-
-  String _cameraStallBadgeText() {
-    final since = _cameraStallSince;
-    if (since == null) return '네트워크 지연';
-    final ms = DateTime.now().difference(since).inMilliseconds;
-    final sec = (ms / 1000.0);
-    return '네트워크 지연 ${sec.toStringAsFixed(1)}s';
   }
 
   String _overlayPreviewScenarioLabel(_OverlayPreviewScenario scenario) {
@@ -1093,9 +876,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
         _debugOverlayPreviewMode = enabled;
         _cameraLoading = false;
         _cameraError = null;
-        _cameraStalled = false;
-        _cameraStallReason = null;
-        _cameraStallSince = null;
         if (enabled) {
           // Preview intent: show all overlay layers by default.
           _debugShowPathFill = true;
@@ -1113,9 +893,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       _debugOverlayPreviewMode = enabled;
       _cameraLoading = false;
       _cameraError = null;
-      _cameraStalled = false;
-      _cameraStallReason = null;
-      _cameraStallSince = null;
       if (enabled) {
         _debugShowPathFill = true;
         _debugShowLaneLines = true;
@@ -1491,6 +1268,15 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       usingLateralPath: false,
       modelPathXMax: 80.0,
       lateralPathXMax: 0.0,
+      navPathPoints: const <_NavPathPoint>[
+        _NavPathPoint(x: 8.0, y: 0.0, d: 8.0),
+        _NavPathPoint(x: 14.0, y: 0.2, d: 14.0),
+        _NavPathPoint(x: 22.0, y: 0.6, d: 22.0),
+        _NavPathPoint(x: 32.0, y: 1.3, d: 32.0),
+      ],
+      navTurnInfo: 2,
+      navDistToTurn: 230.0,
+      navMainText: '우회전',
     );
   }
 
@@ -1505,6 +1291,30 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     await SystemChrome.setPreferredOrientations(const [
       DeviceOrientation.portraitUp,
     ]);
+  }
+
+  Future<void> _setDisplayHighRefreshPreference(
+    bool enabled, {
+    required String reason,
+  }) async {
+    if (kIsWeb || !Platform.isAndroid) return;
+    try {
+      final response =
+          await _displayTuningChannel.invokeMapMethod<String, dynamic>(
+        'setHighRefreshPreferred',
+        <String, dynamic>{'enabled': enabled},
+      );
+      final appliedHz = (response?['refreshRate'] as num?)?.toDouble();
+      debugPrint(
+        '[DriveCanvas][display] high_refresh=$enabled reason=$reason hz=${appliedHz?.toStringAsFixed(1) ?? '-'}',
+      );
+    } on MissingPluginException {
+      // Older builds may not expose display tuning channel yet.
+    } catch (e) {
+      debugPrint(
+        '[DriveCanvas][display] high refresh preference failed: $e',
+      );
+    }
   }
 
   Future<void> _enableScreenAwake() async {
@@ -1703,6 +1513,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       unawaited(nativeSub.cancel());
     }
     unawaited(_disableScreenAwake());
+    unawaited(_setDisplayHighRefreshPreference(false, reason: 'drive_dispose'));
     _overlayNotifier.dispose();
     unawaited(_restorePortraitOrientation());
     super.dispose();
@@ -1737,6 +1548,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     final cameraName =
         cameraKind == _DriveCameraKind.wideRoad ? 'wideRoad' : 'road';
     final directWsUrl = 'ws://${widget.hostIp}:7766/ws/camera/$cameraName';
+    final modePolicy = _openpilotOverlayMode ? 'sidecar_only' : 'webrtc_only';
     return '''
 <!doctype html>
 <html>
@@ -1769,6 +1581,9 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       display: block;
       background: #000;
       z-index: 1;
+      backface-visibility: hidden;
+      transform: translateZ(0);
+      will-change: transform;
     }
     #v {
       position: fixed;
@@ -1779,6 +1594,9 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       display: none;
       background: #000;
       z-index: 2;
+      backface-visibility: hidden;
+      transform: translateZ(0);
+      will-change: transform;
     }
   </style>
 </head>
@@ -1792,10 +1610,16 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     const CAMERA_NAME = ${jsonEncode(cameraName)};
     const STREAM_ENDPOINTS = $streamEndpoints;
     const CODEC_CANDIDATES = ['avc1.640028', 'avc1.64001f', 'avc1.4d401f', 'avc1.42e01f', 'avc1.42e01e'];
+    const MODE_POLICY = ${jsonEncode(modePolicy)};
+    const ALLOW_DIRECT = MODE_POLICY === 'sidecar_only';
+    const ALLOW_WEBRTC = MODE_POLICY === 'webrtc_only';
+    const ENABLE_SHARPEN = ${_webCameraSharpenEnabled ? 'true' : 'false'};
 
     const canvas = document.getElementById('c');
     const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
     const video = document.getElementById('v');
+    const DEVICE_MEMORY_GB = Number(navigator.deviceMemory || 0);
+    const CPU_THREADS = Number(navigator.hardwareConcurrency || 0);
 
     let ws = null;
     let pc = null;
@@ -1806,7 +1630,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     let watchdog = null;
     let reconnectTimer = null;
     let directProbeTimer = null;
-    let mode = 'direct';
+    let mode = ALLOW_DIRECT ? 'direct' : 'webrtc';
     let directErrorCount = 0;
     let webCodecsUnsupported = false;
     let lastDirectFrameId = -1;
@@ -1815,13 +1639,48 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     let sourceW = 0;
     let sourceH = 0;
     let lastCameraFramePosted = -1;
+    let renderDpr = 1.0;
     const pendingFrameIds = [];
 
+    function computeRenderDpr() {
+      const base = Number(window.devicePixelRatio || 1);
+      let cap = 1.12;
+      if (CPU_THREADS >= 8 || DEVICE_MEMORY_GB >= 6) {
+        cap = 1.45;
+      } else if (CPU_THREADS >= 6 || DEVICE_MEMORY_GB >= 4) {
+        cap = 1.30;
+      } else if (CPU_THREADS >= 4 || DEVICE_MEMORY_GB >= 3) {
+        cap = 1.20;
+      }
+      return Math.max(1.0, Math.min(base, cap));
+    }
+
+    function applySharpenFilter() {
+      if (!ENABLE_SHARPEN) {
+        canvas.style.filter = 'none';
+        return;
+      }
+      const applyBoost = renderDpr <= 1.24;
+      if (!applyBoost) {
+        canvas.style.filter = 'none';
+        return;
+      }
+      canvas.style.filter = 'contrast(1.05) saturate(1.04) brightness(1.01)';
+    }
+
     function resizeCanvas() {
-      const w = Math.max(1, window.innerWidth || 1);
-      const h = Math.max(1, window.innerHeight || 1);
-      if (canvas.width !== w) canvas.width = w;
-      if (canvas.height !== h) canvas.height = h;
+      const cssW = Math.max(1, window.innerWidth || 1);
+      const cssH = Math.max(1, window.innerHeight || 1);
+      renderDpr = computeRenderDpr();
+      const pixelW = Math.max(1, Math.round(cssW * renderDpr));
+      const pixelH = Math.max(1, Math.round(cssH * renderDpr));
+      if (canvas.width !== pixelW) canvas.width = pixelW;
+      if (canvas.height !== pixelH) canvas.height = pixelH;
+      canvas.style.width = cssW + 'px';
+      canvas.style.height = cssH + 'px';
+      try { ctx.imageSmoothingEnabled = true; } catch (_) {}
+      try { ctx.imageSmoothingQuality = renderDpr > 1.25 ? 'medium' : 'high'; } catch (_) {}
+      applySharpenFilter();
     }
 
     function setMode(next) {
@@ -1902,11 +1761,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     }
 
     function scheduleDirectProbe(ms) {
+      if (!ALLOW_DIRECT) return;
       clearDirectProbe();
       if (webCodecsUnsupported) return;
       directProbeTimer = setTimeout(() => {
         directProbeTimer = null;
-        if (mode === 'webrtc') {
+        if (mode === 'webrtc' && ALLOW_DIRECT) {
           connectDirect().catch(() => {});
         }
       }, ms || 8000);
@@ -1916,10 +1776,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       clearReconnect();
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
-        if (mode === 'direct') {
+        if (mode === 'direct' && ALLOW_DIRECT) {
           connectDirect().catch(() => {});
-        } else {
+        } else if (ALLOW_WEBRTC) {
           connectWebRtc().catch(() => {});
+        } else if (ALLOW_DIRECT) {
+          connectDirect().catch(() => {});
         }
       }, ms || 900);
     }
@@ -1932,11 +1794,16 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     }
 
     function armWatchdog() {
+      if (!ALLOW_DIRECT) return;
       clearWatchdog();
       watchdog = setTimeout(() => {
-        if (!gotFrame && mode === 'direct') {
+        if (!gotFrame && mode === 'direct' && ALLOW_DIRECT) {
           postToFlutter(payloadWithCamera({ type: 'camera_error', reason: 'no_frames' }));
-          fallbackToWebRtc('no_frames');
+          if (ALLOW_WEBRTC) {
+            fallbackToWebRtc('no_frames');
+          } else {
+            scheduleReconnect(900);
+          }
         }
       }, 4500);
     }
@@ -2171,6 +2038,17 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     function fallbackToWebRtc(reason) {
       cleanupSocket();
       closeDecoder();
+      if (!ALLOW_WEBRTC) {
+        setMode('direct');
+        postToFlutter(
+          payloadWithCamera({
+            type: 'camera_error',
+            reason: 'direct_only_reconnect:' + String(reason || 'unknown'),
+          }),
+        );
+        scheduleReconnect(900);
+        return;
+      }
       setMode('webrtc');
       postToFlutter(
         payloadWithCamera({
@@ -2183,6 +2061,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     }
 
     async function connectDirect() {
+      if (!ALLOW_DIRECT) {
+        if (ALLOW_WEBRTC) {
+          connectWebRtc().catch(() => {});
+        }
+        return;
+      }
       cleanupPc();
       cleanupSocket();
       closeDecoder();
@@ -2192,7 +2076,17 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
 
       if (!window.VideoDecoder || !window.EncodedVideoChunk) {
         webCodecsUnsupported = true;
-        fallbackToWebRtc('webcodecs_unsupported');
+        if (ALLOW_WEBRTC) {
+          fallbackToWebRtc('webcodecs_unsupported');
+        } else {
+          postToFlutter(
+            payloadWithCamera({
+              type: 'camera_error',
+              reason: 'webcodecs_unsupported',
+            }),
+          );
+          scheduleReconnect(1500);
+        }
         return;
       }
       webCodecsUnsupported = false;
@@ -2211,7 +2105,17 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
           if (!parsed) return;
           const meta = parsed.meta || {};
           if (!(await ensureDecoder(meta.codec))) {
-            fallbackToWebRtc('decoder_unsupported');
+            if (ALLOW_WEBRTC) {
+              fallbackToWebRtc('decoder_unsupported');
+            } else {
+              postToFlutter(
+                payloadWithCamera({
+                  type: 'camera_error',
+                  reason: 'decoder_unsupported',
+                }),
+              );
+              scheduleReconnect(900);
+            }
             return;
           }
 
@@ -2261,7 +2165,17 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
           }
         };
         ws.onerror = () => {
-          fallbackToWebRtc('socket_error');
+          if (ALLOW_WEBRTC) {
+            fallbackToWebRtc('socket_error');
+          } else {
+            postToFlutter(
+              payloadWithCamera({
+                type: 'camera_error',
+                reason: 'socket_error',
+              }),
+            );
+            scheduleReconnect(900);
+          }
         };
         ws.onclose = () => {
           if (mode === 'direct') {
@@ -2269,7 +2183,17 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
           }
         };
       } catch (_) {
-        fallbackToWebRtc('socket_open_failed');
+        if (ALLOW_WEBRTC) {
+          fallbackToWebRtc('socket_open_failed');
+        } else {
+          postToFlutter(
+            payloadWithCamera({
+              type: 'camera_error',
+              reason: 'socket_open_failed',
+            }),
+          );
+          scheduleReconnect(1100);
+        }
       }
     }
 
@@ -2289,6 +2213,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     }
 
     async function connectWebRtc() {
+      if (!ALLOW_WEBRTC) {
+        if (ALLOW_DIRECT) {
+          connectDirect().catch(() => {});
+        }
+        return;
+      }
       cleanupPc();
       try {
         pc = new RTCPeerConnection({
@@ -2369,9 +2299,9 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     window.addEventListener('resize', resizeCanvas);
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) return;
-      if (mode === 'direct') {
+      if (mode === 'direct' && ALLOW_DIRECT) {
         connectDirect().catch(() => {});
-      } else {
+      } else if (ALLOW_WEBRTC) {
         connectWebRtc().catch(() => {});
       }
     });
@@ -2382,7 +2312,11 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       clearReconnect();
       clearDirectProbe();
     });
-    connectWebRtc().catch(() => scheduleReconnect(1200));
+    if (ALLOW_DIRECT) {
+      connectDirect().catch(() => scheduleReconnect(1200));
+    } else if (ALLOW_WEBRTC) {
+      connectWebRtc().catch(() => scheduleReconnect(1200));
+    }
   </script>
 </body>
 </html>
@@ -2429,9 +2363,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
         setState(() {
           _cameraLoading = true;
           _cameraError = null;
-          _cameraStalled = false;
-          _cameraStallReason = null;
-          _cameraStallSince = null;
         });
       }
       _cameraSourceKey = 'native-live:${widget.hostIp}:$_liveCameraName';
@@ -2445,9 +2376,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       setState(() {
         _cameraLoading = true;
         _cameraError = null;
-        _cameraStalled = false;
-        _cameraStallReason = null;
-        _cameraStallSince = null;
       });
     }
 
@@ -2467,9 +2395,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       setState(() {
         _cameraLoading = false;
         _cameraError = '카메라 로드 실패: $e';
-        _cameraStalled = false;
-        _cameraStallReason = null;
-        _cameraStallSince = null;
       });
     }
   }
@@ -2533,6 +2458,9 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     _cameraSuspendedByLifecycle = true;
     _backgroundUiResetDone = false;
     _stopAdaptiveCameraQualityLoop();
+    unawaited(
+      _setDisplayHighRefreshPreference(false, reason: 'drive_background'),
+    );
     _scheduleDelayedSidecarStop();
     _scheduleBackgroundUiReset();
   }
@@ -2545,6 +2473,9 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     debugPrint('[DriveCanvas][lifecycle] resume');
     _cameraSuspendedByLifecycle = false;
     unawaited(_lockLandscapeOrientations());
+    unawaited(
+      _setDisplayHighRefreshPreference(true, reason: 'drive_resume'),
+    );
     if (!_backgroundUiResetDone) {
       if (_openpilotOverlayMode) {
         _startAdaptiveCameraQualityLoop();
@@ -2558,7 +2489,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       }
       return;
     }
-    unawaited(_applyHudModeRuntimeWithDisableDmGate());
+    _applyHudModeRuntime();
   }
 
   void _scheduleSuspendForBackground() {
@@ -2624,9 +2555,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
         _nativeCameraViewId = null;
         _cameraLoading = false;
         _cameraError = null;
-        _cameraStalled = false;
-        _cameraStallReason = null;
-        _cameraStallSince = null;
       });
     }
   }
@@ -2738,6 +2666,10 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       snapshot.path.length,
       snapshot.laneLines.length,
       snapshot.roadEdges.length,
+      snapshot.navPathPoints.length,
+      snapshot.navTurnInfo,
+      (snapshot.navDistToTurn ?? -1.0).round(),
+      snapshot.navMainText,
       animBucket,
       _nativeOverlaySize.width.round(),
       _nativeOverlaySize.height.round(),
@@ -2781,6 +2713,14 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   }) async {
     if (!_openpilotOverlayMode) {
       await _clearNativeOverlay();
+      _lastNativeOverlaySignature = null;
+      _lastNativeOverlayHadPayload = false;
+      return;
+    }
+    if (!_debugShowArOverlay) {
+      if (_lastNativeOverlayHadPayload) {
+        await _clearNativeOverlay();
+      }
       _lastNativeOverlaySignature = null;
       _lastNativeOverlayHadPayload = false;
       return;
@@ -3038,18 +2978,12 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     }
     _lastCameraFrameId = frameId;
     _lastCameraFrameEventUs = _renderClock.elapsedMicroseconds;
-    if (mounted && (_cameraLoading || _cameraStalled)) {
+    if (mounted && _cameraLoading) {
       setState(() {
         _cameraLoading = false;
-        _cameraStalled = false;
-        _cameraStallReason = null;
-        _cameraStallSince = null;
       });
-    } else if (!mounted && (_cameraLoading || _cameraStalled)) {
+    } else if (!mounted && _cameraLoading) {
       _cameraLoading = false;
-      _cameraStalled = false;
-      _cameraStallReason = null;
-      _cameraStallSince = null;
     }
     _publishOverlaySynced();
     if (frameId % 60 == 0) {
@@ -3060,7 +2994,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   }
 
   void _startSidecarLoop() {
-    if (_disableDmGateBlocked || _disableDmGateChecking) return;
     _stopSidecarLoop(resetSession: false);
     _sidecarSession++;
     final session = _sidecarSession;
@@ -3137,16 +3070,10 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
           if (next) {
             _suppressCameraErrors = false;
             _cameraError = null;
-            _cameraStalled = false;
-            _cameraStallReason = null;
-            _cameraStallSince = null;
           } else if (_openpilotOverlayMode) {
             _suppressCameraErrors = true;
             _cameraError = null;
             _cameraLoading = false;
-            _cameraStalled = false;
-            _cameraStallReason = null;
-            _cameraStallSince = null;
           }
         });
       } else {
@@ -3154,16 +3081,10 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
         if (next) {
           _suppressCameraErrors = false;
           _cameraError = null;
-          _cameraStalled = false;
-          _cameraStallReason = null;
-          _cameraStallSince = null;
         } else if (_openpilotOverlayMode) {
           _suppressCameraErrors = true;
           _cameraError = null;
           _cameraLoading = false;
-          _cameraStalled = false;
-          _cameraStallReason = null;
-          _cameraStallSince = null;
         }
       }
       if (next) {
@@ -3182,7 +3103,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
           );
         }
       } else if (_openpilotOverlayMode && !_cameraSuspendedByLifecycle) {
-        _recordAdaptiveNetworkIssue('sidecar_ws_disconnected', severity: 3);
         _setSidecarPhase(
           _SidecarPhase.verifying,
           message: '사이드카 재연결을 시도합니다.',
@@ -3211,9 +3131,10 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     _DriveOverlaySnapshot snapshot,
   ) {
     var next = snapshot;
+    final previous = _latestOverlaySnapshot;
     final mergedOverlay2d = _mergeSidecarOverlay2dTrackVertices(
       current: next.sidecarOverlay2d,
-      previous: _latestOverlaySnapshot.sidecarOverlay2d,
+      previous: previous.sidecarOverlay2d,
     );
     if (!identical(mergedOverlay2d, next.sidecarOverlay2d)) {
       next = next.copyWith(sidecarOverlay2d: mergedOverlay2d);
@@ -3226,6 +3147,46 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     if (color == 14 || color == 19) color = 3;
     if (mode != next.pathMode || color != next.pathColor) {
       next = next.copyWith(pathMode: mode, pathColor: color);
+    }
+
+    final hasCurrentNavHint = next.navTurnInfo != 0 ||
+        (next.navDistToTurn != null && next.navDistToTurn! > 0.0) ||
+        next.navMainText.trim().isNotEmpty;
+    if (hasCurrentNavHint) {
+      var navPathPoints = next.navPathPoints;
+      var navTurnInfo = next.navTurnInfo;
+      var navDistToTurn = next.navDistToTurn;
+      var navMainText = next.navMainText;
+      var navChanged = false;
+
+      if (navPathPoints.length < 2 && previous.navPathPoints.length >= 2) {
+        navPathPoints = previous.navPathPoints;
+        navChanged = true;
+      }
+      if (navTurnInfo == 0 && previous.navTurnInfo != 0) {
+        navTurnInfo = previous.navTurnInfo;
+        navChanged = true;
+      }
+      if ((navDistToTurn == null || navDistToTurn <= 0.0) &&
+          previous.navDistToTurn != null &&
+          previous.navDistToTurn! > 0.0) {
+        navDistToTurn = previous.navDistToTurn;
+        navChanged = true;
+      }
+      if (navMainText.trim().isEmpty &&
+          previous.navMainText.trim().isNotEmpty) {
+        navMainText = previous.navMainText;
+        navChanged = true;
+      }
+
+      if (navChanged) {
+        next = next.copyWith(
+          navPathPoints: navPathPoints,
+          navTurnInfo: navTurnInfo,
+          navDistToTurn: navDistToTurn,
+          navMainText: navMainText,
+        );
+      }
     }
 
     return next;
@@ -3396,20 +3357,134 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     }
   }
 
+  String _cameraDiagTimestampForFileName(DateTime now) {
+    String two(int n) => n.toString().padLeft(2, '0');
+    String three(int n) => n.toString().padLeft(3, '0');
+    return '${now.year}${two(now.month)}${two(now.day)}_'
+        '${two(now.hour)}${two(now.minute)}${two(now.second)}_'
+        '${three(now.millisecond)}';
+  }
+
+  Future<Directory> _resolveCameraDiagDir() async {
+    try {
+      await StorageLayoutService.instance.ensureBaseFolders();
+      final preferred =
+          Directory('${StorageLayoutService.logsPath}/camera_errors');
+      if (!await preferred.exists()) {
+        await preferred.create(recursive: true);
+      }
+      return preferred;
+    } catch (_) {
+      final fallback =
+          Directory('${Directory.systemTemp.path}/carrotlink_camera_errors');
+      if (!await fallback.exists()) {
+        await fallback.create(recursive: true);
+      }
+      return fallback;
+    }
+  }
+
+  Future<void> _captureCameraErrorDiagnostics({
+    required String source,
+    required String reason,
+  }) async {
+    if (_cameraDiagCaptureInFlight) return;
+    final now = DateTime.now();
+    final last = _lastCameraDiagCapturedAt;
+    if (last != null && now.difference(last) < _cameraDiagCaptureCooldown) {
+      return;
+    }
+
+    _cameraDiagCaptureInFlight = true;
+    _lastCameraDiagCapturedAt = now;
+    try {
+      final ssh = _sshService ??
+          (mounted ? Provider.of<SSHService>(context, listen: false) : null);
+      final report = <String, dynamic>{
+        'timestamp': now.toIso8601String(),
+        'hostIp': widget.hostIp,
+        'source': source,
+        'reason': reason,
+        'modeTag': _modeTagLabel,
+        'openpilotOverlayMode': _openpilotOverlayMode,
+        'nativeCameraMode': _useNativeLiveCamera,
+        'liveCamera': _liveCameraName,
+        'cameraLoading': _cameraLoading,
+        'cameraError': _cameraError,
+        'sidecarConnected': _sidecarConnected,
+        'sidecarPhase': _sidecarPhase.name,
+      };
+
+      if (_openpilotOverlayMode) {
+        try {
+          report['sidecarHealth'] = await _sidecarGetJson('/health');
+        } catch (e) {
+          report['sidecarHealthError'] = e.toString();
+        }
+      } else {
+        report['sidecarHealth'] = 'skipped (webrtc_mode)';
+      }
+
+      String tmuxTail = 'ssh_not_connected';
+      if (ssh != null && ssh.isConnected) {
+        try {
+          final result = await ssh.executeCommandResult(
+            _cameraDiagTmuxTailCommand,
+            timeout: const Duration(seconds: 25),
+          );
+          tmuxTail = [
+            if (result.stdout.trim().isNotEmpty) result.stdout.trim(),
+            if (result.stderr.trim().isNotEmpty)
+              '\n[stderr]\n${result.stderr.trim()}',
+            if (result.stdout.trim().isEmpty && result.stderr.trim().isEmpty)
+              '(출력 없음)',
+          ].join('\n');
+          report['tmuxExitCode'] = result.exitCode;
+        } catch (e) {
+          tmuxTail = 'tmux_capture_failed: $e';
+        }
+
+        if (_openpilotOverlayMode) {
+          try {
+            report['sidecarStatusRaw'] = await _sidecarService.status(ssh);
+          } catch (e) {
+            report['sidecarStatusError'] = e.toString();
+          }
+        }
+      }
+
+      final dir = await _resolveCameraDiagDir();
+      final file = File(
+        '${dir.path}/camera_error_${_cameraDiagTimestampForFileName(now)}.log',
+      );
+      final pretty = const JsonEncoder.withIndent('  ').convert(report);
+      await file.writeAsString(
+        '''
+=== camera_error diagnostics ===
+$pretty
+
+=== tmux tail ===
+$tmuxTail
+''',
+      );
+      debugPrint(
+          '[DriveCanvas][diag] camera_error snapshot saved: ${file.path}');
+    } catch (e) {
+      debugPrint('[DriveCanvas][diag] camera_error snapshot failed: $e');
+    } finally {
+      _cameraDiagCaptureInFlight = false;
+    }
+  }
+
   String _adaptiveCameraQualityLabel(_AdaptiveCameraQualityMode mode) {
-    return mode == _AdaptiveCameraQualityMode.quality ? 'quality' : 'stable';
+    return 'low_latency';
   }
 
   void _resetAdaptiveCameraQualityState({bool resetMode = false}) {
     _adaptiveBadScore = 0;
-    _adaptiveLastSwitchAt = null;
-    _adaptiveStableSince = null;
-    _adaptiveStartupHoldUntil = null;
-    _adaptiveLastFrameCount = null;
-    _adaptiveLastDropCount = null;
     _adaptiveCameraQualitySynced = false;
     if (resetMode) {
-      _adaptiveCameraQualityMode = _AdaptiveCameraQualityMode.stable;
+      _adaptiveCameraQualityMode = _AdaptiveCameraQualityMode.lowLatency;
     }
   }
 
@@ -3417,12 +3492,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     _adaptiveCameraQualityTimer?.cancel();
     _adaptiveCameraQualityTimer = null;
     _resetAdaptiveCameraQualityState(resetMode: true);
-    _adaptiveStartupHoldUntil = DateTime.now().add(_adaptiveStartupStableHold);
-    _adaptiveStableSince = DateTime.now();
-    _adaptiveCameraQualityTimer = Timer.periodic(
-      const Duration(seconds: 2),
-      (_) => unawaited(_tickAdaptiveCameraQuality()),
-    );
     unawaited(
       _setAdaptiveCameraQualityMode(
         _adaptiveCameraQualityMode,
@@ -3440,19 +3509,18 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   }
 
   Future<void> _setAdaptiveCameraQualityMode(
-    _AdaptiveCameraQualityMode mode, {
+    _AdaptiveCameraQualityMode _, {
     required String reason,
     bool force = false,
   }) async {
     if (!_openpilotOverlayMode || _cameraSuspendedByLifecycle) return;
     if (_adaptiveCameraQualityBusy) return;
-    if (!force &&
-        _adaptiveCameraQualitySynced &&
-        mode == _adaptiveCameraQualityMode) {
+    if (!force && _adaptiveCameraQualitySynced) {
       return;
     }
     _adaptiveCameraQualityBusy = true;
-    final modeLabel = _adaptiveCameraQualityLabel(mode);
+    final modeLabel =
+        _adaptiveCameraQualityLabel(_AdaptiveCameraQualityMode.lowLatency);
     try {
       final response = await _sidecarPostJson(
         '/camera_quality',
@@ -3461,142 +3529,13 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       if (response['ok'] != true) {
         throw Exception(response['error']?.toString() ?? 'unknown error');
       }
-      _adaptiveCameraQualityMode = mode;
+      _adaptiveCameraQualityMode = _AdaptiveCameraQualityMode.lowLatency;
       _adaptiveCameraQualitySynced = true;
-      _adaptiveLastSwitchAt = DateTime.now();
-      if (mode == _AdaptiveCameraQualityMode.stable) {
-        _adaptiveStableSince = null;
-        _adaptiveStartupHoldUntil =
-            DateTime.now().add(_adaptiveStartupStableHold);
-      } else {
-        _adaptiveStableSince = DateTime.now();
-        _adaptiveStartupHoldUntil = null;
-      }
       _pushSidecarHistory('CAM_QUALITY', 'mode=$modeLabel reason=$reason');
     } catch (e) {
       _adaptiveCameraQualitySynced = false;
       _pushSidecarHistory(
           'CAM_QUALITY_FAIL', 'mode=$modeLabel reason=$reason $e');
-    } finally {
-      _adaptiveCameraQualityBusy = false;
-    }
-  }
-
-  void _recordAdaptiveNetworkIssue(String reason, {int severity = 1}) {
-    if (!_openpilotOverlayMode || _cameraSuspendedByLifecycle) return;
-    final step = severity.clamp(1, 4);
-    _adaptiveStableSince = null;
-    _adaptiveBadScore = (_adaptiveBadScore + step).clamp(0, 12);
-    if (_adaptiveCameraQualityMode == _AdaptiveCameraQualityMode.quality &&
-        _adaptiveBadScore >= 3) {
-      unawaited(
-        _setAdaptiveCameraQualityMode(
-          _AdaptiveCameraQualityMode.stable,
-          reason: reason,
-        ),
-      );
-    }
-  }
-
-  Future<void> _tickAdaptiveCameraQuality() async {
-    if (!_openpilotOverlayMode ||
-        _cameraSuspendedByLifecycle ||
-        !_sidecarConnected) {
-      return;
-    }
-    if (_adaptiveCameraQualityBusy) return;
-    _adaptiveCameraQualityBusy = true;
-    try {
-      final health = await _sidecarGetJson('/health');
-      final relayRaw = health['cameraRelay'];
-      if (relayRaw is! Map) return;
-      final relay = Map<String, dynamic>.from(relayRaw);
-      final camerasRaw = relay['cameras'];
-      if (camerasRaw is! Map) return;
-      final cameras = Map<String, dynamic>.from(camerasRaw);
-      final activeRaw = cameras[_liveCameraName];
-      if (activeRaw is! Map) return;
-      final active = Map<String, dynamic>.from(activeRaw);
-      final frameCount = _DriveOverlaySnapshot._asInt(active['frames']) ?? 0;
-      final dropCount = _DriveOverlaySnapshot._asInt(active['drops']) ?? 0;
-
-      var frameDelta = 0;
-      var dropDelta = 0;
-      if (_adaptiveLastFrameCount != null) {
-        frameDelta = frameCount - _adaptiveLastFrameCount!;
-      }
-      if (_adaptiveLastDropCount != null) {
-        dropDelta = dropCount - _adaptiveLastDropCount!;
-      }
-      _adaptiveLastFrameCount = frameCount;
-      _adaptiveLastDropCount = dropCount;
-
-      if (dropDelta > 0) {
-        _adaptiveBadScore = (_adaptiveBadScore + 2).clamp(0, 12);
-      } else if (frameDelta <= 0) {
-        _adaptiveBadScore = (_adaptiveBadScore + 1).clamp(0, 12);
-      } else {
-        _adaptiveBadScore = (_adaptiveBadScore - 1).clamp(0, 12);
-      }
-
-      final nowUs = _renderClock.elapsedMicroseconds;
-      final cameraEventStale = _lastCameraFrameEventUs <= 0 ||
-          (nowUs - _lastCameraFrameEventUs) > (_cameraFrameStaleUs * 2);
-      if (cameraEventStale) {
-        _adaptiveBadScore = (_adaptiveBadScore + 1).clamp(0, 12);
-      }
-
-      final goodSlice = frameDelta >= 8 && dropDelta <= 0 && !cameraEventStale;
-      if (goodSlice) {
-        _adaptiveStableSince ??= DateTime.now();
-      } else {
-        _adaptiveStableSince = null;
-      }
-
-      if (!_adaptiveCameraQualitySynced) {
-        final current = _adaptiveCameraQualityMode;
-        _adaptiveCameraQualityBusy = false;
-        await _setAdaptiveCameraQualityMode(
-          current,
-          reason: 'sync',
-          force: true,
-        );
-        return;
-      }
-
-      if (_adaptiveCameraQualityMode == _AdaptiveCameraQualityMode.quality &&
-          _adaptiveBadScore >= 3) {
-        _adaptiveCameraQualityBusy = false;
-        await _setAdaptiveCameraQualityMode(
-          _AdaptiveCameraQualityMode.stable,
-          reason: 'weak_network',
-        );
-        return;
-      }
-
-      if (_adaptiveCameraQualityMode == _AdaptiveCameraQualityMode.stable) {
-        final stableFor = (_adaptiveStableSince == null)
-            ? Duration.zero
-            : DateTime.now().difference(_adaptiveStableSince!);
-        final startupHoldDone = _adaptiveStartupHoldUntil == null ||
-            !DateTime.now().isBefore(_adaptiveStartupHoldUntil!);
-        final switchCooldown = _adaptiveLastSwitchAt == null ||
-            DateTime.now().difference(_adaptiveLastSwitchAt!) >=
-                const Duration(seconds: 12);
-        if (_adaptiveBadScore <= 0 &&
-            startupHoldDone &&
-            stableFor >= const Duration(seconds: 16) &&
-            switchCooldown) {
-          _adaptiveCameraQualityBusy = false;
-          await _setAdaptiveCameraQualityMode(
-            _AdaptiveCameraQualityMode.quality,
-            reason: 'network_recovered',
-          );
-          return;
-        }
-      }
-    } catch (_) {
-      // ignore transient probe errors
     } finally {
       _adaptiveCameraQualityBusy = false;
     }
@@ -4021,7 +3960,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
       'process=${jsonEncode(process)}',
       'health=${jsonEncode(health)}',
       'lastFrame=${_fmtClock(_sidecarLastFrameAt)} fps=${_overlayDebugFps.toStringAsFixed(1)} gap=${_overlayModelCameraGap ?? '-'} drops=$_overlayDropCount',
-      'toggles=path=$_debugShowPathFill lane=$_debugShowLaneLines edge=$_debugShowRoadEdge lead1=$_debugShowLead1 lead2=$_debugShowLead2 radarBadge=$_debugShowRadarBadge radarVector=$_debugShowRadarVector tf=$_debugShowStopDistanceTf state=$_debugShowStateText',
+      'toggles=ar=$_debugShowArOverlay path=$_debugShowPathFill lane=$_debugShowLaneLines edge=$_debugShowRoadEdge lead1=$_debugShowLead1 lead2=$_debugShowLead2 radarBadge=$_debugShowRadarBadge radarVector=$_debugShowRadarVector tf=$_debugShowStopDistanceTf state=$_debugShowStateText',
       'preview=mode=$_debugOverlayPreviewMode scenario=${_overlayPreviewScenarioLabel(_debugOverlayPreviewScenario)} speed=${_debugOverlayPreviewSpeed.toStringAsFixed(2)}x',
       if ((_sidecarProcessStatusError ?? '').trim().isNotEmpty)
         'error=${_sidecarProcessStatusError!.trim()}',
@@ -4293,7 +4232,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   Future<void> _ensureSidecarRuntime({String reason = 'auto'}) async {
     if (!_openpilotOverlayMode || _cameraSuspendedByLifecycle) return;
     if (_debugOverlayPreviewMode) return;
-    if (_disableDmGateBlocked || _disableDmGateChecking) return;
     if (_sidecarAutoManaging) return;
     _cancelDelayedSidecarStop();
     final ssh = _sshService ??
@@ -5296,6 +5234,36 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                                       ),
                                                     ),
                                                   ),
+                                                layerSwitch(
+                                                  'AR Overlay 표시',
+                                                  _debugShowArOverlay,
+                                                  layerToggleEnabled
+                                                      ? (value) {
+                                                          _onLayerToggleChanged(
+                                                            setLocalState,
+                                                            () =>
+                                                                _debugShowArOverlay =
+                                                                    value,
+                                                          );
+                                                          if (!value) {
+                                                            unawaited(
+                                                              _clearNativeOverlay(),
+                                                            );
+                                                          } else if (_useNativeOverlayRenderer) {
+                                                            unawaited(
+                                                              _pushNativeOverlay(
+                                                                _overlayNotifier
+                                                                    .value,
+                                                                force: true,
+                                                              ),
+                                                            );
+                                                          }
+                                                        }
+                                                      : null,
+                                                ),
+                                                const Divider(
+                                                    color: Colors.white12,
+                                                    height: 10),
                                                 const Align(
                                                   alignment:
                                                       Alignment.centerLeft,
@@ -5860,13 +5828,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   String? _cameraCenterNoticeMessage() {
     if (_debugOverlayPreviewMode) return null;
     if (!_hudModeLoaded) return 'HUD 모드 설정을 불러오는 중입니다.';
-    if (_openpilotOverlayMode && _disableDmGateChecking) {
-      return 'DisableDM 값을 확인하는 중입니다.';
-    }
-    if (_openpilotOverlayMode && _disableDmGateBlocked) {
-      // Keep the actionable bottom warning card instead of duplicating center text.
-      return null;
-    }
     if (_openpilotOverlayMode && !_sidecarConnected) {
       return '사이드카 연결 대기 중입니다.';
     }
@@ -5878,23 +5839,82 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
     if (notice != null && notice.isNotEmpty) {
       return notice;
     }
-    if (_cameraStalled) {
-      return _cameraStallBadgeText();
-    }
-    if (_openpilotOverlayMode && _sidecarConnected) {
-      final last = _sidecarLastFrameAt;
-      if (last == null) {
-        return '사이드카 프레임 대기 중입니다.';
-      }
-      final elapsedMs = DateTime.now().difference(last).inMilliseconds;
-      if (elapsedMs >= 2200) {
-        return '사이드카 프레임 지연 ${((elapsedMs / 1000.0)).toStringAsFixed(1)}s';
-      }
-    }
-    if (!_cameraLoading && _lastCameraFrameId == null) {
+    if (_openpilotOverlayMode &&
+        !_cameraLoading &&
+        _lastCameraFrameId == null) {
       return '로드카메라 프레임 대기 중입니다.';
     }
     return null;
+  }
+
+  Widget _buildDriveModeTag(UiWindowInfo window) {
+    final scheme = Theme.of(context).colorScheme;
+    final fontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 20.0,
+      UiWindowClass.medium => 22.0,
+      UiWindowClass.expanded => 23.0,
+      UiWindowClass.large || UiWindowClass.extraLarge => 24.0,
+    };
+    final horizontalPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 16.0,
+      UiWindowClass.medium => 18.0,
+      UiWindowClass.expanded => 20.0,
+      UiWindowClass.large || UiWindowClass.extraLarge => 22.0,
+    };
+    final verticalPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 8.0,
+      UiWindowClass.medium => 10.0,
+      UiWindowClass.expanded => 11.0,
+      UiWindowClass.large || UiWindowClass.extraLarge => 12.0,
+    };
+    final label = _modeTagLabel;
+    final isOpenpilot = label == 'openpilot';
+    final tagBorderColor = scheme.primary.withValues(
+      alpha: isOpenpilot ? 0.95 : 0.72,
+    );
+    final tagFillColor = isOpenpilot
+        ? scheme.primary.withValues(alpha: 0.24)
+        : Color.alphaBlend(
+            scheme.primary.withValues(alpha: 0.16),
+            scheme.surfaceContainerHighest.withValues(alpha: 0.72),
+          );
+    final tagTextColor =
+        isOpenpilot ? scheme.primary : scheme.onSurface.withValues(alpha: 0.94);
+
+    return IgnorePointer(
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: tagFillColor,
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(
+            color: tagBorderColor.withValues(alpha: 0.95),
+            width: 1.4,
+          ),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x4D000000),
+              blurRadius: 10,
+              offset: Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: horizontalPadding,
+            vertical: verticalPadding,
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: tagTextColor,
+              fontSize: fontSize,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.35,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   double _computePortraitHudHeight(
@@ -6006,42 +6026,45 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   double _computeLandscapeHudOverlaySize(UiWindowInfo window, Size drawSize) {
     final base = math.min(drawSize.width, drawSize.height);
     final ratio = switch (window.windowClass) {
-      UiWindowClass.compact => 0.36,
-      UiWindowClass.medium => 0.34,
-      UiWindowClass.expanded => 0.32,
-      UiWindowClass.large => 0.30,
-      UiWindowClass.extraLarge => 0.28,
+      UiWindowClass.compact => 0.33,
+      UiWindowClass.medium => 0.315,
+      UiWindowClass.expanded => 0.30,
+      UiWindowClass.large => 0.285,
+      UiWindowClass.extraLarge => 0.27,
     };
     final minSize = switch (window.windowClass) {
-      UiWindowClass.compact => 220.0,
-      UiWindowClass.medium => 240.0,
-      UiWindowClass.expanded => 260.0,
-      UiWindowClass.large => 280.0,
-      UiWindowClass.extraLarge => 300.0,
+      UiWindowClass.compact => 200.0,
+      UiWindowClass.medium => 220.0,
+      UiWindowClass.expanded => 240.0,
+      UiWindowClass.large => 260.0,
+      UiWindowClass.extraLarge => 280.0,
     };
     final maxSize = switch (window.windowClass) {
-      UiWindowClass.compact => 420.0,
-      UiWindowClass.medium => 440.0,
-      UiWindowClass.expanded => 470.0,
-      UiWindowClass.large => 500.0,
-      UiWindowClass.extraLarge => 540.0,
+      UiWindowClass.compact => 390.0,
+      UiWindowClass.medium => 410.0,
+      UiWindowClass.expanded => 440.0,
+      UiWindowClass.large => 470.0,
+      UiWindowClass.extraLarge => 500.0,
     };
-    final viewportCap = drawSize.height * 0.58;
+    final viewportCap = drawSize.height * 0.52;
     final upperBound = math.max(minSize, math.min(maxSize, viewportCap));
     return (base * ratio).clamp(minSize, upperBound).toDouble();
   }
 
   Widget _buildLandscapeHudOverlay(UiWindowInfo window, Size drawSize) {
     final size = _computeLandscapeHudOverlaySize(window, drawSize);
-    return SizedBox(
-      width: size,
-      height: size,
-      child: HomeHudPreviewCard(
-        deviceIp: widget.hostIp,
-        enabled: true,
-        fillParent: true,
-        key: ValueKey<String>(
-          'drive_hud_overlay_${window.windowClass.name}_${widget.hostIp}',
+    return Opacity(
+      opacity: 0.8,
+      child: SizedBox(
+        width: size,
+        height: size,
+        child: HomeHudPreviewCard(
+          deviceIp: widget.hostIp,
+          enabled: true,
+          fillParent: true,
+          key: ValueKey<String>(
+            'drive_hud_overlay_${window.windowClass.name}_${widget.hostIp}',
+          ),
         ),
       ),
     );
@@ -6318,49 +6341,21 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                               UiWindowClass.extraLarge =>
                                 13.0,
                             };
-                            final stallBadgePaddingH =
-                                switch (window.windowClass) {
-                              UiWindowClass.compact => 10.0,
-                              UiWindowClass.medium => 11.0,
-                              UiWindowClass.expanded => 12.0,
-                              UiWindowClass.large ||
-                              UiWindowClass.extraLarge =>
-                                13.0,
-                            };
-                            final stallBadgePaddingV =
-                                switch (window.windowClass) {
-                              UiWindowClass.compact => 6.0,
-                              UiWindowClass.medium => 7.0,
-                              UiWindowClass.expanded => 8.0,
-                              UiWindowClass.large ||
-                              UiWindowClass.extraLarge =>
-                                9.0,
-                            };
-                            final stallBadgeIconSize =
-                                switch (window.windowClass) {
-                              UiWindowClass.compact => 14.0,
-                              UiWindowClass.medium => 15.0,
-                              UiWindowClass.expanded => 16.0,
-                              UiWindowClass.large ||
-                              UiWindowClass.extraLarge =>
-                                17.0,
-                            };
-                            final stallBadgeFontSize =
-                                switch (window.windowClass) {
-                              UiWindowClass.compact => 11.0,
-                              UiWindowClass.medium => 11.5,
-                              UiWindowClass.expanded => 12.0,
-                              UiWindowClass.large ||
-                              UiWindowClass.extraLarge =>
-                                12.5,
-                            };
                             final centerNoticeMessage =
                                 _cameraCenterNoticeMessage();
                             final hasCenterNotice =
                                 centerNoticeMessage != null &&
                                     !_debugOverlayPreviewMode;
-                            final showBottomStatusBanners =
-                                !hasCenterNotice || _disableDmGateBlocked;
+                            final showBottomStatusBanners = !hasCenterNotice;
+                            final hudOverlayBottomInset =
+                                switch (window.windowClass) {
+                              UiWindowClass.compact => 64.0,
+                              UiWindowClass.medium => 66.0,
+                              UiWindowClass.expanded => 68.0,
+                              UiWindowClass.large ||
+                              UiWindowClass.extraLarge =>
+                                70.0,
+                            };
                             final drawSize = Size(drawW, drawH);
                             if ((_nativeOverlaySize.width - drawW).abs() >
                                     0.5 ||
@@ -6390,9 +6385,10 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                         Positioned.fill(
                                           child: _buildDriveCameraSurface(),
                                         ),
-                                        if ((_openpilotOverlayMode &&
-                                                !_useNativeOverlayRenderer) ||
-                                            _debugOverlayPreviewMode)
+                                        if (_debugShowArOverlay &&
+                                            ((_openpilotOverlayMode &&
+                                                    !_useNativeOverlayRenderer) ||
+                                                _debugOverlayPreviewMode))
                                           Positioned.fill(
                                             child: ValueListenableBuilder<
                                                 _DriveOverlaySnapshot>(
@@ -6439,7 +6435,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                             ),
                                           ),
                                         if (_cameraLoading &&
-                                            !_cameraStalled &&
                                             !_debugOverlayPreviewMode)
                                           const Positioned.fill(
                                             child: ColoredBox(
@@ -6502,87 +6497,20 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                       ],
                                     ),
                                   ),
+                                  Positioned(
+                                    top: overlayInset * 0.7,
+                                    right: overlayInset * 0.7,
+                                    child: _buildDriveModeTag(window),
+                                  ),
                                   if (isLandscapeLayout &&
                                       !hideHudForTinyViewport)
                                     Positioned(
                                       left: overlayInset,
-                                      bottom: (showBottomStatusBanners
-                                              ? 72.0
-                                              : 0.0) +
-                                          (overlayInset * 0.25),
+                                      bottom: hudOverlayBottomInset,
                                       child: IgnorePointer(
                                         child: _buildLandscapeHudOverlay(
                                           window,
                                           Size(vw, vh),
-                                        ),
-                                      ),
-                                    ),
-                                  if (_cameraStalled &&
-                                      !_debugOverlayPreviewMode &&
-                                      !hasCenterNotice)
-                                    Positioned(
-                                      top: overlayInset,
-                                      left: overlayInset,
-                                      right: overlayInset,
-                                      child: Align(
-                                        alignment: Alignment.topRight,
-                                        child: ConstrainedBox(
-                                          constraints: BoxConstraints(
-                                            maxWidth: math.min(
-                                              vw - (overlayInset * 2),
-                                              switch (window.windowClass) {
-                                                UiWindowClass.compact => 220.0,
-                                                UiWindowClass.medium => 260.0,
-                                                UiWindowClass.expanded => 320.0,
-                                                UiWindowClass.large ||
-                                                UiWindowClass.extraLarge =>
-                                                  380.0,
-                                              },
-                                            ),
-                                          ),
-                                          child: Container(
-                                            padding: EdgeInsets.symmetric(
-                                              horizontal: stallBadgePaddingH,
-                                              vertical: stallBadgePaddingV,
-                                            ),
-                                            decoration: BoxDecoration(
-                                              color: const Color(0xCC4A2E12),
-                                              borderRadius:
-                                                  BorderRadius.circular(
-                                                      statusBannerRadius),
-                                              border: Border.all(
-                                                color: const Color(0x88FFD27A),
-                                              ),
-                                            ),
-                                            child: Row(
-                                              children: [
-                                                Icon(
-                                                  Icons.network_check_rounded,
-                                                  color:
-                                                      const Color(0xFFFFD27A),
-                                                  size: stallBadgeIconSize,
-                                                ),
-                                                SizedBox(
-                                                    width: statusBannerGap),
-                                                Expanded(
-                                                  child: Text(
-                                                    _cameraStallBadgeText(),
-                                                    maxLines: 1,
-                                                    overflow:
-                                                        TextOverflow.ellipsis,
-                                                    style: TextStyle(
-                                                      color: const Color(
-                                                          0xFFFFE6B8),
-                                                      fontSize:
-                                                          stallBadgeFontSize,
-                                                      fontWeight:
-                                                          FontWeight.w600,
-                                                    ),
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                          ),
                                         ),
                                       ),
                                     ),
@@ -6738,84 +6666,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                                       ),
                                     )
                                   else if (showBottomStatusBanners &&
-                                      _disableDmGateChecking &&
-                                      !_debugOverlayPreviewMode)
-                                    Positioned(
-                                      left: overlayInset,
-                                      right: overlayInset,
-                                      bottom: overlayBottomInset,
-                                      child: Container(
-                                        padding:
-                                            EdgeInsets.all(statusAlertPadding),
-                                        decoration: BoxDecoration(
-                                          color: const Color(0xCC1F1712),
-                                          borderRadius: BorderRadius.circular(
-                                              statusBannerRadius),
-                                          border:
-                                              Border.all(color: Colors.white24),
-                                        ),
-                                        child: Text(
-                                          'DisableDM 값 확인 중...',
-                                          style: TextStyle(
-                                            color: Colors.white,
-                                            fontSize: statusBannerBodyFont,
-                                          ),
-                                        ),
-                                      ),
-                                    )
-                                  else if (showBottomStatusBanners &&
-                                      _disableDmGateBlocked &&
-                                      !_debugOverlayPreviewMode)
-                                    Positioned(
-                                      left: overlayInset,
-                                      right: overlayInset,
-                                      bottom: overlayBottomInset,
-                                      child: Container(
-                                        padding:
-                                            EdgeInsets.all(statusAlertPadding),
-                                        decoration: BoxDecoration(
-                                          color: const Color(0xCC7A1010),
-                                          borderRadius: BorderRadius.circular(
-                                              statusBannerRadius),
-                                          border:
-                                              Border.all(color: Colors.white24),
-                                        ),
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              '오픈파일럿 그래픽 모드는 DisableDM=2가 필요합니다. '
-                                              '(현재: ${(_disableDmCurrentValue ?? '').trim().isEmpty ? '확인 불가' : _disableDmCurrentValue})',
-                                              style: const TextStyle(
-                                                color: Colors.white,
-                                              ),
-                                            ),
-                                            SizedBox(
-                                                height: statusBannerGap + 2),
-                                            Wrap(
-                                              spacing: statusBannerGap + 2,
-                                              runSpacing: statusBannerGap + 2,
-                                              children: [
-                                                FilledButton.tonal(
-                                                  onPressed: () async {
-                                                    await _openDisableDmSettingsFromDrive();
-                                                    if (!mounted) return;
-                                                    await _applyHudModeRuntimeWithDisableDmGate();
-                                                  },
-                                                  child: const Text('설정으로 이동'),
-                                                ),
-                                                OutlinedButton(
-                                                  onPressed: _exitScreen,
-                                                  child: const Text('닫기'),
-                                                ),
-                                              ],
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    )
-                                  else if (showBottomStatusBanners &&
                                       _cameraError != null &&
                                       !_debugOverlayPreviewMode)
                                     Positioned(
@@ -6936,14 +6786,11 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
                 };
                 final hasCenterNotice = _cameraCenterNoticeMessage() != null &&
                     !_debugOverlayPreviewMode;
-                final hasBottomStatusBanner =
-                    (!hasCenterNotice || _disableDmGateBlocked) &&
-                        (_showSidecarStatusBanner ||
-                            !_hudModeLoaded ||
-                            _disableDmGateChecking ||
-                            _disableDmGateBlocked ||
-                            (_cameraError?.isNotEmpty ?? false) ||
-                            _hudNoticeMessage != null);
+                final hasBottomStatusBanner = !hasCenterNotice &&
+                    (_showSidecarStatusBanner ||
+                        !_hudModeLoaded ||
+                        (_cameraError?.isNotEmpty ?? false) ||
+                        _hudNoticeMessage != null);
                 final fabBottom =
                     hasBottomStatusBanner ? (fabInset + 72.0) : fabInset;
                 final debugFab = FloatingActionButton.small(
@@ -7129,6 +6976,10 @@ class _DriveOverlaySnapshot {
   final bool usingLateralPath;
   final double modelPathXMax;
   final double lateralPathXMax;
+  final List<_NavPathPoint> navPathPoints;
+  final int navTurnInfo;
+  final double? navDistToTurn;
+  final String navMainText;
 
   const _DriveOverlaySnapshot({
     required this.path,
@@ -7159,6 +7010,10 @@ class _DriveOverlaySnapshot {
     required this.usingLateralPath,
     required this.modelPathXMax,
     required this.lateralPathXMax,
+    required this.navPathPoints,
+    required this.navTurnInfo,
+    required this.navDistToTurn,
+    required this.navMainText,
   });
 
   const _DriveOverlaySnapshot.empty()
@@ -7189,7 +7044,11 @@ class _DriveOverlaySnapshot {
         sidecarOverlay2d = null,
         usingLateralPath = false,
         modelPathXMax = 0.0,
-        lateralPathXMax = 0.0;
+        lateralPathXMax = 0.0,
+        navPathPoints = const <_NavPathPoint>[],
+        navTurnInfo = 0,
+        navDistToTurn = null,
+        navMainText = '';
 
   _DriveOverlaySnapshot copyWith({
     int? pathMode,
@@ -7199,6 +7058,10 @@ class _DriveOverlaySnapshot {
     double? pathOffsetZ,
     double? animationPhase,
     Map<String, dynamic>? sidecarOverlay2d,
+    List<_NavPathPoint>? navPathPoints,
+    int? navTurnInfo,
+    double? navDistToTurn,
+    String? navMainText,
   }) {
     final phase = animationPhase ?? this.animationPhase;
     return _DriveOverlaySnapshot(
@@ -7230,6 +7093,10 @@ class _DriveOverlaySnapshot {
       usingLateralPath: usingLateralPath,
       modelPathXMax: modelPathXMax,
       lateralPathXMax: lateralPathXMax,
+      navPathPoints: navPathPoints ?? this.navPathPoints,
+      navTurnInfo: navTurnInfo ?? this.navTurnInfo,
+      navDistToTurn: navDistToTurn ?? this.navDistToTurn,
+      navMainText: navMainText ?? this.navMainText,
     );
   }
 
@@ -7254,6 +7121,89 @@ class _DriveOverlaySnapshot {
       if (d != null) out.add(d);
     }
     return out;
+  }
+
+  static List<_NavPathPoint> _parseNaviPathPoints(dynamic raw) {
+    if (raw is! String) return const <_NavPathPoint>[];
+    final text = raw.trim();
+    if (text.isEmpty) return const <_NavPathPoint>[];
+    final out = <_NavPathPoint>[];
+    for (final token in text.split(';')) {
+      final part = token.trim();
+      if (part.isEmpty) continue;
+      final xyz = part.split(',');
+      if (xyz.length != 3) continue;
+      final x = _asDouble(xyz[0]);
+      final y = _asDouble(xyz[1]);
+      final d = _asDouble(xyz[2]);
+      if (x == null || y == null || d == null) continue;
+      if (!x.isFinite || !y.isFinite || !d.isFinite) continue;
+      out.add(_NavPathPoint(x: x, y: y, d: d));
+      if (out.length >= 200) break;
+    }
+    if (out.length <= 1) return const <_NavPathPoint>[];
+    out.sort((a, b) => a.d.compareTo(b.d));
+    return out;
+  }
+
+  static int _turnInfoFromNavInstruction({
+    required String maneuverType,
+    required String maneuverModifier,
+    required String fallbackText,
+  }) {
+    final type = maneuverType.trim().toLowerCase();
+    final modifier = maneuverModifier.trim().toLowerCase();
+    final fallback = fallbackText.trim().toLowerCase();
+
+    bool containsAny(String source, List<String> needles) {
+      for (final n in needles) {
+        if (source.contains(n)) return true;
+      }
+      return false;
+    }
+
+    final isArrival =
+        containsAny(type, const <String>['arrive', 'destination']) ||
+            containsAny(fallback, const <String>['도착']);
+    if (isArrival) return 8;
+
+    final isUturn =
+        containsAny(type, const <String>['uturn', 'u-turn', 'u turn']) ||
+            containsAny(fallback, const <String>['유턴']);
+    if (isUturn) return 7;
+
+    final isLeft = containsAny(modifier, const <String>['left']) ||
+        containsAny(fallback, const <String>['좌']);
+    final isRight = containsAny(modifier, const <String>['right']) ||
+        containsAny(fallback, const <String>['우']);
+
+    final isLaneLike = containsAny(type, const <String>[
+      'fork',
+      'merge',
+      'ramp',
+      'onramp',
+      'offramp',
+      'change lane',
+    ]);
+    if (isLaneLike) {
+      if (isLeft) return 3;
+      if (isRight) return 4;
+    }
+
+    final isTurnLike = containsAny(type, const <String>[
+      'turn',
+      'roundabout',
+      'exit roundabout',
+      'continue',
+    ]);
+    if (isTurnLike) {
+      if (isLeft) return 1;
+      if (isRight) return 2;
+    }
+
+    if (containsAny(fallback, const <String>['좌회전'])) return 1;
+    if (containsAny(fallback, const <String>['우회전'])) return 2;
+    return 0;
   }
 
   static double _maxFinite(List<double> values) {
@@ -7370,6 +7320,10 @@ class _DriveOverlaySnapshot {
       usingLateralPath: tt < 0.5 ? from.usingLateralPath : to.usingLateralPath,
       modelPathXMax: _lerp(from.modelPathXMax, to.modelPathXMax, tt),
       lateralPathXMax: _lerp(from.lateralPathXMax, to.lateralPathXMax, tt),
+      navPathPoints: tt < 0.5 ? from.navPathPoints : to.navPathPoints,
+      navTurnInfo: tt < 0.5 ? from.navTurnInfo : to.navTurnInfo,
+      navDistToTurn: tt < 0.5 ? from.navDistToTurn : to.navDistToTurn,
+      navMainText: tt < 0.5 ? from.navMainText : to.navMainText,
     );
   }
 
@@ -7386,10 +7340,56 @@ class _DriveOverlaySnapshot {
     final roadCameraState = payload['roadCameraState'];
     final wideRoadCameraState = payload['wideRoadCameraState'];
     final modelV2 = payload['modelV2'];
+    final carrotMan = payload['carrotMan'];
+    final navInstructionCarrot = payload['navInstructionCarrot'];
     final overlay2dRaw = payload['overlay2d'];
     Map<String, dynamic>? sidecarOverlay2d;
     if (overlay2dRaw is Map) {
       sidecarOverlay2d = Map<String, dynamic>.from(overlay2dRaw);
+    }
+
+    var navPathPoints = const <_NavPathPoint>[];
+    var navTurnInfo = 0;
+    double? navDistToTurn;
+    var navMainText = '';
+    if (carrotMan is Map) {
+      navPathPoints = _parseNaviPathPoints(carrotMan['naviPaths']);
+      navTurnInfo = _asInt(carrotMan['xTurnInfo']) ?? 0;
+      navDistToTurn = _asDouble(carrotMan['xDistToTurn']);
+      navMainText = (carrotMan['szTBTMainText']?.toString() ?? '').trim();
+    }
+    if (navInstructionCarrot is Map) {
+      final instructionPrimary =
+          (navInstructionCarrot['maneuverPrimaryText']?.toString() ?? '')
+              .trim();
+      final instructionType =
+          (navInstructionCarrot['maneuverType']?.toString() ?? '').trim();
+      final instructionModifier =
+          (navInstructionCarrot['maneuverModifier']?.toString() ?? '').trim();
+      final maneuverDistance =
+          _asDouble(navInstructionCarrot['maneuverDistance']);
+      final remainingDistance =
+          _asDouble(navInstructionCarrot['distanceRemaining']);
+      final candidateDistance =
+          (maneuverDistance != null && maneuverDistance > 0.0)
+              ? maneuverDistance
+              : ((remainingDistance != null && remainingDistance > 0.0)
+                  ? remainingDistance
+                  : null);
+      if ((navDistToTurn == null || navDistToTurn <= 0.0) &&
+          candidateDistance != null) {
+        navDistToTurn = candidateDistance;
+      }
+      if (navMainText.isEmpty && instructionPrimary.isNotEmpty) {
+        navMainText = instructionPrimary;
+      }
+      if (navTurnInfo == 0) {
+        navTurnInfo = _turnInfoFromNavInstruction(
+          maneuverType: instructionType,
+          maneuverModifier: instructionModifier,
+          fallbackText: navMainText,
+        );
+      }
     }
 
     double? speedMps;
@@ -7708,6 +7708,10 @@ class _DriveOverlaySnapshot {
       usingLateralPath: canUseLateralPath,
       modelPathXMax: modelPathXMax,
       lateralPathXMax: lateralPathXMax,
+      navPathPoints: navPathPoints,
+      navTurnInfo: navTurnInfo,
+      navDistToTurn: navDistToTurn,
+      navMainText: navMainText,
     );
   }
 }
@@ -7750,6 +7754,18 @@ class _RoadEdgeSeries {
   const _RoadEdgeSeries({
     required this.line,
     required this.std,
+  });
+}
+
+class _NavPathPoint {
+  final double x;
+  final double y;
+  final double d;
+
+  const _NavPathPoint({
+    required this.x,
+    required this.y,
+    required this.d,
   });
 }
 
@@ -8886,6 +8902,7 @@ class _DriveOverlayPainter extends CustomPainter {
   Map<String, dynamic>? _buildNativeOverlayPayloadFromSidecar2d(Size size) {
     final cam = _currentCameraOverlay2d();
     if (cam == null) return null;
+    final transform = _buildTransform(size);
     final sourceWidth =
         _DriveOverlaySnapshot._asDouble(cam['sourceWidth']) ?? _baseSourceWidth;
     final sourceHeight = _DriveOverlaySnapshot._asDouble(cam['sourceHeight']) ??
@@ -8982,7 +8999,6 @@ class _DriveOverlayPainter extends CustomPainter {
       displayTransform: displayTransform,
     );
     if (trackVertices.length < 3 && snapshot.path.length >= 2) {
-      final transform = _buildTransform(size);
       final modelMax = snapshot.path.x.isNotEmpty ? snapshot.path.x.last : 0.0;
       final maxDistance = modelMax.clamp(10.0, 100.0);
       final widthApply = _pathHalfWidthByMode(
@@ -9028,6 +9044,12 @@ class _DriveOverlayPainter extends CustomPainter {
       showRadarVector: showRadarVector,
       showStopDistanceTf: showStopDistanceTf,
       showStateText: showStateText,
+    );
+    _appendNavArOverlayPolygons(
+      polygons: polygons,
+      labels: labels,
+      transform: transform,
+      canvasSize: size,
     );
 
     if (showDebugGuides) {
@@ -9153,6 +9175,14 @@ class _DriveOverlayPainter extends CustomPainter {
         brakeLights,
       );
     }
+    labels ??= <Map<String, dynamic>>[];
+    _appendNavArOverlayPolygons(
+      polygons: polygons,
+      labels: labels,
+      transform: transform,
+      canvasSize: size,
+    );
+    if (labels.isEmpty) labels = null;
 
     if (showDebugGuides) {
       _appendDebugGuidePolygons(
@@ -9710,6 +9740,266 @@ class _DriveOverlayPainter extends CustomPainter {
       color: textColor,
       size: fontSize,
       centered: true,
+    );
+  }
+
+  String _navTurnText(int turnInfo, String fallbackText) {
+    final fallback = fallbackText.trim();
+    if (fallback.isNotEmpty) return fallback;
+    switch (turnInfo) {
+      case 1:
+        return '좌회전';
+      case 2:
+        return '우회전';
+      case 3:
+        return '좌차선 변경';
+      case 4:
+        return '우차선 변경';
+      case 7:
+        return '유턴';
+      case 8:
+        return '도착';
+      default:
+        return '';
+    }
+  }
+
+  String _formatNavDistance(double? distanceMeters) {
+    if (distanceMeters == null ||
+        !distanceMeters.isFinite ||
+        distanceMeters <= 0) {
+      return '';
+    }
+    if (distanceMeters >= 1000.0) {
+      return '${(distanceMeters / 1000.0).toStringAsFixed(1)}km';
+    }
+    return '${distanceMeters.round()}m';
+  }
+
+  List<Offset> _arrowHeadVertices(Offset center, double angle, double size) {
+    final forward = Offset(math.cos(angle), math.sin(angle));
+    final side = Offset(-forward.dy, forward.dx);
+    final tip = Offset(
+      center.dx + (forward.dx * size),
+      center.dy + (forward.dy * size),
+    );
+    final rear = Offset(
+      center.dx - (forward.dx * size * 0.92),
+      center.dy - (forward.dy * size * 0.92),
+    );
+    final left = Offset(
+      rear.dx + (side.dx * size * 0.70),
+      rear.dy + (side.dy * size * 0.70),
+    );
+    final right = Offset(
+      rear.dx - (side.dx * size * 0.70),
+      rear.dy - (side.dy * size * 0.70),
+    );
+    final inner = Offset(
+      center.dx - (forward.dx * size * 0.16),
+      center.dy - (forward.dy * size * 0.16),
+    );
+    return <Offset>[left, tip, right, inner];
+  }
+
+  void _appendNavArOverlayPolygons({
+    required List<Map<String, dynamic>> polygons,
+    required List<Map<String, dynamic>> labels,
+    required _ProjectionTransform transform,
+    required Size canvasSize,
+  }) {
+    if (cameraKind != _DriveCameraKind.road) return;
+
+    // Road-camera AR tuning knobs:
+    // - distanceScale: perspective depth scaling for nav path/chevrons
+    // - pathVerticalOffsetPx: vertical offset applied to projected nav path
+    // - gateVerticalOffsetPx: additional vertical offset for turn board
+    const distanceScale = 0.92;
+    final pathVerticalOffsetPx = canvasSize.height * 0.018;
+    final gateVerticalOffsetPx = -(canvasSize.height * 0.028);
+
+    final navPath = snapshot.navPathPoints;
+    final hasTurnText = snapshot.navMainText.trim().isNotEmpty;
+    final hasTurnInfo = snapshot.navTurnInfo != 0 || hasTurnText;
+    if (navPath.length < 2 && !hasTurnInfo) return;
+
+    final laneBaseLine = snapshot.laneLines.length > 2
+        ? snapshot.laneLines[2].line
+        : (snapshot.laneLines.isNotEmpty
+            ? snapshot.laneLines.first.line
+            : null);
+    final laneX = laneBaseLine?.x ?? snapshot.path.x;
+    final laneZ = laneBaseLine?.z ?? snapshot.path.z;
+    final zOffset = snapshot.pathOffsetZ.isFinite ? snapshot.pathOffsetZ : 1.22;
+
+    final projected = <Offset>[];
+    final projectedDist = <double>[];
+    for (final p in navPath) {
+      if (!p.x.isFinite || !p.y.isFinite || !p.d.isFinite) continue;
+      if (p.x < 2.0 || p.x > 140.0) continue;
+      final sampleDist = (p.d > 0 ? p.d : p.x) * distanceScale;
+      var z = 0.0;
+      if (laneX.isNotEmpty && laneZ.isNotEmpty) {
+        final idx = _getPathLengthIdx(laneX, sampleDist);
+        if (laneZ.isNotEmpty) {
+          final zi = idx.clamp(0, laneZ.length - 1);
+          z = laneZ[zi];
+        }
+      }
+      Offset? out;
+      final ok = _mapToScreen(
+        transform,
+        ((p.x < 3.0 ? 5.0 : p.x) * distanceScale).clamp(2.0, 140.0),
+        p.y,
+        z + zOffset,
+        (pt) => out = pt,
+      );
+      if (!ok || out == null) continue;
+      final o = Offset(out!.dx, out!.dy + pathVerticalOffsetPx);
+      if (o.dx < -60.0 ||
+          o.dx > canvasSize.width + 60.0 ||
+          o.dy < -60.0 ||
+          o.dy > canvasSize.height + 60.0) {
+        continue;
+      }
+      projected.add(o);
+      projectedDist.add(sampleDist);
+      if (projected.length >= 90) break;
+    }
+
+    if (projected.length >= 2) {
+      final segmentStep = math.max(1, (projected.length / 34).floor());
+      for (var i = 0; i + segmentStep < projected.length; i += segmentStep) {
+        final a = projected[i];
+        final b = projected[i + segmentStep];
+        final t = i / math.max(1, projected.length - 1);
+        final glowWidth = (11.0 - (t * 4.5)).clamp(4.8, 11.0);
+        final coreWidth = (5.6 - (t * 2.2)).clamp(2.4, 5.6);
+        polygons.add(
+          _encodePolygon(
+            _lineQuadVertices(a, b, glowWidth),
+            const Color(0x5535FF84),
+          ),
+        );
+        polygons.add(
+          _encodePolygon(
+            _lineQuadVertices(a, b, coreWidth),
+            const Color(0xCC2EEA6A),
+          ),
+        );
+      }
+
+      final chevronCount = math.min(3, projected.length - 1);
+      final chevronSize = (canvasSize.width * 0.013).clamp(8.0, 14.0);
+      for (var c = 0; c < chevronCount; c++) {
+        final idx = (((c + 1) * (projected.length - 2)) / (chevronCount + 1))
+            .round()
+            .clamp(0, projected.length - 2);
+        final a = projected[idx];
+        final b = projected[idx + 1];
+        final dir = b - a;
+        final len = dir.distance;
+        if (!len.isFinite || len <= 1.0) continue;
+        final center = Offset(
+          a.dx + (dir.dx * 0.35),
+          a.dy + (dir.dy * 0.35),
+        );
+        final angle = math.atan2(dir.dy, dir.dx);
+        polygons.add(
+          _encodePolygon(
+            _arrowHeadVertices(center, angle, chevronSize),
+            const Color(0xCC244CFF),
+            strokeColor: const Color(0xCCFFFFFF),
+            strokeWidth: 1.4,
+          ),
+        );
+      }
+    }
+
+    final turnText = _navTurnText(snapshot.navTurnInfo, snapshot.navMainText);
+    final turnDistText = _formatNavDistance(snapshot.navDistToTurn);
+    final gateText = turnText.isEmpty
+        ? ''
+        : (turnDistText.isEmpty ? turnText : '$turnDistText 후 $turnText');
+
+    if (gateText.isNotEmpty) {
+      Offset gateAnchor;
+      if (projected.isNotEmpty) {
+        var anchorIdx = -1;
+        for (var i = 0; i < projected.length; i++) {
+          final d = i < projectedDist.length ? projectedDist[i] : 0.0;
+          if (d >= 14.0 && d <= 38.0) {
+            anchorIdx = i;
+            break;
+          }
+        }
+        if (anchorIdx < 0) anchorIdx = projected.length ~/ 2;
+        gateAnchor = projected[anchorIdx];
+      } else {
+        gateAnchor = Offset(canvasSize.width * 0.5, canvasSize.height * 0.28);
+      }
+
+      final fontSize = (canvasSize.width * 0.017).clamp(13.0, 20.0);
+      final boardWidth = math
+          .min(
+            canvasSize.width * 0.66,
+            math.max(170.0, (gateText.length * fontSize * 0.58) + 38.0),
+          )
+          .toDouble();
+      final boardHeight = (fontSize * 2.2).clamp(46.0, 74.0);
+      final left = (gateAnchor.dx - (boardWidth * 0.5))
+          .clamp(12.0, canvasSize.width - boardWidth - 12.0);
+      final top = (gateAnchor.dy -
+              boardHeight -
+              (fontSize * 1.8) +
+              gateVerticalOffsetPx)
+          .clamp(12.0, canvasSize.height - boardHeight - 20.0);
+      final gateRect = Rect.fromLTWH(left, top, boardWidth, boardHeight);
+
+      polygons.add(
+        _encodePolygon(
+          _roundedRectVertices(gateRect, radius: 14.0, segmentsPerCorner: 5),
+          const Color(0xE617A84B),
+          strokeColor: const Color(0xCCFFFFFF),
+          strokeWidth: 1.4,
+        ),
+      );
+      _appendOverlayLabel(
+        labels,
+        anchor:
+            Offset(gateRect.center.dx, gateRect.center.dy + (fontSize * 0.22)),
+        text: gateText,
+        color: Colors.white,
+        size: fontSize,
+        centered: true,
+      );
+    }
+
+    String statusText;
+    Color statusFill;
+    if (snapshot.navTurnInfo == 8 ||
+        turnText.contains('도착') ||
+        snapshot.navMainText.contains('도착')) {
+      statusText = '도착 임박';
+      statusFill = const Color(0xE617A84B);
+    } else if (projected.length >= 2) {
+      statusText = '정상 경로';
+      statusFill = const Color(0xE617A84B);
+    } else {
+      statusText = '경로 탐색 중';
+      statusFill = const Color(0xD9A36800);
+    }
+    _appendBadge(
+      polygons,
+      labels,
+      center: Offset(canvasSize.width * 0.5, canvasSize.height - 58.0),
+      text: statusText,
+      fillColor: statusFill,
+      textColor: Colors.white,
+      strokeColor: const Color(0xB3FFFFFF),
+      fontSize: (canvasSize.width * 0.012).clamp(12.0, 16.0),
+      minWidth: 132.0,
+      height: 36.0,
     );
   }
 
@@ -10424,6 +10714,7 @@ class _DriveOverlayPainter extends CustomPainter {
 
   void _drawEncodedOverlayPayload(
     Canvas canvas,
+    Size canvasSize,
     Map<String, dynamic> payload,
   ) {
     final polygonsRaw = payload['polygons'];
@@ -10486,7 +10777,8 @@ class _DriveOverlayPainter extends CustomPainter {
           fontWeight: FontWeight.w700,
         ),
       );
-      tp.layout(maxWidth: 360.0);
+      final labelMaxWidth = (canvasSize.width * 0.42).clamp(140.0, 760.0);
+      tp.layout(maxWidth: labelMaxWidth.toDouble());
       final paintOffset = centered
           ? Offset(dx - (tp.width * 0.5), dy - (tp.height * 0.5))
           : Offset(dx, dy - tp.height);
@@ -10501,7 +10793,7 @@ class _DriveOverlayPainter extends CustomPainter {
   ) {
     final sidecarPayload = _buildNativeOverlayPayloadFromSidecar2d(size);
     if (sidecarPayload != null) {
-      _drawEncodedOverlayPayload(canvas, sidecarPayload);
+      _drawEncodedOverlayPayload(canvas, size, sidecarPayload);
       return;
     }
     if (snapshot.path.length < 2) return;
@@ -10589,6 +10881,24 @@ class _DriveOverlayPainter extends CustomPainter {
     );
     if (showPathFill && trackVertices != null) {
       _drawPathByMode(canvas, trackVertices);
+    }
+    final navPolygons = <Map<String, dynamic>>[];
+    final navLabels = <Map<String, dynamic>>[];
+    _appendNavArOverlayPolygons(
+      polygons: navPolygons,
+      labels: navLabels,
+      transform: transform,
+      canvasSize: size,
+    );
+    if (navPolygons.isNotEmpty || navLabels.isNotEmpty) {
+      _drawEncodedOverlayPayload(
+        canvas,
+        size,
+        <String, dynamic>{
+          'polygons': navPolygons,
+          if (navLabels.isNotEmpty) 'labels': navLabels,
+        },
+      );
     }
     if (showDebugGuides) {
       _drawDebugGuides(

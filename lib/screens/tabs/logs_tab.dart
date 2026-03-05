@@ -1968,6 +1968,7 @@ class _RemoteVideoLogsViewState extends State<_RemoteVideoLogsView> {
   Widget build(BuildContext context) {
     final window = UiWindowInfo.of(context);
     final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
     final listHorizontalPadding = window.isCompact
         ? 12.0
         : tokens.screenPadding.clamp(12.0, 24.0).toDouble();
@@ -2025,32 +2026,46 @@ class _RemoteVideoLogsViewState extends State<_RemoteVideoLogsView> {
                                     SizedBox(height: listGap),
                                 itemBuilder: (context, index) {
                                   final video = _videos[index];
-                                  return ListTile(
-                                    dense: true,
-                                    contentPadding: EdgeInsets.symmetric(
-                                      horizontal: tileHorizontalPadding,
-                                      vertical: 2,
-                                    ),
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(10),
-                                      side: BorderSide(
-                                          color: Colors.grey
-                                              .withValues(alpha: 0.2)),
-                                    ),
-                                    leading:
-                                        const Icon(Icons.play_circle_outline),
-                                    title: Text(
-                                      video.filename,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                    subtitle: Text(
-                                      _formatSize(video.attr.size ?? 0),
-                                      style: TextStyle(
-                                        fontSize: videoSubtitleFontSize,
+                                  return Material(
+                                    color: scheme.surfaceContainerHigh,
+                                    borderRadius: BorderRadius.circular(10),
+                                    clipBehavior: Clip.antiAlias,
+                                    child: InkWell(
+                                      onTap: () => _playVideo(video),
+                                      child: Container(
+                                        decoration: BoxDecoration(
+                                          borderRadius:
+                                              BorderRadius.circular(10),
+                                          border: Border.all(
+                                            color: scheme.outlineVariant
+                                                .withValues(
+                                              alpha: 0.45,
+                                            ),
+                                          ),
+                                        ),
+                                        child: ListTile(
+                                          dense: true,
+                                          contentPadding: EdgeInsets.symmetric(
+                                            horizontal: tileHorizontalPadding,
+                                            vertical: 2,
+                                          ),
+                                          leading: const Icon(
+                                            Icons.play_circle_outline,
+                                          ),
+                                          title: Text(
+                                            video.filename,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                          subtitle: Text(
+                                            _formatSize(video.attr.size ?? 0),
+                                            style: TextStyle(
+                                              fontSize: videoSubtitleFontSize,
+                                            ),
+                                          ),
+                                        ),
                                       ),
                                     ),
-                                    onTap: () => _playVideo(video),
                                   );
                                 },
                               ),
@@ -2412,57 +2427,68 @@ fi
         _LogsSubHeader(
           title: 'TMUX 로그',
           description: 'comma 세션 실시간 로그를 확인합니다. (${_isLive ? "ON" : "OFF"})',
-          trailing: PopupMenuButton<String>(
-            tooltip: "메뉴",
-            icon: const Icon(Icons.more_vert),
-            onSelected: (value) {
-              unawaited(_handleMenuAction(value));
-            },
-            itemBuilder: (context) => [
-              PopupMenuItem<String>(
-                value: 'toggle_live',
-                child: Row(
-                  children: [
-                    Icon(
-                      _isLive ? Icons.pause_circle_outline : Icons.play_arrow,
-                      size: 18,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(_isLive ? '실시간 갱신 끄기' : '실시간 갱신 켜기'),
-                  ],
-                ),
+          trailing: SizedBox(
+            width: 36,
+            height: 36,
+            child: PopupMenuButton<String>(
+              tooltip: "메뉴",
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(
+                minWidth: 36,
+                minHeight: 36,
               ),
-              const PopupMenuItem<String>(
-                value: 'refresh',
-                child: Row(
-                  children: [
-                    Icon(Icons.refresh, size: 18),
-                    SizedBox(width: 8),
-                    Text('새로고침'),
-                  ],
+              iconSize: 22,
+              splashRadius: 20,
+              icon: const Icon(Icons.more_vert),
+              onSelected: (value) {
+                unawaited(_handleMenuAction(value));
+              },
+              itemBuilder: (context) => [
+                PopupMenuItem<String>(
+                  value: 'toggle_live',
+                  child: Row(
+                    children: [
+                      Icon(
+                        _isLive ? Icons.pause_circle_outline : Icons.play_arrow,
+                        size: 18,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(_isLive ? '실시간 갱신 끄기' : '실시간 갱신 켜기'),
+                    ],
+                  ),
                 ),
-              ),
-              const PopupMenuItem<String>(
-                value: 'copy_all',
-                child: Row(
-                  children: [
-                    Icon(Icons.copy_all, size: 18),
-                    SizedBox(width: 8),
-                    Text('전체 복사'),
-                  ],
+                const PopupMenuItem<String>(
+                  value: 'refresh',
+                  child: Row(
+                    children: [
+                      Icon(Icons.refresh, size: 18),
+                      SizedBox(width: 8),
+                      Text('새로고침'),
+                    ],
+                  ),
                 ),
-              ),
-              const PopupMenuItem<String>(
-                value: 'download',
-                child: Row(
-                  children: [
-                    Icon(Icons.download, size: 18),
-                    SizedBox(width: 8),
-                    Text('파일 저장'),
-                  ],
+                const PopupMenuItem<String>(
+                  value: 'copy_all',
+                  child: Row(
+                    children: [
+                      Icon(Icons.copy_all, size: 18),
+                      SizedBox(width: 8),
+                      Text('전체 복사'),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+                const PopupMenuItem<String>(
+                  value: 'download',
+                  child: Row(
+                    children: [
+                      Icon(Icons.download, size: 18),
+                      SizedBox(width: 8),
+                      Text('파일 저장'),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
         Expanded(
@@ -2507,10 +2533,8 @@ class _LogsSubHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final viewport = MediaQuery.sizeOf(context);
     final window = UiWindowInfo.of(context);
     final tokens = UiLayoutTokens.of(context);
-    final compactHeaderMode = viewport.width < 420 || viewport.height < 360;
     final headerHorizontalPadding = window.isCompact
         ? 14.0
         : tokens.screenPadding.clamp(14.0, 26.0).toDouble();
@@ -2535,6 +2559,13 @@ class _LogsSubHeader extends StatelessWidget {
       UiWindowClass.large => 4.0,
       UiWindowClass.extraLarge => 4.0,
     };
+    final trailingSlot = trailing == null
+        ? null
+        : SizedBox(
+            width: window.isCompact ? 34 : 36,
+            height: window.isCompact ? 34 : 36,
+            child: Center(child: trailing!),
+          );
 
     return Container(
       width: double.infinity,
@@ -2558,58 +2589,40 @@ class _LogsSubHeader extends StatelessWidget {
           ),
         ),
       ),
-      child: compactHeaderMode
-          ? Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (trailing != null)
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: trailing!,
-                  ),
-                Text(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Text(
                   title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.titleSmall?.copyWith(
                         fontWeight: FontWeight.w700,
                       ),
                 ),
-                SizedBox(height: descriptionTopGap),
-                Text(
-                  description,
-                  style: TextStyle(
-                    fontSize: descriptionFontSize,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
+              ),
+              if (trailingSlot != null) ...[
+                const SizedBox(width: 6),
+                trailingSlot,
               ],
-            )
-          : Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                              fontWeight: FontWeight.w700,
-                            ),
-                      ),
-                      SizedBox(height: descriptionTopGap),
-                      Text(
-                        description,
-                        style: TextStyle(
-                          fontSize: descriptionFontSize,
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                if (trailing != null) trailing!,
-              ],
+            ],
+          ),
+          SizedBox(height: descriptionTopGap),
+          Text(
+            description,
+            maxLines: window.isCompact ? 2 : 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: descriptionFontSize,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
+          ),
+        ],
+      ),
     );
   }
 }

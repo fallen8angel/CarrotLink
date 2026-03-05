@@ -211,11 +211,19 @@ extension _ConnectionSettingsKeys on _ConnectionSettingsScreenState {
 
   Future<void> _deleteKey(int id) async {
     try {
+      final window = UiWindowInfo.of(context);
+      final tokens = UiLayoutTokens.of(context);
       final confirm = await showDialog<bool>(
         context: context,
         builder: (context) => AlertDialog(
           title: const Text("키 삭제"),
-          content: const Text("정말로 이 키를 GitHub에서 삭제하시겠습니까?"),
+          content: Padding(
+            padding: EdgeInsets.only(top: tokens.itemGap),
+            child: Text(
+              "정말로 이 키를 GitHub에서 삭제하시겠습니까?",
+              style: TextStyle(fontSize: window.isCompact ? 13.0 : 13.5),
+            ),
+          ),
           actions: [
             TextButton(
                 onPressed: () => Navigator.pop(context, false),

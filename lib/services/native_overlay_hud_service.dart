@@ -19,11 +19,11 @@ class NativeOverlayHudService {
     if (cached != null) return cached;
     try {
       final prefs = await SharedPreferences.getInstance();
-      final enabled = prefs.getBool(_enabledPrefKey) ?? true;
+      final enabled = prefs.getBool(_enabledPrefKey) ?? false;
       _enabledCache = enabled;
       return enabled;
     } catch (_) {
-      return true;
+      return false;
     }
   }
 

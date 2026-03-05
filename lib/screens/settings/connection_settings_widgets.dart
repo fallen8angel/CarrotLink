@@ -157,41 +157,64 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
     );
   }
 
-  Widget _buildScreen(BuildContext context) {
+  Widget _buildScreen(
+    BuildContext context, {
+    required UiWindowInfo window,
+    required UiLayoutTokens tokens,
+  }) {
     final metrics = _adaptiveMetrics(context);
     final ssh = Provider.of<SSHService>(context);
     final githubFeaturesEnabled = _isGitHubLoggedIn;
+    final maxContentWidth = switch (window.windowClass) {
+      UiWindowClass.compact => 640.0,
+      UiWindowClass.medium => 760.0,
+      _ => 860.0,
+    };
+    final pagePadding = EdgeInsets.fromLTRB(
+      metrics.pagePadding.left,
+      metrics.pagePadding.top,
+      metrics.pagePadding.right,
+      MediaQuery.of(context).padding.bottom + tokens.sectionGap + 14,
+    );
 
     return Scaffold(
       appBar: AppBar(title: const Text('연결 설정')),
-      body: ListView(
-        padding: metrics.pagePadding,
-        children: [
-          Text("1. 기기 연결", style: Theme.of(context).textTheme.titleMedium),
-          SizedBox(height: metrics.sectionHeaderGap),
-          _buildConnectionSection(ssh),
-          if (!githubFeaturesEnabled) ...[
-            SizedBox(height: metrics.sectionHeaderGap),
-            _buildLoginRequiredNotice(),
-          ],
-          SizedBox(height: metrics.sectionSpacing),
-          Text("2. GitHub 연동", style: Theme.of(context).textTheme.titleMedium),
-          SizedBox(height: metrics.sectionHeaderGap),
-          _buildGitHubSection(),
-          SizedBox(height: metrics.sectionSpacing),
-          Text("3. SSH Key", style: Theme.of(context).textTheme.titleMedium),
-          SizedBox(height: metrics.sectionHeaderGap),
-          _buildManualKeySection(),
-          SizedBox(height: metrics.sectionSpacing),
-          Text("4. GitHub SSH 키 관리",
-              style: Theme.of(context).textTheme.titleMedium),
-          SizedBox(height: metrics.sectionHeaderGap),
-          _buildFeatureGate(
-            enabled: githubFeaturesEnabled,
-            child: _buildGitHubKeyManagerSection(),
+      body: Align(
+        alignment: Alignment.topCenter,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: maxContentWidth),
+          child: ListView(
+            padding: pagePadding,
+            children: [
+              Text("1. 기기 연결", style: Theme.of(context).textTheme.titleMedium),
+              SizedBox(height: metrics.sectionHeaderGap),
+              _buildConnectionSection(ssh),
+              if (!githubFeaturesEnabled) ...[
+                SizedBox(height: metrics.sectionHeaderGap),
+                _buildLoginRequiredNotice(),
+              ],
+              SizedBox(height: metrics.sectionSpacing),
+              Text("2. GitHub 연동",
+                  style: Theme.of(context).textTheme.titleMedium),
+              SizedBox(height: metrics.sectionHeaderGap),
+              _buildGitHubSection(),
+              SizedBox(height: metrics.sectionSpacing),
+              Text("3. SSH Key",
+                  style: Theme.of(context).textTheme.titleMedium),
+              SizedBox(height: metrics.sectionHeaderGap),
+              _buildManualKeySection(),
+              SizedBox(height: metrics.sectionSpacing),
+              Text("4. GitHub SSH 키 관리",
+                  style: Theme.of(context).textTheme.titleMedium),
+              SizedBox(height: metrics.sectionHeaderGap),
+              _buildFeatureGate(
+                enabled: githubFeaturesEnabled,
+                child: _buildGitHubKeyManagerSection(),
+              ),
+              SizedBox(height: metrics.sectionSpacing),
+            ],
           ),
-          SizedBox(height: metrics.sectionSpacing),
-        ],
+        ),
       ),
     );
   }
@@ -317,13 +340,13 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
                 SizedBox(
                   width: metrics.spinnerSize,
                   height: metrics.spinnerSize,
-                  child: CircularProgressIndicator(strokeWidth: 2),
+                  child: const CircularProgressIndicator(strokeWidth: 2),
                 ),
             ],
           ),
           SizedBox(height: metrics.gapXs),
           Text(
-            "검색 상태: ${_compactDiscoveryStatus(ssh)}",
+            "검색 상태: ${_compactDiscoveryStatus(ssh)} · $_discoveryStatus",
             style: TextStyle(
               fontSize: metrics.textCaption,
               color: Colors.grey[700],
@@ -440,6 +463,16 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
                   fontSize: metrics.textCaption, color: Colors.grey[500]),
             ),
           ),
+          Padding(
+            padding: EdgeInsets.only(top: metrics.gapXs),
+            child: Text(
+              _backupLocationSummary,
+              style: TextStyle(
+                fontSize: metrics.textCaption,
+                color: Colors.grey[500],
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -482,9 +515,14 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
                     color: Theme.of(context).colorScheme.primary,
                     size: metrics.iconActionIconSize - 2),
                 SizedBox(width: metrics.gapMd),
-                Text("GitHub 로그인됨",
-                    style: TextStyle(fontSize: metrics.textBody)),
-                const Spacer(),
+                Expanded(
+                  child: Text(
+                    "GitHub 로그인됨",
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: metrics.textBody),
+                  ),
+                ),
                 TextButton(
                   onPressed: () async {
                     await _githubService.clearToken();
@@ -524,6 +562,8 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
               Expanded(
                 child: Text(
                   activeText,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: metrics.textBody,
                     fontWeight: FontWeight.w600,

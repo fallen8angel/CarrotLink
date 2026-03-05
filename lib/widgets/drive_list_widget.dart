@@ -9,6 +9,8 @@ import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import '../services/ssh_service.dart';
+import '../ui/adaptive/layout_tokens.dart';
+import '../ui/adaptive/window_class.dart';
 import 'design_components.dart';
 import 'custom_toast.dart';
 
@@ -110,6 +112,7 @@ class _DriveListWidgetState extends State<DriveListWidget> {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
     if (_isLoading) return const Center(child: CircularProgressIndicator());
     if (_routes.isEmpty) return const Center(child: Text("주행 기록이 없습니다."));
 
@@ -118,7 +121,9 @@ class _DriveListWidgetState extends State<DriveListWidget> {
       child: LayoutBuilder(
         builder: (context, constraints) {
           final cardWidth =
-              (constraints.maxWidth * 0.42).clamp(180.0, 280.0).toDouble();
+              (constraints.maxWidth * (window.isCompact ? 0.48 : 0.42))
+                  .clamp(window.isCompact ? 180.0 : 200.0, 290.0)
+                  .toDouble();
           return ListView.builder(
             scrollDirection: Axis.horizontal,
             itemCount: _routes.length,
@@ -201,7 +206,7 @@ class _RouteCardState extends State<RouteCard> {
         if (mounted) setState(() => _previewImage = file);
       }
     } catch (e) {
-      print("Preview error: $e");
+      debugPrint("Preview error: $e");
     } finally {
       if (mounted) setState(() => _loadingImage = false);
     }
@@ -215,6 +220,9 @@ class _RouteCardState extends State<RouteCard> {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       child: DesignCard(
@@ -223,7 +231,9 @@ class _RouteCardState extends State<RouteCard> {
         child: LayoutBuilder(
           builder: (context, constraints) {
             final previewHeight =
-                (constraints.maxWidth * 0.55).clamp(120.0, 180.0).toDouble();
+                (constraints.maxWidth * (window.isCompact ? 0.58 : 0.55))
+                    .clamp(window.isCompact ? 130.0 : 140.0, 190.0)
+                    .toDouble();
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -233,7 +243,7 @@ class _RouteCardState extends State<RouteCard> {
                   child: _previewImage != null
                       ? Image.file(_previewImage!, fit: BoxFit.cover)
                       : Container(
-                          color: Colors.black12,
+                          color: scheme.surfaceContainerHighest,
                           child: Center(
                             child: _loadingImage
                                 ? const SizedBox(
@@ -247,7 +257,7 @@ class _RouteCardState extends State<RouteCard> {
                         ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.all(12.0),
+                  padding: EdgeInsets.all(tokens.sectionGap - 2),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [

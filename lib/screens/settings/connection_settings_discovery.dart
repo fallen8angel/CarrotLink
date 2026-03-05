@@ -249,6 +249,9 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
   Future<void> _showSimpleFailureLog(String title, String errorMessage) async {
     if (!mounted) return;
     final logText = _buildRecentDiagSnippet();
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
 
     await showDialog(
       context: context,
@@ -259,23 +262,32 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(errorMessage, style: const TextStyle(color: Colors.red)),
-              const SizedBox(height: 12),
-              const Text(
+              Text(
+                errorMessage,
+                style: TextStyle(color: scheme.error),
+              ),
+              SizedBox(height: tokens.itemGap + 6),
+              Text(
                 "최근 내부 로그",
-                style: TextStyle(fontWeight: FontWeight.bold),
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: window.isCompact ? 13.0 : 14.0,
+                ),
               ),
               const SizedBox(height: 6),
               Container(
                 width: double.infinity,
-                padding: const EdgeInsets.all(12),
+                padding: EdgeInsets.all(tokens.itemGap + 6),
                 decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.08),
+                  color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: SelectableText(
                   logText,
-                  style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                  style: TextStyle(
+                    fontSize: window.isCompact ? 10.5 : 11.0,
+                    fontFamily: 'monospace',
+                  ),
                 ),
               ),
             ],

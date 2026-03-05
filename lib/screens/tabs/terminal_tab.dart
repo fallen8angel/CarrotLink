@@ -8,6 +8,8 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/ssh_service.dart';
 import '../../services/macro_service.dart';
+import '../../ui/adaptive/layout_tokens.dart';
+import '../../ui/adaptive/window_class.dart';
 import '../../widgets/connection_required_view.dart';
 import '../../widgets/custom_toast.dart';
 import '../../widgets/section_tab_bar.dart';
@@ -633,14 +635,16 @@ class _TerminalScreenState extends State<TerminalScreen>
   }
 
   Widget _buildVirtualKey(String label, String code) {
+    final scheme = Theme.of(context).colorScheme;
     return InkWell(
       onTap: () => _sendKey(code),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.surface,
+          color: scheme.surface,
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.grey.withValues(alpha: 0.3)),
+          border:
+              Border.all(color: scheme.outlineVariant.withValues(alpha: 0.45)),
         ),
         child: Text(
           label,
@@ -655,21 +659,28 @@ class _TerminalScreenState extends State<TerminalScreen>
     super.build(context);
     final connected = context.watch<SSHService>().isConnected;
     final macros = Provider.of<MacroService>(context).macros;
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
     final viewport = MediaQuery.sizeOf(context);
-    final compactHeightMode = viewport.height < 560;
-    final hideMacroStrip = viewport.height < 500;
+    final compactHeightMode = viewport.height < (window.isCompact ? 620 : 560);
+    final hideMacroStrip = viewport.height < (window.isCompact ? 520 : 500);
     final macroStripHeight = compactHeightMode ? 42.0 : 50.0;
 
     return Column(
       children: [
         // Toolbar
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          color: Theme.of(context).colorScheme.surfaceContainer,
+          padding: EdgeInsets.symmetric(
+            horizontal: tokens.screenPadding.clamp(8.0, 16.0).toDouble(),
+            vertical: compactHeightMode ? 4 : 6,
+          ),
+          color: scheme.surfaceContainer,
           child: LayoutBuilder(
             builder: (context, constraints) {
-              final compactToolbar =
-                  constraints.maxWidth < 560 || compactHeightMode;
+              final compactToolbar = compactHeightMode ||
+                  UiWindowInfo.classifyWidth(constraints.maxWidth) ==
+                      UiWindowClass.compact;
               final sessionButton = !_isSessionActive
                   ? ElevatedButton.icon(
                       onPressed: () => _startTerminal(),
@@ -709,7 +720,7 @@ class _TerminalScreenState extends State<TerminalScreen>
                 Container(
                   height: 24,
                   width: 1,
-                  color: Colors.grey.withValues(alpha: 0.5),
+                  color: scheme.outlineVariant.withValues(alpha: 0.7),
                   margin: const EdgeInsets.symmetric(horizontal: 8),
                 ),
                 IconButton(
@@ -746,7 +757,9 @@ class _TerminalScreenState extends State<TerminalScreen>
                 children: [
                   SingleChildScrollView(
                     scrollDirection: Axis.horizontal,
-                    child: Row(children: toolbarActions),
+                    child: Row(
+                      children: toolbarActions,
+                    ),
                   ),
                   const SizedBox(height: 4),
                   Align(

@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import '../ui/adaptive/layout_tokens.dart';
+import '../ui/adaptive/window_class.dart';
 
 class DesignCard extends StatelessWidget {
   final Widget child;
@@ -16,20 +18,32 @@ class DesignCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
     final card = Card(
       elevation: 0,
       color: color ?? Theme.of(context).colorScheme.surfaceContainer,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
         side: BorderSide(
-          color: Theme.of(context).colorScheme.outlineVariant.withOpacity(0.5),
+          color: Theme.of(context)
+              .colorScheme
+              .outlineVariant
+              .withValues(alpha: 0.5),
         ),
       ),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
         child: Padding(
-          padding: padding ?? const EdgeInsets.all(20.0),
+          padding: padding ??
+              EdgeInsets.all(
+                switch (window.windowClass) {
+                  UiWindowClass.compact => tokens.sectionGap + 8,
+                  UiWindowClass.medium => tokens.sectionGap + 8,
+                  _ => tokens.sectionGap + 10,
+                },
+              ),
           child: child,
         ),
       ),
@@ -56,6 +70,7 @@ class DesignSectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
     return Padding(
       padding: EdgeInsets.only(bottom: marginBottom),
       child: Column(
@@ -66,14 +81,14 @@ class DesignSectionHeader extends StatelessWidget {
               Icon(
                 icon,
                 color: iconColor ?? Theme.of(context).colorScheme.primary,
-                size: 24,
+                size: window.isCompact ? 22 : 24,
               ),
               const SizedBox(width: 12),
               Text(
                 title,
                 style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.bold,
-                ),
+                      fontWeight: FontWeight.bold,
+                    ),
               ),
             ],
           ),
@@ -83,7 +98,7 @@ class DesignSectionHeader extends StatelessWidget {
               subtitle!,
               style: TextStyle(
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
-                fontSize: 13,
+                fontSize: window.isCompact ? 12.5 : 13,
               ),
             ),
           ],
@@ -111,31 +126,36 @@ class DesignStatusChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final onColor = ThemeData.estimateBrightnessForColor(color) == Brightness.dark
-        ? Colors.white
-        : Colors.black;
+    final window = UiWindowInfo.of(context);
+    final onColor =
+        ThemeData.estimateBrightnessForColor(color) == Brightness.dark
+            ? Colors.white
+            : Colors.black;
 
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+        padding: EdgeInsets.symmetric(
+          vertical: window.isCompact ? 9 : 10,
+          horizontal: window.isCompact ? 10 : 12,
+        ),
         decoration: BoxDecoration(
-          color: color.withOpacity(0.3),
+          color: color.withValues(alpha: 0.3),
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: color.withOpacity(0.5)),
+          border: Border.all(color: color.withValues(alpha: 0.5)),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                Icon(icon, size: 14, color: onColor.withOpacity(0.8)),
+                Icon(icon, size: 14, color: onColor.withValues(alpha: 0.8)),
                 const SizedBox(width: 6),
                 Text(
                   label,
                   style: TextStyle(
-                    fontSize: 11,
-                    color: onColor.withOpacity(0.8),
+                    fontSize: window.isCompact ? 10.5 : 11,
+                    color: onColor.withValues(alpha: 0.8),
                     fontWeight: FontWeight.w500,
                   ),
                 ),
@@ -145,7 +165,7 @@ class DesignStatusChip extends StatelessWidget {
             Text(
               value,
               style: TextStyle(
-                fontSize: 13,
+                fontSize: window.isCompact ? 12.5 : 13,
                 fontWeight: FontWeight.bold,
                 color: onColor,
               ),

@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:video_player/video_player.dart';
+import '../ui/adaptive/layout_tokens.dart';
+import '../ui/adaptive/window_class.dart';
 
 class VideoListWidget extends StatefulWidget {
   const VideoListWidget({super.key});
@@ -114,7 +116,7 @@ class _VideoListWidgetState extends State<VideoListWidget> {
         await ssh.downloadBinaryFile(remotePath, localPath);
       }
 
-      if (context.mounted) {
+      if (mounted) {
         Navigator.pop(context); // Close loading
         Navigator.push(
           context,
@@ -124,7 +126,7 @@ class _VideoListWidgetState extends State<VideoListWidget> {
         );
       }
     } catch (e) {
-      if (context.mounted) {
+      if (mounted) {
         Navigator.pop(context); // Close loading
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text("Error playing video: $e")),
@@ -135,6 +137,9 @@ class _VideoListWidgetState extends State<VideoListWidget> {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
     if (_isLoading) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -151,10 +156,14 @@ class _VideoListWidgetState extends State<VideoListWidget> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final listHeight = constraints.maxHeight.isFinite
-            ? constraints.maxHeight.clamp(160.0, 280.0).toDouble()
-            : 220.0;
+            ? constraints.maxHeight
+                .clamp(window.isCompact ? 170.0 : 180.0, 300.0)
+                .toDouble()
+            : 230.0;
         final itemWidth =
-            (constraints.maxWidth * 0.38).clamp(150.0, 240.0).toDouble();
+            (constraints.maxWidth * (window.isCompact ? 0.52 : 0.40))
+                .clamp(window.isCompact ? 160.0 : 170.0, 260.0)
+                .toDouble();
         return SizedBox(
           height: listHeight,
           child: ListView.builder(
@@ -172,14 +181,14 @@ class _VideoListWidgetState extends State<VideoListWidget> {
                       children: [
                         Expanded(
                           child: Container(
-                            color: Colors.black12,
+                            color: scheme.surfaceContainerHighest,
                             child: const Center(
                               child: Icon(Icons.play_circle_outline, size: 48),
                             ),
                           ),
                         ),
                         Padding(
-                          padding: const EdgeInsets.all(8.0),
+                          padding: EdgeInsets.all(tokens.itemGap + 2),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [

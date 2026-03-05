@@ -4,6 +4,7 @@ import 'dart:collection';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:carrot_pilot_manager/widgets/connection_required_view.dart';
+import '../../../../ui/adaptive/window_class.dart';
 
 import '../file_explorer_controller.dart';
 
@@ -46,6 +47,7 @@ class _FileExplorerFileListViewState extends State<FileExplorerFileListView> {
   static const int _maxFolderCountConcurrentRequests = 2;
   static const Duration _folderCountUiRefreshDebounce =
       Duration(milliseconds: 48);
+  static const int _checkboxTapSuppressWindowMs = 220;
 
   bool _isAutoLoadingMore = false;
   final Map<String, int> _folderItemCountCache = <String, int>{};
@@ -57,6 +59,7 @@ class _FileExplorerFileListViewState extends State<FileExplorerFileListView> {
   Timer? _folderCountUiRefreshTimer;
   String _folderCountCachePath = '';
   bool _folderCountCacheShowHidden = false;
+  final Map<String, int> _recentCheckboxTapMs = <String, int>{};
 
   @override
   void initState() {
@@ -74,7 +77,20 @@ class _FileExplorerFileListViewState extends State<FileExplorerFileListView> {
   @override
   void dispose() {
     _folderCountUiRefreshTimer?.cancel();
+    _recentCheckboxTapMs.clear();
     super.dispose();
+  }
+
+  void _markCheckboxTap(String fullPath) {
+    _recentCheckboxTapMs[fullPath] = DateTime.now().millisecondsSinceEpoch;
+  }
+
+  bool _consumeRecentCheckboxTap(String fullPath) {
+    final tappedAt = _recentCheckboxTapMs[fullPath];
+    if (tappedAt == null) return false;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _recentCheckboxTapMs.remove(fullPath);
+    return (now - tappedAt) <= _checkboxTapSuppressWindowMs;
   }
 
   void _resetFolderCountCacheIfNeeded() {
@@ -250,8 +266,14 @@ class _FileExplorerFileListViewState extends State<FileExplorerFileListView> {
 
   Widget _buildLoadMoreTile() {
     final controller = widget.controller;
+    final window = UiWindowInfo.of(context);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+      padding: EdgeInsets.fromLTRB(
+        window.isCompact ? 12 : 16,
+        8,
+        window.isCompact ? 12 : 16,
+        12,
+      ),
       child: OutlinedButton.icon(
         onPressed: controller.isLoadingMoreVisible ? null : _loadMore,
         icon: controller.isLoadingMoreVisible
@@ -276,6 +298,8 @@ class _FileExplorerFileListViewState extends State<FileExplorerFileListView> {
     List<SftpName> visibleFiles,
   ) {
     final controller = widget.controller;
+    final window = UiWindowInfo.of(context);
+    final scheme = Theme.of(context).colorScheme;
     final isLoadMore =
         controller.canLoadMoreVisible && index >= visibleFiles.length;
     if (isLoadMore) {
@@ -296,7 +320,9 @@ class _FileExplorerFileListViewState extends State<FileExplorerFileListView> {
     final leadingIcon = Icon(
       isDir ? Icons.folder : (isLink ? Icons.link : Icons.insert_drive_file),
       size: 18,
-      color: isDir ? Colors.amber : (isLink ? Colors.blue : Colors.grey),
+      color: isDir
+          ? scheme.tertiary
+          : (isLink ? scheme.primary : scheme.onSurfaceVariant),
     );
     if (isDir) {
       _ensureFolderItemCount(fullPath);
@@ -305,20 +331,34 @@ class _FileExplorerFileListViewState extends State<FileExplorerFileListView> {
     return ListTile(
       key: ValueKey(fullPath),
       dense: true,
-      visualDensity: const VisualDensity(horizontal: -2, vertical: -2),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 0),
+      visualDensity: const VisualDensity(horizontal: -1, vertical: -1),
+      selected: isSelected,
+      selectedTileColor: scheme.primaryContainer.withValues(alpha: 0.22),
+      contentPadding: EdgeInsets.symmetric(
+        horizontal: window.isCompact ? 8 : 10,
+        vertical: 0,
+      ),
       horizontalTitleGap: 6,
-      minLeadingWidth: 26,
+      minLeadingWidth: window.isCompact ? 32 : 36,
       minVerticalPadding: 2,
       leading: SizedBox(
-        width: 26,
-        child: Transform.scale(
-          scale: 0.92,
-          child: Checkbox(
-            value: isSelected,
-            onChanged: (_) => controller.toggleSelection(fullPath),
-            visualDensity: VisualDensity.compact,
-            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        width: window.isCompact ? 32 : 36,
+        height: window.isCompact ? 32 : 36,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () {
+            _markCheckboxTap(fullPath);
+            controller.toggleSelection(fullPath);
+          },
+          child: Center(
+            child: IgnorePointer(
+              child: Checkbox(
+                value: isSelected,
+                onChanged: (_) {},
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.padded,
+              ),
+            ),
           ),
         ),
       ),
@@ -332,7 +372,7 @@ class _FileExplorerFileListViewState extends State<FileExplorerFileListView> {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                fontWeight: isSelected ? FontWeight.w700 : FontWeight.w400,
+                fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
               ),
             ),
           ),
@@ -349,6 +389,9 @@ class _FileExplorerFileListViewState extends State<FileExplorerFileListView> {
         );
       },
       onTap: () {
+        if (_consumeRecentCheckboxTap(fullPath)) {
+          return;
+        }
         if (controller.selectionMode) {
           controller.toggleSelection(fullPath);
           return;
@@ -404,7 +447,11 @@ class _FileExplorerFileListViewState extends State<FileExplorerFileListView> {
             actionOption('select', '선택에 추가'),
             if (hasAnySelection) actionOption('clear_selection', '선택 해제'),
             if (canExtract) actionOption('extract', '압축 해제'),
-            actionOption('delete', '삭제', color: Colors.red),
+            actionOption(
+              'delete',
+              '삭제',
+              color: Theme.of(dialogContext).colorScheme.error,
+            ),
           ],
         );
       },
@@ -501,6 +548,7 @@ class _FileExplorerFileListViewState extends State<FileExplorerFileListView> {
   Widget build(BuildContext context) {
     _resetFolderCountCacheIfNeeded();
     final controller = widget.controller;
+    final window = UiWindowInfo.of(context);
     final visibleFiles = controller.visibleFiles;
 
     if (!controller.isConnected) {
@@ -523,7 +571,7 @@ class _FileExplorerFileListViewState extends State<FileExplorerFileListView> {
       onNotification: _onScrollNotification,
       child: ListView.builder(
         key: ValueKey('${controller.currentPath}|${controller.showHidden}'),
-        padding: const EdgeInsets.only(bottom: 12),
+        padding: EdgeInsets.only(bottom: window.isCompact ? 12 : 16),
         itemCount: itemCount,
         cacheExtent: 720,
         itemBuilder: (context, index) =>

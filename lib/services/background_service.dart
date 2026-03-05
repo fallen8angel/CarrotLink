@@ -82,12 +82,20 @@ void onStart(ServiceInstance service) async {
   bool stopping = false;
   bool autoReconnectEnabled = true;
   bool appForeground = false;
+  int heartbeatFailureCount = 0;
 
   String? connectedIp;
   int? connectedPort;
   String? candidateIp;
+  String candidateSource = 'none';
   DateTime? candidateSeenAt;
   DateTime? lastCandidateBroadcastAt;
+  DateTime? lastActiveScanSuppressedAt;
+  String? lastUdpCandidateIp;
+  DateTime? lastUdpCandidateSeenAt;
+  String? lastSuccessfulIp;
+  DateTime? lastSuccessfulSeenAt;
+  final Map<String, int> activeScanHitCount = <String, int>{};
 
   String? profileUsername;
   String? profilePassword;
@@ -133,20 +141,25 @@ void onStart(ServiceInstance service) async {
 
   Duration candidateStaleThresholdForProfile() {
     return appForeground
-        ? const Duration(seconds: 12)
-        : const Duration(seconds: 25);
+        ? const Duration(seconds: 20)
+        : const Duration(seconds: 45);
   }
 
   Duration heartbeatIntervalForProfile() {
     return appForeground
         ? const Duration(seconds: 2)
-        : const Duration(seconds: 10);
+        : const Duration(seconds: 4);
   }
 
   Duration heartbeatTimeoutForProfile() {
     return appForeground
-        ? const Duration(seconds: 1)
-        : const Duration(seconds: 3);
+        ? const Duration(milliseconds: 1200)
+        : const Duration(seconds: 2);
+  }
+
+  int heartbeatFailureThresholdForProfile() {
+    // Prioritize quick recovery over battery.
+    return 2;
   }
 
   Duration candidateBroadcastDedupeWindow() {
@@ -156,28 +169,63 @@ void onStart(ServiceInstance service) async {
   }
 
   int reconnectBackoffSeconds(int attempt) {
-    final seq = appForeground ? const [1, 1, 2, 3] : const [2, 4, 6, 10];
+    final seq = appForeground ? const [0, 1, 1, 2] : const [0, 1, 2, 3];
     if (attempt < 0) return seq.first;
     if (attempt >= seq.length) return seq.last;
     return seq[attempt];
   }
 
   int noBroadcastBackoffSeconds(int attempt) {
-    final seq = appForeground ? const [1, 2] : const [8, 12];
+    final seq = appForeground ? const [1, 1, 2] : const [1, 2, 3];
     if (attempt < 0) return seq.first;
     if (attempt >= seq.length) return seq.last;
     return seq[attempt];
   }
 
+  Duration udpPreferWindowForProfile() {
+    return appForeground
+        ? const Duration(seconds: 15)
+        : const Duration(seconds: 30);
+  }
+
+  Duration lastSuccessfulReuseWindowForProfile() {
+    return const Duration(minutes: 20);
+  }
+
+  bool hasRecentUdpCandidate() {
+    final ip = lastUdpCandidateIp;
+    final seenAt = lastUdpCandidateSeenAt;
+    if (ip == null || seenAt == null) return false;
+    return DateTime.now().difference(seenAt) <= udpPreferWindowForProfile();
+  }
+
   String? pickReconnectTarget() {
+    final now = DateTime.now();
+    final udpIp = lastUdpCandidateIp;
+    final udpSeenAt = lastUdpCandidateSeenAt;
+    if (udpIp != null &&
+        udpSeenAt != null &&
+        now.difference(udpSeenAt) <= candidateStaleThresholdForProfile()) {
+      return udpIp;
+    }
+
     final ip = candidateIp;
     final seenAt = candidateSeenAt;
-    if (ip == null || seenAt == null) return null;
-    if (DateTime.now().difference(seenAt) >
-        candidateStaleThresholdForProfile()) {
-      return null;
+    if (ip != null &&
+        seenAt != null &&
+        now.difference(seenAt) <= candidateStaleThresholdForProfile()) {
+      return ip;
     }
-    return ip;
+
+    final lastGood = lastSuccessfulIp;
+    final lastGoodSeenAt = lastSuccessfulSeenAt;
+    if (lastGood != null &&
+        lastGoodSeenAt != null &&
+        now.difference(lastGoodSeenAt) <=
+            lastSuccessfulReuseWindowForProfile()) {
+      return lastGood;
+    }
+    return null;
   }
 
   void emitConnectionState({
@@ -200,11 +248,22 @@ void onStart(ServiceInstance service) async {
     final ageMs = candidateSeenAt == null
         ? null
         : DateTime.now().difference(candidateSeenAt!).inMilliseconds;
+    final udpAgeMs = lastUdpCandidateSeenAt == null
+        ? null
+        : DateTime.now().difference(lastUdpCandidateSeenAt!).inMilliseconds;
+    final lastGoodAgeMs = lastSuccessfulSeenAt == null
+        ? null
+        : DateTime.now().difference(lastSuccessfulSeenAt!).inMilliseconds;
     service.invoke('discoveryState', {
       'source': source,
       'listening': discoveryListening,
       'candidateIp': candidateIp,
+      'candidateSource': candidateSource,
       'candidateAgeMs': ageMs,
+      'lastUdpCandidateIp': lastUdpCandidateIp,
+      'lastUdpCandidateAgeMs': udpAgeMs,
+      'lastSuccessfulIp': lastSuccessfulIp,
+      'lastSuccessfulAgeMs': lastGoodAgeMs,
       'autoReconnectEnabled': autoReconnectEnabled,
       'manualDisconnectRequested': manualDisconnectRequested,
       'connectedIp': connectedIp,
@@ -230,6 +289,7 @@ void onStart(ServiceInstance service) async {
   Future<void> closeClient() async {
     heartbeatTimer?.cancel();
     heartbeatTimer = null;
+    heartbeatFailureCount = 0;
     try {
       sshClient?.close();
     } catch (_) {}
@@ -289,8 +349,20 @@ void onStart(ServiceInstance service) async {
     });
   }
 
+  Future<void> verifyOpenpilotTarget(SSHClient client, String ip) async {
+    const cmd =
+        'if [ -d /data/openpilot ] || [ -d /home/comma/openpilot ] || [ -f /data/params/d/DongleId ] || [ -f /data/params/d/HardwareSerial ]; then echo CARROTLINK_OPENPILOT_OK; else echo CARROTLINK_OPENPILOT_MISSING; fi';
+    final outputBytes =
+        await client.run(cmd).timeout(const Duration(seconds: 4));
+    final output = utf8.decode(outputBytes).trim();
+    if (!output.contains('CARROTLINK_OPENPILOT_OK')) {
+      throw Exception('Connected host is not openpilot/comma: $ip');
+    }
+  }
+
   void startHeartbeatLoop() {
     heartbeatTimer?.cancel();
+    heartbeatFailureCount = 0;
     if (sshClient == null || sshClient!.isClosed) return;
 
     heartbeatTimer =
@@ -303,11 +375,16 @@ void onStart(ServiceInstance service) async {
       }
       try {
         await sshClient!.run('true').timeout(heartbeatTimeoutForProfile());
+        heartbeatFailureCount = 0;
       } catch (e) {
         debugPrint('Background heartbeat failed: $e');
-        timer.cancel();
-        await handleDisconnected('heartbeat_failed');
-        scheduleReconnect('heartbeat_failed');
+        heartbeatFailureCount += 1;
+        final threshold = heartbeatFailureThresholdForProfile();
+        if (heartbeatFailureCount >= threshold) {
+          timer.cancel();
+          await handleDisconnected('heartbeat_failed');
+          scheduleReconnect('heartbeat_failed');
+        }
       }
     });
   }
@@ -367,9 +444,12 @@ void onStart(ServiceInstance service) async {
       }
 
       await sshClient!.authenticated.timeout(const Duration(seconds: 10));
+      await verifyOpenpilotTarget(sshClient!, ip);
 
       connectedIp = ip;
       connectedPort = profilePort;
+      lastSuccessfulIp = ip;
+      lastSuccessfulSeenAt = DateTime.now();
       reconnectAttempt = 0;
       noBroadcastWaitAttempt = 0;
 
@@ -402,9 +482,50 @@ void onStart(ServiceInstance service) async {
   void onCandidateIp(String ip, {String source = 'udp'}) {
     if (!isValidIpv4(ip)) return;
     final now = DateTime.now();
+    final isUdp = source.startsWith('udp');
+    final isActiveScan = source == 'active_scan';
+
+    if (isActiveScan) {
+      final hasRecentUdp = hasRecentUdpCandidate();
+      if (hasRecentUdp &&
+          lastUdpCandidateIp != null &&
+          lastUdpCandidateIp != ip) {
+        if (lastActiveScanSuppressedAt == null ||
+            now.difference(lastActiveScanSuppressedAt!) >=
+                const Duration(seconds: 3)) {
+          lastActiveScanSuppressedAt = now;
+          emitDiscoveryState(source: 'active_scan_ignored_recent_udp');
+        }
+        return;
+      }
+
+      final hit = (activeScanHitCount[ip] ?? 0) + 1;
+      activeScanHitCount[ip] = hit;
+      if (activeScanHitCount.length > 64) {
+        activeScanHitCount.removeWhere((key, value) => value <= 1);
+      }
+      final isKnownGood = lastSuccessfulIp != null && lastSuccessfulIp == ip;
+      if (!isKnownGood && hit < 2) {
+        if (lastActiveScanSuppressedAt == null ||
+            now.difference(lastActiveScanSuppressedAt!) >=
+                const Duration(seconds: 3)) {
+          lastActiveScanSuppressedAt = now;
+          emitDiscoveryState(source: 'active_scan_wait_confirm');
+        }
+        return;
+      }
+    } else {
+      activeScanHitCount[ip] = 0;
+    }
+
+    if (isUdp) {
+      lastUdpCandidateIp = ip;
+      lastUdpCandidateSeenAt = now;
+    }
     final changed = candidateIp != ip;
     final connectedChanged = connectedIp != null && connectedIp != ip;
     candidateIp = ip;
+    candidateSource = source;
     candidateSeenAt = now;
     noBroadcastWaitAttempt = 0;
     emitDiscoveryState(source: source);
@@ -422,8 +543,13 @@ void onStart(ServiceInstance service) async {
     }
 
     if (connectedChanged && canAutoReconnect() && hasConnectProfile()) {
-      unawaited(handleDisconnected('candidate_changed'));
-      unawaited(connectTo(ip, reason: 'candidate_changed'));
+      // Keep the existing healthy SSH session. If the current connection
+      // truly dies, reconnect logic will pick up the latest candidate.
+      if (sshClient == null || sshClient!.isClosed) {
+        unawaited(connectTo(ip, reason: 'candidate_changed'));
+      } else {
+        emitDiscoveryState(source: 'candidate_changed_deferred');
+      }
       return;
     }
 
@@ -437,7 +563,7 @@ void onStart(ServiceInstance service) async {
   void scheduleDiscoveryRetry() {
     if (stopping) return;
     discoveryRetryTimer?.cancel();
-    discoveryRetryTimer = Timer(const Duration(seconds: 3), () {
+    discoveryRetryTimer = Timer(const Duration(seconds: 1), () {
       if (stopping) return;
       discoverySocket?.close();
       discoverySocket = null;
@@ -580,7 +706,7 @@ void onStart(ServiceInstance service) async {
     }
   });
 
-  service.on('networkChanged').listen((event) {
+  service.on('networkChanged').listen((event) async {
     var source = 'network_changed';
     final eventMap = event is Map ? event : null;
     final rawSource = eventMap?['source'];
@@ -588,7 +714,11 @@ void onStart(ServiceInstance service) async {
       source = rawSource;
     }
     candidateIp = null;
+    candidateSource = 'none';
     candidateSeenAt = null;
+    lastUdpCandidateIp = null;
+    lastUdpCandidateSeenAt = null;
+    activeScanHitCount.clear();
     reconnectAttempt = 0;
     noBroadcastWaitAttempt = 0;
     clearReconnectTimer();
@@ -596,9 +726,20 @@ void onStart(ServiceInstance service) async {
     if (discoverySocket == null) {
       unawaited(startDiscoveryListener());
     }
-    if ((sshClient == null || sshClient!.isClosed) &&
-        canAutoReconnect() &&
-        hasConnectProfile()) {
+    if (!canAutoReconnect() || !hasConnectProfile()) return;
+    if (sshClient != null && !sshClient!.isClosed) {
+      try {
+        await sshClient!.run('true').timeout(const Duration(seconds: 2));
+        emitDiscoveryState(source: '${source}_keepalive_ok');
+        return;
+      } catch (_) {
+        await handleDisconnected('network_changed_session_lost');
+      }
+    }
+    final target = pickReconnectTarget();
+    if (target != null) {
+      unawaited(connectTo(target, reason: 'network_changed_fast'));
+    } else {
       scheduleReconnect('network_changed');
     }
   });
@@ -648,7 +789,12 @@ void onStart(ServiceInstance service) async {
       'ip': connectedIp,
       'port': connectedPort,
       'candidateIp': candidateIp,
+      'candidateSource': candidateSource,
       'candidateSeenAt': candidateSeenAt?.millisecondsSinceEpoch,
+      'lastUdpCandidateIp': lastUdpCandidateIp,
+      'lastUdpCandidateSeenAt': lastUdpCandidateSeenAt?.millisecondsSinceEpoch,
+      'lastSuccessfulIp': lastSuccessfulIp,
+      'lastSuccessfulSeenAt': lastSuccessfulSeenAt?.millisecondsSinceEpoch,
       'listening': discoveryListening,
       'autoReconnectEnabled': autoReconnectEnabled,
       'manualDisconnectRequested': manualDisconnectRequested,

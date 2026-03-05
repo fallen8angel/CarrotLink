@@ -15,6 +15,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 
 import '../../services/ssh_service.dart';
+import '../../ui/adaptive/layout_tokens.dart';
+import '../../ui/adaptive/window_class.dart';
 import '../../widgets/custom_toast.dart';
 
 class FileExplorerTab extends StatefulWidget {
@@ -1312,10 +1314,16 @@ class FileExplorerTabState extends State<FileExplorerTab> {
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
     if (bottomInset > 0) return const SizedBox.shrink();
     final safeBottom = MediaQuery.of(context).padding.bottom;
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final rightInset = window.isCompact ? 14.0 : 18.0;
+    final bottomOffset = (window.isCompact ? 70.0 : 76.0) +
+        safeBottom +
+        (tokens.itemGap.clamp(4.0, 8.0));
 
     return Positioned(
-      right: 14,
-      bottom: 70 + safeBottom,
+      right: rightInset,
+      bottom: bottomOffset,
       child: FloatingActionButton.small(
         heroTag: 'file_explorer_quick_actions_fab',
         onPressed: _showQuickActionsSheet,
@@ -1326,6 +1334,27 @@ class FileExplorerTabState extends State<FileExplorerTab> {
   }
 
   Widget _buildSelectionToolbar() {
+    final scheme = Theme.of(context).colorScheme;
+    final clearSelectionChip = ActionChip(
+      avatar: Icon(
+        Icons.check_box_outline_blank_rounded,
+        size: 16,
+        color: scheme.onErrorContainer,
+      ),
+      label: Text(
+        "선택 해제",
+        style: TextStyle(
+          color: scheme.onErrorContainer,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+      backgroundColor: scheme.errorContainer.withValues(alpha: 0.9),
+      side: BorderSide(
+        color: scheme.error.withValues(alpha: 0.45),
+      ),
+      onPressed: _controller.clearSelection,
+    );
+
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.only(top: 6),
@@ -1333,6 +1362,8 @@ class FileExplorerTabState extends State<FileExplorerTab> {
         scrollDirection: Axis.horizontal,
         child: Row(
           children: [
+            clearSelectionChip,
+            const SizedBox(width: 6),
             Chip(label: Text("${_controller.selectedCount}개 선택")),
             const SizedBox(width: 6),
             ActionChip(
@@ -1378,11 +1409,6 @@ class FileExplorerTabState extends State<FileExplorerTab> {
             ActionChip(
               label: const Text("삭제"),
               onPressed: _deleteSelected,
-            ),
-            const SizedBox(width: 6),
-            ActionChip(
-              label: const Text("선택 해제"),
-              onPressed: _controller.clearSelection,
             ),
           ],
         ),

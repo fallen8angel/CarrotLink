@@ -169,7 +169,7 @@ class _PermissionScreenState extends State<PermissionScreen> {
                         SizedBox(height: tokens.sectionGap + 14),
                         Icon(Icons.security,
                             size: headerIconSize,
-                            color: const Color(0xFFFF6D00)),
+                            color: Theme.of(context).colorScheme.primary),
                         SizedBox(height: tokens.sectionGap + 10),
                         Text(
                           "권한 설정",
@@ -183,11 +183,13 @@ class _PermissionScreenState extends State<PermissionScreen> {
                         ),
                         SizedBox(height: tokens.itemGap + 8),
                         Text(
-                          "안정적인 연결/백업을 위해\n다음 권한을 확인해주세요.",
-                          style: Theme.of(context)
-                              .textTheme
-                              .bodyLarge
-                              ?.copyWith(color: Colors.grey),
+                          "안정적인 연결/백업을 위해 다음 권한을 확인해주세요.",
+                          style:
+                              Theme.of(context).textTheme.bodyLarge?.copyWith(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurfaceVariant,
+                                  ),
                           textAlign: TextAlign.center,
                         ),
                         if (Platform.isAndroid) ...[
@@ -197,7 +199,11 @@ class _PermissionScreenState extends State<PermissionScreen> {
                             style: Theme.of(context)
                                 .textTheme
                                 .bodyMedium
-                                ?.copyWith(color: Colors.grey[500]),
+                                ?.copyWith(
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .onSurfaceVariant,
+                                ),
                             textAlign: TextAlign.center,
                           ),
                         ],
@@ -236,7 +242,7 @@ class _PermissionScreenState extends State<PermissionScreen> {
                           onPressed: _finish,
                           child: const Text(
                             "나중에 설정하기",
-                            style: TextStyle(color: Colors.grey),
+                            style: TextStyle(color: Colors.white60),
                           ),
                         ),
                     ],
@@ -258,6 +264,7 @@ class _PermissionScreenState extends State<PermissionScreen> {
     required VoidCallback onTap,
   }) {
     final window = UiWindowInfo.of(context);
+    final scheme = Theme.of(context).colorScheme;
     final titleFontSize = switch (window.windowClass) {
       UiWindowClass.compact => 15.0,
       UiWindowClass.medium => 16.0,
@@ -272,26 +279,38 @@ class _PermissionScreenState extends State<PermissionScreen> {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainer,
+        color: scheme.surfaceContainer,
         borderRadius: BorderRadius.circular(12),
-        border: isGranted
-            ? Border.all(color: Colors.green.withValues(alpha: 0.5))
-            : null,
+        border: Border.all(
+          color: isGranted
+              ? Colors.green.withValues(alpha: 0.5)
+              : scheme.outlineVariant.withValues(alpha: 0.35),
+        ),
       ),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final compact = constraints.maxWidth < 380;
+          final compact = window.isCompact || constraints.maxWidth < 420;
+          final allowButton = FilledButton.tonal(
+            onPressed: onTap,
+            style: FilledButton.styleFrom(
+              minimumSize: const Size(72, 36),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            ),
+            child: const Text("허용"),
+          );
           final statusIcon = Container(
             padding: const EdgeInsets.all(10),
             decoration: BoxDecoration(
               color: isGranted
                   ? Colors.green.withValues(alpha: 0.1)
-                  : Colors.grey.withValues(alpha: 0.1),
+                  : scheme.surfaceContainerHighest.withValues(alpha: 0.65),
               shape: BoxShape.circle,
             ),
             child: Icon(
               isGranted ? Icons.check : icon,
-              color: isGranted ? Colors.green : Colors.grey,
+              color: isGranted ? Colors.green : scheme.onSurfaceVariant,
             ),
           );
 
@@ -310,7 +329,9 @@ class _PermissionScreenState extends State<PermissionScreen> {
                 Text(
                   description,
                   style: TextStyle(
-                      color: Colors.grey[400], fontSize: descFontSize),
+                    color: scheme.onSurfaceVariant,
+                    fontSize: descFontSize,
+                  ),
                 ),
               ],
             ),
@@ -322,11 +343,7 @@ class _PermissionScreenState extends State<PermissionScreen> {
                 statusIcon,
                 const SizedBox(width: 16),
                 descriptionBlock,
-                if (!isGranted)
-                  TextButton(
-                    onPressed: onTap,
-                    child: const Text("허용"),
-                  ),
+                if (!isGranted) allowButton,
               ],
             );
           }
@@ -339,17 +356,38 @@ class _PermissionScreenState extends State<PermissionScreen> {
                 children: [
                   statusIcon,
                   const SizedBox(width: 12),
-                  descriptionBlock,
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              child: Text(
+                                title,
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: titleFontSize,
+                                ),
+                              ),
+                            ),
+                            if (!isGranted) allowButton,
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          description,
+                          style: TextStyle(
+                            color: scheme.onSurfaceVariant,
+                            fontSize: descFontSize,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ],
               ),
-              if (!isGranted)
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: TextButton(
-                    onPressed: onTap,
-                    child: const Text("허용"),
-                  ),
-                ),
             ],
           );
         },

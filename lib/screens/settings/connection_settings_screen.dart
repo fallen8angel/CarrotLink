@@ -90,12 +90,6 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
     return resolved;
   }
 
-  bool _isManagedKeyTitle(String title) {
-    final lower = title.toLowerCase();
-    return lower.startsWith(_managedKeyPrefix) ||
-        lower.startsWith('carrotlink');
-  }
-
   String _newManagedKeyTitle() =>
       '${_managedKeyPrefix}_${DateTime.now().millisecondsSinceEpoch}';
 
@@ -116,7 +110,11 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => _buildScreen(context);
+  Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    return _buildScreen(context, window: window, tokens: tokens);
+  }
 
   @override
   void dispose() {

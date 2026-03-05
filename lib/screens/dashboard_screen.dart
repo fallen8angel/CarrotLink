@@ -50,7 +50,6 @@ class _DashboardScreenState extends State<DashboardScreen>
   bool _setupPromptShown = false;
   bool _overlayLifecycleBusy = false;
   String? _lastDiscoveryLogIp;
-  DateTime? _lastDiscoveryLogAt;
   final DiagnosticsService _diag = DiagnosticsService.instance;
   final GlobalKey<TerminalTabState> _terminalTabKey =
       GlobalKey<TerminalTabState>();
@@ -201,13 +200,8 @@ class _DashboardScreenState extends State<DashboardScreen>
           ssh.discoverySource == 'settings_auto') {
         return;
       }
-      final now = DateTime.now();
-      final shouldLog = _lastDiscoveryLogIp != discoveredIp ||
-          _lastDiscoveryLogAt == null ||
-          now.difference(_lastDiscoveryLogAt!) >= const Duration(seconds: 3);
-      if (!shouldLog) return;
+      if (_lastDiscoveryLogIp == discoveredIp) return;
       _lastDiscoveryLogIp = discoveredIp;
-      _lastDiscoveryLogAt = now;
       _diag.info('discovery', 'Candidate discovered: $discoveredIp');
       debugPrint('[Dashboard] Discovery candidate: $discoveredIp');
     });

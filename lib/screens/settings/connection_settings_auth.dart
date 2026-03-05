@@ -91,6 +91,7 @@ extension _ConnectionSettingsAuth on _ConnectionSettingsScreenState {
     await _startDeviceFlow();
   }
 
+  // ignore: unused_element
   Future<bool> _ensureOpenpilotReady({
     bool interactive = true,
     bool allowKeyGeneration = true,
@@ -210,12 +211,19 @@ extension _ConnectionSettingsAuth on _ConnectionSettingsScreenState {
 
   Future<void> _showKeyGenerationDialog() async {
     if (!mounted) return;
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
     final result = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text("SSH 키 생성"),
-        content: const Text(
-            "GitHub 로그인이 완료되었습니다.\n\n새로운 SSH 키를 생성하고 GitHub에 등록하시겠습니까?\n\n이렇게 하면 기기에 비밀번호 없이 연결할 수 있습니다."),
+        content: Padding(
+          padding: EdgeInsets.only(top: tokens.itemGap),
+          child: Text(
+            "GitHub 로그인이 완료되었습니다.\n\n새로운 SSH 키를 생성하고 GitHub에 등록하시겠습니까?\n\n이렇게 하면 기기에 비밀번호 없이 연결할 수 있습니다.",
+            style: TextStyle(fontSize: window.isCompact ? 13.0 : 13.5),
+          ),
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),

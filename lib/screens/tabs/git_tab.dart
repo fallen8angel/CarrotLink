@@ -103,7 +103,7 @@ class _GitTabState extends State<GitTab> {
           }
         });
       } catch (e) {
-        print("Error loading logs: $e");
+        debugPrint("Error loading logs: $e");
       }
     }
   }
@@ -456,6 +456,7 @@ class _GitTabState extends State<GitTab> {
       return;
     }
 
+    if (!mounted) return;
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
       if (!mounted) return;
@@ -1083,6 +1084,7 @@ class _GitTabState extends State<GitTab> {
     final nextUrl = (value ?? '').trim();
     if (nextUrl.isEmpty || nextUrl == initialUrl.trim()) return;
 
+    if (!mounted) return;
     if (!_looksLikeOpenpilotRepoUrl(nextUrl)) {
       final confirm = await showDialog<bool>(
         context: context,
@@ -1116,6 +1118,7 @@ class _GitTabState extends State<GitTab> {
       if (confirm != true) return;
     }
 
+    if (!mounted) return;
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
       CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
@@ -1151,12 +1154,12 @@ class _GitTabState extends State<GitTab> {
   }
 
   Future<void> _runGitAction(
-    BuildContext context,
     DeviceActionType action,
     String successMessage, {
     String? branch,
     String? remote,
   }) async {
+    if (!mounted) return;
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
       CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
@@ -1210,7 +1213,7 @@ class _GitTabState extends State<GitTab> {
     }
   }
 
-  Future<void> _rebootDevice(BuildContext context) async {
+  Future<void> _rebootDevice() async {
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
       CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
@@ -1253,14 +1256,13 @@ class _GitTabState extends State<GitTab> {
     if (confirmed == true && mounted) {
       _addLog("기기 재부팅 중...");
       await _runGitAction(
-        context,
         DeviceActionType.reboot,
         "재부팅 명령을 전송했습니다.",
       );
     }
   }
 
-  Future<void> _selectBranch(BuildContext context) async {
+  Future<void> _selectBranch() async {
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
       CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
@@ -1299,7 +1301,6 @@ class _GitTabState extends State<GitTab> {
           onSelect: (remote, name) {
             Navigator.pop(ctx);
             _runGitAction(
-              context,
               DeviceActionType.gitCheckout,
               "$name 브랜치로 변경됨",
               branch: name,
@@ -1461,6 +1462,7 @@ class _GitTabState extends State<GitTab> {
     );
     if (payload == null) return;
 
+    if (!mounted) return;
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
       CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
@@ -1547,6 +1549,7 @@ class _GitTabState extends State<GitTab> {
     );
     if (target == null) return;
 
+    if (!mounted) return;
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -1575,6 +1578,7 @@ class _GitTabState extends State<GitTab> {
     );
     if (confirm != true) return;
 
+    if (!mounted) return;
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
       CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
@@ -1761,8 +1765,8 @@ class _GitTabState extends State<GitTab> {
     }
   }
 
-  Future<void> _performGitSync(BuildContext context) async {
-    await _runGitAction(context, DeviceActionType.gitSync, "Git Sync 완료");
+  Future<void> _performGitSync() async {
+    await _runGitAction(DeviceActionType.gitSync, "Git Sync 완료");
   }
 
   @override
@@ -1775,8 +1779,12 @@ class _GitTabState extends State<GitTab> {
     final outerHorizontal = window.isCompact
         ? 12.0
         : tokens.screenPadding.clamp(14.0, 28.0).toDouble();
-    final topPadding =
-        window.isCompact ? tokens.sectionGap : tokens.sectionGap + 2;
+    final topPadding = switch (window.windowClass) {
+      UiWindowClass.compact => tokens.sectionGap,
+      UiWindowClass.medium => tokens.itemGap + 4,
+      UiWindowClass.expanded => tokens.itemGap + 2,
+      UiWindowClass.large || UiWindowClass.extraLarge => tokens.itemGap + 2,
+    };
     final bottomPanelPadding =
         window.isCompact ? tokens.itemGap + 2 : tokens.sectionGap + 2;
     final logHeaderGap = window.isCompact ? 12.0 : 14.0;
@@ -1784,26 +1792,6 @@ class _GitTabState extends State<GitTab> {
     final logContainerRadius = window.isCompact ? 8.0 : 10.0;
     final logLineFontSize = window.isCompact ? 12.0 : 13.0;
     final actionSpacing = window.isCompact ? tokens.itemGap + 2 : 10.0;
-    final baseActionPanelMaxHeight = switch (window.windowClass) {
-      UiWindowClass.compact => 340.0,
-      UiWindowClass.medium => 300.0,
-      UiWindowClass.expanded => 230.0,
-      UiWindowClass.large => 220.0,
-      UiWindowClass.extraLarge => 210.0,
-    };
-    final actionPanelMaxHeight =
-        (viewportSize.height * (shortViewport ? 0.30 : 0.36))
-            .clamp(140.0, baseActionPanelMaxHeight)
-            .toDouble();
-    final actionButtonExtent = switch (window.windowClass) {
-      UiWindowClass.compact => 76.0,
-      UiWindowClass.medium => 74.0,
-      UiWindowClass.expanded => 70.0,
-      UiWindowClass.large => 68.0,
-      UiWindowClass.extraLarge => 66.0,
-    };
-    final useWideSplit =
-        window.isExpandedOrAbove && window.isLandscape && !shortViewport;
     final actionPaneWidth = switch (window.windowClass) {
       UiWindowClass.compact => 300.0,
       UiWindowClass.medium => 320.0,
@@ -1811,38 +1799,74 @@ class _GitTabState extends State<GitTab> {
       UiWindowClass.large => 350.0,
       UiWindowClass.extraLarge => 370.0,
     };
+    final actionButtonExtent = switch (window.windowClass) {
+      UiWindowClass.compact => 76.0,
+      UiWindowClass.medium => 74.0,
+      UiWindowClass.expanded => 70.0,
+      UiWindowClass.large => 68.0,
+      UiWindowClass.extraLarge => 66.0,
+    };
+    final estimatedGridColumns = actionPaneWidth >= 960
+        ? 4
+        : (actionPaneWidth >= 700 ? 3 : (actionPaneWidth >= 280 ? 2 : 1));
+    const actionButtonCount = 4;
+    final estimatedGridRows =
+        (actionButtonCount + estimatedGridColumns - 1) ~/ estimatedGridColumns;
+    final estimatedActionBodyHeight = (estimatedGridRows * actionButtonExtent) +
+        ((estimatedGridRows - 1) * actionSpacing) +
+        actionSpacing +
+        actionButtonExtent +
+        8.0;
+    final baseActionPanelMaxHeight = switch (window.windowClass) {
+      UiWindowClass.compact => 430.0,
+      UiWindowClass.medium => 390.0,
+      UiWindowClass.expanded => 360.0,
+      UiWindowClass.large => 350.0,
+      UiWindowClass.extraLarge => 340.0,
+    };
+    final computedActionPanelMaxHeight =
+        (viewportSize.height * (shortViewport ? 0.38 : 0.46))
+            .clamp(140.0, baseActionPanelMaxHeight)
+            .toDouble();
+    final wideActionPanelMaxHeight =
+        computedActionPanelMaxHeight < estimatedActionBodyHeight
+            ? estimatedActionBodyHeight
+            : computedActionPanelMaxHeight;
+    final veryShortViewport = viewportSize.height < 520;
+    final useWideSplit =
+        window.isExpandedOrAbove && window.isLandscape && !shortViewport;
+    final actionPanelMaxHeight = useWideSplit
+        ? wideActionPanelMaxHeight
+        : (veryShortViewport
+            ? computedActionPanelMaxHeight.clamp(120.0, 210.0).toDouble()
+            : computedActionPanelMaxHeight);
+    final actionPaneEffectiveMaxWidth =
+        (viewportSize.width * 0.44).clamp(240.0, actionPaneWidth).toDouble();
+    final actionPaneMinWidth = switch (window.windowClass) {
+      UiWindowClass.compact => 200.0,
+      UiWindowClass.medium => 220.0,
+      UiWindowClass.expanded => 228.0,
+      UiWindowClass.large || UiWindowClass.extraLarge => 248.0,
+    };
 
     Widget buildLogCard() {
       return DesignCard(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Row(
-              children: [
-                Icon(
-                  Icons.terminal,
-                  size: 18,
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-                SizedBox(width: tokens.itemGap + 2),
-                Text(
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final compactHeader = constraints.maxWidth < 360;
+                final title = Text(
                   "Git 로그",
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: Theme.of(context)
                       .textTheme
                       .titleSmall
                       ?.copyWith(fontWeight: FontWeight.w700),
-                ),
-                const Spacer(),
-                if (_isLoading)
-                  const Padding(
-                    padding: EdgeInsets.only(right: 8.0),
-                    child: SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                  ),
-                PopupMenuButton<_GitToolsMenuAction>(
+                );
+                final menu = PopupMenuButton<_GitToolsMenuAction>(
                   tooltip: "Git 옵션",
                   enabled: !(_isLoading || _isLoadingSourceInfo),
                   icon: const Icon(Icons.settings, size: 20),
@@ -1868,8 +1892,54 @@ class _GitTabState extends State<GitTab> {
                       child: Text("고급 Git 설정"),
                     ),
                   ],
-                ),
-              ],
+                );
+                final loading = _isLoading
+                    ? const Padding(
+                        padding: EdgeInsets.only(right: 8.0),
+                        child: SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      )
+                    : const SizedBox.shrink();
+
+                if (compactHeader) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.terminal,
+                            size: 18,
+                            color: Theme.of(context).colorScheme.primary,
+                          ),
+                          SizedBox(width: tokens.itemGap + 2),
+                          Expanded(child: title),
+                          loading,
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Align(alignment: Alignment.centerRight, child: menu),
+                    ],
+                  );
+                }
+
+                return Row(
+                  children: [
+                    Icon(
+                      Icons.terminal,
+                      size: 18,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                    SizedBox(width: tokens.itemGap + 2),
+                    Expanded(child: title),
+                    loading,
+                    menu,
+                  ],
+                );
+              },
             ),
             SizedBox(height: logHeaderGap),
             Expanded(
@@ -1942,7 +2012,7 @@ class _GitTabState extends State<GitTab> {
                   "브랜치 선택",
                   Icons.list,
                   Colors.blue,
-                  () => _selectBranch(context),
+                  _selectBranch,
                   enabled: connected,
                 ),
                 _buildActionButton(
@@ -1951,7 +2021,6 @@ class _GitTabState extends State<GitTab> {
                   Icons.download,
                   Colors.green,
                   () => _runGitAction(
-                    context,
                     DeviceActionType.gitPull,
                     "Git Pull 완료",
                   ),
@@ -1963,7 +2032,6 @@ class _GitTabState extends State<GitTab> {
                   Icons.restore,
                   Colors.orange,
                   () => _runGitAction(
-                    context,
                     DeviceActionType.gitResetHardClean,
                     "Git Reset 완료",
                   ),
@@ -1974,7 +2042,7 @@ class _GitTabState extends State<GitTab> {
                   "Git Sync",
                   Icons.sync,
                   Colors.red,
-                  () => _performGitSync(context),
+                  _performGitSync,
                   enabled: connected,
                 ),
               ];
@@ -1998,7 +2066,7 @@ class _GitTabState extends State<GitTab> {
             "Reboot",
             Icons.restart_alt,
             Colors.red,
-            () => _rebootDevice(context),
+            _rebootDevice,
             enabled: connected,
           ),
         ],
@@ -2022,8 +2090,8 @@ class _GitTabState extends State<GitTab> {
               alignment: Alignment.topCenter,
               child: ConstrainedBox(
                 constraints: BoxConstraints(
-                  minWidth: 280,
-                  maxWidth: actionPaneWidth,
+                  minWidth: actionPaneMinWidth,
+                  maxWidth: actionPaneEffectiveMaxWidth,
                 ),
                 child: DecoratedBox(
                   decoration: BoxDecoration(
@@ -2044,14 +2112,7 @@ class _GitTabState extends State<GitTab> {
                       bottomPanelPadding,
                       0,
                     ),
-                    child: ConstrainedBox(
-                      constraints: BoxConstraints(
-                        maxHeight: actionPanelMaxHeight,
-                      ),
-                      child: SingleChildScrollView(
-                        child: buildActionBody(),
-                      ),
-                    ),
+                    child: buildActionBody(),
                   ),
                 ),
               ),
@@ -2088,6 +2149,7 @@ class _GitTabState extends State<GitTab> {
           ),
           child: SafeArea(
             top: false,
+            bottom: false,
             child: ConstrainedBox(
               constraints: BoxConstraints(maxHeight: actionPanelMaxHeight),
               child: SingleChildScrollView(

@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../ui/adaptive/layout_tokens.dart';
@@ -49,6 +51,13 @@ class SectionTabBar extends StatelessWidget {
       UiWindowClass.large => 3.0,
       UiWindowClass.extraLarge => 3.0,
     };
+    final indicatorHorizontalInset = switch (window.windowClass) {
+      UiWindowClass.compact => 8.0,
+      UiWindowClass.medium => 10.0,
+      UiWindowClass.expanded => 12.0,
+      UiWindowClass.large => 14.0,
+      UiWindowClass.extraLarge => 16.0,
+    };
 
     return Container(
       padding: EdgeInsets.fromLTRB(
@@ -65,30 +74,49 @@ class SectionTabBar extends StatelessWidget {
           ),
         ),
       ),
-      child: TabBar(
-        controller: controller,
-        isScrollable: isScrollable,
-        labelColor: colors.primary,
-        unselectedLabelColor: colors.onSurfaceVariant,
-        labelStyle: TextStyle(
-          fontSize: labelSize,
-          fontWeight: FontWeight.w700,
-        ),
-        unselectedLabelStyle: TextStyle(
-          fontSize: labelSize,
-          fontWeight: FontWeight.w500,
-        ),
-        labelPadding: EdgeInsets.symmetric(horizontal: labelPadding),
-        indicatorSize: TabBarIndicatorSize.tab,
-        indicatorWeight: indicatorWeight,
-        dividerColor: Colors.transparent,
-        splashFactory: NoSplash.splashFactory,
-        overlayColor: WidgetStateProperty.resolveWith<Color?>(
-          (states) => states.contains(WidgetState.pressed)
-              ? colors.primary.withValues(alpha: 0.06)
-              : null,
-        ),
-        tabs: tabs,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final tabCount = math.max(1, tabs.length);
+          final estimatedTabWidth =
+              isScrollable ? 96.0 : (constraints.maxWidth / tabCount);
+          final adaptiveInset = math.min(
+            indicatorHorizontalInset,
+            math.max(4.0, estimatedTabWidth * 0.22),
+          );
+
+          return TabBar(
+            controller: controller,
+            isScrollable: isScrollable,
+            labelColor: colors.primary,
+            unselectedLabelColor: colors.onSurfaceVariant,
+            automaticIndicatorColorAdjustment: false,
+            labelStyle: TextStyle(
+              fontSize: labelSize,
+              fontWeight: FontWeight.w700,
+            ),
+            unselectedLabelStyle: TextStyle(
+              fontSize: labelSize,
+              fontWeight: FontWeight.w500,
+            ),
+            labelPadding: EdgeInsets.symmetric(horizontal: labelPadding),
+            indicatorSize: TabBarIndicatorSize.tab,
+            indicator: UnderlineTabIndicator(
+              borderSide: BorderSide(
+                color: colors.primary.withValues(alpha: 0.96),
+                width: indicatorWeight + 0.8,
+              ),
+              insets: EdgeInsets.symmetric(horizontal: adaptiveInset),
+            ),
+            dividerColor: Colors.transparent,
+            splashFactory: NoSplash.splashFactory,
+            overlayColor: WidgetStateProperty.resolveWith<Color?>(
+              (states) => states.contains(WidgetState.pressed)
+                  ? colors.primary.withValues(alpha: 0.06)
+                  : null,
+            ),
+            tabs: tabs,
+          );
+        },
       ),
     );
   }

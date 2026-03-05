@@ -20,6 +20,9 @@ class SidecarService {
   static const String _logFileName = 'carrot_linkview.log';
   static const String _managedProcessName = 'carrot_linkview';
   static const String _revisionFileName = '.carrot_linkview.rev';
+  static const String _legacyPythonFileName = 'carrotlink_sidecar.py';
+  static const String _legacyRunScriptName = 'run_sidecar.sh';
+  static const String _legacyBasePath = '/data/media/0/carrotlink_sidecar';
   static const String _defaultProfile = 'p2';
   static const Set<String> _supportedProfiles = <String>{
     'p0',
@@ -156,6 +159,10 @@ if [ ! -d "\$BASE" ]; then
   fi
   BASE="/data/openpilot/selfdrive/carrot"
 fi
+LEGACY_BASE="$_legacyBasePath"
+if [ -d "\$LEGACY_BASE" ] && { [ -f "\$LEGACY_BASE/$_legacyPythonFileName" ] || [ -f "\$LEGACY_BASE/$_legacyRunScriptName" ]; }; then
+  BASE="\$LEGACY_BASE"
+fi
 if [ "${strict ? '1' : '0'}" = "1" ] && [ ! -f "\$REPO/selfdrive/carrot/carrot_server.py" ]; then
   # carrotpilot 미탑재 기기라도 사이드카 배포는 허용하되, 진단에는 힌트를 남긴다.
   echo "CARROT_SERVER_MISSING_WARN"
@@ -220,13 +227,16 @@ mkdir -p "\$BASE" "\$BASE/logs"
 
     await ssh.writeTextFile('$remoteBase/$_pythonFileName', py);
     await ssh.writeTextFile('$remoteBase/$_runScriptName', sh);
+    // Keep legacy names in sync for older branches/processes.
+    await ssh.writeTextFile('$remoteBase/$_legacyPythonFileName', py);
+    await ssh.writeTextFile('$remoteBase/$_legacyRunScriptName', sh);
     await ssh.writeTextFile('$remoteBase/$_revisionFileName', '$revision\n');
 
     final chmod = await ssh.executeCommandResult(
       _bash(
         '''
 BASE=${_q(remoteBase)}
-chmod 755 "\$BASE/$_runScriptName" "\$BASE/$_pythonFileName"
+chmod 755 "\$BASE/$_runScriptName" "\$BASE/$_pythonFileName" "\$BASE/$_legacyRunScriptName" "\$BASE/$_legacyPythonFileName"
 ''',
       ),
       timeout: const Duration(seconds: 20),
@@ -276,7 +286,10 @@ PY
       timeout: const Duration(seconds: 25),
     );
     if (!ensureManaged.isSuccess) {
-      throw Exception('매니저 프로세스 등록 실패: ${ensureManaged.output}');
+      _diag.warn(
+        'sidecar',
+        'Managed registration skipped/fail: ${ensureManaged.output}',
+      );
     }
 
     _diag.info('sidecar', 'Deploy success managed=${ensureManaged.output}');
@@ -354,7 +367,7 @@ if [ -f "\$PIDFILE" ]; then
   rm -f "\$PIDFILE" || true
 fi
 
-for PATTERN in "$_pythonFileName" "$_runScriptName"; do
+for PATTERN in "$_pythonFileName" "$_runScriptName" "$_legacyPythonFileName" "$_legacyRunScriptName"; do
   PIDS=\$(ps -eo pid,args 2>/dev/null | grep -F "\$PATTERN" | grep -v grep | awk '{print \$1}' | sort -u || true)
   for P in \$PIDS; do
     kill_pid_if_alive "\$P"
@@ -514,7 +527,7 @@ if [ -f "\$PIDFILE" ]; then
   rm -f "\$PIDFILE" || true
 fi
 
-for PATTERN in "$_pythonFileName" "$_runScriptName"; do
+for PATTERN in "$_pythonFileName" "$_runScriptName" "$_legacyPythonFileName" "$_legacyRunScriptName"; do
   PIDS=\$(ps -eo pid,args 2>/dev/null | grep -F "\$PATTERN" | grep -v grep | awk '{print \$1}' | sort -u || true)
   for P in \$PIDS; do
     kill_pid_if_alive "\$P"

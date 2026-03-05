@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../services/ssh_service.dart';
 import '../../services/macro_service.dart';
+import '../../ui/adaptive/layout_tokens.dart';
+import '../../ui/adaptive/window_class.dart';
 import '../../widgets/design_components.dart';
 import '../../widgets/custom_toast.dart';
 
@@ -82,6 +84,9 @@ class _MacroTabState extends State<MacroTab> {
   @override
   Widget build(BuildContext context) {
     final macros = Provider.of<MacroService>(context).macros;
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
 
     return Scaffold(
       appBar: AppBar(
@@ -123,8 +128,12 @@ class _MacroTabState extends State<MacroTab> {
         child: const Icon(Icons.add),
       ),
       body: ListView.builder(
-        padding:
-            const EdgeInsets.only(left: 16, right: 16, top: 16, bottom: 150),
+        padding: EdgeInsets.only(
+          left: tokens.screenPadding.clamp(12.0, 20.0).toDouble(),
+          right: tokens.screenPadding.clamp(12.0, 20.0).toDouble(),
+          top: 16,
+          bottom: tokens.footerSpacer,
+        ),
         itemCount: macros.length,
         itemBuilder: (ctx, index) {
           final macro = macros[index];
@@ -154,7 +163,10 @@ class _MacroTabState extends State<MacroTab> {
                   );
                 },
                 title: Text(macro.name,
-                    style: const TextStyle(fontWeight: FontWeight.bold)),
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: window.isCompact ? 14 : 15,
+                    )),
                 titleAlignment: ListTileTitleAlignment.center,
                 subtitle: Text(macro.command,
                     maxLines: 1, overflow: TextOverflow.ellipsis),
@@ -166,7 +178,7 @@ class _MacroTabState extends State<MacroTab> {
                       IconButton(
                         visualDensity: VisualDensity.compact,
                         iconSize: 20,
-                        icon: const Icon(Icons.edit, color: Colors.blue),
+                        icon: Icon(Icons.edit, color: scheme.primary),
                         onPressed: () => _showAddDialog(context,
                             index: index,
                             initialName: macro.name,
@@ -175,7 +187,7 @@ class _MacroTabState extends State<MacroTab> {
                       IconButton(
                         visualDensity: VisualDensity.compact,
                         iconSize: 20,
-                        icon: const Icon(Icons.delete, color: Colors.red),
+                        icon: Icon(Icons.delete, color: scheme.error),
                         onPressed: () =>
                             Provider.of<MacroService>(context, listen: false)
                                 .removeMacro(index),
