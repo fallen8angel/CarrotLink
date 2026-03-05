@@ -8,6 +8,7 @@ import '../../services/native_overlay_hud_service.dart';
 import '../../widgets/custom_toast.dart';
 import '../../widgets/home_hud_preview_card.dart';
 import '../drive/live_drive_canvas_screen.dart';
+import '../../ui/adaptive/layout_tokens.dart';
 
 import 'package:carrot_pilot_manager/widgets/design_components.dart';
 
@@ -274,10 +275,11 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    final tokens = UiLayoutTokens.of(context);
     return Consumer<SSHService>(
       builder: (context, ssh, child) {
         return ListView(
-          padding: const EdgeInsets.all(16.0),
+          padding: EdgeInsets.all(tokens.screenPadding),
           children: [
             // Header Card
             DesignCard(
@@ -387,7 +389,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                 ],
               ),
             ),
-            const SizedBox(height: 12),
+            SizedBox(height: tokens.sectionGap),
             GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: () => _openWebRtcView(ssh),
@@ -400,7 +402,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                     fallbackMemPct: _fallbackMemPct,
                     fallbackDiskPct: _fallbackDiskPct,
                   ),
-                  const SizedBox(height: 6),
+                  SizedBox(height: tokens.itemGap),
                   Text(
                     '탭해서 새 주행화면 열기',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -412,7 +414,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
             ),
 
             // Quick Actions Grid Removed
-            const SizedBox(height: 120),
+            SizedBox(height: tokens.footerSpacer),
           ],
         );
       },
