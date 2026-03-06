@@ -976,173 +976,201 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
     final filterBottomPadding = window.isCompact ? 7.0 : 8.0;
     final filterGap = window.isCompact ? 6.0 : 8.0;
     final fabBottomInset = math.max(16.0, media.padding.bottom + 12.0);
+    final listBottomPadding = math.max(86.0, media.padding.bottom + 82.0);
+    final isTinyLandscape =
+        media.orientation == Orientation.landscape && media.size.height < 560.0;
+
+    final topSection = Column(
+      children: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(
+            horizontalPadding,
+            panelTopPadding,
+            horizontalPadding,
+            0,
+          ),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final compactActions = constraints.maxWidth < 680;
+              final driveButton = OutlinedButton.icon(
+                onPressed: _isDriveAuthBusy
+                    ? null
+                    : () => _toggleDriveLink(isSignedIn),
+                icon: Icon(
+                  isSignedIn ? Icons.check_circle : Icons.cloud_off,
+                  color: isSignedIn ? Colors.green : null,
+                  size: 18,
+                ),
+                label: Text(
+                  _isDriveAuthBusy ? '처리중' : (isSignedIn ? '연동됨' : '구글 연동'),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              );
+              final menuButton = PopupMenuButton<String>(
+                tooltip: '메뉴',
+                onSelected: (value) {
+                  if (value == 'sync') {
+                    unawaited(_syncNow());
+                  } else if (value == 'local') {
+                    unawaited(_deleteAllLocalBackups());
+                  } else if (value == 'cloud') {
+                    unawaited(_deleteAllCloudBackups());
+                  } else if (value == 'both') {
+                    unawaited(_deleteAllBoth());
+                  }
+                },
+                itemBuilder: (context) => const [
+                  PopupMenuItem(value: 'sync', child: Text('동기화')),
+                  PopupMenuItem(value: 'local', child: Text('로컬 전체 삭제')),
+                  PopupMenuItem(value: 'cloud', child: Text('클라우드 전체 삭제')),
+                  PopupMenuItem(value: 'both', child: Text('로컬+클라우드 전체 삭제')),
+                ],
+              );
+
+              if (!compactActions) {
+                return Row(
+                  children: [
+                    Expanded(child: _buildSourceSwitch()),
+                    SizedBox(width: filterGap),
+                    Flexible(
+                      fit: FlexFit.loose,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          minHeight: ui.sourceSwitchMinHeight,
+                          minWidth: 98,
+                          maxWidth: switch (window.windowClass) {
+                            UiWindowClass.compact => 132.0,
+                            UiWindowClass.medium => 140.0,
+                            UiWindowClass.expanded => 148.0,
+                            UiWindowClass.large ||
+                            UiWindowClass.extraLarge =>
+                              156.0,
+                          },
+                        ),
+                        child: driveButton,
+                      ),
+                    ),
+                    menuButton,
+                  ],
+                );
+              }
+
+              return Column(
+                children: [
+                  _buildSourceSwitch(),
+                  SizedBox(height: sourceSectionGap),
+                  Row(
+                    children: [
+                      Expanded(child: driveButton),
+                      menuButton,
+                    ],
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
+        if (backupService.isBackingUp)
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+              horizontalPadding,
+              sourceSectionGap,
+              horizontalPadding,
+              0,
+            ),
+            child: LinearProgressIndicator(value: backupService.progress),
+          ),
+        Padding(
+          padding: EdgeInsets.fromLTRB(
+            horizontalPadding,
+            filterTopPadding,
+            horizontalPadding,
+            filterBottomPadding,
+          ),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final compactFilters = constraints.maxWidth < 700;
+              final dateFilter = _buildCompactFilter(
+                label: '날짜',
+                value: _selectedDate,
+                options: _dateOptions,
+                onChanged: (value) => setState(() => _selectedDate = value),
+              );
+              final branchFilter = _buildCompactFilter(
+                label: '브랜치',
+                value: _selectedBranch,
+                options: _branchOptions,
+                onChanged: (value) => setState(() => _selectedBranch = value),
+              );
+              final refreshButton = IconButton(
+                onPressed: _isLoading ? null : _refreshActive,
+                icon: const Icon(Icons.refresh),
+                tooltip: '새로고침',
+              );
+              final branchWithRefresh = Row(
+                children: [
+                  Expanded(child: branchFilter),
+                  SizedBox(width: filterGap),
+                  SizedBox(
+                    width: ui.filterMinHeight + 4,
+                    height: ui.filterMinHeight + 4,
+                    child: refreshButton,
+                  ),
+                ],
+              );
+
+              if (!compactFilters) {
+                return Row(
+                  children: [
+                    Expanded(flex: 5, child: dateFilter),
+                    SizedBox(width: filterGap),
+                    Expanded(flex: 6, child: branchWithRefresh),
+                  ],
+                );
+              }
+
+              return Column(
+                children: [
+                  dateFilter,
+                  SizedBox(height: filterGap),
+                  branchWithRefresh,
+                ],
+              );
+            },
+          ),
+        ),
+      ],
+    );
 
     return Stack(
       children: [
-        Column(
-          children: [
-            Padding(
-              padding: EdgeInsets.fromLTRB(
-                horizontalPadding,
-                panelTopPadding,
-                horizontalPadding,
-                0,
-              ),
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  final compactActions = constraints.maxWidth < 680;
-                  final driveButton = OutlinedButton.icon(
-                    onPressed: _isDriveAuthBusy
-                        ? null
-                        : () => _toggleDriveLink(isSignedIn),
-                    icon: Icon(
-                      isSignedIn ? Icons.check_circle : Icons.cloud_off,
-                      color: isSignedIn ? Colors.green : null,
-                      size: 18,
-                    ),
-                    label: Text(
-                      _isDriveAuthBusy ? '처리중' : (isSignedIn ? '연동됨' : '구글 연동'),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  );
-                  final menuButton = PopupMenuButton<String>(
-                    tooltip: '메뉴',
-                    onSelected: (value) {
-                      if (value == 'sync') {
-                        unawaited(_syncNow());
-                      } else if (value == 'local') {
-                        unawaited(_deleteAllLocalBackups());
-                      } else if (value == 'cloud') {
-                        unawaited(_deleteAllCloudBackups());
-                      } else if (value == 'both') {
-                        unawaited(_deleteAllBoth());
-                      }
-                    },
-                    itemBuilder: (context) => const [
-                      PopupMenuItem(value: 'sync', child: Text('동기화')),
-                      PopupMenuItem(value: 'local', child: Text('로컬 전체 삭제')),
-                      PopupMenuItem(value: 'cloud', child: Text('클라우드 전체 삭제')),
-                      PopupMenuItem(
-                          value: 'both', child: Text('로컬+클라우드 전체 삭제')),
-                    ],
-                  );
-
-                  if (!compactActions) {
-                    return Row(
-                      children: [
-                        Expanded(child: _buildSourceSwitch()),
-                        SizedBox(width: filterGap),
-                        Flexible(
-                          fit: FlexFit.loose,
-                          child: ConstrainedBox(
-                            constraints: BoxConstraints(
-                              minHeight: ui.sourceSwitchMinHeight,
-                              minWidth: 98,
-                              maxWidth: switch (window.windowClass) {
-                                UiWindowClass.compact => 132.0,
-                                UiWindowClass.medium => 140.0,
-                                UiWindowClass.expanded => 148.0,
-                                UiWindowClass.large ||
-                                UiWindowClass.extraLarge =>
-                                  156.0,
-                              },
-                            ),
-                            child: driveButton,
-                          ),
-                        ),
-                        menuButton,
-                      ],
-                    );
-                  }
-
-                  return Column(
-                    children: [
-                      _buildSourceSwitch(),
-                      SizedBox(height: sourceSectionGap),
-                      Row(
-                        children: [
-                          Expanded(child: driveButton),
-                          menuButton,
-                        ],
-                      ),
-                    ],
-                  );
-                },
-              ),
-            ),
-            if (backupService.isBackingUp)
-              Padding(
-                padding: EdgeInsets.fromLTRB(
-                  horizontalPadding,
-                  sourceSectionGap,
-                  horizontalPadding,
-                  0,
+        if (isTinyLandscape)
+          CustomScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            slivers: [
+              SliverToBoxAdapter(child: topSection),
+              SliverToBoxAdapter(
+                child: _buildList(
+                  isSignedIn: isSignedIn,
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  listBottomPadding: listBottomPadding,
                 ),
-                child: LinearProgressIndicator(value: backupService.progress),
               ),
-            Padding(
-              padding: EdgeInsets.fromLTRB(
-                horizontalPadding,
-                filterTopPadding,
-                horizontalPadding,
-                filterBottomPadding,
+            ],
+          )
+        else
+          Column(
+            children: [
+              topSection,
+              Expanded(
+                child: _buildList(
+                  isSignedIn: isSignedIn,
+                  listBottomPadding: listBottomPadding,
+                ),
               ),
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  final compactFilters = constraints.maxWidth < 700;
-                  final dateFilter = _buildCompactFilter(
-                    label: '날짜',
-                    value: _selectedDate,
-                    options: _dateOptions,
-                    onChanged: (value) => setState(() => _selectedDate = value),
-                  );
-                  final branchFilter = _buildCompactFilter(
-                    label: '브랜치',
-                    value: _selectedBranch,
-                    options: _branchOptions,
-                    onChanged: (value) =>
-                        setState(() => _selectedBranch = value),
-                  );
-                  final refreshButton = IconButton(
-                    onPressed: _isLoading ? null : _refreshActive,
-                    icon: const Icon(Icons.refresh),
-                    tooltip: '새로고침',
-                  );
-                  final branchWithRefresh = Row(
-                    children: [
-                      Expanded(child: branchFilter),
-                      SizedBox(width: filterGap),
-                      SizedBox(
-                        width: ui.filterMinHeight + 4,
-                        height: ui.filterMinHeight + 4,
-                        child: refreshButton,
-                      ),
-                    ],
-                  );
-
-                  if (!compactFilters) {
-                    return Row(
-                      children: [
-                        Expanded(flex: 5, child: dateFilter),
-                        SizedBox(width: filterGap),
-                        Expanded(flex: 6, child: branchWithRefresh),
-                      ],
-                    );
-                  }
-
-                  return Column(
-                    children: [
-                      dateFilter,
-                      SizedBox(height: filterGap),
-                      branchWithRefresh,
-                    ],
-                  );
-                },
-              ),
-            ),
-            Expanded(child: _buildList(isSignedIn: isSignedIn)),
-          ],
-        ),
+            ],
+          ),
         Positioned(
           right: horizontalPadding,
           bottom: fabBottomInset,
@@ -1156,9 +1184,12 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
     );
   }
 
-  Widget _buildList({required bool isSignedIn}) {
-    final media = MediaQuery.of(context);
-    final listBottomPadding = math.max(86.0, media.padding.bottom + 82.0);
+  Widget _buildList({
+    required bool isSignedIn,
+    bool shrinkWrap = false,
+    ScrollPhysics? physics,
+    required double listBottomPadding,
+  }) {
     final horizontalPadding =
         UiLayoutTokens.of(context).screenPadding.clamp(12.0, 24.0).toDouble();
     if (_isLoading) {
@@ -1188,6 +1219,8 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
     }
 
     return ListView.separated(
+      shrinkWrap: shrinkWrap,
+      physics: physics,
       padding: EdgeInsets.fromLTRB(
         horizontalPadding,
         0,

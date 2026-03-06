@@ -752,21 +752,41 @@ class _TerminalScreenState extends State<TerminalScreen>
                 );
               }
 
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: Row(
-                      children: toolbarActions,
+              final sessionReserveWidth = compactHeightMode ? 126.0 : 138.0;
+
+              return SizedBox(
+                width: double.infinity,
+                child: Stack(
+                  alignment: Alignment.centerRight,
+                  children: [
+                    Positioned.fill(
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          padding: EdgeInsets.only(
+                            right: sessionReserveWidth + 8,
+                          ),
+                          child: Row(children: toolbarActions),
+                        ),
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 4),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: sessionButton,
-                  ),
-                ],
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          minWidth: compactHeightMode ? 92 : 100,
+                          maxWidth: sessionReserveWidth,
+                        ),
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          alignment: Alignment.centerRight,
+                          child: sessionButton,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               );
             },
           ),

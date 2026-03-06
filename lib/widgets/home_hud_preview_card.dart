@@ -249,8 +249,8 @@ class _HomeHudPreviewCardState extends State<HomeHudPreviewCard> {
             : finiteW;
         final scale = side / 340.0;
         final metricGap = 8 * scale;
-        final bodyTopGap = 8 * scale;
-        final metricHeight = 54 * scale;
+        final bodyTopGap = (7 * scale).clamp(2.0, 10.0).toDouble();
+        final metricHeight = math.max(32.0, 56 * scale);
         final mainSpeedFont = 78 * scale;
         final setSpeedFont = 44 * scale;
         final tempSourceFont = 32 * scale;
@@ -663,12 +663,14 @@ class _HudMiniMetric extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final labelFont = math.max(10.0, 13.0 * scale);
-    final valueFont = math.max(12.0, 18.0 * scale);
+    final labelFont = (13.0 * scale).clamp(8.0, 16.0).toDouble();
+    final valueFont = (18.0 * scale).clamp(10.0, 22.0).toDouble();
+    final verticalPadding = (6 * scale).clamp(2.0, 6.0).toDouble();
+    final horizontalPadding = (8 * scale).clamp(3.0, 8.0).toDouble();
     return Container(
       padding: EdgeInsets.symmetric(
-        vertical: math.max(3, 6 * scale),
-        horizontal: math.max(4, 8 * scale),
+        vertical: verticalPadding,
+        horizontal: horizontalPadding,
       ),
       decoration: BoxDecoration(
         color: const Color(0xFF1E9A44),

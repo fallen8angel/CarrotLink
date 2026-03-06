@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -666,11 +667,19 @@ class _BackupManagerScreenState extends State<BackupManagerScreen>
         UiWindowClass.medium => 13.0,
         _ => 14.0,
       };
-      final contentHeight = switch (window.windowClass) {
+      final preferredContentHeight = switch (window.windowClass) {
         UiWindowClass.compact => 320.0,
         UiWindowClass.medium => 380.0,
         _ => 440.0,
       };
+      final mediaHeight = MediaQuery.of(context).size.height;
+      final contentHeight = math.max(
+        220.0,
+        math.min(
+          preferredContentHeight,
+          mediaHeight * (window.isLandscape ? 0.56 : 0.64),
+        ),
+      );
 
       if (!mounted) return;
 
@@ -1777,6 +1786,7 @@ class _DiffRestoreDialogState extends State<_DiffRestoreDialog> {
   }) _dialogMetrics(BuildContext context) {
     final window = UiWindowInfo.of(context);
     final tokens = UiLayoutTokens.of(context);
+    final viewportHeight = MediaQuery.of(context).size.height;
     final maxWidth = switch (window.windowClass) {
       UiWindowClass.compact => 520.0,
       UiWindowClass.medium => 620.0,
@@ -1784,11 +1794,18 @@ class _DiffRestoreDialogState extends State<_DiffRestoreDialog> {
       UiWindowClass.large => 860.0,
       UiWindowClass.extraLarge => 960.0,
     };
-    final contentHeight = switch (window.windowClass) {
+    final preferredContentHeight = switch (window.windowClass) {
       UiWindowClass.compact => 420.0,
       UiWindowClass.medium => 500.0,
       _ => 580.0,
     };
+    final contentHeight = math.max(
+      260.0,
+      math.min(
+        preferredContentHeight,
+        viewportHeight * (window.isLandscape ? 0.56 : 0.66),
+      ),
+    );
     final horizontalInset = switch (window.windowClass) {
       UiWindowClass.compact => tokens.screenPadding,
       UiWindowClass.medium => tokens.screenPadding + 8,
@@ -1796,6 +1813,7 @@ class _DiffRestoreDialogState extends State<_DiffRestoreDialog> {
       UiWindowClass.large => tokens.screenPadding + 32,
       UiWindowClass.extraLarge => tokens.screenPadding + 40,
     };
+    final verticalInset = math.max(12.0, math.min(24.0, viewportHeight * 0.08));
     final titleFont = switch (window.windowClass) {
       UiWindowClass.compact => 13.0,
       UiWindowClass.medium => 14.0,
@@ -1807,8 +1825,8 @@ class _DiffRestoreDialogState extends State<_DiffRestoreDialog> {
       _ => 14.0,
     };
     return (
-      insetPadding:
-          EdgeInsets.symmetric(horizontal: horizontalInset, vertical: 24),
+      insetPadding: EdgeInsets.symmetric(
+          horizontal: horizontalInset, vertical: verticalInset),
       contentPadding: EdgeInsets.fromLTRB(
         tokens.screenPadding,
         tokens.sectionGap,

@@ -1263,7 +1263,7 @@ class CameraRelayHub:
       "driverEncodeData",
     ],
   }
-  QUALITY_MODES = ("low_latency",)
+  QUALITY_MODES = ("quality", "stable")
 
   def __init__(self, messaging: Any):
     self.messaging = messaging
@@ -1276,7 +1276,7 @@ class CameraRelayHub:
       cam: {} for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
     }
     self._queues: dict[str, asyncio.Queue[bytes]] = {
-      cam: asyncio.Queue(maxsize=3)
+      cam: asyncio.Queue(maxsize=4)
       for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
     }
     self._frame_count: dict[str, int] = {
@@ -1294,14 +1294,15 @@ class CameraRelayHub:
       for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
     }
     self._quality_mode = self._normalize_quality_mode(
-      os.environ.get("CARROTLINK_CAMERA_QUALITY_MODE", "low_latency")
+      os.environ.get("CARROTLINK_CAMERA_QUALITY_MODE", "quality")
     )
     self._lock = asyncio.Lock()
 
   def _normalize_quality_mode(self, mode: Any) -> str:
-    # Single fixed policy: always low-latency mode.
-    _ = str(mode or "").strip().lower()
-    return "low_latency"
+    value = str(mode or "").strip().lower()
+    if value == "stable":
+      return "stable"
+    return "quality"
 
   def set_quality_mode(self, mode: Any) -> str:
     self._quality_mode = self._normalize_quality_mode(mode)
@@ -1314,8 +1315,10 @@ class CameraRelayHub:
     base = list(self.CAMERA_SERVICE_CANDIDATES.get(camera, []))
     if not base:
       return []
-    # Always prioritize livestream service first for lower latency.
-    return base
+    if self._quality_mode == "stable":
+      return base
+    # quality mode: prefer full encode first, then livestream fallback.
+    return list(reversed(base))
 
   def _pack_frame(self, camera: str, frame: Any) -> bytes:
     header = getattr(frame, "header", b"") or b""
@@ -1460,10 +1463,11 @@ class CameraRelayHub:
     queue = self._queues[camera]
     while True:
       try:
-        send_timeout = 0.20
-        timeout_fail_limit = 3
+        quality_mode = self._quality_mode
+        send_timeout = 0.35 if quality_mode == "quality" else 0.25
+        timeout_fail_limit = 5 if quality_mode == "quality" else 4
         if not self.clients.get(camera):
-          keep_count = 1
+          keep_count = 2
           while queue.qsize() > keep_count:
             try:
               queue.get_nowait()
@@ -1476,15 +1480,6 @@ class CameraRelayHub:
           packet = await asyncio.wait_for(queue.get(), timeout=0.25)
         except asyncio.TimeoutError:
           continue
-        dropped_backlog = 0
-        while queue.qsize() > 0:
-          try:
-            packet = queue.get_nowait()
-            dropped_backlog += 1
-          except Exception:
-            break
-        if dropped_backlog > 0:
-          self._drop_count[camera] += dropped_backlog
 
         stale: list[web.WebSocketResponse] = []
         for ws in list(self.clients.get(camera, set())):
@@ -1539,16 +1534,6 @@ class CameraRelayHub:
 
     ws = web.WebSocketResponse(heartbeat=20, max_msg_size=2 * 1024 * 1024)
     await ws.prepare(request)
-    # Single external viewer policy: keep only one active camera client
-    # per camera channel to avoid duplicate decode fanout load.
-    stale_clients = list(self.clients[camera])
-    for stale in stale_clients:
-      self.clients[camera].discard(stale)
-      self._ws_send_failures.pop(stale, None)
-      try:
-        await stale.close(code=1001, message=b"replaced_by_new_client")
-      except Exception:
-        pass
     self.clients[camera].add(ws)
     await self.ensure_camera_task(camera)
 
@@ -2355,14 +2340,6 @@ class SidecarApp:
     camera_mode = self._normalize_overlay_camera_mode(request.query.get("camera", "both"))
     ws = web.WebSocketResponse(heartbeat=20)
     await ws.prepare(request)
-    # Single external viewer policy: keep one active overlay client.
-    stale_clients = list(self.clients.keys())
-    for stale in stale_clients:
-      self.clients.pop(stale, None)
-      try:
-        await stale.close(code=1001, message=b"replaced_by_new_client")
-      except Exception:
-        pass
     self.clients[ws] = (encoding, camera_mode)
     try:
       await ws.send_str(
