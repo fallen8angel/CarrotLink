@@ -1,11 +1,15 @@
 ﻿part of 'live_drive_canvas_screen.dart';
 
+const bool _driveEnableExperimentalSidecarDecorations = false;
+const bool _driveEnableExperimentalNavAr = false;
+
 class _DriveOverlayPainter extends CustomPainter {
   final _DriveOverlaySnapshot snapshot;
   final bool isConnected;
   final Size sourceSize;
   final _DriveCameraKind cameraKind;
   final bool coverViewport;
+  final double viewportZoom;
   final Rect? visibleViewportRect;
   final bool showDebugGuides;
   final bool showPathFill;
@@ -40,6 +44,7 @@ class _DriveOverlayPainter extends CustomPainter {
     required this.sourceSize,
     required this.cameraKind,
     required this.coverViewport,
+    this.viewportZoom = 1.0,
     this.visibleViewportRect,
     this.showDebugGuides = false,
     this.showPathFill = true,
@@ -228,7 +233,10 @@ class _DriveOverlayPainter extends CustomPainter {
   }) {
     final sx = canvas.width / source.width;
     final sy = canvas.height / source.height;
-    final scale = coverViewport ? math.max(sx, sy) : math.min(sx, sy);
+    final fitScale = coverViewport ? math.max(sx, sy) : math.min(sx, sy);
+    final resolvedViewportZoom =
+        (viewportZoom.isFinite && viewportZoom > 0.1) ? viewportZoom : 1.0;
+    final scale = fitScale * resolvedViewportZoom;
     final drawW = source.width * scale;
     final drawH = source.height * scale;
     var dx = (canvas.width - drawW) * 0.5;
@@ -286,8 +294,11 @@ class _DriveOverlayPainter extends CustomPainter {
     final sx = canvas.width / source.width;
     final sy = canvas.height / source.height;
     final fitScale = coverViewport ? math.max(sx, sy) : math.min(sx, sy);
-    final baseDrawW = source.width * fitScale;
-    final baseDrawH = source.height * fitScale;
+    final resolvedViewportZoom =
+        (viewportZoom.isFinite && viewportZoom > 0.1) ? viewportZoom : 1.0;
+    final scaledFit = fitScale * resolvedViewportZoom;
+    final baseDrawW = source.width * scaledFit;
+    final baseDrawH = source.height * scaledFit;
     final baseDx = (canvas.width - baseDrawW) * 0.5;
     final baseDy = (canvas.height - baseDrawH) * 0.5;
 
@@ -318,17 +329,17 @@ class _DriveOverlayPainter extends CustomPainter {
 
     return _SourceCanvasPlacement(
       transform: _M3(
-        fitScale * zoom,
+        scaledFit * zoom,
         0.0,
-        (fitScale * tx) + baseDx,
+        (scaledFit * tx) + baseDx,
         0.0,
-        fitScale * zoom,
-        (fitScale * ty) + baseDy,
+        scaledFit * zoom,
+        (scaledFit * ty) + baseDy,
         0.0,
         0.0,
         1.0,
       ),
-      scale: fitScale * zoom,
+      scale: scaledFit * zoom,
       xOffset: (xOffsetRaw != null && xOffsetRaw.isFinite) ? xOffsetRaw : 0.0,
       yOffset: (yOffsetRaw != null && yOffsetRaw.isFinite) ? yOffsetRaw : 0.0,
     );
@@ -906,6 +917,7 @@ class _DriveOverlayPainter extends CustomPainter {
     required _DriveCameraKind cameraKind,
     required Size canvasSize,
     required bool coverViewport,
+    double viewportZoom = 1.0,
     Rect? visibleViewportRect,
     bool showDebugGuides = false,
     bool showPathFill = true,
@@ -925,6 +937,7 @@ class _DriveOverlayPainter extends CustomPainter {
       sourceSize: sourceSize,
       cameraKind: cameraKind,
       coverViewport: coverViewport,
+      viewportZoom: viewportZoom,
       visibleViewportRect: visibleViewportRect,
       showDebugGuides: showDebugGuides,
       showPathFill: showPathFill,
@@ -947,6 +960,7 @@ class _DriveOverlayPainter extends CustomPainter {
     required _DriveCameraKind cameraKind,
     required Size canvasSize,
     required bool coverViewport,
+    double viewportZoom = 1.0,
     required String cameraSourceLabel,
   }) {
     final painter = _DriveOverlayPainter(
@@ -955,6 +969,7 @@ class _DriveOverlayPainter extends CustomPainter {
       sourceSize: sourceSize,
       cameraKind: cameraKind,
       coverViewport: coverViewport,
+      viewportZoom: viewportZoom,
       visibleViewportRect: null,
       debugPlotState: const _DriveDebugPlotState.hidden(),
     );
@@ -1058,7 +1073,8 @@ class _DriveOverlayPainter extends CustomPainter {
     final sourceText =
         'src ${src.width.toStringAsFixed(0)}x${src.height.toStringAsFixed(0)} '
         'canvas ${canvasSize.width.toStringAsFixed(0)}x${canvasSize.height.toStringAsFixed(0)} '
-        'fit=${coverViewport ? 'cover' : 'contain'} cam=${cameraKind.name} $cameraSourceLabel';
+        'fit=${coverViewport ? 'cover' : 'contain'} zoom=${viewportZoom.toStringAsFixed(2)} '
+        'cam=${cameraKind.name} $cameraSourceLabel';
 
     return <String>[
       '[Projection Verify]',
@@ -1141,6 +1157,9 @@ class _DriveOverlayPainter extends CustomPainter {
   }
 
   Map<String, dynamic>? _buildNativeOverlayPayloadFromSidecar2d(Size size) {
+    if (!_driveEnableExperimentalSidecarDecorations) {
+      return null;
+    }
     final cam = _currentCameraOverlay2d();
     if (cam == null) return null;
     final sourceWidth =
@@ -1286,7 +1305,7 @@ class _DriveOverlayPainter extends CustomPainter {
       }
     }
     labels ??= <Map<String, dynamic>>[];
-    if (sidecarPayload != null) {
+    if (_driveEnableExperimentalSidecarDecorations && sidecarPayload != null) {
       final sidecarPolygons = sidecarPayload['polygons'];
       if (sidecarPolygons is List) {
         for (final item in sidecarPolygons) {
@@ -1304,12 +1323,14 @@ class _DriveOverlayPainter extends CustomPainter {
         }
       }
     }
-    _appendNavArOverlayPolygons(
-      polygons: polygons,
-      labels: labels,
-      transform: transform,
-      canvasSize: size,
-    );
+    if (_driveEnableExperimentalNavAr) {
+      _appendNavArOverlayPolygons(
+        polygons: polygons,
+        labels: labels,
+        transform: transform,
+        canvasSize: size,
+      );
+    }
     _appendDebugPlotPayload(
       polygons,
       labels,
@@ -2927,7 +2948,8 @@ class _DriveOverlayPainter extends CustomPainter {
   ) {
     final sidecarPayload = _buildNativeOverlayPayloadFromSidecar2d(size);
     if (snapshot.path.length < 2) {
-      if (sidecarPayload != null) {
+      if (_driveEnableExperimentalSidecarDecorations &&
+          sidecarPayload != null) {
         _drawEncodedOverlayPayload(canvas, size, sidecarPayload);
       }
       final plotPayload = _buildDebugPlotOverlayPayload(size);
@@ -3021,26 +3043,29 @@ class _DriveOverlayPainter extends CustomPainter {
     if (showPathFill && trackVertices != null) {
       _drawPathByMode(canvas, trackVertices);
     }
-    if (sidecarPayload != null) {
+    if (_driveEnableExperimentalSidecarDecorations &&
+        sidecarPayload != null) {
       _drawEncodedOverlayPayload(canvas, size, sidecarPayload);
     }
-    final navPolygons = <Map<String, dynamic>>[];
-    final navLabels = <Map<String, dynamic>>[];
-    _appendNavArOverlayPolygons(
-      polygons: navPolygons,
-      labels: navLabels,
-      transform: transform,
-      canvasSize: size,
-    );
-    if (navPolygons.isNotEmpty || navLabels.isNotEmpty) {
-      _drawEncodedOverlayPayload(
-        canvas,
-        size,
-        <String, dynamic>{
-          'polygons': navPolygons,
-          if (navLabels.isNotEmpty) 'labels': navLabels,
-        },
+    if (_driveEnableExperimentalNavAr) {
+      final navPolygons = <Map<String, dynamic>>[];
+      final navLabels = <Map<String, dynamic>>[];
+      _appendNavArOverlayPolygons(
+        polygons: navPolygons,
+        labels: navLabels,
+        transform: transform,
+        canvasSize: size,
       );
+      if (navPolygons.isNotEmpty || navLabels.isNotEmpty) {
+        _drawEncodedOverlayPayload(
+          canvas,
+          size,
+          <String, dynamic>{
+            'polygons': navPolygons,
+            if (navLabels.isNotEmpty) 'labels': navLabels,
+          },
+        );
+      }
     }
     if (showDebugGuides) {
       _drawDebugGuides(
@@ -3063,6 +3088,7 @@ class _DriveOverlayPainter extends CustomPainter {
         oldDelegate.sourceSize != sourceSize ||
         oldDelegate.cameraKind != cameraKind ||
         oldDelegate.coverViewport != coverViewport ||
+        oldDelegate.viewportZoom != viewportZoom ||
         oldDelegate.visibleViewportRect != visibleViewportRect ||
         oldDelegate.showDebugGuides != showDebugGuides ||
         oldDelegate.showPathFill != showPathFill ||

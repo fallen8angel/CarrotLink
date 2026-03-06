@@ -237,6 +237,13 @@ class _HomeHudPreviewCardState extends State<HomeHudPreviewCard> {
         maxScaleFactor: maxScale,
       ),
     );
+    final previewAspectRatio = switch (window.windowClass) {
+      UiWindowClass.compact => 1.68,
+      UiWindowClass.medium => 1.76,
+      UiWindowClass.expanded => 1.84,
+      UiWindowClass.large => 1.92,
+      UiWindowClass.extraLarge => 2.0,
+    };
 
     final hudCore = LayoutBuilder(
       builder: (context, constraints) {
@@ -244,7 +251,7 @@ class _HomeHudPreviewCardState extends State<HomeHudPreviewCard> {
             constraints.maxWidth.isFinite ? constraints.maxWidth : 340.0;
         final finiteH =
             constraints.maxHeight.isFinite ? constraints.maxHeight : finiteW;
-        final side = widget.fillParent
+        final side = (widget.fillParent || widget.matchParentWidth)
             ? math.min(finiteW, finiteH).clamp(170.0, 560.0).toDouble()
             : finiteW;
         final scale = side / 340.0;
@@ -308,10 +315,16 @@ class _HomeHudPreviewCardState extends State<HomeHudPreviewCard> {
                     builder: (context, bodyConstraints) {
                       final w = bodyConstraints.maxWidth;
                       final h = bodyConstraints.maxHeight;
-                      final bodyScale = math.min(w / 320.0, h / 230.0);
+                      final rawBodyScale = math.min(w / 320.0, h / 230.0);
+                      final bottomDockInset =
+                          (16.0 * rawBodyScale).clamp(10.0, 22.0).toDouble();
+                      final usableH = math.max(140.0, h - bottomDockInset);
+                      final bodyScale =
+                          math.min(w / 320.0, usableH / 230.0);
 
                       double px(double r) => w * r;
-                      double py(double r) => h * r;
+                      double py(double r) => usableH * r;
+                      double bottomY(double r) => bottomDockInset + py(r);
 
                       return Stack(
                         children: [
@@ -465,7 +478,7 @@ class _HomeHudPreviewCardState extends State<HomeHudPreviewCard> {
                           ),
                           Positioned(
                             right: 0,
-                            bottom: py(0.00),
+                            bottom: bottomY(0.00),
                             child: Column(
                               children: List.generate(
                                 4,
@@ -488,7 +501,7 @@ class _HomeHudPreviewCardState extends State<HomeHudPreviewCard> {
                           Positioned(
                             left: 0,
                             right: px(0.18),
-                            bottom: py(0.00),
+                            bottom: bottomY(0.00),
                             child: Row(
                               crossAxisAlignment: CrossAxisAlignment.end,
                               children: [
@@ -591,7 +604,7 @@ class _HomeHudPreviewCardState extends State<HomeHudPreviewCard> {
           : Center(
               child: widget.matchParentWidth
                   ? AspectRatio(
-                      aspectRatio: 1,
+                      aspectRatio: previewAspectRatio,
                       child: hudCore,
                     )
                   : ConstrainedBox(
@@ -768,6 +781,15 @@ class _HudSnapshot {
 
   static double? _asDouble(dynamic v) {
     if (v is num) return v.toDouble();
+    if (v is Iterable) {
+      double? maxValue;
+      for (final item in v) {
+        final parsed = _asDouble(item);
+        if (parsed == null) continue;
+        maxValue = maxValue == null ? parsed : math.max(maxValue, parsed);
+      }
+      return maxValue;
+    }
     if (v is String) return double.tryParse(v);
     return null;
   }

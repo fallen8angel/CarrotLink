@@ -65,12 +65,12 @@ extension _DriveDebugPlotPainterComponents on _DriveOverlayPainter {
     final minSide = math.min(visible.width, visible.height);
     final isLandscape = visible.width >= visible.height;
     final margin = switch (minSide) {
-      < 360.0 => 10.0,
-      < 720.0 => 12.0,
-      _ => 14.0,
+      < 360.0 => 12.0,
+      < 720.0 => 15.0,
+      _ => 18.0,
     };
     final availableWidth = math.max(148.0, visible.width - (margin * 2));
-    final availableHeight = math.max(76.0, visible.height - (margin * 2));
+    final availableHeight = math.max(96.0, visible.height - (margin * 2));
     final gap = minSide < 360.0 ? 8.0 : 10.0;
     final titleSize = switch (minSide) {
       < 360.0 => 10.0,
@@ -87,28 +87,28 @@ extension _DriveDebugPlotPainterComponents on _DriveOverlayPainter {
       < 720.0 => 10.0,
       _ => 11.0,
     };
-    var clusterWidth = (visible.width * (isLandscape ? 0.34 : 0.60))
-        .clamp(196.0, 372.0)
-        .toDouble();
-    clusterWidth = math.min(clusterWidth, availableWidth);
-    var valueColumnWidth = (clusterWidth * (isLandscape ? 0.29 : 0.32))
-        .clamp(78.0, 118.0)
+    var clusterWidth = availableWidth;
+    var valueColumnWidth = (clusterWidth * (isLandscape ? 0.16 : 0.18))
+        .clamp(72.0, 120.0)
         .toDouble();
     valueColumnWidth = math.min(
       valueColumnWidth,
-      math.max(68.0, availableWidth * 0.34),
+      math.max(76.0, availableWidth * 0.24),
     );
     var chartWidth = (clusterWidth - valueColumnWidth - gap)
-        .clamp(112.0, 258.0)
+        .clamp(152.0, 428.0)
         .toDouble();
     if ((chartWidth + valueColumnWidth + gap) > availableWidth) {
       chartWidth = math.max(96.0, availableWidth - valueColumnWidth - gap);
       clusterWidth = chartWidth + valueColumnWidth + gap;
     }
-    final chartHeight = (visible.height * (isLandscape ? 0.105 : 0.125))
-        .clamp(58.0, 96.0)
+    final chartHeight = (visible.height * (isLandscape ? 0.14 : 0.18))
+        .clamp(72.0, 132.0)
         .toDouble();
-    final resolvedChartHeight = math.min(chartHeight, math.max(58.0, availableHeight - titleSize - 8.0));
+    final resolvedChartHeight = math.min(
+      chartHeight,
+      math.max(72.0, availableHeight - titleSize - 14.0),
+    );
     final clusterMaxWidth = chartWidth + gap + valueColumnWidth;
     final maxLeft = math.max(visible.left + 8.0, visible.right - clusterMaxWidth);
     final maxTop = math.max(
@@ -121,9 +121,9 @@ extension _DriveDebugPlotPainterComponents on _DriveOverlayPainter {
     final chartRect = Rect.fromLTWH(left, chartTop, chartWidth, resolvedChartHeight);
     final valueBaseY = chartRect.top + (valueSize * 0.9);
     final valueGap = switch (chartHeight) {
-      < 68.0 => 16.0,
-      < 82.0 => 19.0,
-      _ => 22.0,
+      < 84.0 => 18.0,
+      < 110.0 => 22.0,
+      _ => 26.0,
     };
     return (
       chartRect: chartRect,
@@ -145,7 +145,10 @@ extension _DriveDebugPlotPainterComponents on _DriveOverlayPainter {
   double _plotYForValue(Rect chartRect, double value, double minValue, double maxValue) {
     final span = (maxValue - minValue).abs() < 1e-6 ? 1.0 : (maxValue - minValue);
     final t = ((value - minValue) / span).clamp(0.0, 1.0).toDouble();
-    return chartRect.bottom - (chartRect.height * t);
+    final verticalInset =
+        (chartRect.height * 0.08).clamp(4.0, 10.0).toDouble();
+    final usableHeight = math.max(8.0, chartRect.height - (verticalInset * 2));
+    return chartRect.bottom - verticalInset - (usableHeight * t);
   }
 
   List<Offset> _plotPoints(List<double> series, Rect chartRect, double minValue, double maxValue) {

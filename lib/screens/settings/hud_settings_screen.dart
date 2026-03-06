@@ -70,10 +70,61 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
     await HudDriveSettingsService.setDefaultMode(value);
     if (!mounted) return;
     setState(() => _defaultDriveMode = value);
-    final label = value == HudDriveSettingsService.modeOpenpilotOverlay
-        ? '오픈파일럿 그래픽'
-        : 'WebRTC';
+    final label = _modeLabel(value);
     CustomToast.show(context, 'HUD 기본 모드를 $label(으)로 설정했습니다.');
+  }
+
+  String _modeLabel(String value) {
+    return value == HudDriveSettingsService.modeOpenpilotOverlay
+        ? 'Stock'
+        : 'WebRTC';
+  }
+
+  Widget _buildCompactModeButton({
+    required BuildContext context,
+    required ColorScheme scheme,
+    required String value,
+  }) {
+    final selected = _defaultDriveMode == value;
+    return Expanded(
+      child: Material(
+        color: selected ? scheme.primaryContainer : Colors.transparent,
+        borderRadius: BorderRadius.circular(22),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(22),
+          onTap: () => unawaited(_changeDefaultMode(value)),
+          child: Ink(
+            decoration: ShapeDecoration(
+              color: selected ? scheme.primaryContainer : Colors.transparent,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(22),
+                side: BorderSide(
+                  color: selected
+                      ? scheme.primary.withValues(alpha: 0.55)
+                      : scheme.outlineVariant,
+                  width: selected ? 1.4 : 1.0,
+                ),
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 18),
+              child: Text(
+                _modeLabel(value),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                      color: selected
+                          ? scheme.onPrimaryContainer
+                          : scheme.onSurface,
+                    ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   @override
@@ -161,7 +212,7 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
                             ButtonSegment<String>(
                               value:
                                   HudDriveSettingsService.modeOpenpilotOverlay,
-                              label: Text('오픈파일럿 그래픽'),
+                              label: Text('Stock'),
                             ),
                           ],
                           selected: <String>{_defaultDriveMode},
@@ -172,23 +223,18 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
                         );
                       }
 
-                      return Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
+                      return Row(
                         children: [
-                          ChoiceChip(
-                            label: const Text('WebRTC'),
-                            selected: _defaultDriveMode ==
-                                HudDriveSettingsService.modeWebrtc,
-                            onSelected: (_) => unawaited(_changeDefaultMode(
-                                HudDriveSettingsService.modeWebrtc)),
+                          _buildCompactModeButton(
+                            context: context,
+                            scheme: scheme,
+                            value: HudDriveSettingsService.modeWebrtc,
                           ),
-                          ChoiceChip(
-                            label: const Text('오픈파일럿 그래픽'),
-                            selected: _defaultDriveMode ==
-                                HudDriveSettingsService.modeOpenpilotOverlay,
-                            onSelected: (_) => unawaited(_changeDefaultMode(
-                                HudDriveSettingsService.modeOpenpilotOverlay)),
+                          const SizedBox(width: 12),
+                          _buildCompactModeButton(
+                            context: context,
+                            scheme: scheme,
+                            value: HudDriveSettingsService.modeOpenpilotOverlay,
                           ),
                         ],
                       );
@@ -198,7 +244,7 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
                 Padding(
                   padding: const EdgeInsets.fromLTRB(4, 0, 4, 12),
                   child: Text(
-                    'WebRTC: 카메라만 표시, 오픈파일럿 그래픽: 카메라 + 그래픽 오버레이',
+                    'WebRTC: 카메라만 표시, Stock: 카메라 + 그래픽 오버레이',
                     style: TextStyle(
                       fontSize: window.isCompact ? 11.5 : 12.0,
                       color: scheme.onSurfaceVariant,

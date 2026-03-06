@@ -87,6 +87,7 @@ def _downsample(values: list[float], max_points: int = 24) -> list[float]:
 _BASE_SOURCE_W = 1928.0
 _BASE_SOURCE_H = 1208.0
 _CLIP_MARGIN = 500.0
+_ENABLE_EXPERIMENTAL_OVERLAY2D = False
 _VIEW_FROM_DEVICE = (
   (0.0, 1.0, 0.0),
   (0.0, 0.0, 1.0),
@@ -2454,22 +2455,23 @@ class SidecarApp:
 
   def _build_payload_for_camera_mode(self, camera_mode: str) -> dict[str, Any]:
     payload = self._build_live_payload()
-    try:
-      mode = self._normalize_overlay_camera_mode(camera_mode)
-      cache_key = self._overlay2d_cache_key_for(payload, mode)
-      overlay2d: dict[str, Any] | None = None
-      if self._overlay2d_cache_key == cache_key and self._overlay2d_cache_value is not None:
-        overlay2d = self._overlay2d_cache_value
-      else:
-        payload["_overlayCameraMode"] = mode
-        overlay2d = _build_overlay2d(payload)
-        self._overlay2d_cache_key = cache_key
-        self._overlay2d_cache_value = overlay2d
-      if overlay2d is not None:
-        payload["overlay2d"] = overlay2d
-    except Exception:
-      # Keep stream resilient even if 2D projection generation fails.
-      pass
+    if _ENABLE_EXPERIMENTAL_OVERLAY2D:
+      try:
+        mode = self._normalize_overlay_camera_mode(camera_mode)
+        cache_key = self._overlay2d_cache_key_for(payload, mode)
+        overlay2d: dict[str, Any] | None = None
+        if self._overlay2d_cache_key == cache_key and self._overlay2d_cache_value is not None:
+          overlay2d = self._overlay2d_cache_value
+        else:
+          payload["_overlayCameraMode"] = mode
+          overlay2d = _build_overlay2d(payload)
+          self._overlay2d_cache_key = cache_key
+          self._overlay2d_cache_value = overlay2d
+        if overlay2d is not None:
+          payload["overlay2d"] = overlay2d
+      except Exception:
+        # Keep stream resilient even if 2D projection generation fails.
+        pass
     return payload
 
   async def _broadcast_loop(self, app: web.Application) -> None:

@@ -926,10 +926,13 @@ class SSHService extends ChangeNotifier {
     const cmd = r'''
 read_cpu_avg() {
 for z in /sys/devices/virtual/thermal/thermal_zone*; do
+  [ -f "$z/temp" ] || continue
   [ -f "$z/type" ] || continue
   t=$(cat "$z/type" 2>/dev/null | tr '[:upper:]' '[:lower:]')
   case "$t" in
-    cpu*|soc*|ap*|big*|little*)
+    gpu*|pmic*|modem*|battery*|usb*|quiet*|skin*|board*|ddr*|xo-*|pa*|wifi*)
+      ;;
+    *)
       cat "$z/temp" 2>/dev/null
       ;;
   esac

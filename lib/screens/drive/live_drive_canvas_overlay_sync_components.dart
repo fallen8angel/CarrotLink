@@ -171,10 +171,18 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
   }
 
   void _setViewportFitModeImpl(bool coverPreferred) {
+    _setViewportZoomPresetImpl(
+      coverPreferred
+          ? _DriveViewportZoomPreset.crop
+          : _DriveViewportZoomPreset.fit,
+    );
+  }
+
+  void _setViewportZoomPresetImpl(_DriveViewportZoomPreset preset) {
     if (!mounted) return;
-    if (_coverViewportPreferred == coverPreferred) return;
-    _safeSetState(() => _coverViewportPreferred = coverPreferred);
-    _toast(coverPreferred ? '커버(cover) ON' : '레터박스(contain) ON');
+    if (_viewportZoomPreset == preset) return;
+    _safeSetState(() => _viewportZoomPreset = preset);
+    _toast('${preset.tooltip} 적용');
   }
 
   void _setDebugGuidesImpl(bool enabled) {
@@ -497,6 +505,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       cameraKind: _liveCameraKind,
       canvasSize: canvasSize,
       coverViewport: _coverViewport,
+      viewportZoom: _viewportPlacementZoom,
       cameraSourceLabel: 'live',
     );
     if (!mounted) return;
@@ -544,6 +553,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       cameraKind: _liveCameraKind,
       canvasSize: _nativeOverlaySize,
       coverViewport: _coverViewport,
+      viewportZoom: _viewportPlacementZoom,
       visibleViewportRect: _nativeOverlayVisibleViewportRect,
       showDebugGuides: _overlayVerifyMode && _debugShowGuides,
       showPathFill: _debugShowPathFill,

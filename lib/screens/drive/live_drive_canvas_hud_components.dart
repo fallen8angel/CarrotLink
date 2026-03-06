@@ -1,6 +1,33 @@
 part of 'live_drive_canvas_screen.dart';
 
 extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
+  void _startHudFallbackMetricsLoop() {
+    _hudFallbackMetricsTimer?.cancel();
+    _hudFallbackMetricsTimer = null;
+    unawaited(_refreshHudFallbackMetrics());
+    _hudFallbackMetricsTimer =
+        Timer.periodic(const Duration(seconds: 12), (_) {
+      unawaited(_refreshHudFallbackMetrics());
+    });
+  }
+
+  Future<void> _refreshHudFallbackMetrics() async {
+    final ssh = _sshService ??
+        (mounted ? Provider.of<SSHService>(context, listen: false) : null);
+    if (ssh == null || !ssh.isConnected) return;
+    final metrics = await ssh.getHudFallbackMetrics();
+    if (metrics == null || !mounted) return;
+    final sameCpu = _hudFallbackCpuTempC == metrics.cpuTempC;
+    final sameMem = _hudFallbackMemPct == metrics.memPct;
+    final sameDisk = _hudFallbackDiskPct == metrics.diskPct;
+    if (sameCpu && sameMem && sameDisk) return;
+    _safeSetState(() {
+      _hudFallbackCpuTempC = metrics.cpuTempC;
+      _hudFallbackMemPct = metrics.memPct;
+      _hudFallbackDiskPct = metrics.diskPct;
+    });
+  }
+
   Future<void> _loadHudDefaultModeImpl() async {
     final mode = await HudDriveSettingsService.getDefaultMode();
     if (!mounted) return;
@@ -362,6 +389,9 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
           deviceIp: widget.hostIp,
           enabled: true,
           fillParent: true,
+          fallbackCpuTempC: _hudFallbackCpuTempC,
+          fallbackMemPct: _hudFallbackMemPct,
+          fallbackDiskPct: _hudFallbackDiskPct,
           key: ValueKey<String>(
               'drive_hud_panel_${window.windowClass.name}_${widget.hostIp}'),
         ),
@@ -445,6 +475,9 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
           deviceIp: widget.hostIp,
           enabled: true,
           fillParent: true,
+          fallbackCpuTempC: _hudFallbackCpuTempC,
+          fallbackMemPct: _hudFallbackMemPct,
+          fallbackDiskPct: _hudFallbackDiskPct,
           key: ValueKey<String>(
             'drive_hud_overlay_${window.windowClass.name}_${widget.hostIp}',
           ),

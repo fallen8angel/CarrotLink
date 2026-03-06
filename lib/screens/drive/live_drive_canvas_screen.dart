@@ -71,6 +71,43 @@ enum _OverlayPreviewScenario {
   traffic,
 }
 
+enum _DriveViewportZoomPreset {
+  zoomOut,
+  fit,
+  crop,
+  zoomIn,
+}
+
+extension _DriveViewportZoomPresetX on _DriveViewportZoomPreset {
+  bool get coverPreferred => switch (this) {
+        _DriveViewportZoomPreset.zoomOut || _DriveViewportZoomPreset.fit =>
+          false,
+        _DriveViewportZoomPreset.crop || _DriveViewportZoomPreset.zoomIn =>
+          true,
+      };
+
+  double get zoomFactor => switch (this) {
+        _DriveViewportZoomPreset.zoomOut => 0.92,
+        _DriveViewportZoomPreset.fit => 1.0,
+        _DriveViewportZoomPreset.crop => 1.0,
+        _DriveViewportZoomPreset.zoomIn => 1.12,
+      };
+
+  IconData get icon => switch (this) {
+        _DriveViewportZoomPreset.zoomOut => Icons.zoom_out_map_rounded,
+        _DriveViewportZoomPreset.fit => Icons.fit_screen_rounded,
+        _DriveViewportZoomPreset.crop => Icons.crop_free_rounded,
+        _DriveViewportZoomPreset.zoomIn => Icons.zoom_in_map_rounded,
+      };
+
+  String get tooltip => switch (this) {
+        _DriveViewportZoomPreset.zoomOut => '축소',
+        _DriveViewportZoomPreset.fit => '정사이즈',
+        _DriveViewportZoomPreset.crop => '크롭',
+        _DriveViewportZoomPreset.zoomIn => '확대',
+      };
+}
+
 class LiveDriveCanvasScreen extends StatefulWidget {
   final String hostIp;
 
@@ -219,7 +256,8 @@ fi
   String _overlayVerifyText = '';
   int _lastOverlayVerifyUpdateUs = 0;
   static const int _overlayVerifyIntervalUs = 200000;
-  bool _coverViewportPreferred = true;
+  _DriveViewportZoomPreset _viewportZoomPreset =
+      _DriveViewportZoomPreset.crop;
   bool _debugShowGuides = false;
   bool _debugShowVerifyPanel = false;
   bool _debugShowViewportFrame = false;
@@ -238,6 +276,10 @@ fi
   Map<String, dynamic> _sidecarHealthSnapshot = <String, dynamic>{};
   Map<String, dynamic> _sidecarProfileSnapshot = <String, dynamic>{};
   Map<String, dynamic> _sidecarCameraQualitySnapshot = <String, dynamic>{};
+  double? _hudFallbackCpuTempC;
+  double? _hudFallbackMemPct;
+  double? _hudFallbackDiskPct;
+  Timer? _hudFallbackMetricsTimer;
   DateTime? _sidecarProcessCheckedAt;
   DateTime? _sidecarLastDeployAt;
   DateTime? _sidecarLastStartAt;
@@ -319,7 +361,7 @@ fi
   bool get _openpilotOverlayMode =>
       HudDriveSettingsService.isOpenpilotOverlay(_hudDefaultMode);
 
-  String get _modeTagLabel => _openpilotOverlayMode ? 'stock' : 'webrtc';
+  String get _modeTagLabel => _openpilotOverlayMode ? 'Stock' : 'webrtc';
 
   bool get _canUseNativeCamera => !kIsWeb && Platform.isAndroid;
 
@@ -341,7 +383,12 @@ fi
       'ws://${widget.hostIp}:7766/ws/camera/$_liveCameraName';
 
   bool get _coverViewport =>
-      _overlayVerifyMode ? false : _coverViewportPreferred;
+      _overlayVerifyMode ? false : _viewportZoomPreset.coverPreferred;
+
+  bool get _coverViewportPreferred => _viewportZoomPreset.coverPreferred;
+
+  double get _viewportPlacementZoom =>
+      _overlayVerifyMode ? 1.0 : _viewportZoomPreset.zoomFactor;
 
   int get _overlaySyncMaxDeltaCurrent => _overlaySyncMaxDeltaLive;
 
@@ -392,6 +439,7 @@ fi
     unawaited(_loadAndApplyLandscapeOrientation());
     unawaited(_loadHudDebugLayerToggles());
     unawaited(_loadHudDefaultMode());
+    _startHudFallbackMetricsLoop();
   }
 
   @override
@@ -445,6 +493,9 @@ fi
 
   void _setViewportFitMode(bool coverPreferred) =>
       _setViewportFitModeImpl(coverPreferred);
+
+  void _setViewportZoomPreset(_DriveViewportZoomPreset preset) =>
+      _setViewportZoomPresetImpl(preset);
 
   void _setDebugGuides(bool enabled) => _setDebugGuidesImpl(enabled);
 
@@ -584,6 +635,8 @@ fi
     _sidecarRecoveryTimer = null;
     _hudNoticeTimer?.cancel();
     _hudNoticeTimer = null;
+    _hudFallbackMetricsTimer?.cancel();
+    _hudFallbackMetricsTimer = null;
     _stopAdaptiveCameraQualityLoop(resetMode: true);
     _cancelLifecycleSuspendTimer();
     _cancelDelayedSidecarStop();

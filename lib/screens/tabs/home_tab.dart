@@ -330,6 +330,10 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
           UiWindowClass.large => 286.0,
           UiWindowClass.extraLarge => 300.0,
         };
+        final bottomDockGap = math.max(
+          16.0,
+          math.max(media.padding.bottom, media.viewPadding.bottom) + 12.0,
+        );
         final estimatedVerticalChrome =
             (tokens.screenPadding * 2) + tokens.sectionGap + 34.0;
         final viewportAwareHudCap = math
@@ -337,7 +341,8 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
               220.0,
               media.size.height -
                   estimatedHeaderHeight -
-                  estimatedVerticalChrome,
+                  estimatedVerticalChrome -
+                  bottomDockGap,
             )
             .clamp(220.0, 520.0)
             .toDouble();
@@ -540,8 +545,11 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                             UiWindowClass.extraLarge =>
                               11.0,
                           };
-                          final columns =
-                              infoConstraints.maxWidth >= 720 ? 4 : 2;
+                          final columns = switch (window.windowClass) {
+                            UiWindowClass.compact || UiWindowClass.medium => 2,
+                            UiWindowClass.expanded => 3,
+                            UiWindowClass.large || UiWindowClass.extraLarge => 4,
+                          };
                           final itemWidth = (infoConstraints.maxWidth -
                                   (itemSpacing * (columns - 1))) /
                               columns;
@@ -631,6 +639,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
       UiWindowClass.large => 16.5,
       UiWindowClass.extraLarge => 17.0,
     };
+    final valueMaxLines = window.windowClass == UiWindowClass.compact ? 1 : 2;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 2),
       child: Column(
@@ -649,12 +658,13 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
           const SizedBox(height: 4),
           Text(
             value,
-            maxLines: 1,
+            maxLines: valueMaxLines,
+            softWrap: valueMaxLines > 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
               fontWeight: FontWeight.w700,
               fontSize: valueSize,
-              height: 1.0,
+              height: valueMaxLines > 1 ? 1.08 : 1.0,
             ),
           ),
         ],

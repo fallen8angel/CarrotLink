@@ -91,6 +91,10 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
       foregroundColor: const Color(0xFFFFB07A),
       child: const Icon(Icons.tune_rounded),
     );
+    final quickControls = _buildViewportZoomQuickControls(
+      debugFab: debugFab,
+      isLandscapeLayout: isLandscapeLayout,
+    );
 
     if (isLandscapeLayout || hideHudForTinyViewport) {
       return Stack(
@@ -100,7 +104,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
             Positioned(
               right: fabInset,
               bottom: fabBottom,
-              child: debugFab,
+              child: quickControls,
             ),
         ],
       );
@@ -118,7 +122,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                 Positioned(
                   right: fabInset,
                   bottom: fabBottom,
-                  child: debugFab,
+                  child: quickControls,
                 ),
             ],
           ),
@@ -155,6 +159,49 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildViewportZoomQuickControls({
+    required Widget debugFab,
+    required bool isLandscapeLayout,
+  }) {
+    final spacing = isLandscapeLayout ? 8.0 : 7.0;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ..._DriveViewportZoomPreset.values.map(
+          (preset) => Padding(
+            padding: EdgeInsets.only(right: spacing),
+            child: _buildViewportZoomButton(preset),
+          ),
+        ),
+        debugFab,
+      ],
+    );
+  }
+
+  Widget _buildViewportZoomButton(_DriveViewportZoomPreset preset) {
+    final active = _viewportZoomPreset == preset;
+    return Tooltip(
+      message: preset.tooltip,
+      child: Material(
+        color: active ? const Color(0xFFE88C53) : const Color(0xCC2A1A12),
+        borderRadius: BorderRadius.circular(18),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(18),
+          onTap: () => _setViewportZoomPreset(preset),
+          child: SizedBox(
+            width: 36,
+            height: 36,
+            child: Icon(
+              preset.icon,
+              size: 18,
+              color: active ? Colors.white : const Color(0xFFFFB07A),
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -242,6 +289,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
           snapshot: _overlayNotifier.value,
           cameraKind: _liveCameraKind,
           coverViewport: _coverViewport,
+          viewportZoom: _viewportPlacementZoom,
           openpilotTransform: _openpilotOverlayMode,
         );
         final drawW = placement.width;
@@ -418,6 +466,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                                   sourceSize: _cameraSourceSize,
                                   cameraKind: _liveCameraKind,
                                   coverViewport: _coverViewport,
+                                  viewportZoom: _viewportPlacementZoom,
                                   visibleViewportRect: visibleViewportRect,
                                   showDebugGuides:
                                       _overlayVerifyMode && _debugShowGuides,

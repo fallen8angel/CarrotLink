@@ -187,6 +187,7 @@ class _M3 {
     required _DriveOverlaySnapshot snapshot,
     required _DriveCameraKind cameraKind,
     required bool coverViewport,
+    required double viewportZoom,
     required bool openpilotTransform,
   }) {
     final fitScale = coverViewport
@@ -195,7 +196,9 @@ class _M3 {
         : math.min(
             viewport.width / source.width, viewport.height / source.height);
 
-    var scale = fitScale;
+    final resolvedViewportZoom =
+        (viewportZoom.isFinite && viewportZoom > 0.1) ? viewportZoom : 1.0;
+    var scale = fitScale * resolvedViewportZoom;
     var xOffset = 0.0;
     var yOffset = 0.0;
     var dx = (viewport.width - source.width * scale) * 0.5;
@@ -204,7 +207,7 @@ class _M3 {
     if (openpilotTransform) {
       final wideCam = cameraKind == _DriveCameraKind.wideRoad;
       final zoom = wideCam ? 2.0 : 1.1;
-      scale = fitScale * zoom;
+      scale = fitScale * zoom * resolvedViewportZoom;
 
       final intrinsic = _intrinsicForVideo(source, wideCam);
       final deviceFromCalib =

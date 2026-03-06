@@ -44,7 +44,7 @@ class _DriveDebugPlotSample {
 
 class _DriveDebugPlotState {
   static const int maxSamples = 400;
-  static const double _minSpan = 4.0;
+  static const double _minSpan = 6.0;
   static const double _rangeSmoothing = 0.16;
 
   final int version;
@@ -106,7 +106,7 @@ class _DriveDebugPlotState {
     if (minValue > -2.0) minValue = -2.0;
     if (maxValue < 2.0) maxValue = 2.0;
     final rawSpan = math.max(0.001, maxValue - minValue);
-    final paddedSpan = math.max(_minSpan, rawSpan * 1.18);
+    final paddedSpan = math.max(_minSpan, rawSpan * 1.32);
     final center = (minValue + maxValue) * 0.5;
     final halfSpan = paddedSpan * 0.5;
     return (
