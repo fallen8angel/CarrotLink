@@ -24,12 +24,6 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                 _overlayVerifyMode;
             final process = _sidecarProcessSnapshot;
             final health = _sidecarHealthSnapshot;
-            final running = process.isEmpty
-                ? '-'
-                : ((process['running'] == '1') ? '실행' : '중지');
-            final listening = process.isEmpty
-                ? '-'
-                : ((process['listening'] == '1') ? 'LISTEN' : '닫힘');
             final method = (process['method'] ?? '-').trim().isEmpty
                 ? '-'
                 : (process['method'] ?? '-');
@@ -73,6 +67,42 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
               final relayQuality = relay['qualityMode']?.toString() ?? '-';
               relayState =
                   'mode:$relayMode quality:$relayQuality running:$relayRunning';
+            }
+            final procStatusLabel = _sidecarProcessStatusLabel;
+            final cameraReadyLabel = _sidecarCameraReadyLabel;
+            final cameraRelaySummary = _sidecarCameraRelaySummary;
+            final liveRelaySummary = _sidecarLiveRelaySummary;
+            final scheduledStopSummary = _sidecarScheduledStopSummary;
+            final remotePyName = _sidecarRemotePyName;
+            final remoteUpdated = _sidecarRemoteUpdatedLabel;
+            final profileEndpoint = (_sidecarProfileSnapshot['profile']?.toString() ?? '-')
+                .trim();
+            final profileModesRaw = _sidecarProfileSnapshot['profiles'];
+            final profileModeCount = profileModesRaw is List ? profileModesRaw.length : 0;
+            final profileEndpointSummary = profileEndpoint.isEmpty
+                ? '-'
+                : '$profileEndpoint (${profileModeCount > 0 ? 'modes $profileModeCount' : 'modes -'})';
+            final qualityEndpoint = (_sidecarCameraQualitySnapshot['mode']?.toString() ?? '-')
+                .trim();
+            final qualityModesRaw = _sidecarCameraQualitySnapshot['modes'];
+            final qualityModeCount = qualityModesRaw is List ? qualityModesRaw.length : 0;
+            final qualityEndpointSummary = qualityEndpoint.isEmpty
+                ? '-'
+                : '$qualityEndpoint (${qualityModeCount > 0 ? 'modes $qualityModeCount' : 'modes -'})';
+            final healthEndpointSummary =
+                health.isEmpty ? '-' : 'ok:$healthOk profile:$healthProfile clients:$healthClients';
+
+            String criticalValue(String name) {
+              final value = (_sidecarCriticalProcSnapshot[name] ?? '-').trim();
+              if (value.isEmpty) return '-';
+              return value;
+            }
+
+            Color criticalColor(String name) {
+              final value = criticalValue(name);
+              return value.startsWith('up:')
+                  ? const Color(0xFF73E07C)
+                  : const Color(0xFFFF8A8A);
             }
 
             final history = _sidecarHistory.take(10).toList(growable: false);
@@ -376,6 +406,16 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                             _debugMetricPill(
                                                 '단계', _sidecarStatusTitle()),
                                             SizedBox(width: chipSpacing),
+                                            _debugMetricPill(
+                                              'Proc',
+                                              procStatusLabel,
+                                            ),
+                                            SizedBox(width: chipSpacing),
+                                            _debugMetricPill(
+                                              'Cam',
+                                              cameraReadyLabel,
+                                            ),
+                                            SizedBox(width: chipSpacing),
                                             _debugMetricPill('WS', wsState),
                                             SizedBox(width: chipSpacing),
                                             _debugMetricPill(
@@ -441,10 +481,16 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                       color: null
                                                     ),
                                                     (
-                                                      label: '프로세스',
-                                                      value:
-                                                          '$running / $listening',
-                                                      color: null
+                                                      label: '프로세스 준비',
+                                                      value: procStatusLabel,
+                                                      color:
+                                                          _sidecarProcessStatusColor()
+                                                    ),
+                                                    (
+                                                      label: '카메라 준비',
+                                                      value: cameraReadyLabel,
+                                                      color:
+                                                          _sidecarCameraStatusColor()
                                                     ),
                                                     (
                                                       label: 'WS',
@@ -469,7 +515,7 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                     (
                                                       label: '헬스',
                                                       value:
-                                                          'ok:$healthOk profile:$healthProfile clients:$healthClients',
+                                                          healthEndpointSummary,
                                                       color: (healthOk == 'ok')
                                                           ? const Color(
                                                               0xFF73E07C)
@@ -478,7 +524,18 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                     ),
                                                     (
                                                       label: '카메라 릴레이',
+                                                      value:
+                                                          cameraRelaySummary,
+                                                      color: null
+                                                    ),
+                                                    (
+                                                      label: '릴레이 상태',
                                                       value: relayState,
+                                                      color: null
+                                                    ),
+                                                    (
+                                                      label: '오버레이 릴레이',
+                                                      value: liveRelaySummary,
                                                       color: null
                                                     ),
                                                     (
@@ -494,6 +551,12 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                     (
                                                       label: 'PID',
                                                       value: pid,
+                                                      color: null
+                                                    ),
+                                                    (
+                                                      label: '유휴 종료',
+                                                      value:
+                                                          scheduledStopSummary,
                                                       color: null
                                                     ),
                                                   ],
@@ -564,6 +627,83 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                           ),
                                         if (selectedGroup == 0)
                                           sectionCard(
+                                            'comma 핵심 프로세스',
+                                            Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                statusGrid(
+                                                  [
+                                                    (
+                                                      label: 'locationd',
+                                                      value: criticalValue(
+                                                        'locationd',
+                                                      ),
+                                                      color: criticalColor(
+                                                        'locationd',
+                                                      )
+                                                    ),
+                                                    (
+                                                      label: 'controlsd',
+                                                      value: criticalValue(
+                                                        'controlsd',
+                                                      ),
+                                                      color: criticalColor(
+                                                        'controlsd',
+                                                      )
+                                                    ),
+                                                    (
+                                                      label: 'plannerd',
+                                                      value: criticalValue(
+                                                        'plannerd',
+                                                      ),
+                                                      color: criticalColor(
+                                                        'plannerd',
+                                                      )
+                                                    ),
+                                                    (
+                                                      label: 'selfdrived',
+                                                      value: criticalValue(
+                                                        'selfdrived',
+                                                      ),
+                                                      color: criticalColor(
+                                                        'selfdrived',
+                                                      )
+                                                    ),
+                                                    (
+                                                      label: 'stream_encoderd',
+                                                      value: criticalValue(
+                                                        'stream_encoderd',
+                                                      ),
+                                                      color: criticalColor(
+                                                        'stream_encoderd',
+                                                      )
+                                                    ),
+                                                    (
+                                                      label: 'webrtcd',
+                                                      value: criticalValue(
+                                                        'webrtcd',
+                                                      ),
+                                                      color: criticalColor(
+                                                        'webrtcd',
+                                                      )
+                                                    ),
+                                                  ],
+                                                  columns: isWideDialog ? 3 : 2,
+                                                ),
+                                                const SizedBox(height: 6),
+                                                const Text(
+                                                  'camera ready와 별개로 comma onroad 핵심 프로세스가 살아있는지 분리해서 봅니다.',
+                                                  style: TextStyle(
+                                                    color: Colors.white60,
+                                                    fontSize: 11,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        if (selectedGroup == 0)
+                                          sectionCard(
                                             '배포/버전 상세',
                                             Column(
                                               crossAxisAlignment:
@@ -607,6 +747,16 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                       color: null
                                                     ),
                                                     (
+                                                      label: 'PY 파일',
+                                                      value: remotePyName,
+                                                      color: null
+                                                    ),
+                                                    (
+                                                      label: '원격 업데이트',
+                                                      value: remoteUpdated,
+                                                      color: null
+                                                    ),
+                                                    (
                                                       label: '최근 시작',
                                                       value: _fmtClock(
                                                           _sidecarLastStartAt),
@@ -620,6 +770,68 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                     ),
                                                   ],
                                                   columns: isWideDialog ? 3 : 2,
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        if (selectedGroup == 0)
+                                          sectionCard(
+                                            '엔드포인트 응답',
+                                            Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                statusGrid(
+                                                  [
+                                                    (
+                                                      label: 'GET /health',
+                                                      value:
+                                                          healthEndpointSummary,
+                                                      color: healthOk == 'ok'
+                                                          ? const Color(
+                                                              0xFF73E07C)
+                                                          : const Color(
+                                                              0xFFFF8A8A)
+                                                    ),
+                                                    (
+                                                      label: 'GET /profile',
+                                                      value:
+                                                          profileEndpointSummary,
+                                                      color: profileEndpointSummary ==
+                                                              '-'
+                                                          ? const Color(
+                                                              0xFFFF8A8A)
+                                                          : const Color(
+                                                              0xFF73E07C)
+                                                    ),
+                                                    (
+                                                      label: 'GET /camera_quality',
+                                                      value:
+                                                          qualityEndpointSummary,
+                                                      color: qualityEndpointSummary ==
+                                                              '-'
+                                                          ? const Color(
+                                                              0xFFFF8A8A)
+                                                          : const Color(
+                                                              0xFF73E07C)
+                                                    ),
+                                                    (
+                                                      label: '프로세스 점검',
+                                                      value: _fmtClock(
+                                                        _sidecarProcessCheckedAt,
+                                                      ),
+                                                      color: null
+                                                    ),
+                                                  ],
+                                                  columns: isWideDialog ? 2 : 1,
+                                                ),
+                                                const SizedBox(height: 6),
+                                                const Text(
+                                                  '상단 배지와 이 영역은 같은 remote status / endpoint 스냅샷을 사용합니다.',
+                                                  style: TextStyle(
+                                                    color: Colors.white60,
+                                                    fontSize: 11,
+                                                  ),
                                                 ),
                                               ],
                                             ),
@@ -1157,6 +1369,54 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                               }
                                                               _safeSetState(() {
                                                                 _debugOverlayPreviewScenario =
+                                                                    next;
+                                                              });
+                                                              _tickOverlayPreview();
+                                                              setLocalState(
+                                                                  () {});
+                                                            }
+                                                          : null,
+                                                ),
+                                                const SizedBox(height: 8),
+                                                DropdownButtonFormField<int>(
+                                                  initialValue:
+                                                      _debugOverlayPreviewPlotMode,
+                                                  decoration:
+                                                      const InputDecoration(
+                                                    labelText:
+                                                        'Plot 미리보기 모드',
+                                                    border:
+                                                        OutlineInputBorder(),
+                                                    isDense: true,
+                                                  ),
+                                                  dropdownColor: _debugCardBg,
+                                                  style: const TextStyle(
+                                                      color: Colors.white),
+                                                  items: List<int>.generate(
+                                                    11,
+                                                    (index) => index,
+                                                  )
+                                                      .map(
+                                                        (mode) =>
+                                                            DropdownMenuItem<
+                                                                int>(
+                                                          value: mode,
+                                                          child: Text(
+                                                            _overlayPreviewPlotModeLabel(
+                                                                mode),
+                                                          ),
+                                                        ),
+                                                      )
+                                                      .toList(growable: false),
+                                                  onChanged:
+                                                      _debugOverlayPreviewMode
+                                                          ? (next) {
+                                                              if (next ==
+                                                                  null) {
+                                                                return;
+                                                              }
+                                                              _safeSetState(() {
+                                                                _debugOverlayPreviewPlotMode =
                                                                     next;
                                                               });
                                                               _tickOverlayPreview();

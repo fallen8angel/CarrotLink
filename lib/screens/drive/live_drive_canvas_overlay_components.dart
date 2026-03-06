@@ -6,6 +6,7 @@ class _DriveOverlayPainter extends CustomPainter {
   final Size sourceSize;
   final _DriveCameraKind cameraKind;
   final bool coverViewport;
+  final Rect? visibleViewportRect;
   final bool showDebugGuides;
   final bool showPathFill;
   final bool showLaneLines;
@@ -16,6 +17,7 @@ class _DriveOverlayPainter extends CustomPainter {
   final bool showRadarVector;
   final bool showStopDistanceTf;
   final bool showStateText;
+  final _DriveDebugPlotState debugPlotState;
 
   static const double _baseSourceWidth = 1928.0;
   static const double _baseSourceHeight = 1208.0;
@@ -38,6 +40,7 @@ class _DriveOverlayPainter extends CustomPainter {
     required this.sourceSize,
     required this.cameraKind,
     required this.coverViewport,
+    this.visibleViewportRect,
     this.showDebugGuides = false,
     this.showPathFill = true,
     this.showLaneLines = true,
@@ -48,6 +51,7 @@ class _DriveOverlayPainter extends CustomPainter {
     this.showRadarVector = true,
     this.showStopDistanceTf = true,
     this.showStateText = true,
+    this.debugPlotState = const _DriveDebugPlotState.hidden(),
   });
 
   _M3 _rotationFromEuler(List<double> rpy) {
@@ -902,6 +906,7 @@ class _DriveOverlayPainter extends CustomPainter {
     required _DriveCameraKind cameraKind,
     required Size canvasSize,
     required bool coverViewport,
+    Rect? visibleViewportRect,
     bool showDebugGuides = false,
     bool showPathFill = true,
     bool showLaneLines = true,
@@ -912,6 +917,7 @@ class _DriveOverlayPainter extends CustomPainter {
     bool showRadarVector = true,
     bool showStopDistanceTf = true,
     bool showStateText = true,
+    _DriveDebugPlotState debugPlotState = const _DriveDebugPlotState.hidden(),
   }) {
     final painter = _DriveOverlayPainter(
       snapshot: snapshot,
@@ -919,6 +925,7 @@ class _DriveOverlayPainter extends CustomPainter {
       sourceSize: sourceSize,
       cameraKind: cameraKind,
       coverViewport: coverViewport,
+      visibleViewportRect: visibleViewportRect,
       showDebugGuides: showDebugGuides,
       showPathFill: showPathFill,
       showLaneLines: showLaneLines,
@@ -929,6 +936,7 @@ class _DriveOverlayPainter extends CustomPainter {
       showRadarVector: showRadarVector,
       showStopDistanceTf: showStopDistanceTf,
       showStateText: showStateText,
+      debugPlotState: debugPlotState,
     );
     return painter._buildNativeOverlayPayload(canvasSize);
   }
@@ -947,6 +955,8 @@ class _DriveOverlayPainter extends CustomPainter {
       sourceSize: sourceSize,
       cameraKind: cameraKind,
       coverViewport: coverViewport,
+      visibleViewportRect: null,
+      debugPlotState: const _DriveDebugPlotState.hidden(),
     );
     return painter._buildProjectionDebugText(
       canvasSize: canvasSize,
@@ -1133,7 +1143,6 @@ class _DriveOverlayPainter extends CustomPainter {
   Map<String, dynamic>? _buildNativeOverlayPayloadFromSidecar2d(Size size) {
     final cam = _currentCameraOverlay2d();
     if (cam == null) return null;
-    final transform = _buildTransform(size);
     final sourceWidth =
         _DriveOverlaySnapshot._asDouble(cam['sourceWidth']) ?? _baseSourceWidth;
     final sourceHeight = _DriveOverlaySnapshot._asDouble(cam['sourceHeight']) ??
@@ -1142,124 +1151,8 @@ class _DriveOverlayPainter extends CustomPainter {
     final displayTransform = displayTransformRaw is Map
         ? Map<String, dynamic>.from(displayTransformRaw)
         : null;
-    var sidecarPathMode =
-        _DriveOverlaySnapshot._asInt(cam['pathMode']) ?? snapshot.pathMode;
-    var sidecarPathColor =
-        _DriveOverlaySnapshot._asInt(cam['pathColor']) ?? snapshot.pathColor;
-    // Enforce classic visual style on sidecar-provided payload as well.
-    if (sidecarPathMode >= 13 && sidecarPathMode <= 15) {
-      sidecarPathMode = 0;
-    }
-    if (sidecarPathColor == 14 || sidecarPathColor == 19) {
-      sidecarPathColor = 3;
-    }
-    var sidecarBrakeLights = snapshot.brakeLights;
-    final meta = cam['meta'];
-    if (meta is Map) {
-      final brakeRaw = meta['brakeLights'];
-      if (brakeRaw is bool) {
-        sidecarBrakeLights = brakeRaw;
-      } else if (brakeRaw is num) {
-        sidecarBrakeLights = brakeRaw != 0;
-      } else if (brakeRaw is String) {
-        final lower = brakeRaw.trim().toLowerCase();
-        if (lower == '1' || lower == 'true' || lower == 'yes') {
-          sidecarBrakeLights = true;
-        } else if (lower == '0' || lower == 'false' || lower == 'no') {
-          sidecarBrakeLights = false;
-        }
-      }
-    }
     final polygons = <Map<String, dynamic>>[];
     final labels = <Map<String, dynamic>>[];
-
-    final laneRaw = cam['lanePolygons'];
-    if (showLaneLines && laneRaw is List) {
-      for (final item in laneRaw) {
-        if (item is! Map) continue;
-        final points = _mapSourcePointsToCanvas(
-          _decodeOverlayPoints(item['points']),
-          canvasSize: size,
-          sourceWidth: sourceWidth,
-          sourceHeight: sourceHeight,
-          displayTransform: displayTransform,
-        );
-        if (points.length < 3) continue;
-        final probability =
-            (_DriveOverlaySnapshot._asDouble(item['probability']) ?? 0.0)
-                .clamp(0.0, 1.0);
-        if (probability <= 0.3) continue;
-        final laneIndex = _DriveOverlaySnapshot._asInt(item['index']) ?? -1;
-        Color laneColor = Colors.white;
-        if (laneIndex == 1 && snapshot.leftLaneLine >= 20) {
-          laneColor = const Color(0xFFFFD95E);
-        } else if (laneIndex == 2 && snapshot.rightLaneLine >= 20) {
-          laneColor = const Color(0xFFFFD95E);
-        }
-        polygons.add(
-          _encodePolygon(
-            points,
-            laneColor.withValues(alpha: 220.0 / 255.0),
-          ),
-        );
-      }
-    }
-
-    final edgeRaw = cam['roadEdgePolygons'];
-    if (showRoadEdge && edgeRaw is List) {
-      for (final item in edgeRaw) {
-        if (item is! Map) continue;
-        final points = _mapSourcePointsToCanvas(
-          _decodeOverlayPoints(item['points']),
-          canvasSize: size,
-          sourceWidth: sourceWidth,
-          sourceHeight: sourceHeight,
-          displayTransform: displayTransform,
-        );
-        if (points.length < 3) continue;
-        final std = _DriveOverlaySnapshot._asDouble(item['std']) ?? 1.0;
-        polygons.add(_encodePolygon(points, _roadEdgeColor(std)));
-      }
-    }
-
-    var trackVertices = _mapSourcePointsToCanvas(
-      _decodeOverlayPoints(cam['pathTrackVertices']),
-      canvasSize: size,
-      sourceWidth: sourceWidth,
-      sourceHeight: sourceHeight,
-      displayTransform: displayTransform,
-    );
-    if (trackVertices.length < 3 && snapshot.path.length >= 2) {
-      final modelMax = snapshot.path.x.isNotEmpty ? snapshot.path.x.last : 0.0;
-      final maxDistance = modelMax.clamp(10.0, 100.0);
-      final widthApply = _pathHalfWidthByMode(
-        sidecarPathMode,
-        snapshot.pathWidthRatio,
-      );
-      final zOff = snapshot.pathOffsetZ.isFinite ? snapshot.pathOffsetZ : 1.22;
-      final fallbackTrack = _mapLineToTrackVerticesDist(
-        transform,
-        snapshot.path,
-        widthApply,
-        zOff,
-        zOff,
-        maxDistance,
-        startDistance: snapshot.active ? 2.0 : 3.5,
-        allowInvert: false,
-      );
-      if (fallbackTrack != null && fallbackTrack.length >= 3) {
-        trackVertices = fallbackTrack;
-      }
-    }
-    if (showPathFill && trackVertices.length >= 3) {
-      _collectPathPolygonsByMode(
-        polygons,
-        trackVertices,
-        sidecarPathMode,
-        sidecarPathColor,
-        sidecarBrakeLights,
-      );
-    }
 
     _appendSidecarLeadAndRadarPolygons(
       cam: cam,
@@ -1276,20 +1169,6 @@ class _DriveOverlayPainter extends CustomPainter {
       showStopDistanceTf: showStopDistanceTf,
       showStateText: showStateText,
     );
-    _appendNavArOverlayPolygons(
-      polygons: polygons,
-      labels: labels,
-      transform: transform,
-      canvasSize: size,
-    );
-
-    if (showDebugGuides) {
-      _appendDebugScreenGridPolygons(
-        polygons,
-        canvasSize: size,
-      );
-      labels.addAll(_buildDebugGridLabels(canvasSize: size));
-    }
 
     if (polygons.isEmpty && labels.isEmpty) return null;
     return <String, dynamic>{
@@ -1305,112 +1184,135 @@ class _DriveOverlayPainter extends CustomPainter {
 
   Map<String, dynamic>? _buildNativeOverlayPayload(Size size) {
     final sidecarPayload = _buildNativeOverlayPayloadFromSidecar2d(size);
-    if (sidecarPayload != null) return sidecarPayload;
-    if (snapshot.path.length < 2) return null;
-
     final transform = _buildTransform(size);
-    final modelMax = snapshot.path.x.isNotEmpty ? snapshot.path.x.last : 0.0;
-    final maxDistance = modelMax.clamp(10.0, 100.0);
-    final laneBaseX = snapshot.laneLines.isNotEmpty
-        ? snapshot.laneLines.first.line.x
-        : snapshot.path.x;
-    final laneMaxIdx = laneBaseX.isNotEmpty
-        ? _getPathLengthIdx(laneBaseX, maxDistance)
-        : _getPathLengthIdx(snapshot.path.x, maxDistance);
-
     final polygons = <Map<String, dynamic>>[];
     List<Map<String, dynamic>>? labels;
 
-    if (showLaneLines) {
-      for (var i = 0; i < snapshot.laneLines.length; i++) {
-        final ln = snapshot.laneLines[i];
-        var lineWidth = 0.025;
-        if (i == 1 && snapshot.leftLaneLine >= 20) {
-          lineWidth = 0.05;
-        }
-        final poly = _mapLineToPolygonVertices(
-          transform,
-          ln.line,
-          lineWidth,
-          0.0,
-          laneMaxIdx,
-        );
-        if (poly == null) continue;
-        final alpha = ln.probability > 0.3 ? (220.0 / 255.0) : 0.0;
-        if (alpha <= 0.0) continue;
-        Color laneColor = Colors.white;
-        if (i == 1 && snapshot.leftLaneLine >= 20) {
-          laneColor = const Color(0xFFFFD95E);
-        } else if (i == 2 && snapshot.rightLaneLine >= 20) {
-          laneColor = const Color(0xFFFFD95E);
-        }
-        polygons.add(_encodePolygon(
-          poly,
-          laneColor.withValues(alpha: alpha),
-        ));
-        if (i == 1 && (snapshot.leftLaneLine % 10) == 4) {
-          final doublePoly = _mapLineToPolygonVertices(
+    List<Offset>? trackVertices;
+    if (snapshot.path.length >= 2) {
+      final modelMax = snapshot.path.x.isNotEmpty ? snapshot.path.x.last : 0.0;
+      final maxDistance = modelMax.clamp(10.0, 100.0);
+      final laneBaseX = snapshot.laneLines.isNotEmpty
+          ? snapshot.laneLines.first.line.x
+          : snapshot.path.x;
+      final laneMaxIdx = laneBaseX.isNotEmpty
+          ? _getPathLengthIdx(laneBaseX, maxDistance)
+          : _getPathLengthIdx(snapshot.path.x, maxDistance);
+
+      if (showLaneLines) {
+        for (var i = 0; i < snapshot.laneLines.length; i++) {
+          final ln = snapshot.laneLines[i];
+          var lineWidth = 0.025;
+          if (i == 1 && snapshot.leftLaneLine >= 20) {
+            lineWidth = 0.05;
+          }
+          final poly = _mapLineToPolygonVertices(
             transform,
             ln.line,
             lineWidth,
             0.0,
             laneMaxIdx,
-            lineCenterShift: -0.3,
           );
-          if (doublePoly != null) {
-            polygons.add(_encodePolygon(
-              doublePoly,
-              laneColor.withValues(alpha: alpha),
-            ));
+          if (poly == null) continue;
+          final alpha = ln.probability > 0.3 ? (220.0 / 255.0) : 0.0;
+          if (alpha <= 0.0) continue;
+          Color laneColor = Colors.white;
+          if (i == 1 && snapshot.leftLaneLine >= 20) {
+            laneColor = const Color(0xFFFFD95E);
+          } else if (i == 2 && snapshot.rightLaneLine >= 20) {
+            laneColor = const Color(0xFFFFD95E);
+          }
+          polygons.add(_encodePolygon(
+            poly,
+            laneColor.withValues(alpha: alpha),
+          ));
+          if (i == 1 && (snapshot.leftLaneLine % 10) == 4) {
+            final doublePoly = _mapLineToPolygonVertices(
+              transform,
+              ln.line,
+              lineWidth,
+              0.0,
+              laneMaxIdx,
+              lineCenterShift: -0.3,
+            );
+            if (doublePoly != null) {
+              polygons.add(_encodePolygon(
+                doublePoly,
+                laneColor.withValues(alpha: alpha),
+              ));
+            }
+          }
+        }
+      }
+
+      if (showRoadEdge) {
+        for (final edge in snapshot.roadEdges) {
+          final poly = _mapLineToPolygonVertices(
+            transform,
+            edge.line,
+            0.025,
+            0.0,
+            laneMaxIdx,
+          );
+          if (poly == null) continue;
+          polygons.add(_encodePolygon(poly, _roadEdgeColor(edge.std)));
+        }
+      }
+
+      final pathMode = snapshot.pathMode;
+      final widthApply = _pathHalfWidthByMode(pathMode, snapshot.pathWidthRatio);
+      final zOff = snapshot.pathOffsetZ.isFinite ? snapshot.pathOffsetZ : 1.22;
+      final startDistance = snapshot.active ? 2.0 : 3.5;
+      trackVertices = _mapLineToTrackVerticesDist(
+        transform,
+        snapshot.path,
+        widthApply,
+        zOff,
+        zOff,
+        maxDistance,
+        startDistance: startDistance,
+        allowInvert: false,
+      );
+      if (showPathFill && trackVertices != null && trackVertices.length >= 3) {
+        final colorIdx = snapshot.pathColor;
+        final brakeLights = snapshot.brakeLights;
+        _collectPathPolygonsByMode(
+          polygons,
+          trackVertices,
+          pathMode,
+          colorIdx,
+          brakeLights,
+        );
+      }
+    }
+    labels ??= <Map<String, dynamic>>[];
+    if (sidecarPayload != null) {
+      final sidecarPolygons = sidecarPayload['polygons'];
+      if (sidecarPolygons is List) {
+        for (final item in sidecarPolygons) {
+          if (item is Map) {
+            polygons.add(Map<String, dynamic>.from(item));
+          }
+        }
+      }
+      final sidecarLabels = sidecarPayload['labels'];
+      if (sidecarLabels is List) {
+        for (final item in sidecarLabels) {
+          if (item is Map) {
+            labels.add(Map<String, dynamic>.from(item));
           }
         }
       }
     }
-
-    if (showRoadEdge) {
-      for (final edge in snapshot.roadEdges) {
-        final poly = _mapLineToPolygonVertices(
-          transform,
-          edge.line,
-          0.025,
-          0.0,
-          laneMaxIdx,
-        );
-        if (poly == null) continue;
-        polygons.add(_encodePolygon(poly, _roadEdgeColor(edge.std)));
-      }
-    }
-
-    final pathMode = snapshot.pathMode;
-    final widthApply = _pathHalfWidthByMode(pathMode, snapshot.pathWidthRatio);
-    final zOff = snapshot.pathOffsetZ.isFinite ? snapshot.pathOffsetZ : 1.22;
-    final startDistance = snapshot.active ? 2.0 : 3.5;
-    final trackVertices = _mapLineToTrackVerticesDist(
-      transform,
-      snapshot.path,
-      widthApply,
-      zOff,
-      zOff,
-      maxDistance,
-      startDistance: startDistance,
-      allowInvert: false,
-    );
-    if (showPathFill && trackVertices != null && trackVertices.length >= 3) {
-      final colorIdx = snapshot.pathColor;
-      final brakeLights = snapshot.brakeLights;
-      _collectPathPolygonsByMode(
-        polygons,
-        trackVertices,
-        pathMode,
-        colorIdx,
-        brakeLights,
-      );
-    }
-    labels ??= <Map<String, dynamic>>[];
     _appendNavArOverlayPolygons(
       polygons: polygons,
       labels: labels,
       transform: transform,
+      canvasSize: size,
+    );
+    _appendDebugPlotPayload(
+      polygons,
+      labels,
       canvasSize: size,
     );
     if (labels.isEmpty) labels = null;
@@ -1422,7 +1324,8 @@ class _DriveOverlayPainter extends CustomPainter {
         transform: transform,
         trackVertices: trackVertices,
       );
-      labels = _buildDebugGridLabels(canvasSize: size);
+      labels ??= <Map<String, dynamic>>[];
+      labels.addAll(_buildDebugGridLabels(canvasSize: size));
     }
 
     if (polygons.isEmpty && (labels == null || labels.isEmpty)) return null;
@@ -3023,11 +2926,16 @@ class _DriveOverlayPainter extends CustomPainter {
     Size size,
   ) {
     final sidecarPayload = _buildNativeOverlayPayloadFromSidecar2d(size);
-    if (sidecarPayload != null) {
-      _drawEncodedOverlayPayload(canvas, size, sidecarPayload);
+    if (snapshot.path.length < 2) {
+      if (sidecarPayload != null) {
+        _drawEncodedOverlayPayload(canvas, size, sidecarPayload);
+      }
+      final plotPayload = _buildDebugPlotOverlayPayload(size);
+      if (plotPayload != null) {
+        _drawEncodedOverlayPayload(canvas, size, plotPayload);
+      }
       return;
     }
-    if (snapshot.path.length < 2) return;
     final transform = _buildTransform(size);
     final modelMax = snapshot.path.x.isNotEmpty ? snapshot.path.x.last : 0.0;
     final maxDistance = modelMax.clamp(10.0, 100.0);
@@ -3113,6 +3021,9 @@ class _DriveOverlayPainter extends CustomPainter {
     if (showPathFill && trackVertices != null) {
       _drawPathByMode(canvas, trackVertices);
     }
+    if (sidecarPayload != null) {
+      _drawEncodedOverlayPayload(canvas, size, sidecarPayload);
+    }
     final navPolygons = <Map<String, dynamic>>[];
     final navLabels = <Map<String, dynamic>>[];
     _appendNavArOverlayPolygons(
@@ -3139,6 +3050,10 @@ class _DriveOverlayPainter extends CustomPainter {
         trackVertices: trackVertices,
       );
     }
+    final plotPayload = _buildDebugPlotOverlayPayload(size);
+    if (plotPayload != null) {
+      _drawEncodedOverlayPayload(canvas, size, plotPayload);
+    }
   }
 
   @override
@@ -3148,6 +3063,7 @@ class _DriveOverlayPainter extends CustomPainter {
         oldDelegate.sourceSize != sourceSize ||
         oldDelegate.cameraKind != cameraKind ||
         oldDelegate.coverViewport != coverViewport ||
+        oldDelegate.visibleViewportRect != visibleViewportRect ||
         oldDelegate.showDebugGuides != showDebugGuides ||
         oldDelegate.showPathFill != showPathFill ||
         oldDelegate.showLaneLines != showLaneLines ||
@@ -3157,7 +3073,8 @@ class _DriveOverlayPainter extends CustomPainter {
         oldDelegate.showRadarBadge != showRadarBadge ||
         oldDelegate.showRadarVector != showRadarVector ||
         oldDelegate.showStopDistanceTf != showStopDistanceTf ||
-        oldDelegate.showStateText != showStateText;
+        oldDelegate.showStateText != showStateText ||
+        oldDelegate.debugPlotState != debugPlotState;
   }
 }
 

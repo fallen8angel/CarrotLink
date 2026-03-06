@@ -1249,6 +1249,7 @@ def _extract_h264_codec(payload: bytes) -> str | None:
 
 
 class CameraRelayHub:
+  CAMERA_QUEUE_MAXSIZE = 2
   CAMERA_SERVICE_CANDIDATES = {
     "road": [
       "livestreamRoadEncodeData",
@@ -1276,7 +1277,7 @@ class CameraRelayHub:
       cam: {} for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
     }
     self._queues: dict[str, asyncio.Queue[bytes]] = {
-      cam: asyncio.Queue(maxsize=4)
+      cam: asyncio.Queue(maxsize=self.CAMERA_QUEUE_MAXSIZE)
       for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
     }
     self._frame_count: dict[str, int] = {
@@ -1293,6 +1294,21 @@ class CameraRelayHub:
       cam: ""
       for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
     }
+    self._queue_drop_count: dict[str, int] = {
+      cam: 0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+    }
+    self._send_drop_count: dict[str, int] = {
+      cam: 0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+    }
+    self._last_frame_at_mono: dict[str, float] = {
+      cam: 0.0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+    }
+    self._last_frame_id: dict[str, int] = {
+      cam: -1 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+    }
+    self._last_send_batch_ms: dict[str, float] = {
+      cam: 0.0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+    }
     self._quality_mode = self._normalize_quality_mode(
       os.environ.get("CARROTLINK_CAMERA_QUALITY_MODE", "quality")
     )
@@ -1300,7 +1316,7 @@ class CameraRelayHub:
 
   def _normalize_quality_mode(self, mode: Any) -> str:
     value = str(mode or "").strip().lower()
-    if value == "stable":
+    if value in ("stable", "low_latency", "low-latency", "latency"):
       return "stable"
     return "quality"
 
@@ -1316,7 +1332,7 @@ class CameraRelayHub:
     if not base:
       return []
     if self._quality_mode == "stable":
-      return base
+      return base[:1]
     # quality mode: prefer full encode first, then livestream fallback.
     return list(reversed(base))
 
@@ -1440,10 +1456,12 @@ class CameraRelayHub:
           await asyncio.sleep(0.001)
           continue
 
+        frame_id = _safe_int(getattr(frame, "frameId", None))
         packet = self._pack_frame(camera, frame)
         if queue.full():
           try:
             queue.get_nowait()
+            self._queue_drop_count[camera] += 1
           except Exception:
             pass
         try:
@@ -1452,6 +1470,9 @@ class CameraRelayHub:
           await asyncio.sleep(0.001)
           continue
         self._frame_count[camera] += 1
+        self._last_frame_at_mono[camera] = time.monotonic()
+        if frame_id is not None and frame_id >= 0:
+          self._last_frame_id[camera] = frame_id
         if source_service:
           self._selected_service[camera] = source_service
       except asyncio.CancelledError:
@@ -1467,10 +1488,11 @@ class CameraRelayHub:
         send_timeout = 0.35 if quality_mode == "quality" else 0.25
         timeout_fail_limit = 5 if quality_mode == "quality" else 4
         if not self.clients.get(camera):
-          keep_count = 2
+          keep_count = 1
           while queue.qsize() > keep_count:
             try:
               queue.get_nowait()
+              self._queue_drop_count[camera] += 1
             except Exception:
               break
           await asyncio.sleep(0.03)
@@ -1482,16 +1504,29 @@ class CameraRelayHub:
           continue
 
         stale: list[web.WebSocketResponse] = []
-        for ws in list(self.clients.get(camera, set())):
-          try:
-            await asyncio.wait_for(ws.send_bytes(packet), timeout=send_timeout)
+        clients = list(self.clients.get(camera, set()))
+        send_started = time.monotonic()
+        results = await asyncio.gather(
+          *[
+            asyncio.wait_for(ws.send_bytes(packet), timeout=send_timeout)
+            for ws in clients
+          ],
+          return_exceptions=True,
+        )
+        self._last_send_batch_ms[camera] = max(
+          0.0,
+          (time.monotonic() - send_started) * 1000.0,
+        )
+        for ws, result in zip(clients, results):
+          if not isinstance(result, Exception):
             self._ws_send_failures.pop(ws, None)
-          except Exception:
-            fail_count = self._ws_send_failures.get(ws, 0) + 1
-            self._ws_send_failures[ws] = fail_count
-            if fail_count >= timeout_fail_limit:
-              stale.append(ws)
-              self._drop_count[camera] += 1
+            continue
+          fail_count = self._ws_send_failures.get(ws, 0) + 1
+          self._ws_send_failures[ws] = fail_count
+          if fail_count >= timeout_fail_limit:
+            stale.append(ws)
+            self._drop_count[camera] += 1
+            self._send_drop_count[camera] += 1
         for ws in stale:
           self.clients[camera].discard(ws)
           self._ws_send_failures.pop(ws, None)
@@ -1562,12 +1597,23 @@ class CameraRelayHub:
   def status(self) -> dict[str, Any]:
     cameras: dict[str, Any] = {}
     for camera in self.CAMERA_SERVICE_CANDIDATES.keys():
+      last_frame_at = self._last_frame_at_mono.get(camera, 0.0)
+      last_frame_age_ms = (
+        max(0, int((time.monotonic() - last_frame_at) * 1000.0))
+        if last_frame_at > 0.0 else None
+      )
       cameras[camera] = {
         "clients": len(self.clients.get(camera, set())),
         "frames": self._frame_count.get(camera, 0),
         "drops": self._drop_count.get(camera, 0),
         "codec": self._last_codec.get(camera, ""),
         "queue": self._queues[camera].qsize(),
+        "queueMax": self.CAMERA_QUEUE_MAXSIZE,
+        "queueDrops": self._queue_drop_count.get(camera, 0),
+        "sendDrops": self._send_drop_count.get(camera, 0),
+        "lastFrameId": self._last_frame_id.get(camera, -1),
+        "lastFrameAgeMs": last_frame_age_ms,
+        "lastSendBatchMs": round(self._last_send_batch_ms.get(camera, 0.0), 1),
         "service": self._selected_service.get(camera, ""),
       }
     return {
@@ -1585,10 +1631,12 @@ class SidecarApp:
       "carState",
       "deviceState",
       "selfdriveState",
+      "carControl",
       "controlsState",
       "longitudinalPlan",
       "lateralPlan",
       "liveCalibration",
+      "liveParameters",
       "modelV2",
       "radarState",
       "roadCameraState",
@@ -1600,10 +1648,12 @@ class SidecarApp:
       "carState",
       "deviceState",
       "selfdriveState",
+      "carControl",
       "controlsState",
       "longitudinalPlan",
       "lateralPlan",
       "liveCalibration",
+      "liveParameters",
       "modelV2",
       "radarState",
       "roadCameraState",
@@ -1616,10 +1666,12 @@ class SidecarApp:
       "carState",
       "deviceState",
       "selfdriveState",
+      "carControl",
       "controlsState",
       "longitudinalPlan",
       "lateralPlan",
       "liveCalibration",
+      "liveParameters",
       "modelV2",
       "radarState",
       "roadCameraState",
@@ -1657,10 +1709,16 @@ class SidecarApp:
       "showRadarInfo": 0,
       "radarLatFactor": 20.0,
     }
+    self._plot_mode_last_read = 0.0
+    self._plot_mode_cache = 0
     self._cached_calibration_last_read = 0.0
     self._cached_calibration_cache: dict[str, Any] | None = None
     self._overlay2d_cache_key: tuple[Any, ...] | None = None
     self._overlay2d_cache_value: dict[str, Any] | None = None
+    self._live_send_failures: dict[web.WebSocketResponse, int] = {}
+    self._live_send_drop_count = 0
+    self._last_live_build_ms = 0.0
+    self._last_live_send_batch_ms = 0.0
 
     self._init_messaging()
     self._init_params()
@@ -1716,6 +1774,127 @@ class SidecarApp:
     except Exception:
       pass
     return dict(self._path_style_cache)
+
+  def _read_plot_mode(self) -> int:
+    now = time.monotonic()
+    if now - self._plot_mode_last_read < 1.0:
+      return self._plot_mode_cache
+    self._plot_mode_last_read = now
+    if self._params is None:
+      return self._plot_mode_cache
+    try:
+      self._plot_mode_cache = int(self._params.get_int("ShowPlotMode"))
+    except Exception:
+      pass
+    return self._plot_mode_cache
+
+  def _build_debug_plot(self) -> dict[str, Any] | None:
+    mode = self._read_plot_mode()
+    if mode <= 0 or self.sm is None:
+      return None
+    if not self.sm.alive.get("carState", False):
+      return None
+    if not self.sm.alive.get("longitudinalPlan", False):
+      return None
+
+    car_state = self.sm["carState"]
+    lp = self.sm["longitudinalPlan"]
+    car_control = self.sm["carControl"] if self.sm.alive.get("carControl", False) else None
+    controls_state = self.sm["controlsState"] if self.sm.alive.get("controlsState", False) else None
+    model = self.sm["modelV2"] if self.sm.alive.get("modelV2", False) else None
+    radar_state = self.sm["radarState"] if self.sm.alive.get("radarState", False) else None
+    live_params = self.sm["liveParameters"] if self.sm.alive.get("liveParameters", False) else None
+
+    def fv(raw: Any, default: float = 0.0) -> float:
+      value = _safe_float(raw)
+      if value is None or not math.isfinite(value):
+        return default
+      return float(value)
+
+    def seq_value(raw: Any, idx: int, default: float = 0.0) -> float:
+      try:
+        seq = list(raw)
+      except Exception:
+        return default
+      if idx < 0 or idx >= len(seq):
+        return default
+      return fv(seq[idx], default)
+
+    actuators = getattr(car_control, "actuators", None) if car_control is not None else None
+    lateral_state = getattr(controls_state, "lateralControlState", None) if controls_state is not None else None
+    torque_state = None
+    if lateral_state is not None:
+      try:
+        if lateral_state.which() == "torqueState":
+          torque_state = getattr(lateral_state, "torqueState", None)
+      except Exception:
+        torque_state = getattr(lateral_state, "torqueState", None)
+
+    position = getattr(model, "position", None) if model is not None else None
+    velocity = getattr(model, "velocity", None) if model is not None else None
+    lead_one = getattr(radar_state, "leadOne", None) if radar_state is not None else None
+
+    values = [0.0, 0.0, 0.0]
+    title = "no data"
+    if mode == 1:
+      values = [
+        fv(getattr(car_state, "aEgo", None)),
+        seq_value(getattr(lp, "accels", []), 0),
+        fv(getattr(actuators, "accel", None)),
+      ]
+      title = "1.Accel (Y:a_ego, G:a_target, O:a_out)"
+    elif mode == 2:
+      values = [
+        seq_value(getattr(lp, "speeds", []), 0),
+        fv(getattr(car_state, "vEgo", None)),
+        fv(getattr(car_state, "aEgo", None)),
+      ]
+      title = "2.Speed/Accel(Y:speed_0, G:v_ego, O:a_ego)"
+    elif mode == 3:
+      values = [
+        seq_value(getattr(position, "x", []), 32),
+        seq_value(getattr(velocity, "x", []), 32),
+        seq_value(getattr(velocity, "x", []), 0),
+      ]
+      title = "3.Model(Y:pos_32, G:vel_32, O:vel_0)"
+    elif mode == 4:
+      values = [
+        seq_value(getattr(lp, "accels", []), 0),
+        fv(getattr(lead_one, "aLeadK", None)),
+        fv(getattr(lead_one, "vRel", None)),
+      ]
+      title = "4.Lead(Y:accel, G:a_lead, O:v_rel)"
+    elif mode == 5:
+      values = [
+        fv(getattr(car_state, "aEgo", None)),
+        fv(getattr(lead_one, "aLead", None)),
+        fv(getattr(lead_one, "jLead", None)),
+      ]
+      title = "5.Lead(Y:a_ego, G:a_lead, O:j_lead)"
+    elif mode == 6:
+      values = [
+        fv(getattr(torque_state, "actualLateralAccel", None)) * 10.0,
+        fv(getattr(torque_state, "desiredLateralAccel", None)) * 10.0,
+        fv(getattr(torque_state, "output", None)) * 10.0,
+      ]
+      title = "6.Steer(Y:actual, G:desire, O:output)"
+    elif mode == 7:
+      values = [
+        fv(getattr(car_state, "steeringAngleDeg", None)),
+        fv(getattr(actuators, "steeringAngleDeg", None)),
+        fv(getattr(live_params, "angleOffsetDeg", None)) * 10.0,
+      ]
+      title = "7.SteerA (Y:Actual, G:Target, O:Offset*10)"
+    elif mode == 8:
+      curvature = fv(getattr(actuators, "curvature", None)) * 10000.0
+      values = [curvature, curvature, curvature]
+      title = "8.SteerA (Y:Actual, G:Target, O:Offset*10)"
+
+    return {
+      "mode": mode,
+      "title": title,
+      "values": values,
+    }
 
   def _read_cached_calibration(self) -> dict[str, Any] | None:
     now = time.monotonic()
@@ -2196,6 +2375,9 @@ class SidecarApp:
     if cached_calib is not None:
       payload["cachedCalibration"] = cached_calib
     payload["pathStyle"] = self._read_path_style()
+    debug_plot = self._build_debug_plot()
+    if debug_plot is not None:
+      payload["debugPlot"] = debug_plot
     return payload
 
   def _build_payload(self) -> dict[str, Any]:
@@ -2293,20 +2475,29 @@ class SidecarApp:
   async def _broadcast_loop(self, app: web.Application) -> None:
     while True:
       try:
+        base_interval = self.PROFILE_INTERVAL.get(self.profile, 0.12)
+        live_send_timeout = min(max(base_interval * 2.5, 0.08), 0.2)
         if self.clients:
           payload_cache: dict[str, tuple[str, bytes]] = {}
           compressed_cache: dict[str, bytes] = {}
           stale: list[web.WebSocketResponse] = []
+          send_jobs: list[tuple[web.WebSocketResponse, asyncio.Task[Any]]] = []
+          batch_started = time.monotonic()
           for ws, entry in list(self.clients.items()):
             encoding, camera_mode = entry
             try:
               mode = self._normalize_overlay_camera_mode(camera_mode)
               cached = payload_cache.get(mode)
               if cached is None:
+                build_started = time.monotonic()
                 payload = self._build_payload_for_camera_mode(mode)
                 message = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
                 message_bytes = message.encode("utf-8")
                 payload_cache[mode] = (message, message_bytes)
+                self._last_live_build_ms = max(
+                  0.0,
+                  (time.monotonic() - build_started) * 1000.0,
+                )
               else:
                 message, message_bytes = cached
               if encoding == "zlib-json":
@@ -2314,18 +2505,50 @@ class SidecarApp:
                 if comp is None:
                   comp = zlib.compress(message_bytes, level=1)
                   compressed_cache[mode] = comp
-                await ws.send_bytes(comp)
+                send_jobs.append(
+                  (
+                    ws,
+                    asyncio.create_task(
+                      asyncio.wait_for(ws.send_bytes(comp), timeout=live_send_timeout)
+                    ),
+                  )
+                )
               else:
-                await ws.send_str(message)
+                send_jobs.append(
+                  (
+                    ws,
+                    asyncio.create_task(
+                      asyncio.wait_for(ws.send_str(message), timeout=live_send_timeout)
+                    ),
+                  )
+                )
             except Exception:
               stale.append(ws)
+          if send_jobs:
+            results = await asyncio.gather(
+              *[task for _, task in send_jobs],
+              return_exceptions=True,
+            )
+            self._last_live_send_batch_ms = max(
+              0.0,
+              (time.monotonic() - batch_started) * 1000.0,
+            )
+            for (ws, _), result in zip(send_jobs, results):
+              if not isinstance(result, Exception):
+                self._live_send_failures.pop(ws, None)
+                continue
+              fail_count = self._live_send_failures.get(ws, 0) + 1
+              self._live_send_failures[ws] = fail_count
+              if fail_count >= 3:
+                stale.append(ws)
+                self._live_send_drop_count += 1
           for ws in stale:
             self.clients.pop(ws, None)
+            self._live_send_failures.pop(ws, None)
             try:
               await ws.close(code=1011, message=b"broadcast_send_failed")
             except Exception:
               pass
-        base_interval = self.PROFILE_INTERVAL.get(self.profile, 0.12)
         await asyncio.sleep(base_interval)
       except asyncio.CancelledError:
         break
@@ -2379,6 +2602,12 @@ class SidecarApp:
         "clients": len(self.clients),
         "repo": self.repo,
         "error": self.last_error,
+        "liveRelay": {
+          "clients": len(self.clients),
+          "sendDrops": self._live_send_drop_count,
+          "lastBuildMs": round(self._last_live_build_ms, 1),
+          "lastSendBatchMs": round(self._last_live_send_batch_ms, 1),
+        },
         "cameraRelay": camera_status,
       }
     )
@@ -2392,7 +2621,7 @@ class SidecarApp:
     )
 
   async def get_camera_quality(self, request: web.Request) -> web.Response:
-    mode = "low_latency"
+    mode = "stable"
     if self._camera_hub is not None:
       mode = self._camera_hub.get_quality_mode()
     return web.json_response(

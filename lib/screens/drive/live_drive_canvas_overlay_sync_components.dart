@@ -140,18 +140,13 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     _clearSidecarRecoverySchedule();
     _suppressCameraErrors = false;
     _setSidecarPhase(
-      _LiveDriveCanvasScreenState._residentSidecarManaged
-          ? _SidecarPhase.idle
-          : _SidecarPhase.stopping,
-      message: _LiveDriveCanvasScreenState._residentSidecarManaged
-          ? '사이드카 그래픽 모드를 종료했습니다.'
-          : '사이드카 그래픽 모드를 정리하는 중입니다.',
+      _SidecarPhase.idle,
+      message:
+          '사이드카 그래픽 모드를 종료했습니다. 잠시 후 유휴 정리합니다.',
     );
     _stopAdaptiveCameraQualityLoop(resetMode: true);
     _stopSidecarLoop();
-    if (!_LiveDriveCanvasScreenState._residentSidecarManaged) {
-      unawaited(_stopSidecarProcessIfNeeded());
-    }
+    _scheduleIdleSidecarWarmStop();
     _applyOverlaySnapshot(
       const _DriveOverlaySnapshot.empty(),
       forceNativePush: true,
@@ -418,6 +413,11 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     _DriveOverlaySnapshot snapshot, {
     bool forceNativePush = false,
   }) {
+    if (snapshot.modelFrameId == null &&
+        snapshot.path.length < 2 &&
+        snapshot.debugPlot == null) {
+      _clearDebugPlotState();
+    }
     final decorated = snapshot.copyWith(animationPhase: _pathAnimationPhase);
     _overlayNotifier.value = decorated;
     _refreshOverlayVerify(decorated, force: forceNativePush);
@@ -463,8 +463,14 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       (snapshot.navDistToTurn ?? -1.0).round(),
       snapshot.navMainText,
       animBucket,
+      _debugPlotState.version,
+      _debugPlotState.mode,
       _nativeOverlaySize.width.round(),
       _nativeOverlaySize.height.round(),
+      _nativeOverlayVisibleViewportRect.left.round(),
+      _nativeOverlayVisibleViewportRect.top.round(),
+      _nativeOverlayVisibleViewportRect.width.round(),
+      _nativeOverlayVisibleViewportRect.height.round(),
       _liveCameraKind.index,
       _coverViewport ? 1 : 0,
     ]);
@@ -538,6 +544,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       cameraKind: _liveCameraKind,
       canvasSize: _nativeOverlaySize,
       coverViewport: _coverViewport,
+      visibleViewportRect: _nativeOverlayVisibleViewportRect,
       showDebugGuides: _overlayVerifyMode && _debugShowGuides,
       showPathFill: _debugShowPathFill,
       showLaneLines: _debugShowLaneLines,
@@ -548,6 +555,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       showRadarVector: _debugShowRadarVector,
       showStopDistanceTf: _debugShowStopDistanceTf,
       showStateText: _debugShowStateText,
+      debugPlotState: _debugPlotState,
     );
     if (!force &&
         _lastNativeOverlaySignature == signature &&
@@ -592,6 +600,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
         }
         return;
       }
+      _recordDebugPlotSample(_latestOverlaySnapshot);
       _setRenderTarget(_latestOverlaySnapshot, nowUs: nowUs);
       _lastPublishedModelFrameId = _latestOverlaySnapshot.modelFrameId;
       return;
@@ -607,6 +616,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       if (_latestOverlaySnapshot.path.length >= 2 &&
           _latestOverlaySnapshot.modelFrameId != null &&
           _lastPublishedModelFrameId == null) {
+        _recordDebugPlotSample(_latestOverlaySnapshot);
         _setRenderTarget(_latestOverlaySnapshot, nowUs: nowUs);
         _lastPublishedModelFrameId = _latestOverlaySnapshot.modelFrameId;
         return;
@@ -633,6 +643,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       return;
     }
     _lastSyncHitUs = nowUs;
+    _recordDebugPlotSample(synced);
     _setRenderTarget(synced, nowUs: nowUs);
     _lastPublishedModelFrameId = modelFrameId;
   }

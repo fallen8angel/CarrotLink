@@ -1869,7 +1869,13 @@ class _GitTabState extends State<GitTab> {
                 final menu = PopupMenuButton<_GitToolsMenuAction>(
                   tooltip: "Git 옵션",
                   enabled: !(_isLoading || _isLoadingSourceInfo),
-                  icon: const Icon(Icons.settings, size: 20),
+                  padding: compactHeader
+                      ? const EdgeInsets.all(2)
+                      : const EdgeInsets.all(8),
+                  constraints: compactHeader
+                      ? const BoxConstraints(minWidth: 34, minHeight: 34)
+                      : const BoxConstraints(minWidth: 40, minHeight: 40),
+                  icon: Icon(Icons.settings, size: compactHeader ? 18 : 20),
                   onSelected: _handleGitToolsMenuAction,
                   itemBuilder: (_) => [
                     const PopupMenuItem(
@@ -1894,8 +1900,9 @@ class _GitTabState extends State<GitTab> {
                   ],
                 );
                 final loading = _isLoading
-                    ? const Padding(
-                        padding: EdgeInsets.only(right: 8.0),
+                    ? Padding(
+                        padding:
+                            EdgeInsets.only(right: compactHeader ? 4.0 : 8.0),
                         child: SizedBox(
                           width: 16,
                           height: 16,
@@ -1904,29 +1911,8 @@ class _GitTabState extends State<GitTab> {
                       )
                     : const SizedBox.shrink();
 
-                if (compactHeader) {
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Row(
-                        children: [
-                          Icon(
-                            Icons.terminal,
-                            size: 18,
-                            color: Theme.of(context).colorScheme.primary,
-                          ),
-                          SizedBox(width: tokens.itemGap + 2),
-                          Expanded(child: title),
-                          loading,
-                        ],
-                      ),
-                      const SizedBox(height: 4),
-                      Align(alignment: Alignment.centerRight, child: menu),
-                    ],
-                  );
-                }
-
                 return Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                     Icon(
                       Icons.terminal,

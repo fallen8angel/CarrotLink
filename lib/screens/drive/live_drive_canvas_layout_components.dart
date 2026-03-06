@@ -248,6 +248,9 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
         final drawH = placement.height;
         final left = placement.left;
         final top = placement.top;
+        final fullSurfaceRect = Rect.fromLTWH(0.0, 0.0, drawW, drawH);
+        final visibleViewportRect =
+            Rect.fromLTWH(-left, -top, vw, vh).intersect(fullSurfaceRect);
         final overlayInset = switch (window.windowClass) {
           UiWindowClass.compact => 12.0,
           UiWindowClass.medium => 14.0,
@@ -351,6 +354,21 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
             (top + drawH - landscapeHudSize - overlayInset)
                 .clamp(overlayInset, landscapeHudTopBound)
                 .toDouble();
+        final nativeViewportRectChanged =
+            (_nativeOverlayVisibleViewportRect.left - visibleViewportRect.left)
+                    .abs() >
+                0.5 ||
+            (_nativeOverlayVisibleViewportRect.top - visibleViewportRect.top)
+                    .abs() >
+                0.5 ||
+            (_nativeOverlayVisibleViewportRect.width - visibleViewportRect.width)
+                    .abs() >
+                0.5 ||
+            (_nativeOverlayVisibleViewportRect.height -
+                        visibleViewportRect.height)
+                    .abs() >
+                0.5;
+        _nativeOverlayVisibleViewportRect = visibleViewportRect;
         if ((_nativeOverlaySize.width - drawW).abs() > 0.5 ||
             (_nativeOverlaySize.height - drawH).abs() > 0.5) {
           _nativeOverlaySize = drawSize;
@@ -362,6 +380,13 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
               ),
             );
           }
+        } else if (nativeViewportRectChanged && _useNativeOverlayRenderer) {
+          unawaited(
+            _pushNativeOverlay(
+              _overlayNotifier.value,
+              force: true,
+            ),
+          );
         }
 
         return ClipRect(
@@ -393,6 +418,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                                   sourceSize: _cameraSourceSize,
                                   cameraKind: _liveCameraKind,
                                   coverViewport: _coverViewport,
+                                  visibleViewportRect: visibleViewportRect,
                                   showDebugGuides:
                                       _overlayVerifyMode && _debugShowGuides,
                                   showPathFill: _debugShowPathFill,
@@ -404,6 +430,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                                   showRadarVector: _debugShowRadarVector,
                                   showStopDistanceTf: _debugShowStopDistanceTf,
                                   showStateText: _debugShowStateText,
+                                  debugPlotState: _debugPlotState,
                                 ),
                               ),
                             );
@@ -458,6 +485,15 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                         ),
                       ),
                   ],
+                ),
+              ),
+              Positioned(
+                top: overlayInset * 0.7,
+                left: overlayInset,
+                right: overlayInset,
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  child: _buildSidecarRevisionBadge(window),
                 ),
               ),
               Positioned(

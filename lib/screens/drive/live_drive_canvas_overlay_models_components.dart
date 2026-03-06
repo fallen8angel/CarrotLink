@@ -104,6 +104,7 @@ class _DriveOverlaySnapshot {
   final int? modelFrameId;
   final int? roadFrameId;
   final int? wideRoadFrameId;
+  final _DriveDebugPlotSample? debugPlot;
   final Map<String, dynamic>? sidecarOverlay2d;
   final bool usingLateralPath;
   final double modelPathXMax;
@@ -138,6 +139,7 @@ class _DriveOverlaySnapshot {
     required this.modelFrameId,
     required this.roadFrameId,
     required this.wideRoadFrameId,
+    required this.debugPlot,
     required this.sidecarOverlay2d,
     required this.usingLateralPath,
     required this.modelPathXMax,
@@ -173,6 +175,7 @@ class _DriveOverlaySnapshot {
         modelFrameId = null,
         roadFrameId = null,
         wideRoadFrameId = null,
+        debugPlot = null,
         sidecarOverlay2d = null,
         usingLateralPath = false,
         modelPathXMax = 0.0,
@@ -189,6 +192,7 @@ class _DriveOverlaySnapshot {
     List<double>? wideFromDeviceEuler,
     double? pathOffsetZ,
     double? animationPhase,
+    _DriveDebugPlotSample? debugPlot,
     Map<String, dynamic>? sidecarOverlay2d,
     List<_NavPathPoint>? navPathPoints,
     int? navTurnInfo,
@@ -221,6 +225,7 @@ class _DriveOverlaySnapshot {
       modelFrameId: modelFrameId,
       roadFrameId: roadFrameId,
       wideRoadFrameId: wideRoadFrameId,
+      debugPlot: debugPlot ?? this.debugPlot,
       sidecarOverlay2d: sidecarOverlay2d ?? this.sidecarOverlay2d,
       usingLateralPath: usingLateralPath,
       modelPathXMax: modelPathXMax,
@@ -448,6 +453,7 @@ class _DriveOverlaySnapshot {
       modelFrameId: tt < 0.5 ? from.modelFrameId : to.modelFrameId,
       roadFrameId: tt < 0.5 ? from.roadFrameId : to.roadFrameId,
       wideRoadFrameId: tt < 0.5 ? from.wideRoadFrameId : to.wideRoadFrameId,
+      debugPlot: to.debugPlot ?? from.debugPlot,
       sidecarOverlay2d: tt < 0.5 ? from.sidecarOverlay2d : to.sidecarOverlay2d,
       usingLateralPath: tt < 0.5 ? from.usingLateralPath : to.usingLateralPath,
       modelPathXMax: _lerp(from.modelPathXMax, to.modelPathXMax, tt),
@@ -474,6 +480,7 @@ class _DriveOverlaySnapshot {
     final modelV2 = payload['modelV2'];
     final carrotMan = payload['carrotMan'];
     final navInstructionCarrot = payload['navInstructionCarrot'];
+    final debugPlot = _DriveDebugPlotSample.fromDynamic(payload['debugPlot']);
     final overlay2dRaw = payload['overlay2d'];
     Map<String, dynamic>? sidecarOverlay2d;
     if (overlay2dRaw is Map) {
@@ -836,6 +843,7 @@ class _DriveOverlaySnapshot {
       modelFrameId: modelFrameId,
       roadFrameId: roadFrameId,
       wideRoadFrameId: wideRoadFrameId,
+      debugPlot: debugPlot,
       sidecarOverlay2d: sidecarOverlay2d,
       usingLateralPath: canUseLateralPath,
       modelPathXMax: modelPathXMax,

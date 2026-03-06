@@ -14,6 +14,34 @@ extension _LiveDriveCanvasOverlayPreviewComponents on _LiveDriveCanvasScreenStat
     }
   }
 
+  String _overlayPreviewPlotModeLabelImpl(int mode) {
+    switch (mode) {
+      case 0:
+        return '꺼짐';
+      case 1:
+        return '1. Accel';
+      case 2:
+        return '2. Speed/Accel';
+      case 3:
+        return '3. Model';
+      case 4:
+        return '4. Lead';
+      case 5:
+        return '5. Lead Jerk';
+      case 6:
+        return '6. Steer';
+      case 7:
+        return '7. SteerA';
+      case 8:
+        return '8. Curvature';
+      case 9:
+        return '9. No data';
+      case 10:
+        return '10. No data';
+    }
+    return '$mode. Custom';
+  }
+
   void _setOverlayPreviewModeImpl(bool enabled) {
     if (_debugOverlayPreviewMode == enabled) return;
     if (mounted) {
@@ -51,13 +79,16 @@ extension _LiveDriveCanvasOverlayPreviewComponents on _LiveDriveCanvasScreenStat
     }
 
     if (enabled) {
+      _clearDebugPlotState();
       _startOverlayPreviewLoop();
       _toast('프리뷰 모드 활성화 (실데이터 없이 그래픽 확인)');
       return;
     }
 
     _stopOverlayPreviewLoop();
+    _clearDebugPlotState();
     if (_openpilotOverlayMode && _latestOverlaySnapshot.path.length >= 2) {
+      _recordDebugPlotSample(_latestOverlaySnapshot);
       _applyOverlaySnapshot(_latestOverlaySnapshot, forceNativePush: true);
     } else {
       _applyOverlaySnapshot(
@@ -87,12 +118,117 @@ extension _LiveDriveCanvasOverlayPreviewComponents on _LiveDriveCanvasScreenStat
     if (!_debugOverlayPreviewMode) return;
     _overlayPreviewFrameSeq += 1;
     final next = _buildOverlayPreviewSnapshot(seq: _overlayPreviewFrameSeq);
-    _latestOverlaySnapshot = next;
+    _recordDebugPlotSample(next);
     _applyOverlaySnapshot(next, forceNativePush: true);
     _sidecarLastFrameAt = DateTime.now();
     if (_overlayDebugWindowStartMs <= 0) {
       _overlayDebugWindowStartMs = DateTime.now().millisecondsSinceEpoch - 500;
     }
+  }
+
+  _DriveDebugPlotSample? _buildOverlayPreviewDebugPlotImpl({
+    required int seq,
+    required double t,
+    required double speedKph,
+    required double leadDist,
+  }) {
+    final mode = _debugOverlayPreviewPlotMode;
+    if (mode <= 0) return null;
+
+    final scenarioCurve = switch (_debugOverlayPreviewScenario) {
+      _OverlayPreviewScenario.highwayStraight => 0.0,
+      _OverlayPreviewScenario.gentleLeft => -1.0,
+      _OverlayPreviewScenario.gentleRight => 1.0,
+      _OverlayPreviewScenario.traffic => 0.45,
+    };
+    final cruiseSpeed = speedKph / 3.6;
+    final phase = t + (seq * 0.0125);
+    final fastWave = math.sin(phase * 1.9);
+    final midWave = math.sin((phase * 1.2) + 0.7);
+    final slowWave = math.cos((phase * 0.85) - 0.45);
+    late final List<double> values;
+    late final String title;
+
+    switch (mode) {
+      case 1:
+        values = <double>[
+          fastWave * 1.4,
+          (fastWave * 1.1) + 0.25,
+          (midWave * 1.6) - 0.15,
+        ];
+        title = '1.Accel (Y:a_ego, G:a_target, O:a_out)';
+        break;
+      case 2:
+        values = <double>[
+          cruiseSpeed + (slowWave * 1.1),
+          (cruiseSpeed - 0.5) + (midWave * 0.8),
+          (fastWave * 1.2),
+        ];
+        title = '2.Speed/Accel(Y:speed_0, G:v_ego, O:a_ego)';
+        break;
+      case 3:
+        values = <double>[
+          32.0 + (midWave * 4.5),
+          14.0 + (slowWave * 2.8),
+          17.0 + (fastWave * 3.1),
+        ];
+        title = '3.Model(Y:pos_32, G:vel_32, O:vel_0)';
+        break;
+      case 4:
+        values = <double>[
+          (fastWave * 1.0),
+          -(leadDist / 18.0) + (midWave * 0.8),
+          (scenarioCurve * 4.0) + (slowWave * 2.4),
+        ];
+        title = '4.Lead(Y:accel, G:a_lead, O:v_rel)';
+        break;
+      case 5:
+        values = <double>[
+          fastWave * 1.25,
+          (midWave * 1.6) - 0.2,
+          slowWave * 2.1,
+        ];
+        title = '5.Lead(Y:a_ego, G:a_lead, O:j_lead)';
+        break;
+      case 6:
+        values = <double>[
+          ((scenarioCurve * 0.9) + fastWave) * 8.0,
+          ((scenarioCurve * 1.1) + midWave) * 8.6,
+          ((scenarioCurve * 0.8) + slowWave) * 7.4,
+        ];
+        title = '6.Steer(Y:actual, G:desire, O:output)';
+        break;
+      case 7:
+        values = <double>[
+          (scenarioCurve * 12.0) + (fastWave * 4.0),
+          (scenarioCurve * 14.5) + (midWave * 4.6),
+          (scenarioCurve * 7.5) + (slowWave * 3.2),
+        ];
+        title = '7.SteerA (Y:Actual, G:Target, O:Offset*10)';
+        break;
+      case 8:
+        final curvature = ((scenarioCurve * 1.8) + (slowWave * 0.6)) * 100.0;
+        values = <double>[curvature, curvature, curvature];
+        title = '8.Curvature (Y:G:O same)';
+        break;
+      case 9:
+      case 10:
+        values = const <double>[0.0, 0.0, 0.0];
+        title = 'no data';
+        break;
+      default:
+        values = const <double>[0.0, 0.0, 0.0];
+        title = 'no data';
+        break;
+    }
+
+    return _DriveDebugPlotSample(
+      mode: mode,
+      title: title,
+      yellow: values[0],
+      green: values[1],
+      orange: values[2],
+    );
   }
 
   List<List<double>> _previewRoadPathVerticesImpl({
@@ -233,6 +369,12 @@ extension _LiveDriveCanvasOverlayPreviewComponents on _LiveDriveCanvasScreenStat
         _debugOverlayPreviewScenario == _OverlayPreviewScenario.traffic
             ? 28.0
             : 64.0;
+    final debugPlot = _buildOverlayPreviewDebugPlot(
+      seq: seq,
+      t: t,
+      speedKph: speedKph,
+      leadDist: leadDist,
+    );
 
     final sidecarOverlay2d = <String, dynamic>{
       'version': 1,
@@ -408,6 +550,7 @@ extension _LiveDriveCanvasOverlayPreviewComponents on _LiveDriveCanvasScreenStat
       modelFrameId: seq,
       roadFrameId: seq,
       wideRoadFrameId: seq,
+      debugPlot: debugPlot,
       sidecarOverlay2d: sidecarOverlay2d,
       usingLateralPath: false,
       modelPathXMax: 80.0,

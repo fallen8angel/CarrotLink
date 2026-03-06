@@ -267,6 +267,10 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
   }
 
   _DriveCameraKind _selectLiveCameraKind(_DriveOverlaySnapshot snapshot) {
+    if (_openpilotOverlayMode) {
+      _wideCamRequested = false;
+      return _DriveCameraKind.road;
+    }
     if (!_hasWideRoadCapability(snapshot)) {
       _wideCamRequested = false;
       return _DriveCameraKind.road;

@@ -58,6 +58,16 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
       transform: translateZ(0);
       will-change: transform;
     }
+    #v::-webkit-media-controls,
+    #v::-webkit-media-controls-enclosure,
+    #v::-webkit-media-controls-panel,
+    #v::-webkit-media-controls-start-playback-button {
+      display: none !important;
+      -webkit-appearance: none !important;
+      opacity: 0 !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+    }
   </style>
 </head>
 <body>
@@ -100,7 +110,20 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
     let sourceH = 0;
     let lastCameraFramePosted = -1;
     let renderDpr = 1.0;
+    let webrtcVideoReady = false;
     const pendingFrameIds = [];
+
+    try {
+      video.controls = false;
+      video.disablePictureInPicture = true;
+      video.playsInline = true;
+      video.autoplay = true;
+      video.muted = true;
+      video.setAttribute('playsinline', '');
+      video.setAttribute('webkit-playsinline', '');
+      video.setAttribute('disablePictureInPicture', '');
+      video.setAttribute('controlsList', 'nodownload noplaybackrate noremoteplayback nofullscreen');
+    } catch (_) {}
 
     function computeRenderDpr() {
       const base = Number(window.devicePixelRatio || 1);
@@ -143,16 +166,28 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
       applySharpenFilter();
     }
 
+    function updatePresentation() {
+      if (mode === 'direct') {
+        canvas.style.display = 'block';
+        canvas.style.opacity = '1';
+        video.style.display = 'none';
+        video.style.opacity = '0';
+        return;
+      }
+      const showVideo = webrtcVideoReady;
+      canvas.style.display = showVideo ? 'none' : 'block';
+      canvas.style.opacity = '1';
+      video.style.display = showVideo ? 'block' : 'none';
+      video.style.opacity = showVideo ? '1' : '0';
+    }
+
     function setMode(next) {
       mode = next;
       if (next === 'direct') {
-        canvas.style.display = 'block';
-        video.style.display = 'none';
+        webrtcVideoReady = false;
         try { video.pause(); } catch (_) {}
-      } else {
-        canvas.style.display = 'none';
-        video.style.display = 'block';
       }
+      updatePresentation();
     }
 
     function postToFlutter(payload) {
@@ -278,6 +313,21 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
       try { if (pc) pc.close(); } catch (_) {}
       pc = null;
       try { video.srcObject = null; } catch (_) {}
+      webrtcVideoReady = false;
+      updatePresentation();
+    }
+
+    function publishVideoSize() {
+      const w = Number(video.videoWidth || 0);
+      const h = Number(video.videoHeight || 0);
+      if (w > 0 && h > 0) publishSourceSize(w, h);
+    }
+
+    function webrtcSessionHealthy() {
+      if (!pc) return false;
+      const st = String(pc.connectionState || '');
+      if (st !== 'connected' && st !== 'connecting') return false;
+      return !!video.srcObject;
     }
 
     function normalizeTimestamp(rawTs) {
@@ -680,6 +730,7 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
         return;
       }
       cleanupPc();
+      setMode('webrtc');
       try {
         pc = new RTCPeerConnection({
           iceServers: [],
@@ -693,9 +744,7 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
           video.srcObject = stream;
           try { await video.play(); } catch (_) {}
           setTimeout(() => {
-            const w = Number(video.videoWidth || 0);
-            const h = Number(video.videoHeight || 0);
-            if (w > 0 && h > 0) publishSourceSize(w, h);
+            publishVideoSize();
           }, 100);
         };
 
@@ -756,13 +805,39 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
     }
 
     resizeCanvas();
+    updatePresentation();
+    video.addEventListener('loadedmetadata', () => {
+      publishVideoSize();
+    });
+    video.addEventListener('loadeddata', publishVideoSize);
+    video.addEventListener('canplay', publishVideoSize);
+    video.addEventListener('playing', () => {
+      webrtcVideoReady = true;
+      updatePresentation();
+      publishVideoSize();
+    });
+    video.addEventListener('emptied', () => {
+      if (mode !== 'webrtc') return;
+      webrtcVideoReady = false;
+      updatePresentation();
+    });
+    video.addEventListener('resize', () => {
+      publishVideoSize();
+    });
     window.addEventListener('resize', resizeCanvas);
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) return;
       if (mode === 'direct' && ALLOW_DIRECT) {
-        connectDirect().catch(() => {});
+        if (!ws || !gotFrame) {
+          connectDirect().catch(() => {});
+        }
       } else if (ALLOW_WEBRTC) {
-        connectWebRtc().catch(() => {});
+        if (webrtcSessionHealthy()) {
+          try { video.play(); } catch (_) {}
+          updatePresentation();
+        } else {
+          connectWebRtc().catch(() => {});
+        }
       }
     });
     window.addEventListener('beforeunload', () => {

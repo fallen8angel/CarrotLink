@@ -168,6 +168,8 @@ extension _LiveDriveCanvasDebugActionsComponents on _LiveDriveCanvasScreenState 
   String _buildDebugSnapshotTextImpl() {
     final process = _sidecarProcessSnapshot;
     final health = _sidecarHealthSnapshot;
+    final profile = _sidecarProfileSnapshot;
+    final cameraQuality = _sidecarCameraQualitySnapshot;
     return [
       'time=${DateTime.now().toIso8601String()}',
       'phase=$_sidecarPhase',
@@ -175,13 +177,16 @@ extension _LiveDriveCanvasDebugActionsComponents on _LiveDriveCanvasScreenState 
       'cameraQuality=${_adaptiveCameraQualityLabel(_adaptiveCameraQualityMode)} score=$_adaptiveBadScore',
       'deploy=$_sidecarLastDeployResult at ${_fmtClock(_sidecarLastDeployAt)}',
       'revision local=${_shortSidecarRevision(_sidecarLocalRevision)} remote=${_shortSidecarRevision(_sidecarRemoteRevision)} action=$_sidecarRevisionAction checked=${_fmtClock(_sidecarLastRevisionCheckedAt)}',
+      'remote_py=$_sidecarRemotePyName remote_rev=$_sidecarRemoteRevisionLabel remote_updated=$_sidecarRemoteUpdatedLabel',
       'bootstrap=$_sidecarLastBootstrapResult at ${_fmtClock(_sidecarLastBootstrapAt)} done=${_sidecarBootstrapDone ?? false}',
       'start=${_fmtClock(_sidecarLastStartAt)} stop=${_fmtClock(_sidecarLastStopAt)}',
       'process=${jsonEncode(process)}',
       'health=${jsonEncode(health)}',
+      'profile=${jsonEncode(profile)}',
+      'camera_quality=${jsonEncode(cameraQuality)}',
       'lastFrame=${_fmtClock(_sidecarLastFrameAt)} fps=${_overlayDebugFps.toStringAsFixed(1)} gap=${_overlayModelCameraGap ?? '-'} drops=$_overlayDropCount',
       'toggles=ar=$_debugShowArOverlay path=$_debugShowPathFill lane=$_debugShowLaneLines edge=$_debugShowRoadEdge lead1=$_debugShowLead1 lead2=$_debugShowLead2 radarBadge=$_debugShowRadarBadge radarVector=$_debugShowRadarVector tf=$_debugShowStopDistanceTf state=$_debugShowStateText',
-      'preview=mode=$_debugOverlayPreviewMode scenario=${_overlayPreviewScenarioLabel(_debugOverlayPreviewScenario)} speed=${_debugOverlayPreviewSpeed.toStringAsFixed(2)}x',
+      'preview=mode=$_debugOverlayPreviewMode scenario=${_overlayPreviewScenarioLabel(_debugOverlayPreviewScenario)} plot=${_overlayPreviewPlotModeLabel(_debugOverlayPreviewPlotMode)} speed=${_debugOverlayPreviewSpeed.toStringAsFixed(2)}x',
       if ((_sidecarProcessStatusError ?? '').trim().isNotEmpty)
         'error=${_sidecarProcessStatusError!.trim()}',
     ].join('\n');

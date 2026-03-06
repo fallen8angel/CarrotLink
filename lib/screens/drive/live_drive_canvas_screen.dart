@@ -25,6 +25,8 @@ import '../../widgets/home_hud_preview_card.dart';
 
 part 'live_drive_canvas_overlay_components.dart';
 part 'live_drive_canvas_overlay_models_components.dart';
+part 'live_drive_canvas_plot_models_components.dart';
+part 'live_drive_canvas_plot_components.dart';
 part 'live_drive_canvas_overlay_math_components.dart';
 part 'live_drive_canvas_debug_components.dart';
 part 'live_drive_canvas_debug_actions_components.dart';
@@ -133,6 +135,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   bool _nativeCameraUnsupported = false;
   final bool _nativeOverlayEnabled = true;
   Size _nativeOverlaySize = Size.zero;
+  Rect _nativeOverlayVisibleViewportRect = Rect.zero;
   int _lastNativeOverlayPushUs = 0;
   static const int _nativeOverlayPushIntervalUs = 16666;
 
@@ -169,6 +172,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const int _interpMaxUs = 90000;
   static const Duration _cameraDiagCaptureCooldown = Duration(seconds: 12);
   static const Duration _lifecycleSuspendDelay = Duration(milliseconds: 2600);
+  static const Duration _sidecarWarmProcessKeepAlive = Duration(seconds: 20);
   static const Duration _backgroundProcessKeepAlive = Duration(seconds: 45);
   static const Duration _backgroundUiResetGrace = Duration(seconds: 8);
   static const String _cameraDiagTmuxTailCommand = '''
@@ -230,7 +234,10 @@ fi
   bool _debugShowStopDistanceTf = true;
   bool _debugShowStateText = true;
   Map<String, String> _sidecarProcessSnapshot = <String, String>{};
+  Map<String, String> _sidecarCriticalProcSnapshot = <String, String>{};
   Map<String, dynamic> _sidecarHealthSnapshot = <String, dynamic>{};
+  Map<String, dynamic> _sidecarProfileSnapshot = <String, dynamic>{};
+  Map<String, dynamic> _sidecarCameraQualitySnapshot = <String, dynamic>{};
   DateTime? _sidecarProcessCheckedAt;
   DateTime? _sidecarLastDeployAt;
   DateTime? _sidecarLastStartAt;
@@ -245,12 +252,15 @@ fi
   String _sidecarLastBootstrapResult = '-';
   String _sidecarLastBootstrapDetail = '-';
   String? _sidecarProcessStatusError;
+  DateTime? _sidecarScheduledStopAt;
+  String? _sidecarScheduledStopReason;
   int _overlayDebugWindowStartMs = 0;
   int _overlayDebugWindowFrames = 0;
   double _overlayDebugFps = 0.0;
   int _overlayDropCount = 0;
   int? _overlayPrevModelFrameId;
   int? _overlayModelCameraGap;
+  _DriveDebugPlotState _debugPlotState = const _DriveDebugPlotState.hidden();
   final ListQueue<String> _sidecarHistory = ListQueue<String>();
   int _lastCameraFallbackLogUs = 0;
   Timer? _lifecycleSuspendTimer;
@@ -269,9 +279,13 @@ fi
   bool _debugOverlayPreviewMode = false;
   _OverlayPreviewScenario _debugOverlayPreviewScenario =
       _OverlayPreviewScenario.highwayStraight;
+  int _debugOverlayPreviewPlotMode = 6;
   double _debugOverlayPreviewSpeed = 1.0;
+  bool _sidecarRevisionBadgeExpanded = false;
   Timer? _overlayPreviewTimer;
   int _overlayPreviewFrameSeq = 0;
+  int _lastDebugPlotSampleUs = 0;
+  static const int _debugPlotMissingClearGraceUs = 1500000;
 
   final ValueNotifier<_DriveOverlaySnapshot> _overlayNotifier =
       ValueNotifier<_DriveOverlaySnapshot>(
@@ -305,12 +319,14 @@ fi
   bool get _openpilotOverlayMode =>
       HudDriveSettingsService.isOpenpilotOverlay(_hudDefaultMode);
 
-  String get _modeTagLabel => _openpilotOverlayMode ? 'openpilot' : 'webrtc';
+  String get _modeTagLabel => _openpilotOverlayMode ? 'stock' : 'webrtc';
 
   bool get _canUseNativeCamera => !kIsWeb && Platform.isAndroid;
 
   bool get _useNativeLiveCamera =>
-      _openpilotOverlayMode && _canUseNativeCamera && !_nativeCameraUnsupported;
+      _openpilotOverlayMode &&
+      _canUseNativeCamera &&
+      !_nativeCameraUnsupported;
 
   bool get _useNativeOverlayRenderer =>
       _openpilotOverlayMode && _useNativeLiveCamera && _nativeOverlayEnabled;
@@ -463,6 +479,21 @@ fi
   String _overlayPreviewScenarioLabel(_OverlayPreviewScenario scenario) =>
       _overlayPreviewScenarioLabelImpl(scenario);
 
+  String _overlayPreviewPlotModeLabel(int mode) =>
+      _overlayPreviewPlotModeLabelImpl(mode);
+
+  _DriveDebugPlotSample? _buildOverlayPreviewDebugPlot({
+    required int seq,
+    required double t,
+    required double speedKph,
+    required double leadDist,
+  }) => _buildOverlayPreviewDebugPlotImpl(
+        seq: seq,
+        t: t,
+        speedKph: speedKph,
+        leadDist: leadDist,
+      );
+
   void _setOverlayPreviewMode(bool enabled) =>
       _setOverlayPreviewModeImpl(enabled);
 
@@ -561,9 +592,7 @@ fi
     _renderTicker = null;
     unawaited(_clearNativeOverlay());
     _stopSidecarLoop();
-    if (!_residentSidecarManaged) {
-      unawaited(_stopSidecarProcessIfNeeded());
-    }
+    unawaited(_stopSidecarProcessIfNeeded(force: true));
     final nativeSub = _nativeCameraEventSub;
     _nativeCameraEventSub = null;
     if (nativeSub != null) {
@@ -720,6 +749,9 @@ fi
 
   Widget _buildDriveModeTag(UiWindowInfo window) =>
       _buildDriveModeTagImpl(window);
+
+  Widget _buildSidecarRevisionBadge(UiWindowInfo window) =>
+      _buildSidecarRevisionBadgeImpl(window);
 
 
   double _computePortraitHudHeight(

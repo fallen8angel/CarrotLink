@@ -18,11 +18,13 @@ class SidecarService {
   static const String _runScriptName = 'run_carrot_linkview.sh';
   static const String _pidFileName = 'sidecar.pid';
   static const String _logFileName = 'carrot_linkview.log';
-  static const String _managedProcessName = 'carrot_linkview';
   static const String _revisionFileName = '.carrot_linkview.rev';
+  static const String _legacyCleanupMarkerName =
+      '.carrot_linkview.legacy_cleanup_v1';
   static const String _legacyPythonFileName = 'carrotlink_sidecar.py';
   static const String _legacyRunScriptName = 'run_sidecar.sh';
-  static const String _legacyBasePath = '/data/media/0/carrotlink_sidecar';
+  static const String _sidecarBasePath = '/data/media/0/carrotlink_sidecar';
+  static const String _legacyManagedModule = 'selfdrive.carrot.carrot_linkview';
   static const String _defaultProfile = 'p2';
   static const Set<String> _supportedProfiles = <String>{
     'p0',
@@ -93,6 +95,7 @@ class SidecarService {
     if (!ssh.isConnected) {
       throw Exception('기기와 연결되어 있지 않습니다.');
     }
+    await _maybeCleanupLegacyInstall(ssh);
     final remoteBase = await _resolveRemoteBase(ssh, strict: false);
     final result = await ssh.executeCommandResult(
       _bash(
@@ -112,6 +115,176 @@ fi
     final rev = result.output.trim();
     if (rev.isEmpty) return null;
     return rev;
+  }
+
+  Future<void> _maybeCleanupLegacyInstall(
+    SSHService ssh, {
+    bool force = false,
+  }) async {
+    try {
+      final output = await cleanupLegacyInstall(ssh, force: force);
+      final trimmed = output.trim();
+      if (trimmed.isEmpty ||
+          trimmed.contains('LEGACY_CLEANUP_ALREADY_DONE')) {
+        return;
+      }
+      final summary = trimmed
+          .split('\n')
+          .map((e) => e.trim())
+          .where((e) =>
+              e.startsWith('LEGACY_CLEANUP_') ||
+              e.startsWith('repo=') ||
+              e.startsWith('cfg_removed=') ||
+              e.startsWith('legacy_files_removed=') ||
+              e.startsWith('legacy_runtime_killed='))
+          .join(' ');
+      if (summary.isNotEmpty) {
+        _diag.info('sidecar', 'Legacy cleanup $summary');
+      }
+    } catch (e) {
+      _diag.warn('sidecar', 'Legacy cleanup skipped/fail: $e');
+    }
+  }
+
+  Future<String> cleanupLegacyInstall(
+    SSHService ssh, {
+    bool force = false,
+  }) async {
+    if (!ssh.isConnected) {
+      throw Exception('기기와 연결되어 있지 않습니다.');
+    }
+
+    final remoteBase = await _resolveRemoteBase(ssh, strict: false);
+    final result = await ssh.executeCommandResult(
+      _bash(
+        '''
+BASE=${_q(remoteBase)}
+MARKER="\$BASE/$_legacyCleanupMarkerName"
+FORCE=${force ? '1' : '0'}
+REPO=""
+
+for d in /data/openpilot /home/comma/openpilot /data/media/0/openpilot /data/openpilot_source/openpilot; do
+  if [ -d "\$d/selfdrive" ] && { [ -d "\$d/.git" ] || [ -f "\$d/launch_openpilot.sh" ] || [ -d "\$d/system" ]; }; then
+    REPO="\$d"
+    break
+  fi
+done
+
+if [ -z "\$REPO" ]; then
+  for root in /data /home/comma /data/media/0; do
+    if [ -d "\$root" ]; then
+      FOUND=\$(find "\$root" -maxdepth 3 -type d -name openpilot 2>/dev/null | head -n 1 || true)
+      if [ -n "\$FOUND" ] && [ -d "\$FOUND/selfdrive" ]; then
+        REPO="\$FOUND"
+        break
+      fi
+    fi
+  done
+fi
+
+if [ "\$FORCE" != "1" ] && [ -f "\$MARKER" ]; then
+  echo "LEGACY_CLEANUP_ALREADY_DONE"
+  echo "repo=\$REPO"
+  exit 0
+fi
+
+CFG_REMOVED=0
+FILES_REMOVED=0
+RUNTIME_KILLED=0
+
+kill_pid_if_alive() {
+  KP="\$1"
+  if [ -n "\$KP" ] && kill -0 "\$KP" 2>/dev/null; then
+    kill "\$KP" 2>/dev/null || true
+    sleep 0.15
+    if kill -0 "\$KP" 2>/dev/null; then
+      kill -9 "\$KP" 2>/dev/null || true
+    fi
+    RUNTIME_KILLED=1
+  fi
+}
+
+remove_if_exists() {
+  TARGET="\$1"
+  if [ -e "\$TARGET" ]; then
+    rm -rf "\$TARGET" 2>/dev/null || true
+    FILES_REMOVED=1
+  fi
+}
+
+if [ -n "\$REPO" ]; then
+  CFG="\$REPO/system/manager/process_config.py"
+  if [ -f "\$CFG" ] && command -v python3 >/dev/null 2>&1; then
+    PY_OUT=\$(python3 - "\$CFG" <<'PY'
+import pathlib, sys
+
+cfg = pathlib.Path(sys.argv[1])
+text = cfg.read_text()
+lines = text.splitlines()
+needle_module = "$_legacyManagedModule"
+removed = 0
+out = []
+for line in lines:
+  if needle_module in line:
+    removed = 1
+    continue
+  out.append(line)
+if removed:
+  cfg.write_text("\\n".join(out) + "\\n")
+print(f"cfg_removed={removed}")
+PY
+)
+    case "\$PY_OUT" in
+      *cfg_removed=1*) CFG_REMOVED=1 ;;
+    esac
+  fi
+
+  CARROT_DIR="\$REPO/selfdrive/carrot"
+  if [ -d "\$CARROT_DIR" ]; then
+    remove_if_exists "\$CARROT_DIR/$_pythonFileName"
+    remove_if_exists "\$CARROT_DIR/$_runScriptName"
+    remove_if_exists "\$CARROT_DIR/$_legacyPythonFileName"
+    remove_if_exists "\$CARROT_DIR/$_legacyRunScriptName"
+    remove_if_exists "\$CARROT_DIR/$_revisionFileName"
+    remove_if_exists "\$CARROT_DIR/$_pidFileName"
+    remove_if_exists "\$CARROT_DIR/logs/$_logFileName"
+    remove_if_exists "\$CARROT_DIR/logs/sidecar.log"
+  fi
+
+  for PATTERN in
+    "$_legacyManagedModule"
+    "\$REPO/selfdrive/carrot/$_pythonFileName"
+    "\$REPO/selfdrive/carrot/$_legacyPythonFileName"
+    "\$REPO/selfdrive/carrot/$_runScriptName"
+    "\$REPO/selfdrive/carrot/$_legacyRunScriptName"
+  do
+    [ -n "\$PATTERN" ] || continue
+    PIDS=\$(ps -eo pid=,args= 2>/dev/null | awk -v pat="\$PATTERN" '
+      index(\$0, pat) {
+        print \$1
+      }
+    ' | sort -u || true)
+    for P in \$PIDS; do
+      kill_pid_if_alive "\$P"
+    done
+  done
+fi
+
+mkdir -p "\$BASE" >/dev/null 2>&1 || true
+date +%s > "\$MARKER" 2>/dev/null || true
+echo "LEGACY_CLEANUP_DONE"
+echo "repo=\$REPO"
+echo "cfg_removed=\$CFG_REMOVED"
+echo "legacy_files_removed=\$FILES_REMOVED"
+echo "legacy_runtime_killed=\$RUNTIME_KILLED"
+''',
+      ),
+      timeout: const Duration(seconds: 45),
+    );
+    if (!result.isSuccess) {
+      throw Exception('legacy cleanup 실패: ${result.output}');
+    }
+    return result.output;
   }
 
   Future<String> _resolveRemoteBase(
@@ -142,28 +315,18 @@ if [ -z "\$REPO" ]; then
   done
 fi
 
-if [ -z "\$REPO" ]; then
-  if [ "${strict ? '1' : '0'}" = "1" ]; then
-    echo "OPENPILOT_REPO_NOT_FOUND"
-    exit 2
-  fi
-  REPO="/data/openpilot"
+if [ -z "\$REPO" ] && [ "${strict ? '1' : '0'}" = "1" ]; then
+  echo "OPENPILOT_REPO_NOT_FOUND"
+  exit 2
 fi
 
-BASE="\$REPO/selfdrive/carrot"
-mkdir -p "\$BASE" >/dev/null 2>&1 || true
+BASE="$_sidecarBasePath"
+mkdir -p "\$BASE" "\$BASE/logs" >/dev/null 2>&1 || true
 if [ ! -d "\$BASE" ]; then
-  if [ "${strict ? '1' : '0'}" = "1" ]; then
-    echo "CARROT_BASE_NOT_FOUND"
-    exit 3
-  fi
-  BASE="/data/openpilot/selfdrive/carrot"
+  echo "SIDECAR_BASE_NOT_FOUND"
+  exit 3
 fi
-LEGACY_BASE="$_legacyBasePath"
-if [ -d "\$LEGACY_BASE" ] && { [ -f "\$LEGACY_BASE/$_legacyPythonFileName" ] || [ -f "\$LEGACY_BASE/$_legacyRunScriptName" ]; }; then
-  BASE="\$LEGACY_BASE"
-fi
-if [ "${strict ? '1' : '0'}" = "1" ] && [ ! -f "\$REPO/selfdrive/carrot/carrot_server.py" ]; then
+if [ -n "\$REPO" ] && [ "${strict ? '1' : '0'}" = "1" ] && [ ! -f "\$REPO/selfdrive/carrot/carrot_server.py" ]; then
   # carrotpilot 미탑재 기기라도 사이드카 배포는 허용하되, 진단에는 힌트를 남긴다.
   echo "CARROT_SERVER_MISSING_WARN"
 fi
@@ -186,8 +349,8 @@ echo "\$BASE"
     if (lines.contains('OPENPILOT_REPO_NOT_FOUND')) {
       throw Exception('openpilot repo를 찾지 못했습니다.');
     }
-    if (lines.contains('CARROT_BASE_NOT_FOUND')) {
-      throw Exception('selfdrive/carrot 경로를 만들지 못했습니다.');
+    if (lines.contains('SIDECAR_BASE_NOT_FOUND')) {
+      throw Exception('사이드카 경로를 만들지 못했습니다.');
     }
     final base = lines.lastWhere(
       (e) => e.contains('/'),
@@ -204,6 +367,7 @@ echo "\$BASE"
       throw Exception('기기와 연결되어 있지 않습니다.');
     }
 
+    await _maybeCleanupLegacyInstall(ssh);
     _diag.info('sidecar', 'Deploy start');
     final remoteBase = await _resolveRemoteBase(ssh);
     final py = _toUnixText(
@@ -245,65 +409,7 @@ chmod 755 "\$BASE/$_runScriptName" "\$BASE/$_pythonFileName" "\$BASE/$_legacyRun
       throw Exception('실행 권한 설정 실패: ${chmod.output}');
     }
 
-    final ensureManaged = await ssh.executeCommandResult(
-      _bash(
-        '''
-BASE=${_q(remoteBase)}
-REPO=\$(dirname "\$(dirname "\$BASE")")
-CFG="\$REPO/system/manager/process_config.py"
-if [ ! -f "\$CFG" ]; then
-  echo "PROCESS_CONFIG_MISSING=\$CFG"
-  exit 6
-fi
-
-python3 - "\$CFG" <<'PY'
-import pathlib, sys
-
-cfg = pathlib.Path(sys.argv[1])
-needle = 'PythonProcess("$_managedProcessName", "selfdrive.carrot.carrot_linkview", always_run),'
-text = cfg.read_text()
-
-if f'PythonProcess("$_managedProcessName"' in text:
-  print("MANAGED_PROC_ALREADY")
-  raise SystemExit(0)
-
-insert_line = f'  {needle}\\n'
-anchor = 'PythonProcess("carrot_server", "selfdrive.carrot.carrot_server", always_run),'
-if anchor in text:
-  text = text.replace(anchor, anchor + '\\n' + insert_line.rstrip('\\n'), 1)
-else:
-  marker = '\\n]\\n\\nmanaged_processes'
-  if marker in text:
-    text = text.replace(marker, '\\n' + insert_line + ']\\n\\nmanaged_processes', 1)
-  else:
-    raise SystemExit("PROCESS_CONFIG_FORMAT_UNSUPPORTED")
-
-cfg.write_text(text)
-print("MANAGED_PROC_INSTALLED")
-PY
-''',
-      ),
-      timeout: const Duration(seconds: 25),
-    );
-    if (!ensureManaged.isSuccess) {
-      _diag.warn(
-        'sidecar',
-        'Managed registration skipped/fail: ${ensureManaged.output}',
-      );
-    }
-
-    _diag.info('sidecar', 'Deploy success managed=${ensureManaged.output}');
-    final managedSummary = ensureManaged.output
-        .split('\n')
-        .map((e) => e.trim())
-        .where((e) =>
-            e.startsWith('MANAGED_PROC_') ||
-            e.startsWith('PROCESS_CONFIG_') ||
-            e.startsWith('PROCESS_CONFIG_FORMAT_'))
-        .join(' ');
-    if (managedSummary.isNotEmpty) {
-      return '배포 완료: $remoteBase ($managedSummary, rev=${shortRevision(revision)})';
-    }
+    _diag.info('sidecar', 'Deploy success base=$remoteBase');
     return '배포 완료: $remoteBase (rev=${shortRevision(revision)})';
   }
 
@@ -316,6 +422,7 @@ PY
       throw Exception('기기와 연결되어 있지 않습니다.');
     }
 
+    await _maybeCleanupLegacyInstall(ssh);
     final remoteBase = await _resolveRemoteBase(ssh);
     final normalizedProfile =
         _supportedProfiles.contains(profile) ? profile : _defaultProfile;
@@ -357,6 +464,13 @@ kill_pid_if_alive() {
   fi
 }
 
+port_open() {
+  if ! command -v ss >/dev/null 2>&1; then
+    return 1
+  fi
+  ss -ltn 2>/dev/null | awk -v p=":\$PORT" '\$4 ~ (p "\$") { found=1 } END { exit(found ? 0 : 1) }'
+}
+
 if command -v tmux >/dev/null 2>&1; then
   tmux has-session -t "\$SESSION" 2>/dev/null && tmux kill-session -t "\$SESSION" || true
 fi
@@ -366,13 +480,6 @@ if [ -f "\$PIDFILE" ]; then
   kill_pid_if_alive "\$OLD_PID"
   rm -f "\$PIDFILE" || true
 fi
-
-for PATTERN in "$_pythonFileName" "$_runScriptName" "$_legacyPythonFileName" "$_legacyRunScriptName"; do
-  PIDS=\$(ps -eo pid,args 2>/dev/null | grep -F "\$PATTERN" | grep -v grep | awk '{print \$1}' | sort -u || true)
-  for P in \$PIDS; do
-    kill_pid_if_alive "\$P"
-  done
-done
 
 if command -v ss >/dev/null 2>&1; then
   PORT_PIDS=\$(ss -ltnp 2>/dev/null | awk -v p=":\$PORT" '
@@ -387,22 +494,16 @@ if command -v ss >/dev/null 2>&1; then
 fi
 
 for i in \$(seq 1 15); do
-  BUSY=0
-  if command -v ss >/dev/null 2>&1; then
-    ss -ltn 2>/dev/null | awk '{print \$4}' | grep -E "[:.]\\\$PORT\$" >/dev/null 2>&1 && BUSY=1 || true
-  fi
-  if [ "\$BUSY" -eq 0 ]; then
+  if ! port_open; then
     break
   fi
   sleep 0.2
 done
 
-if command -v ss >/dev/null 2>&1; then
-  if ss -ltn 2>/dev/null | awk '{print \$4}' | grep -E "[:.]\\\$PORT\$" >/dev/null 2>&1; then
-    echo "PORT_IN_USE_BEFORE_START=\$PORT"
-    ss -ltnp 2>/dev/null | grep -E "[:.]\\\$PORT\\b" || true
-    exit 5
-  fi
+if port_open; then
+  echo "PORT_IN_USE_BEFORE_START=\$PORT"
+  ss -ltnp 2>/dev/null | awk -v p=":\$PORT" '\$4 ~ (p "\$") { print }' || true
+  exit 5
 fi
 
 if command -v tmux >/dev/null 2>&1; then
@@ -437,10 +538,8 @@ else
     fi
   fi
 fi
-if [ "\$READY" -ne 1 ] && command -v ss >/dev/null 2>&1; then
-  if ss -ltn 2>/dev/null | awk '{print \$4}' | grep -E "[:.]\\\$PORT\$" >/dev/null 2>&1; then
-    READY=1
-  fi
+if [ "\$READY" -ne 1 ] && port_open; then
+  READY=1
 fi
 if [ "\$READY" -eq 1 ]; then
   echo "SIDECAR_STARTED profile=\$PROFILE port=\$PORT base=\$BASE"
@@ -512,6 +611,13 @@ kill_pid_if_alive() {
   fi
 }
 
+port_open() {
+  if ! command -v ss >/dev/null 2>&1; then
+    return 1
+  fi
+  ss -ltn 2>/dev/null | awk -v p=":\$PORT" '\$4 ~ (p "\$") { found=1 } END { exit(found ? 0 : 1) }'
+}
+
 if command -v tmux >/dev/null 2>&1; then
   if tmux has-session -t "\$SESSION" 2>/dev/null; then
     tmux kill-session -t "\$SESSION" || true
@@ -527,14 +633,6 @@ if [ -f "\$PIDFILE" ]; then
   rm -f "\$PIDFILE" || true
 fi
 
-for PATTERN in "$_pythonFileName" "$_runScriptName" "$_legacyPythonFileName" "$_legacyRunScriptName"; do
-  PIDS=\$(ps -eo pid,args 2>/dev/null | grep -F "\$PATTERN" | grep -v grep | awk '{print \$1}' | sort -u || true)
-  for P in \$PIDS; do
-    kill_pid_if_alive "\$P"
-    STOPPED=1
-  done
-done
-
 if command -v ss >/dev/null 2>&1; then
   PORT_PIDS=\$(ss -ltnp 2>/dev/null | awk -v p=":\$PORT" '
     \$4 ~ (p "\$") {
@@ -549,19 +647,15 @@ if command -v ss >/dev/null 2>&1; then
 fi
 
 for i in \$(seq 1 20); do
-  BUSY=0
-  if command -v ss >/dev/null 2>&1; then
-    ss -ltn 2>/dev/null | awk '{print \$4}' | grep -E "[:.]\\\$PORT\$" >/dev/null 2>&1 && BUSY=1 || true
-  fi
-  if [ "\$BUSY" -eq 0 ]; then
+  if ! port_open; then
     break
   fi
   sleep 0.2
 done
 
 LISTEN=0
-if command -v ss >/dev/null 2>&1; then
-  ss -ltn 2>/dev/null | awk '{print \$4}' | grep -E "[:.]\\\$PORT\$" >/dev/null 2>&1 && LISTEN=1 || true
+if port_open; then
+  LISTEN=1
 fi
 if [ "\$STOPPED" -eq 1 ]; then
   echo "SIDECAR_STOPPED"
@@ -596,10 +690,18 @@ BASE=${_q(remoteBase)}
 SESSION=${_q(_sessionName)}
 PORT=${_q(port.toString())}
 PIDFILE="\$BASE/$_pidFileName"
+PYFILE="\$BASE/$_pythonFileName"
+REVFILE="\$BASE/$_revisionFileName"
 RUNNING=0
 LISTEN=0
 METHOD="none"
 PORT_PIDS=""
+file_mtime() {
+  if ! command -v stat >/dev/null 2>&1; then
+    return 0
+  fi
+  stat -c %Y "\$1" 2>/dev/null || stat -f %m "\$1" 2>/dev/null || true
+}
 if command -v tmux >/dev/null 2>&1; then
   if tmux has-session -t "\$SESSION" 2>/dev/null; then
     RUNNING=1
@@ -616,7 +718,7 @@ if [ -f "\$PIDFILE" ]; then
   fi
 fi
 if command -v ss >/dev/null 2>&1; then
-  ss -ltn 2>/dev/null | awk '{print \$4}' | grep -E "[:.]\\\$PORT\$" >/dev/null 2>&1 && LISTEN=1 || true
+  ss -ltn 2>/dev/null | awk -v p=":\$PORT" '\$4 ~ (p "\$") { found=1 } END { exit(found ? 0 : 1) }' && LISTEN=1 || true
   PORT_PIDS=\$(ss -ltnp 2>/dev/null | awk -v p=":\$PORT" '
     \$4 ~ (p "\$") {
       if (match(\$0, /pid=[0-9]+/)) {
@@ -634,6 +736,19 @@ echo "method=\$METHOD"
 echo "port_pids=\$PORT_PIDS"
 echo "session=\$SESSION"
 echo "base=\$BASE"
+echo "py_name=$_pythonFileName"
+if [ -f "\$PYFILE" ]; then
+  echo "py_updated_epoch=\$(file_mtime "\$PYFILE")"
+else
+  echo "py_updated_epoch="
+fi
+if [ -f "\$REVFILE" ]; then
+  echo "remote_revision=\$(tr -d '\r' < "\$REVFILE" | head -n 1)"
+  echo "rev_updated_epoch=\$(file_mtime "\$REVFILE")"
+else
+  echo "remote_revision="
+  echo "rev_updated_epoch="
+fi
 if [ -f "\$PIDFILE" ]; then
   echo "pid=\$(cat "\$PIDFILE" 2>/dev/null || true)"
 else
@@ -653,6 +768,47 @@ fi
     );
     if (!result.isSuccess) {
       throw Exception('사이드카 상태 조회 실패: ${result.output}');
+    }
+    return result.output;
+  }
+
+  Future<String> criticalProcStatus(SSHService ssh) async {
+    if (!ssh.isConnected) {
+      throw Exception('기기와 연결되어 있지 않습니다.');
+    }
+
+    final result = await ssh.executeCommandResult(
+      _bash(
+        '''
+emit_proc() {
+  NAME="\$1"
+  PATTERN="\$2"
+  PIDS=\$(ps -eo pid,args 2>/dev/null | awk -v pat="\$PATTERN" '
+    index(\$0, pat) {
+      if (out != "") out = out ","
+      out = out \$1
+    }
+    END { print out }
+  ' || true)
+  if [ -n "\$PIDS" ]; then
+    echo "\$NAME=up:\$PIDS"
+  else
+    echo "\$NAME=down"
+  fi
+}
+
+emit_proc "locationd" "selfdrive.locationd.locationd"
+emit_proc "controlsd" "selfdrive.controls.controlsd"
+emit_proc "plannerd" "selfdrive.controls.plannerd"
+emit_proc "selfdrived" "selfdrive.selfdrived.selfdrived"
+emit_proc "stream_encoderd" "encoderd --stream"
+emit_proc "webrtcd" "system.webrtc.webrtcd"
+''',
+      ),
+      timeout: const Duration(seconds: 12),
+    );
+    if (!result.isSuccess) {
+      throw Exception('핵심 프로세스 상태 조회 실패: ${result.output}');
     }
     return result.output;
   }
@@ -699,16 +855,16 @@ fi
     try {
       await stop(ssh, port: port);
     } catch (_) {}
+    if (removeManagerRegistration) {
+      await _maybeCleanupLegacyInstall(ssh, force: true);
+    }
 
     final remoteBase = await _resolveRemoteBase(ssh, strict: false);
-    final removeRegistrationFlag = removeManagerRegistration ? '1' : '0';
     final result = await ssh.executeCommandResult(
       _bash(
         '''
 BASE=${_q(remoteBase)}
 PORT=${_q(port.toString())}
-REPO=\$(dirname "\$(dirname "\$BASE")")
-CFG="\$REPO/system/manager/process_config.py"
 
 # Remove current and legacy sidecar artifacts
 rm -f "\$BASE/$_pythonFileName" "\$BASE/$_runScriptName" "\$BASE/$_revisionFileName" "\$BASE/$_pidFileName" "\$BASE/logs/$_logFileName" "\$BASE/carrotlink_sidecar.py" "\$BASE/run_sidecar.sh" "\$BASE/logs/sidecar.log"
@@ -728,29 +884,7 @@ if command -v ss >/dev/null 2>&1; then
   done
 fi
 
-REMOVED_CFG=0
-if [ "$removeRegistrationFlag" = "1" ] && [ -f "\$CFG" ]; then
-python3 - "\$CFG" <<'PY'
-import pathlib, sys
-cfg = pathlib.Path(sys.argv[1])
-lines = cfg.read_text().splitlines()
-needle_name = 'PythonProcess("$_managedProcessName"'
-needle_module = 'selfdrive.carrot.carrot_linkview'
-out = []
-removed = 0
-for line in lines:
-  if removed == 0 and needle_name in line and needle_module in line:
-    removed = 1
-    continue
-  out.append(line)
-if removed:
-  cfg.write_text("\\n".join(out) + "\\n")
-print(f"removed={removed}")
-PY
-  REMOVED_CFG=1
-fi
-
-echo "SIDECAR_RESET_DONE base=\$BASE repo=\$REPO cfg_removed=\$REMOVED_CFG"
+echo "SIDECAR_RESET_DONE base=\$BASE"
 ''',
       ),
       timeout: const Duration(seconds: 40),

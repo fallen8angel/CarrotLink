@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -81,10 +82,12 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
   String? _error;
   String _query = '';
   final TextEditingController _groupSearchController = TextEditingController();
+  final FocusNode _groupSearchFocusNode = FocusNode();
   final List<_CarrotSettingFavorite> _favorites = <_CarrotSettingFavorite>[];
   String? _activeHost;
   int _loadEpoch = 0;
   bool _initialFocusHandled = false;
+  double _lastKeyboardInset = 0.0;
 
   @override
   bool get wantKeepAlive => true;
@@ -94,6 +97,10 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _groupSearchController.addListener(_onGroupSearchChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _lastKeyboardInset = _currentKeyboardInset();
+    });
     unawaited(_loadFavorites());
   }
 
@@ -101,6 +108,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
   void dispose() {
     _groupSearchController.removeListener(_onGroupSearchChanged);
     _groupSearchController.dispose();
+    _groupSearchFocusNode.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -131,6 +139,30 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
           ..addAll(next);
       });
     } catch (_) {}
+  }
+
+  double _currentKeyboardInset() {
+    final view = View.maybeOf(context);
+    if (view != null) {
+      return view.viewInsets.bottom / view.devicePixelRatio;
+    }
+    return MediaQuery.maybeViewInsetsOf(context)?.bottom ?? 0.0;
+  }
+
+  void _dismissSearchKeyboard() {
+    SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+    _groupSearchFocusNode.unfocus();
+    FocusManager.instance.primaryFocus?.unfocus();
+  }
+
+  bool _consumeBackForSearchKeyboard() {
+    final keyboardVisible = _currentKeyboardInset() > 0.0;
+    final searchFocused = _groupSearchFocusNode.hasFocus;
+    if (!keyboardVisible && !searchFocused) {
+      return false;
+    }
+    _dismissSearchKeyboard();
+    return true;
   }
 
   Future<void> _persistFavorites() async {
@@ -258,6 +290,20 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && _activeHost != null) {
       unawaited(_refreshAll(silent: true));
+    }
+  }
+
+  @override
+  void didChangeMetrics() {
+    if (!mounted) return;
+    final nextInset = _currentKeyboardInset();
+    final keyboardClosed = _lastKeyboardInset > 0.0 && nextInset <= 0.0;
+    _lastKeyboardInset = nextInset;
+    if (keyboardClosed && _groupSearchFocusNode.hasFocus) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _dismissSearchKeyboard();
+      });
     }
   }
 
@@ -468,34 +514,38 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
     final host = ssh.connectedIp ?? ssh.targetIp;
     _scheduleLoadForHost(host);
 
-    if (host == null || host.isEmpty) {
-      return _buildNoHostState();
-    }
+    final body = host == null || host.isEmpty
+        ? _buildNoHostState()
+        : RefreshIndicator(
+            onRefresh: () => _refreshAll(),
+            child: ListView(
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              padding: EdgeInsets.fromLTRB(
+                horizontalPadding,
+                topPadding,
+                horizontalPadding,
+                24 + MediaQuery.of(context).padding.bottom,
+              ),
+              children: [
+                _buildCarCard(),
+                SizedBox(height: itemGap),
+                if (_isLoading && _bundle == null)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 36),
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                else if (_error != null && _bundle == null)
+                  _buildErrorCard(_error!)
+                else ...[
+                  _buildGroupsCard(),
+                ],
+              ],
+            ),
+          );
 
-    return RefreshIndicator(
-      onRefresh: () => _refreshAll(),
-      child: ListView(
-        padding: EdgeInsets.fromLTRB(
-          horizontalPadding,
-          topPadding,
-          horizontalPadding,
-          24 + MediaQuery.of(context).padding.bottom,
-        ),
-        children: [
-          _buildCarCard(),
-          SizedBox(height: itemGap),
-          if (_isLoading && _bundle == null)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 36),
-              child: Center(child: CircularProgressIndicator()),
-            )
-          else if (_error != null && _bundle == null)
-            _buildErrorCard(_error!)
-          else ...[
-            _buildGroupsCard(),
-          ],
-        ],
-      ),
+    return WillPopScope(
+      onWillPop: () async => !_consumeBackForSearchKeyboard(),
+      child: body,
     );
   }
 
@@ -508,6 +558,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
     final verticalPadding = window.isCompact ? 16.0 : 18.0;
 
     return ListView(
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       padding: EdgeInsets.symmetric(
         horizontal: horizontalPadding,
         vertical: verticalPadding,
@@ -701,7 +752,11 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
                   height: searchFieldHeight,
                   child: TextField(
                     controller: _groupSearchController,
+                    focusNode: _groupSearchFocusNode,
                     textInputAction: TextInputAction.search,
+                    onTapOutside: (_) => _dismissSearchKeyboard(),
+                    onEditingComplete: _dismissSearchKeyboard,
+                    onSubmitted: (_) => _dismissSearchKeyboard(),
                     style: TextStyle(fontSize: searchTextFontSize),
                     decoration: InputDecoration(
                       hintText: '설정 검색',

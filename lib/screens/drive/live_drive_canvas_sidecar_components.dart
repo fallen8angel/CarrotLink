@@ -179,8 +179,8 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
       } else if (!_openpilotOverlayMode) {
         _setSidecarPhase(_SidecarPhase.idle);
       }
-      if (next && !_cameraSuspendedByLifecycle) {
-        unawaited(_loadCameraSource(force: true));
+      if (next && !_cameraSuspendedByLifecycle && _cameraSourceKey == null) {
+        unawaited(_loadCameraSource(force: false));
       } else if (!next &&
           _openpilotOverlayMode &&
           !_cameraSuspendedByLifecycle &&

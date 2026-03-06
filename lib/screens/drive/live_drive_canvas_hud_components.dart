@@ -80,53 +80,45 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
   }
 
   Widget _buildDriveModeTagImpl(UiWindowInfo window) {
-    final scheme = Theme.of(context).colorScheme;
     final fontSize = switch (window.windowClass) {
-      UiWindowClass.compact => 20.0,
-      UiWindowClass.medium => 22.0,
-      UiWindowClass.expanded => 23.0,
-      UiWindowClass.large || UiWindowClass.extraLarge => 24.0,
+      UiWindowClass.compact => 11.0,
+      UiWindowClass.medium => 11.5,
+      UiWindowClass.expanded => 12.0,
+      UiWindowClass.large || UiWindowClass.extraLarge => 12.5,
     };
     final horizontalPadding = switch (window.windowClass) {
-      UiWindowClass.compact => 16.0,
-      UiWindowClass.medium => 18.0,
-      UiWindowClass.expanded => 20.0,
-      UiWindowClass.large || UiWindowClass.extraLarge => 22.0,
+      UiWindowClass.compact => 10.0,
+      UiWindowClass.medium => 11.0,
+      UiWindowClass.expanded => 12.0,
+      UiWindowClass.large || UiWindowClass.extraLarge => 13.0,
     };
     final verticalPadding = switch (window.windowClass) {
-      UiWindowClass.compact => 8.0,
-      UiWindowClass.medium => 10.0,
-      UiWindowClass.expanded => 11.0,
-      UiWindowClass.large || UiWindowClass.extraLarge => 12.0,
+      UiWindowClass.compact => 5.0,
+      UiWindowClass.medium => 5.5,
+      UiWindowClass.expanded => 6.0,
+      UiWindowClass.large || UiWindowClass.extraLarge => 6.5,
     };
     final label = _modeTagLabel;
-    final isOpenpilot = label == 'openpilot';
-    final tagBorderColor = scheme.primary.withValues(
-      alpha: isOpenpilot ? 0.95 : 0.72,
-    );
-    final tagFillColor = isOpenpilot
-        ? scheme.primary.withValues(alpha: 0.24)
-        : Color.alphaBlend(
-            scheme.primary.withValues(alpha: 0.16),
-            scheme.surfaceContainerHighest.withValues(alpha: 0.72),
-          );
-    final tagTextColor =
-        isOpenpilot ? scheme.primary : scheme.onSurface.withValues(alpha: 0.94);
+    final isOpenpilot = _openpilotOverlayMode;
+    final tagBorderColor =
+        isOpenpilot ? _debugSelectedBorder : Colors.white12;
+    final tagFillColor = isOpenpilot ? _debugSelectedBg : _debugNavBg;
+    const tagTextColor = Colors.white;
 
     return IgnorePointer(
       child: DecoratedBox(
         decoration: BoxDecoration(
           color: tagFillColor,
-          borderRadius: BorderRadius.circular(999),
+          borderRadius: BorderRadius.circular(10),
           border: Border.all(
-            color: tagBorderColor.withValues(alpha: 0.95),
-            width: 1.4,
+            color: tagBorderColor,
+            width: 1.0,
           ),
-          boxShadow: const [
+          boxShadow: const <BoxShadow>[
             BoxShadow(
-              color: Color(0x4D000000),
-              blurRadius: 10,
-              offset: Offset(0, 4),
+              color: Color(0x33000000),
+              blurRadius: 8,
+              offset: Offset(0, 3),
             ),
           ],
         ),
@@ -141,11 +133,165 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
               color: tagTextColor,
               fontSize: fontSize,
               fontWeight: FontWeight.w700,
-              letterSpacing: 0.35,
+              letterSpacing: 0.15,
             ),
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildSidecarRevisionBadgeImpl(UiWindowInfo window) {
+    if (!_openpilotOverlayMode) {
+      return const SizedBox.shrink();
+    }
+    final pyName = _sidecarRemotePyName;
+    final revision = _sidecarRemoteRevisionLabel;
+    final updated = _sidecarRemoteUpdatedLabel;
+    final procStatus = _sidecarProcessStatusLabel;
+    final camStatus = _sidecarCameraReadyLabel;
+    final fpsLabel = _overlayDebugFps.toStringAsFixed(1);
+    final ageLabel = _sidecarCameraAgeLabel;
+    final titleFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 10.0,
+      UiWindowClass.medium => 10.5,
+      UiWindowClass.expanded => 11.0,
+      UiWindowClass.large || UiWindowClass.extraLarge => 11.5,
+    };
+    final bodyFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 9.0,
+      UiWindowClass.medium => 9.5,
+      UiWindowClass.expanded => 10.0,
+      UiWindowClass.large || UiWindowClass.extraLarge => 10.5,
+    };
+    final metaFontSize = bodyFontSize - 0.2;
+    final collapsed = !_sidecarRevisionBadgeExpanded;
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 180),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      child: collapsed
+          ? Material(
+              key: const ValueKey<String>('sidecar-badge-collapsed'),
+              color: Colors.transparent,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(999),
+                onTap: () => _safeSetState(
+                  () => _sidecarRevisionBadgeExpanded = true,
+                ),
+                child: Ink(
+                  width: 34,
+                  height: 34,
+                  decoration: BoxDecoration(
+                    color: _debugCardBg.withValues(alpha: 0.90),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white12),
+                    boxShadow: const <BoxShadow>[
+                      BoxShadow(
+                        color: Color(0x33000000),
+                        blurRadius: 10,
+                        offset: Offset(0, 4),
+                      ),
+                    ],
+                  ),
+                  child: const Icon(
+                    Icons.memory_rounded,
+                    size: 18,
+                    color: Colors.white70,
+                  ),
+                ),
+              ),
+            )
+          : Material(
+              key: const ValueKey<String>('sidecar-badge-expanded'),
+              color: Colors.transparent,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () => _safeSetState(
+                  () => _sidecarRevisionBadgeExpanded = false,
+                ),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 320),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: _debugCardBg.withValues(alpha: 0.92),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.white12),
+                      boxShadow: const <BoxShadow>[
+                        BoxShadow(
+                          color: Color(0x33000000),
+                          blurRadius: 10,
+                          offset: Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 7,
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Text(
+                            pyName,
+                            textAlign: TextAlign.center,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: titleFontSize,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.1,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            'sha $revision · $updated',
+                            textAlign: TextAlign.center,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: Colors.white70,
+                              fontSize: bodyFontSize,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 0.05,
+                            ),
+                          ),
+                          const SizedBox(height: 1),
+                          Text(
+                            'proc $procStatus · cam $camStatus',
+                            textAlign: TextAlign.center,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: Colors.white70,
+                              fontSize: metaFontSize,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 0.04,
+                            ),
+                          ),
+                          const SizedBox(height: 1),
+                          Text(
+                            'fps $fpsLabel · age $ageLabel',
+                            textAlign: TextAlign.center,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: Colors.white60,
+                              fontSize: metaFontSize,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 0.04,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
     );
   }
 

@@ -58,6 +58,15 @@ class _DashboardScreenState extends State<DashboardScreen>
     FocusManager.instance.primaryFocus?.unfocus();
   }
 
+  bool _consumeBackForKeyboard(BuildContext context) {
+    final keyboardVisible = MediaQuery.viewInsetsOf(context).bottom > 0.0;
+    if (!keyboardVisible) {
+      return false;
+    }
+    _dismissKeyboard();
+    return true;
+  }
+
   void _setServiceAppVisibility(bool foreground,
       {String source = 'dashboard'}) {
     FlutterBackgroundService().invoke('setAppVisibility', {
@@ -604,6 +613,9 @@ class _DashboardScreenState extends State<DashboardScreen>
 
     return WillPopScope(
       onWillPop: () async {
+        if (_consumeBackForKeyboard(context)) {
+          return false;
+        }
         if (await _handleNestedBackStack()) {
           return false;
         }

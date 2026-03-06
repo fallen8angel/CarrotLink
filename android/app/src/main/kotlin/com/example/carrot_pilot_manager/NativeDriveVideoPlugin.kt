@@ -38,6 +38,7 @@ import java.io.ByteArrayOutputStream
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 private const val NATIVE_VIDEO_TAG = "CarrotNativeVideo"
 
@@ -156,7 +157,9 @@ class NativeDriveVideoView(
   @Volatile private var lastPacketAtMs = 0L
   @Volatile private var lastDecodedAtMs = 0L
   private val pendingFrameIds: ArrayDeque<Int> = ArrayDeque()
+  private val pendingDecodeTasks = AtomicInteger(0)
   @Volatile private var frameStallStrikes = 0
+  @Volatile private var decodeBacklogDropCount = 0
 
   private var reconnectRunnable: Runnable? = null
   private var frameWatchdogRunnable: Runnable? = null
@@ -168,6 +171,9 @@ class NativeDriveVideoView(
   private val frameHardReconnectMs = 24000L
   private val frameDecodeHardReconnectMs = 18000L
   private val frameStallStateEmitEvery = 2
+  private val decodeTaskBacklogLimit = 2
+  private val codecBacklogLimit = 2
+  private val decodeBacklogStateEmitEvery = 24
   @Volatile private var hintedFrameRate = 30f
   @Volatile private var performanceHintTargetNs = 33_333_333L
   @Volatile private var performanceHintSession: PerformanceHintManager.Session? = null
@@ -262,7 +268,22 @@ class NativeDriveVideoView(
                 lastPacketAtMs = System.currentTimeMillis()
                 frameStallStrikes = 0
                 val copy = bytes.toByteArray()
-                decodeHandler.post { handlePacket(copy) }
+                val queued = pendingDecodeTasks.incrementAndGet()
+                decodeHandler.post {
+                  try {
+                    handlePacket(copy)
+                  } finally {
+                    val remain = pendingDecodeTasks.decrementAndGet()
+                    if (remain < 0) {
+                      pendingDecodeTasks.set(0)
+                    }
+                  }
+                }
+                if (queued >= (decodeTaskBacklogLimit + 4) &&
+                    (queued == (decodeTaskBacklogLimit + 4) || queued % 8 == 0)
+                ) {
+                  emitState("decode_queue_$queued")
+                }
               }
 
               override fun onFailure(
@@ -387,6 +408,7 @@ class NativeDriveVideoView(
     codecConfigured = false
     waitingKeyFrame = true
     lastFrameId = -1
+    pendingDecodeTasks.set(0)
     pendingFrameIds.clear()
     val c = codec
     codec = null
@@ -407,6 +429,13 @@ class NativeDriveVideoView(
       val payload: ByteArray,
   )
 
+  private fun noteBacklogDrop(reason: String, backlog: Int) {
+    decodeBacklogDropCount += 1
+    if (decodeBacklogDropCount == 1 || decodeBacklogDropCount % decodeBacklogStateEmitEvery == 0) {
+      emitState("drop_${reason}_n${decodeBacklogDropCount}_b$backlog")
+    }
+  }
+
   private fun handlePacket(packet: ByteArray) {
     if (closed) return
     if (surface == null || !surface!!.isValid) return
@@ -415,6 +444,17 @@ class NativeDriveVideoView(
     val meta = parsed.meta
     val frameId = meta.optInt("frameId", -1)
     if (frameId >= 0 && lastFrameId >= 0 && frameId <= lastFrameId) {
+      return
+    }
+    val keyByMeta =
+        meta.optBoolean("keyFrame", false) || ((meta.optInt("flags", 0) and 0x8) != 0)
+    val queuedTasks = pendingDecodeTasks.get()
+    if (queuedTasks > (decodeTaskBacklogLimit + 1) && !keyByMeta) {
+      noteBacklogDrop("task", queuedTasks)
+      return
+    }
+    if (pendingFrameIds.size >= codecBacklogLimit && !keyByMeta) {
+      noteBacklogDrop("codec", pendingFrameIds.size)
       return
     }
     if (frameId >= 0) {
@@ -430,8 +470,6 @@ class NativeDriveVideoView(
       emitMeta(width, height)
     }
 
-    val keyByMeta =
-        meta.optBoolean("keyFrame", false) || ((meta.optInt("flags", 0) and 0x8) != 0)
     val annexb = toAnnexB(parsed.payload, keyByMeta) ?: return
 
     if (!codecConfigured) {
@@ -488,7 +526,10 @@ class NativeDriveVideoView(
     val localCodec = codec ?: return
     try {
       val inputIndex = localCodec.dequeueInputBuffer(0)
-      if (inputIndex < 0) return
+      if (inputIndex < 0) {
+        noteBacklogDrop("input", pendingFrameIds.size)
+        return
+      }
       val input = localCodec.getInputBuffer(inputIndex) ?: return
       input.clear()
       input.put(frame)

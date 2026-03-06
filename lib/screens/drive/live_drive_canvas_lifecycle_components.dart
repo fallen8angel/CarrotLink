@@ -61,6 +61,8 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
   void _cancelDelayedSidecarStop() {
     _sidecarProcessStopTimer?.cancel();
     _sidecarProcessStopTimer = null;
+    _sidecarScheduledStopAt = null;
+    _sidecarScheduledStopReason = null;
   }
 
   void _cancelBackgroundUiResetTimer() {
@@ -112,29 +114,60 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
 
   void _scheduleDelayedSidecarStop() {
     _cancelDelayedSidecarStop();
-    if (_LiveDriveCanvasScreenState._residentSidecarManaged) {
-      _pushSidecarHistory(
-          'BG_KEEPALIVE', 'resident mode: process stop skipped');
-      return;
-    }
-    if (!_openpilotOverlayMode) {
-      unawaited(_stopSidecarProcessIfNeeded());
-      return;
-    }
     _pushSidecarHistory(
       'BG_KEEPALIVE',
       'defer stop ${_LiveDriveCanvasScreenState._backgroundProcessKeepAlive.inSeconds}s',
     );
-    _sidecarProcessStopTimer = Timer(_LiveDriveCanvasScreenState._backgroundProcessKeepAlive, () {
-      _sidecarProcessStopTimer = null;
-      if (!mounted || !_cameraSuspendedByLifecycle) return;
-      _setSidecarPhase(
-        _SidecarPhase.stopping,
-        message: '백그라운드 유지 시간이 지나 사이드카를 중지합니다.',
-      );
-      _stopSidecarLoop();
-      unawaited(_stopSidecarProcessIfNeeded());
-    });
+    _sidecarScheduledStopReason = 'background';
+    _sidecarScheduledStopAt =
+        DateTime.now().add(_LiveDriveCanvasScreenState._backgroundProcessKeepAlive);
+    _sidecarProcessStopTimer = Timer(
+      _LiveDriveCanvasScreenState._backgroundProcessKeepAlive,
+      () {
+        _sidecarProcessStopTimer = null;
+        final shouldStop = _cameraSuspendedByLifecycle;
+        _sidecarScheduledStopAt = null;
+        _sidecarScheduledStopReason = null;
+        if (!shouldStop) return;
+        _setSidecarPhase(
+          _SidecarPhase.stopping,
+          message: '백그라운드 유지 시간이 지나 사이드카를 중지합니다.',
+        );
+        _stopSidecarLoop();
+        unawaited(_stopSidecarProcessIfNeeded(force: true));
+      },
+    );
+  }
+
+  void _scheduleIdleSidecarWarmStop() {
+    _cancelDelayedSidecarStop();
+    final hadRuntime = _sidecarLastStartAt != null ||
+        _sidecarProcessSnapshot['running'] == '1' ||
+        _sidecarProcessSnapshot['listening'] == '1';
+    if (!hadRuntime) return;
+    _sidecarScheduledStopReason = 'idle';
+    _sidecarScheduledStopAt =
+        DateTime.now().add(_LiveDriveCanvasScreenState._sidecarWarmProcessKeepAlive);
+    _pushSidecarHistory(
+      'AUTO_STOP_ARM',
+      'idle ${_LiveDriveCanvasScreenState._sidecarWarmProcessKeepAlive.inSeconds}s',
+    );
+    _sidecarProcessStopTimer = Timer(
+      _LiveDriveCanvasScreenState._sidecarWarmProcessKeepAlive,
+      () {
+        _sidecarProcessStopTimer = null;
+        final shouldStop = !_openpilotOverlayMode && !_cameraSuspendedByLifecycle;
+        _sidecarScheduledStopAt = null;
+        _sidecarScheduledStopReason = null;
+        if (!shouldStop) return;
+        _setSidecarPhase(
+          _SidecarPhase.stopping,
+          message: '유휴 시간이 지나 사이드카를 중지합니다.',
+        );
+        _stopSidecarLoop();
+        unawaited(_stopSidecarProcessIfNeeded(force: true));
+      },
+    );
   }
 
 
