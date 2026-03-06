@@ -25,6 +25,8 @@ import '../../widgets/home_hud_preview_card.dart';
 
 part 'live_drive_canvas_overlay_components.dart';
 part 'live_drive_canvas_overlay_models_components.dart';
+part 'live_drive_canvas_ar_scene_components.dart';
+part 'live_drive_canvas_ar_replay_components.dart';
 part 'live_drive_canvas_plot_models_components.dart';
 part 'live_drive_canvas_plot_components.dart';
 part 'live_drive_canvas_overlay_math_components.dart';
@@ -252,6 +254,8 @@ fi
   int _lastPathAnimationTickUs = 0;
   int? _lastNativeOverlaySignature;
   bool _lastNativeOverlayHadPayload = false;
+  int? _lastNativeArSceneSignature;
+  bool _lastNativeArSceneHadPayload = false;
   bool _overlayVerifyMode = false;
   String _overlayVerifyText = '';
   int _lastOverlayVerifyUpdateUs = 0;
@@ -271,6 +275,16 @@ fi
   bool _debugShowRadarVector = false;
   bool _debugShowStopDistanceTf = true;
   bool _debugShowStateText = true;
+  bool _debugPushNativeArScene = false;
+  final bool _debugArCaptureEnabled = true;
+  bool _debugArReplayMode = false;
+  _DriveArReplayFrame? _activeArReplayFrame;
+  final ListQueue<_DriveArReplayFrame> _arReplayFrames =
+      ListQueue<_DriveArReplayFrame>();
+  int _arReplayCaptureSeq = 0;
+  int _lastArReplayCaptureUs = 0;
+  static const int _arReplayCaptureIntervalUs = 250000;
+  static const int _arReplayMaxFrames = 96;
   Map<String, String> _sidecarProcessSnapshot = <String, String>{};
   Map<String, String> _sidecarCriticalProcSnapshot = <String, String>{};
   Map<String, dynamic> _sidecarHealthSnapshot = <String, dynamic>{};
@@ -743,6 +757,45 @@ fi
 
 
   Future<void> _debugActionRestart() => _debugActionRestartImpl();
+
+  Future<void> _debugActionInspectArScene() =>
+      _debugActionInspectArSceneImpl();
+
+  Future<void> _debugActionCaptureArReplay() =>
+      _debugActionCaptureArReplayImpl();
+
+  Future<void> _debugActionUseLatestArReplay() =>
+      _debugActionUseLatestArReplayImpl();
+
+  Future<void> _debugActionStopArReplay() =>
+      _debugActionStopArReplayImpl();
+
+  String _arReplayStatusLabel() => _arReplayStatusLabelImpl();
+
+  Map<String, dynamic>? _currentLiveArScenePayload() =>
+      _currentLiveArScenePayloadImpl();
+
+  Future<void> _captureArReplayFrame({
+    required Map<String, dynamic> arScenePayload,
+    int? viewId,
+    Map<String, dynamic>? nativeRenderDebug,
+    bool force = false,
+  }) =>
+      _captureArReplayFrameImpl(
+        arScenePayload: arScenePayload,
+        viewId: viewId,
+        nativeRenderDebug: nativeRenderDebug,
+        force: force,
+      );
+
+  Future<Map<String, dynamic>?> _fetchNativeArRenderDebug(int viewId) =>
+      _fetchNativeArRenderDebugImpl(viewId);
+
+  void _setArReplayMode(
+    bool enabled, {
+    _DriveArReplayFrame? frame,
+  }) =>
+      _setArReplayModeImpl(enabled, frame: frame);
 
 
   Future<bool> _confirmDebugAction({

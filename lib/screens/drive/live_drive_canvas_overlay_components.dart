@@ -1,4 +1,4 @@
-﻿part of 'live_drive_canvas_screen.dart';
+part of 'live_drive_canvas_screen.dart';
 
 const bool _driveEnableExperimentalSidecarDecorations = false;
 const bool _driveEnableExperimentalNavAr = false;
@@ -954,6 +954,51 @@ class _DriveOverlayPainter extends CustomPainter {
     return painter._buildNativeOverlayPayload(canvasSize);
   }
 
+  static Map<String, dynamic>? buildArScenePayload({
+    required _DriveOverlaySnapshot snapshot,
+    required Size sourceSize,
+    required _DriveCameraKind cameraKind,
+    required Size canvasSize,
+    required bool coverViewport,
+    double viewportZoom = 1.0,
+    Rect? visibleViewportRect,
+    int frameGapTolerance = 8,
+  }) {
+    final painter = _DriveOverlayPainter(
+      snapshot: snapshot,
+      isConnected: true,
+      sourceSize: sourceSize,
+      cameraKind: cameraKind,
+      coverViewport: coverViewport,
+      viewportZoom: viewportZoom,
+      visibleViewportRect: visibleViewportRect,
+      debugPlotState: const _DriveDebugPlotState.hidden(),
+    );
+    return painter._buildArScenePayload(
+      canvasSize,
+      frameGapTolerance: frameGapTolerance,
+    );
+  }
+
+  Map<String, dynamic>? _buildArScenePayload(
+    Size canvasSize, {
+    int frameGapTolerance = 8,
+  }) {
+    final scene = snapshot.buildArScene(
+      cameraKind: cameraKind,
+      frameGapTolerance: frameGapTolerance,
+    );
+    if (scene.isEmpty) return null;
+    final screenAnchors = _buildArScreenAnchors(
+      scene: scene,
+      canvasSize: canvasSize,
+    );
+    return scene.toPayload(
+      cameraKind: cameraKind,
+      screenAnchors: screenAnchors?.toPayload(),
+    );
+  }
+
   static String buildProjectionDebugText({
     required _DriveOverlaySnapshot snapshot,
     required Size sourceSize,
@@ -1279,7 +1324,8 @@ class _DriveOverlayPainter extends CustomPainter {
       }
 
       final pathMode = snapshot.pathMode;
-      final widthApply = _pathHalfWidthByMode(pathMode, snapshot.pathWidthRatio);
+      final widthApply =
+          _pathHalfWidthByMode(pathMode, snapshot.pathWidthRatio);
       final zOff = snapshot.pathOffsetZ.isFinite ? snapshot.pathOffsetZ : 1.22;
       final startDistance = snapshot.active ? 2.0 : 3.5;
       trackVertices = _mapLineToTrackVerticesDist(
@@ -1957,6 +2003,149 @@ class _DriveOverlayPainter extends CustomPainter {
     return <Offset>[left, tip, right, inner];
   }
 
+  _DriveArScreenAnchors? _buildArScreenAnchors({
+    required _DriveArScene scene,
+    required Size canvasSize,
+  }) {
+    if (cameraKind != _DriveCameraKind.road) return null;
+    if (scene.isEmpty) return null;
+    final transform = _buildTransform(canvasSize);
+    const distanceScale = 0.92;
+    final pathVerticalOffsetPx = canvasSize.height * 0.018;
+    final laneBaseLine = snapshot.laneLines.length > 2
+        ? snapshot.laneLines[2].line
+        : (snapshot.laneLines.isNotEmpty
+            ? snapshot.laneLines.first.line
+            : null);
+    final laneX = laneBaseLine?.x ?? snapshot.path.x;
+    final laneZ = laneBaseLine?.z ?? snapshot.path.z;
+    final zOffset = snapshot.pathOffsetZ.isFinite ? snapshot.pathOffsetZ : 1.22;
+
+    final projected = <Offset>[];
+    final projectedDist = <double>[];
+    for (final p in scene.routePoints) {
+      if (!p.x.isFinite || !p.y.isFinite || !p.d.isFinite) continue;
+      if (p.x < 2.0 || p.x > 140.0) continue;
+      final sampleDist = (p.d > 0 ? p.d : p.x) * distanceScale;
+      var z = 0.0;
+      if (laneX.isNotEmpty && laneZ.isNotEmpty) {
+        final idx = _getPathLengthIdx(laneX, sampleDist);
+        if (laneZ.isNotEmpty) {
+          final zi = idx.clamp(0, laneZ.length - 1);
+          z = laneZ[zi];
+        }
+      }
+      Offset? out;
+      final ok = _mapToScreen(
+        transform,
+        ((p.x < 3.0 ? 5.0 : p.x) * distanceScale).clamp(2.0, 140.0),
+        p.y,
+        z + zOffset,
+        (pt) => out = pt,
+      );
+      if (!ok || out == null) continue;
+      final o = Offset(out!.dx, out!.dy + pathVerticalOffsetPx);
+      if (o.dx < -60.0 ||
+          o.dx > canvasSize.width + 60.0 ||
+          o.dy < -60.0 ||
+          o.dy > canvasSize.height + 60.0) {
+        continue;
+      }
+      projected.add(o);
+      projectedDist.add(sampleDist);
+      if (projected.length >= 90) break;
+    }
+
+    Offset? gateAnchor;
+    if (projected.isNotEmpty) {
+      var anchorIdx = -1;
+      for (var i = 0; i < projected.length; i++) {
+        final d = i < projectedDist.length ? projectedDist[i] : 0.0;
+        if (d >= 14.0 && d <= 38.0) {
+          anchorIdx = i;
+          break;
+        }
+      }
+      if (anchorIdx < 0) anchorIdx = projected.length ~/ 2;
+      gateAnchor = projected[anchorIdx];
+    } else if (scene.turnCue != null) {
+      gateAnchor = Offset(canvasSize.width * 0.5, canvasSize.height * 0.28);
+    }
+
+    final sampledPoints = <Offset>[];
+    final sampledDistances = <double>[];
+    if (projected.length <= 18) {
+      sampledPoints.addAll(projected);
+      sampledDistances.addAll(projectedDist);
+    } else {
+      final sampleStep = math.max(1, (projected.length / 18).floor());
+      for (var i = 0; i < projected.length; i += sampleStep) {
+        sampledPoints.add(projected[i]);
+        sampledDistances.add(projectedDist[i]);
+      }
+      if (sampledPoints.last != projected.last) {
+        sampledPoints.add(projected.last);
+        sampledDistances.add(projectedDist.last);
+      }
+    }
+
+    final defaultStatusAnchor = Offset(
+      canvasSize.width * 0.5,
+      canvasSize.height - 58.0,
+    );
+    final statusAnchorSource = projected.isNotEmpty
+        ? projected.first
+        : (gateAnchor ?? defaultStatusAnchor);
+    final statusHorizontalMargin = math.min(92.0, canvasSize.width * 0.18);
+    final statusAnchor = Offset(
+      statusAnchorSource.dx.clamp(
+        statusHorizontalMargin,
+        canvasSize.width - statusHorizontalMargin,
+      ),
+      defaultStatusAnchor.dy,
+    );
+    final visibleDistanceMeters =
+        sampledDistances.isNotEmpty ? sampledDistances.last : 0.0;
+    var minDx = double.infinity;
+    var maxDx = double.negativeInfinity;
+    var minDy = double.infinity;
+    var maxDy = double.negativeInfinity;
+    for (final point in sampledPoints) {
+      if (point.dx < minDx) minDx = point.dx;
+      if (point.dx > maxDx) maxDx = point.dx;
+      if (point.dy < minDy) minDy = point.dy;
+      if (point.dy > maxDy) maxDy = point.dy;
+    }
+    final pathSpanX = sampledPoints.length >= 2 ? (maxDx - minDx) : 0.0;
+    final pathSpanY = sampledPoints.length >= 2 ? (maxDy - minDy) : 0.0;
+    final countScore = (sampledPoints.length / 8.0).clamp(0.0, 1.0);
+    final distanceScore = (visibleDistanceMeters / 34.0).clamp(0.0, 1.0);
+    final spanYScore = (pathSpanY / (canvasSize.height * 0.24)).clamp(0.0, 1.0);
+    final centeredScore = sampledPoints.isNotEmpty
+        ? (1.0 -
+                (((sampledPoints.first.dx - (canvasSize.width * 0.5)).abs()) /
+                        (canvasSize.width * 0.5))
+                    .clamp(0.0, 1.0))
+            .clamp(0.0, 1.0)
+        : 0.0;
+    final qualityScore = ((countScore * 0.34) +
+            (distanceScore * 0.30) +
+            (spanYScore * 0.24) +
+            (centeredScore * 0.12))
+        .clamp(0.0, 1.0);
+
+    return _DriveArScreenAnchors(
+      pathPoints: sampledPoints,
+      pathDistances: sampledDistances,
+      gateAnchor: gateAnchor,
+      statusAnchor: statusAnchor,
+      visibleDistanceMeters: visibleDistanceMeters,
+      pathSpanX: pathSpanX,
+      pathSpanY: pathSpanY,
+      qualityScore: qualityScore,
+    );
+  }
+
   void _appendNavArOverlayPolygons({
     required List<Map<String, dynamic>> polygons,
     required List<Map<String, dynamic>> labels,
@@ -1964,6 +2153,7 @@ class _DriveOverlayPainter extends CustomPainter {
     required Size canvasSize,
   }) {
     if (cameraKind != _DriveCameraKind.road) return;
+    final arScene = snapshot.buildArScene(cameraKind: cameraKind);
 
     // Road-camera AR tuning knobs:
     // - distanceScale: perspective depth scaling for nav path/chevrons
@@ -1973,10 +2163,9 @@ class _DriveOverlayPainter extends CustomPainter {
     final pathVerticalOffsetPx = canvasSize.height * 0.018;
     final gateVerticalOffsetPx = -(canvasSize.height * 0.028);
 
-    final navPath = snapshot.navPathPoints;
-    final hasTurnText = snapshot.navMainText.trim().isNotEmpty;
-    final hasTurnInfo = snapshot.navTurnInfo != 0 || hasTurnText;
-    if (navPath.length < 2 && !hasTurnInfo) return;
+    final navPath = arScene.routePoints;
+    final turnCue = arScene.turnCue;
+    if (arScene.isEmpty) return;
 
     final laneBaseLine = snapshot.laneLines.length > 2
         ? snapshot.laneLines[2].line
@@ -2071,8 +2260,11 @@ class _DriveOverlayPainter extends CustomPainter {
       }
     }
 
-    final turnText = _navTurnText(snapshot.navTurnInfo, snapshot.navMainText);
-    final turnDistText = _formatNavDistance(snapshot.navDistToTurn);
+    final turnText = turnCue == null
+        ? ''
+        : _navTurnText(turnCue.turnInfo, turnCue.primaryText);
+    final turnDistText =
+        _formatNavDistance(turnCue == null ? null : turnCue.distanceMeters);
     final gateText = turnText.isEmpty
         ? ''
         : (turnDistText.isEmpty ? turnText : '$turnDistText ??$turnText');
@@ -2132,9 +2324,15 @@ class _DriveOverlayPainter extends CustomPainter {
 
     String statusText;
     Color statusFill;
-    if (snapshot.navTurnInfo == 8 ||
+    if (!arScene.health.calibrationOk) {
+      statusText = '캘리브레이션 대기';
+      statusFill = const Color(0xD97A5100);
+    } else if (!arScene.health.frameGapOk) {
+      statusText = '프레임 정합 대기';
+      statusFill = const Color(0xD97A5100);
+    } else if ((turnCue?.isArrival ?? false) ||
         turnText.contains('도착') ||
-        snapshot.navMainText.contains('도착')) {
+        (turnCue?.primaryText.contains('도착') ?? false)) {
       statusText = '도착 임박';
       statusFill = const Color(0xE617A84B);
     } else if (projected.length >= 2) {
@@ -3043,8 +3241,7 @@ class _DriveOverlayPainter extends CustomPainter {
     if (showPathFill && trackVertices != null) {
       _drawPathByMode(canvas, trackVertices);
     }
-    if (_driveEnableExperimentalSidecarDecorations &&
-        sidecarPayload != null) {
+    if (_driveEnableExperimentalSidecarDecorations && sidecarPayload != null) {
       _drawEncodedOverlayPayload(canvas, size, sidecarPayload);
     }
     if (_driveEnableExperimentalNavAr) {
@@ -3104,3 +3301,41 @@ class _DriveOverlayPainter extends CustomPainter {
   }
 }
 
+class _DriveArScreenAnchors {
+  final List<Offset> pathPoints;
+  final List<double> pathDistances;
+  final Offset? gateAnchor;
+  final Offset statusAnchor;
+  final double visibleDistanceMeters;
+  final double pathSpanX;
+  final double pathSpanY;
+  final double qualityScore;
+
+  const _DriveArScreenAnchors({
+    required this.pathPoints,
+    required this.pathDistances,
+    required this.gateAnchor,
+    required this.statusAnchor,
+    required this.visibleDistanceMeters,
+    required this.pathSpanX,
+    required this.pathSpanY,
+    required this.qualityScore,
+  });
+
+  bool get hasPath => pathPoints.length >= 2;
+
+  Map<String, dynamic> toPayload() {
+    return <String, dynamic>{
+      'pathPoints':
+          pathPoints.map((p) => <double>[p.dx, p.dy]).toList(growable: false),
+      'pathDistances': pathDistances.toList(growable: false),
+      if (gateAnchor != null)
+        'gateAnchor': <double>[gateAnchor!.dx, gateAnchor!.dy],
+      'statusAnchor': <double>[statusAnchor.dx, statusAnchor.dy],
+      'visibleDistanceMeters': visibleDistanceMeters,
+      'pathSpanX': pathSpanX,
+      'pathSpanY': pathSpanY,
+      'qualityScore': qualityScore,
+    };
+  }
+}

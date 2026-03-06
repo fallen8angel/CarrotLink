@@ -938,6 +938,29 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                         }
                                                       : null,
                                                 ),
+                                                layerSwitch(
+                                                  'Native AR scene 전송',
+                                                  _debugPushNativeArScene,
+                                                  layerToggleEnabled
+                                                      ? (value) {
+                                                          _onLayerToggleChanged(
+                                                            setLocalState,
+                                                            () =>
+                                                                _debugPushNativeArScene =
+                                                                    value,
+                                                          );
+                                                          if (_useNativeOverlayRenderer) {
+                                                            unawaited(
+                                                              _pushNativeOverlay(
+                                                                _overlayNotifier
+                                                                    .value,
+                                                                force: true,
+                                                              ),
+                                                            );
+                                                          }
+                                                        }
+                                                      : null,
+                                                ),
                                                 const Divider(
                                                     color: Colors.white12,
                                                     height: 10),
@@ -1264,6 +1287,56 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                         Icons.subject),
                                                     label: const Text(
                                                         '로그 tail 50'),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: OutlinedButton.icon(
+                                                    onPressed: actionRunning
+                                                        ? null
+                                                        : () => runAction(
+                                                            _debugActionInspectArScene),
+                                                    icon: const Icon(
+                                                        Icons.view_in_ar_outlined),
+                                                    label: const Text(
+                                                        'AR scene 보기'),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: OutlinedButton.icon(
+                                                    onPressed: actionRunning
+                                                        ? null
+                                                        : () => runAction(
+                                                            _debugActionCaptureArReplay),
+                                                    icon: const Icon(Icons.save_alt_rounded),
+                                                    label: const Text('AR 캡처 저장'),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: OutlinedButton.icon(
+                                                    onPressed: actionRunning
+                                                        ? null
+                                                        : () => runAction(
+                                                            _debugActionUseLatestArReplay),
+                                                    icon: const Icon(Icons.play_circle_outline_rounded),
+                                                    label: const Text('마지막 캡처 재생'),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: OutlinedButton.icon(
+                                                    onPressed: actionRunning
+                                                        ? null
+                                                        : () => runAction(
+                                                            _debugActionStopArReplay),
+                                                    icon: const Icon(Icons.stop_circle_outlined),
+                                                    label: const Text('AR 재생 종료'),
                                                   ),
                                                 ),
                                                 const SizedBox(height: 8),

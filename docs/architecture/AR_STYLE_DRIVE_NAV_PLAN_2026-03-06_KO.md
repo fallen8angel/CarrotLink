@@ -54,8 +54,9 @@
    `roadCameraState`, `wideRoadCameraState` 등을 전달
    - 파일: `assets/sidecar/carrotlink_sidecar.py`
 
-2. 단, 현재 사이드카 라이브 payload에 `carrotMan/navInstructionCarrot/navRoute`는 미포함
-   - 즉, 내비 문구/턴 거리/명시적 경로선은 앱에서 아직 직접 못 받는 상태
+2. 현재 사이드카 라이브 payload에는 `carrotMan`과 `navInstructionCarrot`가 포함된다
+   - 즉, 내비 문구/턴 거리/가공된 경로선(`naviPaths`)은 앱에서 이미 직접 받을 수 있다
+   - `navRoute/navRouteNavd`는 현재 1차 필수는 아니고 디버그/보강용 후보로 보는 것이 맞다
 
 3. 앱(`live_drive_canvas_screen.dart`)은 이미 카메라+오버레이 투영 파이프라인을 보유
    - `overlay2d` + `modelV2` 기반 path/lane/radar 렌더 가능
@@ -73,9 +74,9 @@
 ## 5.1 데이터 경로
 
 1. comma/openpilot -> sidecar(`/ws/live`)  
-2. sidecar payload 확장:
-   - `carrotMan` (필수)
-   - `navInstructionCarrot` (권장)
+2. sidecar payload 현재 상태:
+   - `carrotMan` (이미 포함)
+   - `navInstructionCarrot` (이미 포함)
    - `navRoute` or `navRouteNavd` (옵션, 디버그/보강)
 3. 앱 `LiveDriveCanvasScreen`에서 수신 후 `DriveNavOverlaySnapshot` 생성
 
@@ -96,15 +97,15 @@
 
 ## 6. 구현 단계 (권장)
 
-## 단계 A: 데이터 계약 확장 (1~2일)
+## 단계 A: 데이터 계약 검증/정리 (1~2일)
 
 수정 파일:
 1. `assets/sidecar/carrotlink_sidecar.py`
 
 작업:
-1. `PROFILE_SERVICES`의 `p2/p3`에 `carrotMan`, `navInstructionCarrot` 추가
-2. `_build_live_payload()`에 위 payload 직렬화 추가
-3. payload 크기 증가 모니터링(전송 주기/프레임 드랍 영향 체크)
+1. 현재 `PROFILE_SERVICES`와 `_build_live_payload()`에 포함된 `carrotMan`, `navInstructionCarrot` 경로 재검증
+2. 실제 기기에서 payload 크기와 갱신 주기 확인
+3. 필요 시 `navRoute` 또는 추가 maneuver 필드만 선택적으로 보강
 
 완료 기준:
 1. 앱 로그에서 `carrotMan.naviPaths`, `xTurnInfo`, `xDistToTurn` 수신 확인

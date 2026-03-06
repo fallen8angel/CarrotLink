@@ -219,6 +219,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       final prefs = await SharedPreferences.getInstance();
       const defaults = <String, bool>{
         'arOverlay': true,
+        'nativeArScene': false,
         'pathFill': true,
         'laneLines': true,
         'roadEdge': true,
@@ -246,6 +247,8 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
         if (!mounted) {
           _debugShowArOverlay =
               readBool(map, 'arOverlay', defaults['arOverlay']!);
+          _debugPushNativeArScene =
+              readBool(map, 'nativeArScene', defaults['nativeArScene']!);
           _debugShowPathFill = readBool(map, 'pathFill', defaults['pathFill']!);
           _debugShowLaneLines =
               readBool(map, 'laneLines', defaults['laneLines']!);
@@ -266,6 +269,8 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
         _safeSetState(() {
           _debugShowArOverlay =
               readBool(map, 'arOverlay', defaults['arOverlay']!);
+          _debugPushNativeArScene =
+              readBool(map, 'nativeArScene', defaults['nativeArScene']!);
           _debugShowPathFill = readBool(map, 'pathFill', defaults['pathFill']!);
           _debugShowLaneLines =
               readBool(map, 'laneLines', defaults['laneLines']!);
@@ -322,6 +327,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       final prefs = await SharedPreferences.getInstance();
       final payload = <String, bool>{
         'arOverlay': _debugShowArOverlay,
+        'nativeArScene': _debugPushNativeArScene,
         'pathFill': _debugShowPathFill,
         'laneLines': _debugShowLaneLines,
         'roadEdge': _debugShowRoadEdge,
@@ -446,6 +452,8 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       );
       _lastNativeOverlaySignature = null;
       _lastNativeOverlayHadPayload = false;
+      _lastNativeArSceneSignature = null;
+      _lastNativeArSceneHadPayload = false;
     } catch (_) {}
   }
 
@@ -482,6 +490,15 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       _liveCameraKind.index,
       _coverViewport ? 1 : 0,
     ]);
+  }
+
+  int? _buildArSceneSignature(Map<String, dynamic>? payload) {
+    if (payload == null) return null;
+    try {
+      return jsonEncode(payload).hashCode;
+    } catch (_) {
+      return payload.toString().hashCode;
+    }
   }
 
   void _refreshOverlayVerify(
@@ -522,6 +539,8 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       await _clearNativeOverlay();
       _lastNativeOverlaySignature = null;
       _lastNativeOverlayHadPayload = false;
+      _lastNativeArSceneSignature = null;
+      _lastNativeArSceneHadPayload = false;
       return;
     }
     if (!_debugShowArOverlay) {
@@ -530,6 +549,8 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       }
       _lastNativeOverlaySignature = null;
       _lastNativeOverlayHadPayload = false;
+      _lastNativeArSceneSignature = null;
+      _lastNativeArSceneHadPayload = false;
       return;
     }
     if (!_useNativeOverlayRenderer) return;
@@ -542,9 +563,28 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       return;
     }
     final signature = _buildOverlaySignature(snapshot);
+    final shouldBuildLiveArScenePayload =
+        _debugPushNativeArScene || _debugArCaptureEnabled || _debugArReplayMode;
+    final liveArScenePayload = shouldBuildLiveArScenePayload
+        ? _DriveOverlayPainter.buildArScenePayload(
+            snapshot: snapshot,
+            sourceSize: _cameraSourceSize,
+            cameraKind: _liveCameraKind,
+            canvasSize: _nativeOverlaySize,
+            coverViewport: _coverViewport,
+            viewportZoom: _viewportPlacementZoom,
+            visibleViewportRect: _nativeOverlayVisibleViewportRect,
+          )
+        : null;
+    final arScenePayload = _debugArReplayMode
+        ? (_activeArReplayFrame?.arScenePayload ?? liveArScenePayload)
+        : (_debugPushNativeArScene ? liveArScenePayload : null);
+    final arSceneSignature = _buildArSceneSignature(arScenePayload);
+    final arSceneHadPayload = arScenePayload != null;
     if (!force &&
         !_isAnimatedPathMode(snapshot.pathMode) &&
-        _lastNativeOverlaySignature == signature) {
+        _lastNativeOverlaySignature == signature &&
+        _lastNativeArSceneSignature == arSceneSignature) {
       return;
     }
     final payload = _DriveOverlayPainter.buildNativeOverlayPayload(
@@ -567,9 +607,12 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       showStateText: _debugShowStateText,
       debugPlotState: _debugPlotState,
     );
+    final overlayHadPayload = payload != null;
     if (!force &&
         _lastNativeOverlaySignature == signature &&
-        _lastNativeOverlayHadPayload == (payload != null)) {
+        _lastNativeOverlayHadPayload == overlayHadPayload &&
+        _lastNativeArSceneSignature == arSceneSignature &&
+        _lastNativeArSceneHadPayload == arSceneHadPayload) {
       return;
     }
     _lastNativeOverlayPushUs = nowUs;
@@ -585,11 +628,22 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
           <String, dynamic>{
             'viewId': viewId,
             'overlay': payload,
+            'arScene': arScenePayload,
           },
         );
       }
       _lastNativeOverlaySignature = signature;
-      _lastNativeOverlayHadPayload = payload != null;
+      _lastNativeOverlayHadPayload = overlayHadPayload;
+      _lastNativeArSceneSignature = arSceneSignature;
+      _lastNativeArSceneHadPayload = arSceneHadPayload;
+      if (!_debugArReplayMode &&
+          _debugArCaptureEnabled &&
+          liveArScenePayload != null) {
+        await _captureArReplayFrame(
+          arScenePayload: liveArScenePayload,
+          viewId: viewId,
+        );
+      }
     } catch (_) {}
   }
 
