@@ -17,6 +17,8 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../services/diagnostics_service.dart';
 import '../../services/ssh_service.dart';
 import '../../services/storage_layout_service.dart';
+import '../../ui/adaptive/layout_tokens.dart';
+import '../../ui/adaptive/window_class.dart';
 import '../../widgets/connection_required_view.dart';
 import '../../widgets/custom_toast.dart';
 import '../../widgets/dashcam_player_screen.dart';
@@ -46,38 +48,59 @@ class _LogsTabState extends State<LogsTab> with SingleTickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        SectionTabBar(
-          controller: _tabController,
-          tabs: const [
-            Tab(text: "대시캠녹화", icon: Icon(Icons.videocam_outlined)),
-            Tab(text: "화면녹화", icon: Icon(Icons.screen_share_outlined)),
-            Tab(text: "TMUX", icon: Icon(Icons.terminal_outlined)),
-          ],
-        ),
-        Expanded(
-          child: TabBarView(
-            controller: _tabController,
-            children: const [
-              _DashcamLogsView(),
-              _RemoteVideoLogsView(
-                folderCandidates: [
-                  "/data/media/0/videos",
-                  "/data/media/0/screenrecord",
-                  "/data/media/0/screen_recordings",
-                  "/data/media/0/screenrecords",
-                  "/data/media/0/ScreenRecords",
-                  "/data/media/0/Movies",
-                  "/sdcard/Movies",
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final maxWidth = switch (window.windowClass) {
+      UiWindowClass.compact => double.infinity,
+      UiWindowClass.medium => 1020.0,
+      UiWindowClass.expanded => 1220.0,
+      UiWindowClass.large => 1360.0,
+      UiWindowClass.extraLarge => 1480.0,
+    };
+
+    return Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxWidth),
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: window.isCompact ? 0 : tokens.screenPadding,
+          ),
+          child: Column(
+            children: [
+              SectionTabBar(
+                controller: _tabController,
+                tabs: const [
+                  Tab(text: "대시캠녹화", icon: Icon(Icons.videocam_outlined)),
+                  Tab(text: "화면녹화", icon: Icon(Icons.screen_share_outlined)),
+                  Tab(text: "TMUX", icon: Icon(Icons.terminal_outlined)),
                 ],
-                emptyMessage: "화면녹화 폴더/영상이 없습니다.",
               ),
-              _TmuxLogsView(),
+              Expanded(
+                child: TabBarView(
+                  controller: _tabController,
+                  children: const [
+                    _DashcamLogsView(),
+                    _RemoteVideoLogsView(
+                      folderCandidates: [
+                        "/data/media/0/videos",
+                        "/data/media/0/screenrecord",
+                        "/data/media/0/screen_recordings",
+                        "/data/media/0/screenrecords",
+                        "/data/media/0/ScreenRecords",
+                        "/data/media/0/Movies",
+                        "/sdcard/Movies",
+                      ],
+                      emptyMessage: "화면녹화 폴더/영상이 없습니다.",
+                    ),
+                    _TmuxLogsView(),
+                  ],
+                ),
+              ),
             ],
           ),
         ),
-      ],
+      ),
     );
   }
 }
@@ -158,6 +181,61 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
   List<_DashcamRouteEntry> _routes = const <_DashcamRouteEntry>[];
   final Set<String> _expandedRoutes = <String>{};
   Timer? _refreshTimer;
+
+  ({
+    EdgeInsets insetPadding,
+    EdgeInsets contentPadding,
+    double bodyFontSize,
+    double maxContentWidth,
+  }) _dialogMetrics(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final insetHorizontal = window.isCompact
+        ? 16.0
+        : tokens.screenPadding.clamp(16.0, 28.0).toDouble();
+    final insetVertical = switch (window.windowClass) {
+      UiWindowClass.compact => 20.0,
+      UiWindowClass.medium => 22.0,
+      UiWindowClass.expanded => 24.0,
+      UiWindowClass.large => 24.0,
+      UiWindowClass.extraLarge => 26.0,
+    };
+    final contentPaddingValue = switch (window.windowClass) {
+      UiWindowClass.compact => 16.0,
+      UiWindowClass.medium => 18.0,
+      UiWindowClass.expanded => 20.0,
+      UiWindowClass.large => 20.0,
+      UiWindowClass.extraLarge => 22.0,
+    };
+    final bodyFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 13.0,
+      UiWindowClass.medium => 13.0,
+      UiWindowClass.expanded => 14.0,
+      UiWindowClass.large => 14.0,
+      UiWindowClass.extraLarge => 14.0,
+    };
+    final maxContentWidth = switch (window.windowClass) {
+      UiWindowClass.compact => 420.0,
+      UiWindowClass.medium => 460.0,
+      UiWindowClass.expanded => 520.0,
+      UiWindowClass.large => 560.0,
+      UiWindowClass.extraLarge => 600.0,
+    };
+    return (
+      insetPadding: EdgeInsets.symmetric(
+        horizontal: insetHorizontal,
+        vertical: insetVertical,
+      ),
+      contentPadding: EdgeInsets.fromLTRB(
+        contentPaddingValue,
+        12,
+        contentPaddingValue,
+        contentPaddingValue,
+      ),
+      bodyFontSize: bodyFontSize,
+      maxContentWidth: maxContentWidth,
+    );
+  }
 
   @override
   void didChangeDependencies() {
@@ -406,22 +484,33 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
     Future<T> Function() action,
   ) async {
     if (!mounted) return action();
+    final metrics = _dialogMetrics(context);
     showDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (_) => PopScope(
         canPop: false,
         child: AlertDialog(
-          content: Row(
-            children: [
-              const SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2.4),
-              ),
-              const SizedBox(width: 12),
-              Expanded(child: Text(message)),
-            ],
+          insetPadding: metrics.insetPadding,
+          contentPadding: metrics.contentPadding,
+          content: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: metrics.maxContentWidth),
+            child: Row(
+              children: [
+                const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2.4),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    message,
+                    style: TextStyle(fontSize: metrics.bodyFontSize),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -443,6 +532,7 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
     Future<T> Function(void Function(String message) updateStatus) action,
   ) async {
     if (!mounted) return action((_) {});
+    final metrics = _dialogMetrics(context);
     final statusText = ValueNotifier<String>(initialMessage);
     var dialogActive = true;
     showDialog<void>(
@@ -451,21 +541,29 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
       builder: (_) => PopScope(
         canPop: false,
         child: AlertDialog(
-          content: Row(
-            children: [
-              const SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2.4),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: ValueListenableBuilder<String>(
-                  valueListenable: statusText,
-                  builder: (_, text, __) => Text(text),
+          insetPadding: metrics.insetPadding,
+          contentPadding: metrics.contentPadding,
+          content: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: metrics.maxContentWidth),
+            child: Row(
+              children: [
+                const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2.4),
                 ),
-              ),
-            ],
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ValueListenableBuilder<String>(
+                    valueListenable: statusText,
+                    builder: (_, text, __) => Text(
+                      text,
+                      style: TextStyle(fontSize: metrics.bodyFontSize),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -628,15 +726,46 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
         barrierDismissible: true,
         builder: (dialogContext) {
           final screenSize = MediaQuery.of(dialogContext).size;
-          final contentWidth = screenSize.width - 20;
+          final window = UiWindowInfo.of(dialogContext);
+          final dialogHorizontalInset = switch (window.windowClass) {
+            UiWindowClass.compact => 10.0,
+            UiWindowClass.medium => 16.0,
+            UiWindowClass.expanded => 20.0,
+            UiWindowClass.large => 24.0,
+            UiWindowClass.extraLarge => 28.0,
+          };
+          final dialogVerticalInset = switch (window.windowClass) {
+            UiWindowClass.compact => 16.0,
+            UiWindowClass.medium => 18.0,
+            UiWindowClass.expanded => 20.0,
+            UiWindowClass.large => 22.0,
+            UiWindowClass.extraLarge => 24.0,
+          };
+          final contentWidth = screenSize.width - (dialogHorizontalInset * 2);
           final targetHeight = (contentWidth * 9 / 16) + 200;
-          final maxHeight = screenSize.height * 0.78;
-          final dialogHeight = targetHeight < 420
-              ? 420.0
+          final maxHeightRatio = switch (window.windowClass) {
+            UiWindowClass.compact => 0.82,
+            UiWindowClass.medium => 0.80,
+            UiWindowClass.expanded => 0.78,
+            UiWindowClass.large => 0.76,
+            UiWindowClass.extraLarge => 0.74,
+          };
+          final maxHeight = screenSize.height * maxHeightRatio;
+          final minHeight = switch (window.windowClass) {
+            UiWindowClass.compact => 380.0,
+            UiWindowClass.medium => 400.0,
+            UiWindowClass.expanded => 420.0,
+            UiWindowClass.large => 430.0,
+            UiWindowClass.extraLarge => 440.0,
+          };
+          final dialogHeight = targetHeight < minHeight
+              ? minHeight
               : (targetHeight > maxHeight ? maxHeight : targetHeight);
           return Dialog(
-            insetPadding:
-                const EdgeInsets.symmetric(horizontal: 10, vertical: 18),
+            insetPadding: EdgeInsets.symmetric(
+              horizontal: dialogHorizontalInset,
+              vertical: dialogVerticalInset,
+            ),
             backgroundColor: Colors.transparent,
             child: ClipRRect(
               borderRadius: BorderRadius.circular(16),
@@ -682,70 +811,119 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
     final result = await showDialog<_SegmentShareOptions>(
       context: context,
       builder: (context) {
+        final window = UiWindowInfo.of(context);
+        final tokens = UiLayoutTokens.of(context);
+        final dialogHorizontalInset = window.isCompact
+            ? 12.0
+            : tokens.screenPadding.clamp(12.0, 26.0).toDouble();
+        final dialogVerticalInset = switch (window.windowClass) {
+          UiWindowClass.compact => 20.0,
+          UiWindowClass.medium => 22.0,
+          UiWindowClass.expanded => 24.0,
+          UiWindowClass.large => 24.0,
+          UiWindowClass.extraLarge => 26.0,
+        };
+        final dialogContentPadding = switch (window.windowClass) {
+          UiWindowClass.compact => 16.0,
+          UiWindowClass.medium => 18.0,
+          UiWindowClass.expanded => 20.0,
+          UiWindowClass.large => 20.0,
+          UiWindowClass.extraLarge => 22.0,
+        };
+        final dialogTitleBottomGap = switch (window.windowClass) {
+          UiWindowClass.compact => 8.0,
+          UiWindowClass.medium => 9.0,
+          UiWindowClass.expanded => 10.0,
+          UiWindowClass.large => 10.0,
+          UiWindowClass.extraLarge => 10.0,
+        };
+        final maxDialogWidth = switch (window.windowClass) {
+          UiWindowClass.compact => 420.0,
+          UiWindowClass.medium => 460.0,
+          UiWindowClass.expanded => 520.0,
+          UiWindowClass.large => 560.0,
+          UiWindowClass.extraLarge => 600.0,
+        };
         return StatefulBuilder(
-          builder: (context, setLocalState) => AlertDialog(
-            title: Text(forClip ? '구간 공유 옵션' : '세그먼트 공유 옵션'),
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (!forClip)
-                    SwitchListTile(
-                      value: convertToMp4,
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text('MP4로 변환'),
-                      subtitle: const Text('qcamera.ts를 qcamera.mp4로 변환'),
-                      onChanged: (value) =>
-                          setLocalState(() => convertToMp4 = value),
-                    ),
-                  CheckboxListTile(
-                    value: includeRlog,
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('rlog 포함'),
-                    onChanged: (value) =>
-                        setLocalState(() => includeRlog = value ?? false),
-                  ),
-                  CheckboxListTile(
-                    value: includeQlog,
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('qlog 포함'),
-                    onChanged: (value) =>
-                        setLocalState(() => includeQlog = value ?? false),
-                  ),
-                  SwitchListTile(
-                    value: saveOnly,
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('공유창 없이 로컬 저장만'),
-                    onChanged: (value) => setLocalState(() => saveOnly = value),
-                  ),
-                ],
+          builder: (context, setLocalState) {
+            return AlertDialog(
+              insetPadding: EdgeInsets.symmetric(
+                horizontal: dialogHorizontalInset,
+                vertical: dialogVerticalInset,
               ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('취소'),
+              contentPadding: EdgeInsets.fromLTRB(
+                dialogContentPadding,
+                dialogTitleBottomGap,
+                dialogContentPadding,
+                dialogContentPadding,
               ),
-              FilledButton(
-                onPressed: () {
-                  Navigator.pop(
-                    context,
-                    _SegmentShareOptions(
-                      convertToMp4: convertToMp4,
-                      includeRlog: includeRlog,
-                      includeQlog: includeQlog,
-                      saveOnly: saveOnly,
-                    ),
-                  );
-                },
-                child: const Text('확인'),
+              title: Text(forClip ? '구간 공유 옵션' : '세그먼트 공유 옵션'),
+              content: ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: maxDialogWidth),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (!forClip)
+                        SwitchListTile(
+                          value: convertToMp4,
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('MP4로 변환'),
+                          subtitle: const Text('qcamera.ts를 qcamera.mp4로 변환'),
+                          onChanged: (value) =>
+                              setLocalState(() => convertToMp4 = value),
+                        ),
+                      CheckboxListTile(
+                        value: includeRlog,
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('rlog 포함'),
+                        onChanged: (value) =>
+                            setLocalState(() => includeRlog = value ?? false),
+                      ),
+                      CheckboxListTile(
+                        value: includeQlog,
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('qlog 포함'),
+                        onChanged: (value) =>
+                            setLocalState(() => includeQlog = value ?? false),
+                      ),
+                      SwitchListTile(
+                        value: saveOnly,
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('공유창 없이 로컬 저장만'),
+                        onChanged: (value) =>
+                            setLocalState(() => saveOnly = value),
+                      ),
+                    ],
+                  ),
+                ),
               ),
-            ],
-          ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('취소'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    Navigator.pop(
+                      context,
+                      _SegmentShareOptions(
+                        convertToMp4: convertToMp4,
+                        includeRlog: includeRlog,
+                        includeQlog: includeQlog,
+                        saveOnly: saveOnly,
+                      ),
+                    );
+                  },
+                  child: const Text('확인'),
+                ),
+              ],
+            );
+          },
         );
       },
     );
@@ -1008,14 +1186,21 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
       return true;
     }
     if (!mounted) return false;
+    final metrics = _dialogMetrics(context);
     final message = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
+        insetPadding: metrics.insetPadding,
+        contentPadding: metrics.contentPadding,
         title: const Text('대용량 공유 경고'),
-        content: Text(
-          '첨부 총 용량이 ${_formatBytes(totalBytes)} 입니다.\n'
-          '메신저 앱 제한으로 전송이 실패할 수 있습니다.\n'
-          '계속 공유할까요?',
+        content: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: metrics.maxContentWidth),
+          child: Text(
+            '첨부 총 용량이 ${_formatBytes(totalBytes)} 입니다.\n'
+            '메신저 앱 제한으로 전송이 실패할 수 있습니다.\n'
+            '계속 공유할까요?',
+            style: TextStyle(fontSize: metrics.bodyFontSize),
+          ),
         ),
         actions: [
           TextButton(
@@ -1386,6 +1571,57 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
   }
 
   Widget _buildRouteTile(_DashcamRouteEntry entry) {
+    final window = UiWindowInfo.of(context);
+    final tileHorizontalPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 13.0,
+      UiWindowClass.expanded => 14.0,
+      UiWindowClass.large => 16.0,
+      UiWindowClass.extraLarge => 16.0,
+    };
+    final expandedHorizontalPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 10.0,
+      UiWindowClass.medium => 11.0,
+      UiWindowClass.expanded => 12.0,
+      UiWindowClass.large => 14.0,
+      UiWindowClass.extraLarge => 14.0,
+    };
+    final segmentBadgeRadius = switch (window.windowClass) {
+      UiWindowClass.compact => 13.0,
+      UiWindowClass.medium => 13.0,
+      UiWindowClass.expanded => 14.0,
+      UiWindowClass.large => 14.0,
+      UiWindowClass.extraLarge => 15.0,
+    };
+    final segmentBadgeFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 11.0,
+      UiWindowClass.medium => 11.0,
+      UiWindowClass.expanded => 12.0,
+      UiWindowClass.large => 12.0,
+      UiWindowClass.extraLarge => 12.0,
+    };
+    final segmentTitleFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 13.0,
+      UiWindowClass.medium => 13.0,
+      UiWindowClass.expanded => 13.5,
+      UiWindowClass.large => 14.0,
+      UiWindowClass.extraLarge => 14.0,
+    };
+    final segmentSubtitleFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 11.0,
+      UiWindowClass.medium => 11.0,
+      UiWindowClass.expanded => 12.0,
+      UiWindowClass.large => 12.0,
+      UiWindowClass.extraLarge => 12.0,
+    };
+    final segmentTrailingWidth = switch (window.windowClass) {
+      UiWindowClass.compact => 44.0,
+      UiWindowClass.medium => 46.0,
+      UiWindowClass.expanded => 48.0,
+      UiWindowClass.large => 48.0,
+      UiWindowClass.extraLarge => 50.0,
+    };
+
     final expanded = _expandedRoutes.contains(entry.route);
     final dateLabel = _formatRouteDateLabel(entry.route);
     final subtitle = dateLabel == null
@@ -1399,7 +1635,8 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
         children: [
           ListTile(
             dense: true,
-            contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+            contentPadding:
+                EdgeInsets.symmetric(horizontal: tileHorizontalPadding),
             onTap: () => _toggleRouteExpanded(entry.route),
             leading: const Icon(Icons.alt_route),
             title: Text(
@@ -1419,34 +1656,41 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
           ),
           if (expanded)
             Padding(
-              padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+              padding: EdgeInsets.fromLTRB(
+                expandedHorizontalPadding,
+                0,
+                expandedHorizontalPadding,
+                8,
+              ),
               child: Column(
                 children: entry.segmentFolders.map((segmentFolder) {
                   final segment = _segmentIndex(segmentFolder);
                   return ListTile(
                     dense: true,
                     visualDensity: const VisualDensity(vertical: -3),
-                    contentPadding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: expandedHorizontalPadding,
+                      vertical: 0,
+                    ),
                     leading: CircleAvatar(
-                      radius: 13,
+                      radius: segmentBadgeRadius,
                       child: Text(
                         '$segment',
-                        style: const TextStyle(fontSize: 11),
+                        style: TextStyle(fontSize: segmentBadgeFontSize),
                       ),
                     ),
                     title: Text(
                       '세그먼트 $segment',
-                      style: const TextStyle(fontSize: 13),
+                      style: TextStyle(fontSize: segmentTitleFontSize),
                     ),
                     subtitle: Text(
                       segmentFolder,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11),
+                      style: TextStyle(fontSize: segmentSubtitleFontSize),
                     ),
                     trailing: SizedBox(
-                      width: 44,
+                      width: segmentTrailingWidth,
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.end,
                         children: [
@@ -1476,6 +1720,19 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final listHorizontalPadding = window.isCompact
+        ? 12.0
+        : tokens.screenPadding.clamp(12.0, 24.0).toDouble();
+    final listGap = switch (window.windowClass) {
+      UiWindowClass.compact => 8.0,
+      UiWindowClass.medium => 9.0,
+      UiWindowClass.expanded => 10.0,
+      UiWindowClass.large => 10.0,
+      UiWindowClass.extraLarge => 10.0,
+    };
+
     return Column(
       children: [
         const _LogsSubHeader(
@@ -1494,11 +1751,15 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
                       : _routes.isEmpty
                           ? const Center(child: Text('주행 기록이 없습니다.'))
                           : ListView.separated(
-                              padding:
-                                  const EdgeInsets.fromLTRB(12, 10, 12, 16),
+                              padding: EdgeInsets.fromLTRB(
+                                listHorizontalPadding,
+                                10,
+                                listHorizontalPadding,
+                                16,
+                              ),
                               itemCount: _routes.length,
                               separatorBuilder: (_, __) =>
-                                  const SizedBox(height: 8),
+                                  SizedBox(height: listGap),
                               itemBuilder: (context, index) =>
                                   _buildRouteTile(_routes[index]),
                             ),
@@ -1705,6 +1966,34 @@ class _RemoteVideoLogsViewState extends State<_RemoteVideoLogsView> {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
+    final listHorizontalPadding = window.isCompact
+        ? 12.0
+        : tokens.screenPadding.clamp(12.0, 24.0).toDouble();
+    final listGap = switch (window.windowClass) {
+      UiWindowClass.compact => 6.0,
+      UiWindowClass.medium => 7.0,
+      UiWindowClass.expanded => 8.0,
+      UiWindowClass.large => 8.0,
+      UiWindowClass.extraLarge => 8.0,
+    };
+    final tileHorizontalPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 8.0,
+      UiWindowClass.medium => 10.0,
+      UiWindowClass.expanded => 12.0,
+      UiWindowClass.large => 12.0,
+      UiWindowClass.extraLarge => 14.0,
+    };
+    final videoSubtitleFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 11.0,
+      UiWindowClass.medium => 11.0,
+      UiWindowClass.expanded => 12.0,
+      UiWindowClass.large => 12.0,
+      UiWindowClass.extraLarge => 12.0,
+    };
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1726,35 +2015,57 @@ class _RemoteVideoLogsViewState extends State<_RemoteVideoLogsView> {
                           children: [
                             Expanded(
                               child: ListView.separated(
-                                padding:
-                                    const EdgeInsets.fromLTRB(16, 10, 16, 24),
+                                padding: EdgeInsets.fromLTRB(
+                                  listHorizontalPadding,
+                                  10,
+                                  listHorizontalPadding,
+                                  24,
+                                ),
                                 itemCount: _videos.length,
                                 separatorBuilder: (_, __) =>
-                                    const SizedBox(height: 6),
+                                    SizedBox(height: listGap),
                                 itemBuilder: (context, index) {
                                   final video = _videos[index];
-                                  return ListTile(
-                                    dense: true,
-                                    contentPadding: const EdgeInsets.symmetric(
-                                        horizontal: 8, vertical: 2),
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(10),
-                                      side: BorderSide(
-                                          color: Colors.grey
-                                              .withValues(alpha: 0.2)),
+                                  return Material(
+                                    color: scheme.surfaceContainerHigh,
+                                    borderRadius: BorderRadius.circular(10),
+                                    clipBehavior: Clip.antiAlias,
+                                    child: InkWell(
+                                      onTap: () => _playVideo(video),
+                                      child: Container(
+                                        decoration: BoxDecoration(
+                                          borderRadius:
+                                              BorderRadius.circular(10),
+                                          border: Border.all(
+                                            color: scheme.outlineVariant
+                                                .withValues(
+                                              alpha: 0.45,
+                                            ),
+                                          ),
+                                        ),
+                                        child: ListTile(
+                                          dense: true,
+                                          contentPadding: EdgeInsets.symmetric(
+                                            horizontal: tileHorizontalPadding,
+                                            vertical: 2,
+                                          ),
+                                          leading: const Icon(
+                                            Icons.play_circle_outline,
+                                          ),
+                                          title: Text(
+                                            video.filename,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                          subtitle: Text(
+                                            _formatSize(video.attr.size ?? 0),
+                                            style: TextStyle(
+                                              fontSize: videoSubtitleFontSize,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
                                     ),
-                                    leading:
-                                        const Icon(Icons.play_circle_outline),
-                                    title: Text(
-                                      video.filename,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                    subtitle: Text(
-                                      _formatSize(video.attr.size ?? 0),
-                                      style: const TextStyle(fontSize: 11),
-                                    ),
-                                    onTap: () => _playVideo(video),
                                   );
                                 },
                               ),
@@ -1783,6 +2094,61 @@ class _TmuxLogsViewState extends State<_TmuxLogsView> {
 
   static const int _maxVisibleLines = 350;
   static const Duration _pollInterval = Duration(seconds: 3);
+
+  ({
+    EdgeInsets insetPadding,
+    EdgeInsets contentPadding,
+    double bodyFontSize,
+    double maxContentWidth,
+  }) _dialogMetrics(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final insetHorizontal = window.isCompact
+        ? 16.0
+        : tokens.screenPadding.clamp(16.0, 28.0).toDouble();
+    final insetVertical = switch (window.windowClass) {
+      UiWindowClass.compact => 20.0,
+      UiWindowClass.medium => 22.0,
+      UiWindowClass.expanded => 24.0,
+      UiWindowClass.large => 24.0,
+      UiWindowClass.extraLarge => 26.0,
+    };
+    final contentPaddingValue = switch (window.windowClass) {
+      UiWindowClass.compact => 16.0,
+      UiWindowClass.medium => 18.0,
+      UiWindowClass.expanded => 20.0,
+      UiWindowClass.large => 20.0,
+      UiWindowClass.extraLarge => 22.0,
+    };
+    final bodyFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 13.0,
+      UiWindowClass.medium => 13.0,
+      UiWindowClass.expanded => 14.0,
+      UiWindowClass.large => 14.0,
+      UiWindowClass.extraLarge => 14.0,
+    };
+    final maxContentWidth = switch (window.windowClass) {
+      UiWindowClass.compact => 420.0,
+      UiWindowClass.medium => 460.0,
+      UiWindowClass.expanded => 520.0,
+      UiWindowClass.large => 560.0,
+      UiWindowClass.extraLarge => 600.0,
+    };
+    return (
+      insetPadding: EdgeInsets.symmetric(
+        horizontal: insetHorizontal,
+        vertical: insetVertical,
+      ),
+      contentPadding: EdgeInsets.fromLTRB(
+        contentPaddingValue,
+        12,
+        contentPaddingValue,
+        contentPaddingValue,
+      ),
+      bodyFontSize: bodyFontSize,
+      maxContentWidth: maxContentWidth,
+    );
+  }
 
   static const String _tmuxInspectCommand = '''
 if command -v tmux >/dev/null 2>&1; then
@@ -1908,22 +2274,33 @@ fi
     Future<T> Function() action,
   ) async {
     if (!mounted) return action();
+    final metrics = _dialogMetrics(context);
     showDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (_) => PopScope(
         canPop: false,
         child: AlertDialog(
-          content: Row(
-            children: [
-              const SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2.4),
-              ),
-              const SizedBox(width: 12),
-              Expanded(child: Text(message)),
-            ],
+          insetPadding: metrics.insetPadding,
+          contentPadding: metrics.contentPadding,
+          content: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: metrics.maxContentWidth),
+            child: Row(
+              children: [
+                const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2.4),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    message,
+                    style: TextStyle(fontSize: metrics.bodyFontSize),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -2032,62 +2409,86 @@ fi
   @override
   Widget build(BuildContext context) {
     final connected = context.watch<SSHService>().isConnected;
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final outputHorizontalPadding = window.isCompact
+        ? 16.0
+        : tokens.screenPadding.clamp(16.0, 28.0).toDouble();
+    final outputFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.5,
+      UiWindowClass.expanded => 13.0,
+      UiWindowClass.large => 13.0,
+      UiWindowClass.extraLarge => 13.0,
+    };
+
     return Column(
       children: [
         _LogsSubHeader(
           title: 'TMUX 로그',
           description: 'comma 세션 실시간 로그를 확인합니다. (${_isLive ? "ON" : "OFF"})',
-          trailing: PopupMenuButton<String>(
-            tooltip: "메뉴",
-            icon: const Icon(Icons.more_vert),
-            onSelected: (value) {
-              unawaited(_handleMenuAction(value));
-            },
-            itemBuilder: (context) => [
-              PopupMenuItem<String>(
-                value: 'toggle_live',
-                child: Row(
-                  children: [
-                    Icon(
-                      _isLive ? Icons.pause_circle_outline : Icons.play_arrow,
-                      size: 18,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(_isLive ? '실시간 갱신 끄기' : '실시간 갱신 켜기'),
-                  ],
-                ),
+          trailing: SizedBox(
+            width: 36,
+            height: 36,
+            child: PopupMenuButton<String>(
+              tooltip: "메뉴",
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(
+                minWidth: 36,
+                minHeight: 36,
               ),
-              const PopupMenuItem<String>(
-                value: 'refresh',
-                child: Row(
-                  children: [
-                    Icon(Icons.refresh, size: 18),
-                    SizedBox(width: 8),
-                    Text('새로고침'),
-                  ],
+              iconSize: 22,
+              splashRadius: 20,
+              icon: const Icon(Icons.more_vert),
+              onSelected: (value) {
+                unawaited(_handleMenuAction(value));
+              },
+              itemBuilder: (context) => [
+                PopupMenuItem<String>(
+                  value: 'toggle_live',
+                  child: Row(
+                    children: [
+                      Icon(
+                        _isLive ? Icons.pause_circle_outline : Icons.play_arrow,
+                        size: 18,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(_isLive ? '실시간 갱신 끄기' : '실시간 갱신 켜기'),
+                    ],
+                  ),
                 ),
-              ),
-              const PopupMenuItem<String>(
-                value: 'copy_all',
-                child: Row(
-                  children: [
-                    Icon(Icons.copy_all, size: 18),
-                    SizedBox(width: 8),
-                    Text('전체 복사'),
-                  ],
+                const PopupMenuItem<String>(
+                  value: 'refresh',
+                  child: Row(
+                    children: [
+                      Icon(Icons.refresh, size: 18),
+                      SizedBox(width: 8),
+                      Text('새로고침'),
+                    ],
+                  ),
                 ),
-              ),
-              const PopupMenuItem<String>(
-                value: 'download',
-                child: Row(
-                  children: [
-                    Icon(Icons.download, size: 18),
-                    SizedBox(width: 8),
-                    Text('파일 저장'),
-                  ],
+                const PopupMenuItem<String>(
+                  value: 'copy_all',
+                  child: Row(
+                    children: [
+                      Icon(Icons.copy_all, size: 18),
+                      SizedBox(width: 8),
+                      Text('전체 복사'),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+                const PopupMenuItem<String>(
+                  value: 'download',
+                  child: Row(
+                    children: [
+                      Icon(Icons.download, size: 18),
+                      SizedBox(width: 8),
+                      Text('파일 저장'),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
         Expanded(
@@ -2099,12 +2500,17 @@ fi
                   ? const Center(child: CircularProgressIndicator())
                   : SingleChildScrollView(
                       controller: _scrollController,
-                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 24),
+                      padding: EdgeInsets.fromLTRB(
+                        outputHorizontalPadding,
+                        10,
+                        outputHorizontalPadding,
+                        24,
+                      ),
                       child: SelectableText(
                         _output.isEmpty ? "(출력 없음)" : _output,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontFamily: 'monospace',
-                          fontSize: 12,
+                          fontSize: outputFontSize,
                         ),
                       ),
                     ),
@@ -2127,9 +2533,48 @@ class _LogsSubHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final headerHorizontalPadding = window.isCompact
+        ? 14.0
+        : tokens.screenPadding.clamp(14.0, 26.0).toDouble();
+    final headerTopPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 10.0,
+      UiWindowClass.medium => 11.0,
+      UiWindowClass.expanded => 12.0,
+      UiWindowClass.large => 12.0,
+      UiWindowClass.extraLarge => 12.0,
+    };
+    final descriptionFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.5,
+      UiWindowClass.expanded => 13.0,
+      UiWindowClass.large => 13.0,
+      UiWindowClass.extraLarge => 13.0,
+    };
+    final descriptionTopGap = switch (window.windowClass) {
+      UiWindowClass.compact => 3.0,
+      UiWindowClass.medium => 3.0,
+      UiWindowClass.expanded => 4.0,
+      UiWindowClass.large => 4.0,
+      UiWindowClass.extraLarge => 4.0,
+    };
+    final trailingSlot = trailing == null
+        ? null
+        : SizedBox(
+            width: window.isCompact ? 34 : 36,
+            height: window.isCompact ? 34 : 36,
+            child: Center(child: trailing!),
+          );
+
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(14, 10, 10, 8),
+      padding: EdgeInsets.fromLTRB(
+        headerHorizontalPadding,
+        headerTopPadding,
+        headerHorizontalPadding - 4,
+        8,
+      ),
       decoration: BoxDecoration(
         color: Theme.of(context)
             .colorScheme
@@ -2144,31 +2589,38 @@ class _LogsSubHeader extends StatelessWidget {
           ),
         ),
       ),
-      child: Row(
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Text(
                   title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.titleSmall?.copyWith(
                         fontWeight: FontWeight.w700,
                       ),
                 ),
-                const SizedBox(height: 3),
-                Text(
-                  description,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
+              ),
+              if (trailingSlot != null) ...[
+                const SizedBox(width: 6),
+                trailingSlot,
               ],
+            ],
+          ),
+          SizedBox(height: descriptionTopGap),
+          Text(
+            description,
+            maxLines: window.isCompact ? 2 : 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: descriptionFontSize,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
           ),
-          if (trailing != null) trailing!,
         ],
       ),
     );

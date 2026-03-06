@@ -211,7 +211,7 @@ class SSHService extends ChangeNotifier {
         ? preferredIp
         : _serviceCandidateIp;
 
-    print(
+    debugPrint(
         '[SSHService] Reconnect from storage - IP: $targetIp, Username: $username, Port: $port');
     _diag.info(
         'ssh', 'Reconnect from storage target=$targetIp:$port user=$username');
@@ -321,17 +321,18 @@ class SSHService extends ChangeNotifier {
 
       if (privateKey != null) {
         try {
-          print("Debug: Attempting to parse PEM key...");
-          print("Debug: Key starts with: ${privateKey.substring(0, 50)}...");
+          debugPrint("Debug: Attempting to parse PEM key...");
+          debugPrint(
+              "Debug: Key starts with: ${privateKey.substring(0, 50)}...");
 
           final keys = SSHKeyPair.fromPem(privateKey);
-          print("Debug: Parsed ${keys.length} keys from PEM.");
+          debugPrint("Debug: Parsed ${keys.length} keys from PEM.");
 
           if (keys.isEmpty) {
             throw Exception("No valid keys found in the provided PEM.");
           }
 
-          print("Debug: Key type: ${keys.first.type}");
+          debugPrint("Debug: Key type: ${keys.first.type}");
 
           _client = SSHClient(
             socket,
@@ -339,7 +340,7 @@ class SSHService extends ChangeNotifier {
             identities: keys,
           );
         } catch (e) {
-          print("Debug: Key parsing/auth failed: $e");
+          debugPrint("Debug: Key parsing/auth failed: $e");
           rethrow;
         }
       } else {
@@ -380,16 +381,16 @@ class SSHService extends ChangeNotifier {
 
       // Listen for immediate disconnection events from the socket
       _client!.done.then((_) {
-        print("SSH Connection closed by OS/Remote");
+        debugPrint("SSH Connection closed by OS/Remote");
         _handleDisconnect(reason: "socket closed");
       }).catchError((e) {
-        print("SSH Connection error: $e");
+        debugPrint("SSH Connection error: $e");
         _handleDisconnect(reason: "socket error");
       });
 
       _startHeartbeat();
     } catch (e) {
-      print("Connection failed: $e");
+      debugPrint("Connection failed: $e");
       _connectionStatus = _mapErrorToMessage(e);
       _diag.warn('ssh', 'Connection failed target=$ip:$port error=$e');
       _client = null;
@@ -433,7 +434,7 @@ class SSHService extends ChangeNotifier {
       }
 
       if (_client!.isClosed) {
-        print("Heartbeat: Client is closed");
+        debugPrint("Heartbeat: Client is closed");
         timer.cancel();
         _handleDisconnect(reason: "heartbeat: client closed");
         return;
@@ -453,8 +454,8 @@ class SSHService extends ChangeNotifier {
         _heartbeatFailureCount = 0;
       } catch (e) {
         _heartbeatFailureCount += 1;
-        print(
-            "Heartbeat failed (${_heartbeatFailureCount}/$_maxHeartbeatFailures): $e");
+        debugPrint(
+            "Heartbeat failed ($_heartbeatFailureCount/$_maxHeartbeatFailures): $e");
         if (_heartbeatFailureCount >= _maxHeartbeatFailures) {
           timer.cancel();
           _handleDisconnect(reason: "heartbeat failures");
@@ -472,12 +473,14 @@ class SSHService extends ChangeNotifier {
     bool manual = false,
   }) {
     if (_isHandlingDisconnect) return;
-    if (_client == null && _connectionStatus == "Disconnected" && !manual)
+    if (_client == null && _connectionStatus == "Disconnected" && !manual) {
       return; // 이미 처리됨
+    }
     _isHandlingDisconnect = true;
 
     try {
-      print("Connection lost - updating state immediately (reason: $reason)");
+      debugPrint(
+          "Connection lost - updating state immediately (reason: $reason)");
       _diag.warn('ssh', 'Disconnected reason=$reason manual=$manual');
       _manualDisconnectRequested = manual;
       _manualDisconnectUntil =
@@ -580,7 +583,7 @@ class SSHService extends ChangeNotifier {
           duration: duration,
         );
       } catch (e) {
-        print("Command execution failed: $e");
+        debugPrint("Command execution failed: $e");
         final errorStr = e.toString();
         if (errorStr.contains("SocketException") ||
             errorStr.contains("Connection closed") ||
@@ -864,6 +867,16 @@ class SSHService extends ChangeNotifier {
     notifyListeners();
   }
 
+  void notifyNetworkChanged({String source = 'ui'}) {
+    _serviceCandidateIp = null;
+    _serviceCandidateSeenAt = null;
+    _lastDiscoveredIp = null;
+    _lastDiscoveredAt = null;
+    FlutterBackgroundService().invoke('networkChanged', {'source': source});
+    _diag.info('connectivity', 'Network changed source=$source');
+    notifyListeners();
+  }
+
   Future<void> saveConnection(
     String ip,
     String username,
@@ -874,10 +887,12 @@ class SSHService extends ChangeNotifier {
     await _storage.delete(key: 'ssh_ip');
     await _storage.write(key: 'ssh_username', value: username);
     await _storage.write(key: 'ssh_port', value: port.toString());
-    if (password != null)
+    if (password != null) {
       await _storage.write(key: 'ssh_password', value: password);
-    if (keyPath != null)
+    }
+    if (keyPath != null) {
       await _storage.write(key: 'ssh_key_path', value: keyPath);
+    }
     await _syncAutoConnectProfileToService();
   }
 
@@ -908,22 +923,30 @@ class SSHService extends ChangeNotifier {
   }
 
   Future<HudFallbackMetrics?> getHudFallbackMetrics() async {
-    // Match carrot/openpilot deviceState thermal source as closely as possible.
-    // tici/mici typically expose cpu[0-3]-silver-usr + cpu[0-3]-gold-usr.
     const cmd = r'''
-avg=$(for z in /sys/devices/virtual/thermal/thermal_zone*; do
+read_cpu_avg() {
+for z in /sys/devices/virtual/thermal/thermal_zone*; do
   [ -f "$z/type" ] || continue
-  t=$(cat "$z/type" 2>/dev/null)
+  t=$(cat "$z/type" 2>/dev/null | tr '[:upper:]' '[:lower:]')
   case "$t" in
-    cpu[0-9]-silver-usr|cpu[0-9]-gold-usr)
+    cpu*|soc*|ap*|big*|little*)
       cat "$z/temp" 2>/dev/null
       ;;
   esac
-done | awk 'BEGIN{sum=0;n=0} {v=$1+0; if(v>0){sum+=v;n++}} END{if(n>0) printf "%.2f", sum/(n*1000)}')
-if [ -n "$avg" ]; then
-  cpu="$avg"
-else
-  cpu=$(awk '{v=$1+0; if(v>0) printf "%.2f", v/1000}' /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+done | awk 'BEGIN{sum=0;n=0} {
+  v=$1+0;
+  if(v>1000) v=v/1000;
+  if(v>0 && v<150){sum+=v;n++}
+} END{if(n>0) printf "%.2f", sum/n}'
+}
+
+cpu=$(read_cpu_avg)
+if [ -z "$cpu" ]; then
+  cpu=$(awk '{
+    v=$1+0;
+    if(v>1000) v=v/1000;
+    if(v>0 && v<150) printf "%.2f", v
+  }' /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
 fi
 mem=$(awk '/MemTotal:/ {t=$2} /MemAvailable:/ {a=$2} END{if(t>0) printf "%.2f", ((t-a)*100)/t}' /proc/meminfo 2>/dev/null)
 disk=$(df -P /data 2>/dev/null | awk 'NR==2 {gsub("%","",$5); print $5}')
@@ -1010,72 +1033,113 @@ printf "%s %s %s\n" "$cpu" "$mem" "$disk"
       }
     });
 
-    // Broadcast-first discovery for auto flow.
-    // Keep active scan only for explicit manual discovery sessions.
-    if (manualSession) {
-      unawaited(_scanSubnet(generation));
-    }
+    // Keep UDP broadcast as primary, but always run active scan as fallback.
+    // Manual session uses multi-pass aggressive probing.
+    unawaited(_scanSubnet(generation, aggressive: manualSession));
     return true;
   }
 
-  Future<void> _scanSubnet(int generation) async {
+  Future<void> _scanSubnet(
+    int generation, {
+    required bool aggressive,
+  }) async {
     try {
+      final prefixes = <String>{};
+      void addPrefixFromIp(String? ip) {
+        if (ip == null || ip.isEmpty) return;
+        final parts = ip.split('.');
+        if (parts.length != 4) return;
+        prefixes.add("${parts[0]}.${parts[1]}.${parts[2]}");
+      }
+
       final interfaces = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
         includeLinkLocal: false,
       );
 
       for (final interface in interfaces) {
-        if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
         for (final addr in interface.addresses) {
-          if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
           if (addr.isLoopback) continue;
+          addPrefixFromIp(addr.address);
+        }
+      }
 
-          final ip = addr.address;
-          final parts = ip.split('.');
-          if (parts.length != 4) continue;
+      addPrefixFromIp(_serviceCandidateIp);
+      addPrefixFromIp(_connectedIp);
+      addPrefixFromIp(_targetIp);
+      addPrefixFromIp(_lastDiscoveredIp);
+      if (prefixes.isEmpty) return;
 
-          final prefix = "${parts[0]}.${parts[1]}.${parts[2]}";
+      final timeoutPhasesMs =
+          aggressive ? const <int>[450, 1000, 1700] : const <int>[1000, 1600];
+      final batchSize = aggressive ? 36 : 24;
 
-          // Scan 1-254 in batches to avoid FD limits
-          for (int i = 1; i < 255; i += 20) {
-            if (!_isDiscoveryActive || generation != _discoveryGeneration)
+      for (var p = 0; p < timeoutPhasesMs.length; p++) {
+        final timeoutMs = timeoutPhasesMs[p];
+        for (final prefix in prefixes) {
+          if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
+          for (int i = 1; i < 255; i += batchSize) {
+            if (!_isDiscoveryActive || generation != _discoveryGeneration) {
               return;
+            }
             final futures = <Future>[];
-            for (int j = 0; j < 20 && (i + j) < 255; j++) {
+            for (int j = 0; j < batchSize && (i + j) < 255; j++) {
               final targetIp = "$prefix.${i + j}";
-              if (targetIp == ip) continue; // Skip self
-              futures.add(_checkPort(targetIp, _defaultSshPort, generation));
+              futures.add(
+                _checkPort(
+                  targetIp,
+                  _defaultSshPort,
+                  generation,
+                  timeoutMs: timeoutMs,
+                ),
+              );
             }
             await Future.wait(futures);
           }
         }
+
+        if (!aggressive &&
+            _lastDiscoveredAt != null &&
+            DateTime.now().difference(_lastDiscoveredAt!) <
+                const Duration(seconds: 4)) {
+          break;
+        }
       }
     } catch (e) {
-      print("Subnet scan error: $e");
+      debugPrint("Subnet scan error: $e");
     }
   }
 
-  Future<void> _checkPort(String ip, int port, int generation) async {
+  Future<void> _checkPort(
+    String ip,
+    int port,
+    int generation, {
+    required int timeoutMs,
+  }) async {
     if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
     try {
-      final socket = await Socket.connect(ip, port,
-          timeout: const Duration(milliseconds: 1000));
+      final socket = await Socket.connect(
+        ip,
+        port,
+        timeout: Duration(milliseconds: timeoutMs),
+      );
       socket.destroy();
       if (!_isDiscoveryActive || generation != _discoveryGeneration) return;
-      _emitDiscoveredIp(ip);
-      print("Found openpilot at $ip");
+      final emitted = _emitDiscoveredIp(ip);
+      if (emitted) {
+        debugPrint("Found openpilot at $ip");
+      }
     } catch (e) {
       // Connection failed or timed out
     }
   }
 
-  void _emitDiscoveredIp(String ip) {
+  bool _emitDiscoveredIp(String ip) {
     final now = DateTime.now();
     if (_lastDiscoveredIp == ip &&
         _lastDiscoveredAt != null &&
         now.difference(_lastDiscoveredAt!) < const Duration(seconds: 5)) {
-      return;
+      return false;
     }
 
     _lastDiscoveredIp = ip;
@@ -1084,6 +1148,13 @@ printf "%s %s %s\n" "$cpu" "$mem" "$disk"
     if (_ipDiscoveryController != null && !_ipDiscoveryController!.isClosed) {
       _ipDiscoveryController!.add(ip);
     }
+
+    FlutterBackgroundService().invoke('candidateHint', {
+      'ip': ip,
+      'source': 'active_scan',
+      'ts': now.millisecondsSinceEpoch,
+    });
+    return true;
   }
 
   bool _isValidIpv4(String ip) {
@@ -1110,7 +1181,7 @@ printf "%s %s %s\n" "$cpu" "$mem" "$disk"
   Future<void> checkGitUpdates() async {
     if (!isConnected) return;
     try {
-      final script = '''
+      const script = '''
 REPO="";
 for d in /data/openpilot /home/comma/openpilot; do
   if [ -d "\$d/.git" ]; then
@@ -1143,7 +1214,7 @@ echo "\$LOCAL_HASH|\$REMOTE_HASH"
       }
       notifyListeners();
     } catch (e) {
-      print("Git update check failed: $e");
+      debugPrint("Git update check failed: $e");
       _hasGitUpdate = false;
       notifyListeners();
     }

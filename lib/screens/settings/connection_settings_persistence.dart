@@ -187,14 +187,19 @@ extension _ConnectionSettingsPersistence on _ConnectionSettingsScreenState {
 
   Future<void> _refreshBackupStatus() async {
     final status = await _keyBackupService.getBackupLocationStatus();
+    if (!mounted) return;
     final labels = <String>[];
     if (status['auth'] == true) labels.add('CarrotLink/auth');
     if (status['documents'] == true) labels.add('Documents');
     if (status['download'] == true) labels.add('Download');
     if (status['app_external'] == true) labels.add('App-External');
-    final summary = labels.isEmpty ? '백업 없음' : '백업 위치: ${labels.join(", ")}';
+    final window = UiWindowInfo.of(context);
+    final summary = labels.isEmpty
+        ? '백업 없음'
+        : (window.isCompact && labels.length > 2
+            ? '백업 위치: ${labels.take(2).join(", ")} +${labels.length - 2}'
+            : '백업 위치: ${labels.join(", ")}');
 
-    if (!mounted) return;
     _setStateSafe(() {
       _backupLocationSummary = summary;
     });

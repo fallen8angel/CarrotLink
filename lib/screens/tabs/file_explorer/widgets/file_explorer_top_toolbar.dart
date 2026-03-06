@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../../../../ui/adaptive/layout_tokens.dart';
+import '../../../../ui/adaptive/window_class.dart';
 import '../file_explorer_controller.dart';
 
 class FileExplorerTopToolbar extends StatelessWidget {
@@ -28,19 +30,32 @@ class FileExplorerTopToolbar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
+    final retryLabelMinWidth = window.isCompact ? 0.0 : 120.0;
+    final retryLabelMaxWidth = switch (window.windowClass) {
+      UiWindowClass.compact => 220.0,
+      UiWindowClass.medium => 260.0,
+      UiWindowClass.expanded => 320.0,
+      UiWindowClass.large => 380.0,
+      UiWindowClass.extraLarge => 420.0,
+    };
     final hasQuery =
         controller.searchQuery.isNotEmpty || searchController.text.isNotEmpty;
 
     return Container(
-      padding: const EdgeInsets.fromLTRB(8, 8, 8, 6),
+      padding: EdgeInsets.fromLTRB(
+        tokens.screenPadding.clamp(8.0, 16.0).toDouble(),
+        8,
+        tokens.screenPadding.clamp(8.0, 16.0).toDouble(),
+        6,
+      ),
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainer,
+        color: scheme.surfaceContainer,
         border: Border(
           bottom: BorderSide(
-            color: Theme.of(context)
-                .colorScheme
-                .outlineVariant
-                .withValues(alpha: 0.5),
+            color: scheme.outlineVariant.withValues(alpha: 0.5),
           ),
         ),
       ),
@@ -53,11 +68,15 @@ class FileExplorerTopToolbar extends StatelessWidget {
                   controller: searchController,
                   focusNode: searchFocusNode,
                   textInputAction: TextInputAction.search,
-                  style: const TextStyle(fontSize: 13),
+                  style: TextStyle(
+                    fontSize: window.isCompact ? 12.5 : 13,
+                  ),
                   decoration: InputDecoration(
                     isDense: true,
                     hintText: "검색",
-                    hintStyle: const TextStyle(fontSize: 12),
+                    hintStyle: TextStyle(
+                      fontSize: window.isCompact ? 11.5 : 12,
+                    ),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(10),
                     ),
@@ -93,11 +112,18 @@ class FileExplorerTopToolbar extends StatelessWidget {
                 controller.batchProgressText.isEmpty
                     ? controller.batchMessage
                     : '${controller.batchProgressText}  ${controller.batchMessage}',
-                style: const TextStyle(fontSize: 12, color: Colors.grey),
+                style: TextStyle(
+                  fontSize: 12,
+                  color: scheme.onSurfaceVariant,
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
             ),
             const SizedBox(height: 4),
-            Row(
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
               children: [
                 TextButton.icon(
                   onPressed: onToggleBatchPause,
@@ -117,16 +143,26 @@ class FileExplorerTopToolbar extends StatelessWidget {
           ],
           if (!controller.isBatchBusy && controller.hasRetryableFailures) ...[
             const SizedBox(height: 6),
-            Row(
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                Text(
-                  '${controller.retryLabel} 실패 ${controller.retryableFailureCount}건',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    minWidth: retryLabelMinWidth,
+                    maxWidth: retryLabelMaxWidth,
+                  ),
+                  child: Text(
+                    '${controller.retryLabel} 실패 ${controller.retryableFailureCount}건',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                const SizedBox(width: 8),
                 TextButton.icon(
                   onPressed: onRetryFailedTransfers,
                   icon: const Icon(Icons.refresh),

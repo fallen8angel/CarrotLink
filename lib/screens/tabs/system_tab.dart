@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../services/device_action_service.dart';
 import '../../services/ssh_service.dart';
+import '../../ui/adaptive/layout_tokens.dart';
+import '../../ui/adaptive/window_class.dart';
 import '../../widgets/custom_toast.dart';
 import '../../widgets/design_components.dart';
 
@@ -15,22 +17,23 @@ class SystemTab extends StatefulWidget {
 class _SystemTabState extends State<SystemTab> {
   final DeviceActionService _actionService = DeviceActionService();
 
-  Future<void> _executeManagedAction(
-    BuildContext context, {
+  Future<void> _executeManagedAction({
     required DeviceActionType action,
     required String title,
     required String message,
     bool isDestructive = false,
   }) async {
-    final ssh = Provider.of<SSHService>(context, listen: false);
+    final ctx = context;
+    final scheme = Theme.of(ctx).colorScheme;
+    final ssh = Provider.of<SSHService>(ctx, listen: false);
 
     if (!ssh.isConnected) {
-      CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
+      CustomToast.show(ctx, "기기와 연결되어 있지 않습니다.", isError: true);
       return;
     }
 
     final confirmed = await showDialog<bool>(
-      context: context,
+      context: ctx,
       builder: (ctx) => AlertDialog(
         title: Text(title),
         content: Text(message),
@@ -42,12 +45,9 @@ class _SystemTabState extends State<SystemTab> {
           ElevatedButton(
             onPressed: () => Navigator.pop(ctx, true),
             style: ElevatedButton.styleFrom(
-              backgroundColor: isDestructive
-                  ? Theme.of(context).colorScheme.error
-                  : Theme.of(context).colorScheme.primary,
-              foregroundColor: isDestructive
-                  ? Theme.of(context).colorScheme.onError
-                  : Theme.of(context).colorScheme.onPrimary,
+              backgroundColor: isDestructive ? scheme.error : scheme.primary,
+              foregroundColor:
+                  isDestructive ? scheme.onError : scheme.onPrimary,
             ),
             child: const Text("확인"),
           ),
@@ -104,8 +104,15 @@ class _SystemTabState extends State<SystemTab> {
 
   @override
   Widget build(BuildContext context) {
+    final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: EdgeInsets.fromLTRB(
+        tokens.screenPadding.clamp(12.0, 24.0).toDouble(),
+        16,
+        tokens.screenPadding.clamp(12.0, 24.0).toDouble(),
+        tokens.footerSpacer,
+      ),
       children: [
         _buildSection(context, "전원 및 프로세스", Icons.power_settings_new, [
           _buildActionButton(
@@ -114,7 +121,7 @@ class _SystemTabState extends State<SystemTab> {
             Icons.refresh,
             DeviceActionType.softRestart,
             "UI를 재시작하시겠습니까?",
-            Colors.orange,
+            scheme.tertiary,
           ),
           _buildActionButton(
             context,
@@ -122,7 +129,7 @@ class _SystemTabState extends State<SystemTab> {
             Icons.restart_alt,
             DeviceActionType.reboot,
             "기기를 재부팅하시겠습니까?",
-            Colors.red,
+            scheme.error,
             isDestructive: true,
           ),
         ]),
@@ -134,7 +141,7 @@ class _SystemTabState extends State<SystemTab> {
             Icons.build,
             DeviceActionType.rebuildOpenpilot,
             "재빌드를 시작하시겠습니까? 시간이 소요될 수 있습니다.",
-            Colors.blue,
+            scheme.primary,
           ),
         ]),
         const SizedBox(height: 16),
@@ -145,7 +152,7 @@ class _SystemTabState extends State<SystemTab> {
             Icons.tune,
             DeviceActionType.resetLiveParameters,
             "주행 학습 데이터를 초기화하시겠습니까?",
-            Colors.grey,
+            scheme.secondary,
           ),
           _buildActionButton(
             context,
@@ -153,7 +160,7 @@ class _SystemTabState extends State<SystemTab> {
             Icons.camera_alt,
             DeviceActionType.resetCalibration,
             "카메라 캘리브레이션을 초기화하고 재부팅하시겠습니까?",
-            Colors.grey,
+            scheme.secondary,
           ),
           _buildActionButton(
             context,
@@ -161,7 +168,7 @@ class _SystemTabState extends State<SystemTab> {
             Icons.video_library,
             DeviceActionType.deleteVideos,
             "모든 주행 녹화 영상을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.",
-            Colors.red,
+            scheme.error,
             isDestructive: true,
           ),
           _buildActionButton(
@@ -170,11 +177,11 @@ class _SystemTabState extends State<SystemTab> {
             Icons.delete_sweep,
             DeviceActionType.deleteLogs,
             "모든 주행 로그를 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.",
-            Colors.red,
+            scheme.error,
             isDestructive: true,
           ),
         ]),
-        const SizedBox(height: 100),
+        SizedBox(height: tokens.sectionGap + 10),
       ],
     );
   }
@@ -209,6 +216,8 @@ class _SystemTabState extends State<SystemTab> {
     Color? color, {
     bool isDestructive = false,
   }) {
+    final window = UiWindowInfo.of(context);
+    final scheme = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4.0),
       child: ListTile(
@@ -228,11 +237,21 @@ class _SystemTabState extends State<SystemTab> {
         ),
         title: Text(
           label,
-          style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 14),
+          style: TextStyle(
+            fontWeight: FontWeight.w500,
+            fontSize: switch (window.windowClass) {
+              UiWindowClass.compact => 13.5,
+              UiWindowClass.medium => 14.0,
+              _ => 14.5,
+            },
+          ),
         ),
-        trailing: const Icon(Icons.chevron_right, size: 20, color: Colors.grey),
+        trailing: Icon(
+          Icons.chevron_right,
+          size: 20,
+          color: scheme.onSurfaceVariant,
+        ),
         onTap: () => _executeManagedAction(
-          context,
           action: action,
           title: label,
           message: confirmMessage,

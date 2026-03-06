@@ -9,6 +9,8 @@ import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import '../services/ssh_service.dart';
+import '../ui/adaptive/layout_tokens.dart';
+import '../ui/adaptive/window_class.dart';
 import 'design_components.dart';
 import 'custom_toast.dart';
 
@@ -110,20 +112,29 @@ class _DriveListWidgetState extends State<DriveListWidget> {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
     if (_isLoading) return const Center(child: CircularProgressIndicator());
     if (_routes.isEmpty) return const Center(child: Text("주행 기록이 없습니다."));
 
     return Material(
       color: Colors.transparent,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        itemCount: _routes.length,
-        itemBuilder: (context, index) {
-          final route = _routes[index];
-          return SizedBox(
-            width: 200, // Fixed width for horizontal items
-            child: RouteCard(
-                route: route, index: index, onTap: () => _openRoute(route)),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final cardWidth =
+              (constraints.maxWidth * (window.isCompact ? 0.48 : 0.42))
+                  .clamp(window.isCompact ? 180.0 : 200.0, 290.0)
+                  .toDouble();
+          return ListView.builder(
+            scrollDirection: Axis.horizontal,
+            itemCount: _routes.length,
+            itemBuilder: (context, index) {
+              final route = _routes[index];
+              return SizedBox(
+                width: cardWidth,
+                child: RouteCard(
+                    route: route, index: index, onTap: () => _openRoute(route)),
+              );
+            },
           );
         },
       ),
@@ -195,7 +206,7 @@ class _RouteCardState extends State<RouteCard> {
         if (mounted) setState(() => _previewImage = file);
       }
     } catch (e) {
-      print("Preview error: $e");
+      debugPrint("Preview error: $e");
     } finally {
       if (mounted) setState(() => _loadingImage = false);
     }
@@ -209,55 +220,67 @@ class _RouteCardState extends State<RouteCard> {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       child: DesignCard(
         padding: EdgeInsets.zero,
         onTap: widget.onTap,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              height: 150,
-              width: double.infinity,
-              child: _previewImage != null
-                  ? Image.file(_previewImage!, fit: BoxFit.cover)
-                  : Container(
-                      color: Colors.black12,
-                      child: Center(
-                        child: _loadingImage
-                            ? const SizedBox(
-                                width: 24,
-                                height: 24,
-                                child:
-                                    CircularProgressIndicator(strokeWidth: 2))
-                            : const Icon(Icons.movie,
-                                size: 50, color: Colors.grey),
-                      ),
-                    ),
-            ),
-            Padding(
-              padding: const EdgeInsets.all(12.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    _formatRouteName(widget.route),
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.bold,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final previewHeight =
+                (constraints.maxWidth * (window.isCompact ? 0.58 : 0.55))
+                    .clamp(window.isCompact ? 130.0 : 140.0, 190.0)
+                    .toDouble();
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  height: previewHeight,
+                  width: double.infinity,
+                  child: _previewImage != null
+                      ? Image.file(_previewImage!, fit: BoxFit.cover)
+                      : Container(
+                          color: scheme.surfaceContainerHighest,
+                          child: Center(
+                            child: _loadingImage
+                                ? const SizedBox(
+                                    width: 24,
+                                    height: 24,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2))
+                                : const Icon(Icons.movie,
+                                    size: 50, color: Colors.grey),
+                          ),
                         ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                ),
+                Padding(
+                  padding: EdgeInsets.all(tokens.sectionGap - 2),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _formatRouteName(widget.route),
+                        style:
+                            Theme.of(context).textTheme.titleMedium?.copyWith(
+                                  fontWeight: FontWeight.bold,
+                                ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        "자세히 보기",
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    "자세히 보기",
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ],
-              ),
-            ),
-          ],
+                ),
+              ],
+            );
+          },
         ),
       ),
     );

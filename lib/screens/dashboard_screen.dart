@@ -23,6 +23,7 @@ import 'tabs/device_settings_tab.dart';
 import 'tabs/terminal_tab.dart';
 import 'tabs/logs_tab.dart';
 import 'settings_screen.dart';
+import '../../ui/adaptive/window_class.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -49,13 +50,21 @@ class _DashboardScreenState extends State<DashboardScreen>
   bool _setupPromptShown = false;
   bool _overlayLifecycleBusy = false;
   String? _lastDiscoveryLogIp;
-  DateTime? _lastDiscoveryLogAt;
   final DiagnosticsService _diag = DiagnosticsService.instance;
   final GlobalKey<TerminalTabState> _terminalTabKey =
       GlobalKey<TerminalTabState>();
 
   void _dismissKeyboard() {
     FocusManager.instance.primaryFocus?.unfocus();
+  }
+
+  bool _consumeBackForKeyboard(BuildContext context) {
+    final keyboardVisible = MediaQuery.viewInsetsOf(context).bottom > 0.0;
+    if (!keyboardVisible) {
+      return false;
+    }
+    _dismissKeyboard();
+    return true;
   }
 
   void _setServiceAppVisibility(bool foreground,
@@ -79,7 +88,11 @@ class _DashboardScreenState extends State<DashboardScreen>
         reason: 'dashboard_init',
       ),
     );
-    _tryAutoConnect();
+    _tryAutoConnect(
+      silent: true,
+      force: true,
+      reason: 'app_start',
+    );
     _startReconnectLoop();
     _setupDiscoveryListener();
     _setupConnectivityListener();
@@ -169,6 +182,7 @@ class _DashboardScreenState extends State<DashboardScreen>
           debounce: const Duration(seconds: 6),
         );
         final ssh = Provider.of<SSHService>(context, listen: false);
+        ssh.notifyNetworkChanged(source: 'dashboard_connectivity');
 
         // 연결이 끊어진 상태면 즉시 재연결 시도
         if (!ssh.isConnected && !ssh.isConnecting) {
@@ -195,13 +209,8 @@ class _DashboardScreenState extends State<DashboardScreen>
           ssh.discoverySource == 'settings_auto') {
         return;
       }
-      final now = DateTime.now();
-      final shouldLog = _lastDiscoveryLogIp != discoveredIp ||
-          _lastDiscoveryLogAt == null ||
-          now.difference(_lastDiscoveryLogAt!) >= const Duration(seconds: 3);
-      if (!shouldLog) return;
+      if (_lastDiscoveryLogIp == discoveredIp) return;
       _lastDiscoveryLogIp = discoveredIp;
-      _lastDiscoveryLogAt = now;
       _diag.info('discovery', 'Candidate discovered: $discoveredIp');
       debugPrint('[Dashboard] Discovery candidate: $discoveredIp');
     });
@@ -260,18 +269,24 @@ class _DashboardScreenState extends State<DashboardScreen>
     }
   }
 
-  void _startDiscoveryIfNeeded({bool force = false}) {
+  void _startDiscoveryIfNeeded({
+    bool force = false,
+    bool aggressive = false,
+    Duration timeout = const Duration(seconds: 45),
+  }) {
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (ssh.manualDisconnectRequested) {
       return;
     }
-    debugPrint('[Dashboard] Starting IP discovery...');
+    debugPrint(
+      '[Dashboard] Starting IP discovery... force=$force aggressive=$aggressive timeout=${timeout.inSeconds}s',
+    );
     unawaited(
       ssh.startDiscovery(
         forceRestart: force,
-        timeout: const Duration(seconds: 45),
+        timeout: timeout,
         source: 'dashboard_auto',
-        manualSession: false,
+        manualSession: aggressive,
       ),
     );
   }
@@ -391,6 +406,82 @@ class _DashboardScreenState extends State<DashboardScreen>
     ];
   }
 
+  List<NavigationRailDestination> _buildRailDestinations(SSHService ssh) {
+    return [
+      const NavigationRailDestination(
+        icon: Icon(Icons.home_outlined),
+        selectedIcon: Icon(Icons.home),
+        label: Text('홈'),
+      ),
+      const NavigationRailDestination(
+        icon: Icon(Icons.settings_outlined),
+        selectedIcon: Icon(Icons.settings),
+        label: Text('설정'),
+      ),
+      NavigationRailDestination(
+        icon: Badge(
+          isLabelVisible: ssh.hasGitUpdate,
+          label: const Text("!"),
+          child: const Icon(Icons.tune_outlined),
+        ),
+        selectedIcon: Badge(
+          isLabelVisible: ssh.hasGitUpdate,
+          label: const Text("!"),
+          child: const Icon(Icons.tune),
+        ),
+        label: const Text('메뉴'),
+      ),
+      const NavigationRailDestination(
+        icon: Icon(Icons.terminal_outlined),
+        selectedIcon: Icon(Icons.terminal),
+        label: Text('콘솔'),
+      ),
+      const NavigationRailDestination(
+        icon: Icon(Icons.article_outlined),
+        selectedIcon: Icon(Icons.article),
+        label: Text('로그'),
+      ),
+    ];
+  }
+
+  List<NavigationDestination> _buildBottomDestinations(SSHService ssh) {
+    return [
+      const NavigationDestination(
+        icon: Icon(Icons.home_outlined),
+        selectedIcon: Icon(Icons.home),
+        label: '홈',
+      ),
+      const NavigationDestination(
+        icon: Icon(Icons.settings_outlined),
+        selectedIcon: Icon(Icons.settings),
+        label: '설정',
+      ),
+      NavigationDestination(
+        icon: Badge(
+          isLabelVisible: ssh.hasGitUpdate,
+          label: const Text("!"),
+          child: const Icon(Icons.tune_outlined),
+        ),
+        selectedIcon: Badge(
+          isLabelVisible: ssh.hasGitUpdate,
+          label: const Text("!"),
+          child: const Icon(Icons.tune),
+        ),
+        label: '메뉴',
+      ),
+      const NavigationDestination(
+        icon: Icon(Icons.terminal_outlined),
+        selectedIcon: Icon(Icons.terminal),
+        label: '콘솔',
+      ),
+      const NavigationDestination(
+        icon: Icon(Icons.article_outlined),
+        selectedIcon: Icon(Icons.article),
+        label: '로그',
+      ),
+    ];
+  }
+
   Future<void> _persistLastTabIndex(int index) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_lastDashboardTabIndexKey, index);
@@ -399,8 +490,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   void _startReconnectLoop() {
     _reconnectTimer?.cancel();
     // Discovery/auto reconnect sync loop (broadcast-first).
-    _reconnectTimer =
-        Timer.periodic(const Duration(seconds: 10), (timer) async {
+    _reconnectTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
       final ssh = Provider.of<SSHService>(context, listen: false);
       if (!ssh.isConnected && !ssh.isConnecting) {
         await _tryAutoConnect(silent: true, reason: 'timer');
@@ -443,7 +533,7 @@ class _DashboardScreenState extends State<DashboardScreen>
 
     _isAutoConnectRunning = true;
     try {
-      if (!silent) {
+      if (!silent && reason != 'app_start' && reason != 'connectivity') {
         // Small delay to allow UI to settle and user to see initial state
         await Future.delayed(const Duration(milliseconds: 500));
       }
@@ -469,7 +559,19 @@ class _DashboardScreenState extends State<DashboardScreen>
       ssh.resumeAutoReconnect();
       _diag.info('autoconnect',
           'Broadcast sync reason=$reason candidate=${ssh.serviceCandidateIp}');
-      _startDiscoveryIfNeeded(force: force);
+      final fastStart = reason == 'app_start';
+      final aggressive = fastStart ||
+          reason == 'connectivity' ||
+          reason == 'resume' ||
+          reason == 'network_reconnected' ||
+          force;
+      _startDiscoveryIfNeeded(
+        force: force || aggressive,
+        aggressive: aggressive,
+        timeout: aggressive
+            ? const Duration(seconds: 60)
+            : const Duration(seconds: 45),
+      );
       _markReconnectSuccess();
     } catch (e) {
       _markReconnectFailure();
@@ -505,8 +607,15 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final viewport = MediaQuery.sizeOf(context);
+    final useRail = window.isExpandedOrAbove && viewport.height >= 560;
+
     return WillPopScope(
       onWillPop: () async {
+        if (_consumeBackForKeyboard(context)) {
+          return false;
+        }
         if (await _handleNestedBackStack()) {
           return false;
         }
@@ -546,63 +655,52 @@ class _DashboardScreenState extends State<DashboardScreen>
             ),
           ],
         ),
-        body: Column(
-          children: [
-            Expanded(
-              child: IndexedStack(
+        body: useRail
+            ? Consumer<SSHService>(
+                builder: (context, ssh, child) {
+                  return Row(
+                    children: [
+                      NavigationRail(
+                        selectedIndex: _currentIndex,
+                        useIndicator: true,
+                        labelType: NavigationRailLabelType.all,
+                        onDestinationSelected: (idx) {
+                          _dismissKeyboard();
+                          setState(() => _currentIndex = idx);
+                          unawaited(_persistLastTabIndex(idx));
+                        },
+                        destinations: _buildRailDestinations(ssh),
+                      ),
+                      const VerticalDivider(width: 1),
+                      Expanded(
+                        child: IndexedStack(
+                          index: _currentIndex,
+                          children: _buildTabs(),
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              )
+            : IndexedStack(
                 index: _currentIndex,
                 children: _buildTabs(),
               ),
-            ),
-          ],
-        ),
-        bottomNavigationBar: Consumer<SSHService>(
-          builder: (context, ssh, child) {
-            return NavigationBar(
-              selectedIndex: _currentIndex,
-              onDestinationSelected: (idx) {
-                _dismissKeyboard();
-                setState(() => _currentIndex = idx);
-                unawaited(_persistLastTabIndex(idx));
-              },
-              destinations: [
-                const NavigationDestination(
-                  icon: Icon(Icons.home_outlined),
-                  selectedIcon: Icon(Icons.home),
-                  label: '홈',
-                ),
-                const NavigationDestination(
-                  icon: Icon(Icons.settings_outlined),
-                  selectedIcon: Icon(Icons.settings),
-                  label: '설정',
-                ),
-                NavigationDestination(
-                  icon: Badge(
-                    isLabelVisible: ssh.hasGitUpdate,
-                    label: const Text("!"),
-                    child: const Icon(Icons.tune_outlined),
-                  ),
-                  selectedIcon: Badge(
-                    isLabelVisible: ssh.hasGitUpdate,
-                    label: const Text("!"),
-                    child: const Icon(Icons.tune),
-                  ),
-                  label: '메뉴',
-                ),
-                const NavigationDestination(
-                  icon: Icon(Icons.terminal_outlined),
-                  selectedIcon: Icon(Icons.terminal),
-                  label: '콘솔',
-                ),
-                const NavigationDestination(
-                  icon: Icon(Icons.article_outlined),
-                  selectedIcon: Icon(Icons.article),
-                  label: '로그',
-                ),
-              ],
-            );
-          },
-        ),
+        bottomNavigationBar: useRail
+            ? null
+            : Consumer<SSHService>(
+                builder: (context, ssh, child) {
+                  return NavigationBar(
+                    selectedIndex: _currentIndex,
+                    onDestinationSelected: (idx) {
+                      _dismissKeyboard();
+                      setState(() => _currentIndex = idx);
+                      unawaited(_persistLastTabIndex(idx));
+                    },
+                    destinations: _buildBottomDestinations(ssh),
+                  );
+                },
+              ),
       ),
     );
   }

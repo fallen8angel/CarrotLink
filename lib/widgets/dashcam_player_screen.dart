@@ -4,6 +4,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
+import '../ui/adaptive/window_class.dart';
 
 class DashcamPlayerScreen extends StatefulWidget {
   final File? videoFile;
@@ -241,6 +242,27 @@ class _DashcamPlayerScreenState extends State<DashcamPlayerScreen> {
       showDragHandle: true,
       isScrollControlled: true,
       builder: (context) {
+        final window = UiWindowInfo.of(context);
+        final thumbHeight = switch (window.windowClass) {
+          UiWindowClass.compact => 76.0,
+          UiWindowClass.medium => 84.0,
+          UiWindowClass.expanded => 96.0,
+          UiWindowClass.large || UiWindowClass.extraLarge => 108.0,
+        };
+        final modalPadding = switch (window.windowClass) {
+          UiWindowClass.compact => const EdgeInsets.fromLTRB(14, 4, 14, 14),
+          UiWindowClass.medium => const EdgeInsets.fromLTRB(16, 6, 16, 16),
+          UiWindowClass.expanded => const EdgeInsets.fromLTRB(18, 8, 18, 18),
+          UiWindowClass.large ||
+          UiWindowClass.extraLarge =>
+            const EdgeInsets.fromLTRB(20, 10, 20, 20),
+        };
+        final labelFont = switch (window.windowClass) {
+          UiWindowClass.compact => 12.0,
+          UiWindowClass.medium => 12.5,
+          UiWindowClass.expanded => 13.0,
+          UiWindowClass.large || UiWindowClass.extraLarge => 13.5,
+        };
         return StatefulBuilder(
           builder: (context, setModalState) {
             final startFrame = _previewFrameForSecond(startSec);
@@ -251,13 +273,13 @@ class _DashcamPlayerScreenState extends State<DashcamPlayerScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(label, style: const TextStyle(fontSize: 12)),
+                    Text(label, style: TextStyle(fontSize: labelFont)),
                     const SizedBox(height: 6),
                     ClipRRect(
                       borderRadius: BorderRadius.circular(8),
                       child: Container(
                         color: Colors.black12,
-                        height: 88,
+                        height: thumbHeight,
                         width: double.infinity,
                         child: file == null
                             ? const Center(child: Icon(Icons.movie_outlined))
@@ -280,7 +302,7 @@ class _DashcamPlayerScreenState extends State<DashcamPlayerScreen> {
 
             return SafeArea(
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(14, 4, 14, 14),
+                padding: modalPadding,
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,

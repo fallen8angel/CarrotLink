@@ -4,13 +4,14 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:provider/provider.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../../services/diagnostics_service.dart';
 import '../../services/github_service.dart';
 import '../../services/key_backup_service.dart';
 import '../../services/ssh_key_helper.dart';
 import '../../services/ssh_service.dart';
+import '../../ui/adaptive/layout_tokens.dart';
+import '../../ui/adaptive/window_class.dart';
 import '../../widgets/custom_toast.dart';
 import '../github_login_screen.dart';
 
@@ -89,12 +90,6 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
     return resolved;
   }
 
-  bool _isManagedKeyTitle(String title) {
-    final lower = title.toLowerCase();
-    return lower.startsWith(_managedKeyPrefix) ||
-        lower.startsWith('carrotlink');
-  }
-
   String _newManagedKeyTitle() =>
       '${_managedKeyPrefix}_${DateTime.now().millisecondsSinceEpoch}';
 
@@ -115,7 +110,11 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => _buildScreen(context);
+  Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    return _buildScreen(context, window: window, tokens: tokens);
+  }
 
   @override
   void dispose() {

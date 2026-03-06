@@ -8,6 +8,8 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/ssh_service.dart';
 import '../../services/macro_service.dart';
+import '../../ui/adaptive/layout_tokens.dart';
+import '../../ui/adaptive/window_class.dart';
 import '../../widgets/connection_required_view.dart';
 import '../../widgets/custom_toast.dart';
 import '../../widgets/section_tab_bar.dart';
@@ -633,14 +635,16 @@ class _TerminalScreenState extends State<TerminalScreen>
   }
 
   Widget _buildVirtualKey(String label, String code) {
+    final scheme = Theme.of(context).colorScheme;
     return InkWell(
       onTap: () => _sendKey(code),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.surface,
+          color: scheme.surface,
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.grey.withValues(alpha: 0.3)),
+          border:
+              Border.all(color: scheme.outlineVariant.withValues(alpha: 0.45)),
         ),
         child: Text(
           label,
@@ -655,75 +659,136 @@ class _TerminalScreenState extends State<TerminalScreen>
     super.build(context);
     final connected = context.watch<SSHService>().isConnected;
     final macros = Provider.of<MacroService>(context).macros;
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
+    final viewport = MediaQuery.sizeOf(context);
+    final compactHeightMode = viewport.height < (window.isCompact ? 620 : 560);
+    final hideMacroStrip = viewport.height < (window.isCompact ? 520 : 500);
+    final macroStripHeight = compactHeightMode ? 42.0 : 50.0;
 
     return Column(
       children: [
         // Toolbar
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          color: Theme.of(context).colorScheme.surfaceContainer,
-          child: Row(
-            children: [
-              IconButton(
-                icon: const Icon(Icons.remove),
-                onPressed: () => _updateFontSize(_fontSize - 2),
-                tooltip: "글자 작게",
-              ),
-              Text("${_fontSize.toInt()}pt"),
-              IconButton(
-                icon: const Icon(Icons.add),
-                onPressed: () => _updateFontSize(_fontSize + 2),
-                tooltip: "글자 크게",
-              ),
-              Container(
-                height: 24,
-                width: 1,
-                color: Colors.grey.withValues(alpha: 0.5),
-                margin: const EdgeInsets.symmetric(horizontal: 8),
-              ),
-              IconButton(
-                icon: const Icon(Icons.copy),
-                onPressed: _copySelection,
-                tooltip: "복사",
-              ),
-              IconButton(
-                icon: const Icon(Icons.paste),
-                onPressed: _paste,
-                tooltip: "붙여넣기",
-              ),
-              IconButton(
-                icon: Icon(
-                    _showVirtualKeys ? Icons.keyboard_hide : Icons.keyboard),
-                onPressed: () =>
-                    setState(() => _showVirtualKeys = !_showVirtualKeys),
-                tooltip: "가상 키보드",
-              ),
-              const Spacer(),
-              if (!_isSessionActive)
-                ElevatedButton.icon(
-                  onPressed: () => _startTerminal(),
-                  icon: const Icon(Icons.refresh, size: 16),
-                  label: const Text("연결"),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.green,
-                    foregroundColor: Colors.white,
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  ),
-                )
-              else
-                ElevatedButton.icon(
-                  onPressed: () => _stopTerminal(manual: true),
-                  icon: const Icon(Icons.close, size: 16),
-                  label: const Text("끊기"),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red,
-                    foregroundColor: Colors.white,
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  ),
+          padding: EdgeInsets.symmetric(
+            horizontal: tokens.screenPadding.clamp(8.0, 16.0).toDouble(),
+            vertical: compactHeightMode ? 4 : 6,
+          ),
+          color: scheme.surfaceContainer,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final compactToolbar = compactHeightMode ||
+                  UiWindowInfo.classifyWidth(constraints.maxWidth) ==
+                      UiWindowClass.compact;
+              final sessionButton = !_isSessionActive
+                  ? ElevatedButton.icon(
+                      onPressed: () => _startTerminal(),
+                      icon: const Icon(Icons.refresh, size: 16),
+                      label: const Text("연결"),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 8),
+                      ),
+                    )
+                  : ElevatedButton.icon(
+                      onPressed: () => _stopTerminal(manual: true),
+                      icon: const Icon(Icons.close, size: 16),
+                      label: const Text("끊기"),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 8),
+                      ),
+                    );
+
+              final toolbarActions = <Widget>[
+                IconButton(
+                  icon: const Icon(Icons.remove),
+                  onPressed: () => _updateFontSize(_fontSize - 2),
+                  tooltip: "글자 작게",
                 ),
-            ],
+                Text("${_fontSize.toInt()}pt"),
+                IconButton(
+                  icon: const Icon(Icons.add),
+                  onPressed: () => _updateFontSize(_fontSize + 2),
+                  tooltip: "글자 크게",
+                ),
+                Container(
+                  height: 24,
+                  width: 1,
+                  color: scheme.outlineVariant.withValues(alpha: 0.7),
+                  margin: const EdgeInsets.symmetric(horizontal: 8),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.copy),
+                  onPressed: _copySelection,
+                  tooltip: "복사",
+                ),
+                IconButton(
+                  icon: const Icon(Icons.paste),
+                  onPressed: _paste,
+                  tooltip: "붙여넣기",
+                ),
+                IconButton(
+                  icon: Icon(
+                      _showVirtualKeys ? Icons.keyboard_hide : Icons.keyboard),
+                  onPressed: () =>
+                      setState(() => _showVirtualKeys = !_showVirtualKeys),
+                  tooltip: "가상 키보드",
+                ),
+              ];
+
+              if (!compactToolbar) {
+                return Row(
+                  children: [
+                    ...toolbarActions,
+                    const Spacer(),
+                    sessionButton,
+                  ],
+                );
+              }
+
+              final sessionReserveWidth = compactHeightMode ? 126.0 : 138.0;
+
+              return SizedBox(
+                width: double.infinity,
+                child: Stack(
+                  alignment: Alignment.centerRight,
+                  children: [
+                    Positioned.fill(
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          padding: EdgeInsets.only(
+                            right: sessionReserveWidth + 8,
+                          ),
+                          child: Row(children: toolbarActions),
+                        ),
+                      ),
+                    ),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          minWidth: compactHeightMode ? 92 : 100,
+                          maxWidth: sessionReserveWidth,
+                        ),
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          alignment: Alignment.centerRight,
+                          child: sessionButton,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
           ),
         ),
         Expanded(
@@ -776,7 +841,8 @@ class _TerminalScreenState extends State<TerminalScreen>
                 if (_showVirtualKeys)
                   Container(
                     color: Theme.of(context).colorScheme.surfaceContainerHigh,
-                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    padding: EdgeInsets.symmetric(
+                        vertical: compactHeightMode ? 2 : 4),
                     child: SingleChildScrollView(
                       scrollDirection: Axis.horizontal,
                       child: Row(
@@ -804,10 +870,11 @@ class _TerminalScreenState extends State<TerminalScreen>
                   ),
 
                 // Quick Macros
-                if (macros.isNotEmpty)
+                if (macros.isNotEmpty && !hideMacroStrip)
                   Container(
-                    height: 50,
-                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    height: macroStripHeight,
+                    padding: EdgeInsets.symmetric(
+                        vertical: compactHeightMode ? 2 : 4),
                     child: ListView.builder(
                       scrollDirection: Axis.horizontal,
                       padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -821,7 +888,7 @@ class _TerminalScreenState extends State<TerminalScreen>
                             style: ElevatedButton.styleFrom(
                               padding:
                                   const EdgeInsets.symmetric(horizontal: 12),
-                              minimumSize: const Size(0, 36),
+                              minimumSize: Size(0, compactHeightMode ? 30 : 36),
                             ),
                             child: Text(macro.name),
                           ),

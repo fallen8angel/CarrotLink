@@ -13,13 +13,29 @@ from aiohttp import web
 
 
 def _detect_repo() -> str:
-  candidates = []
+  candidates: list[str] = []
   env_repo = os.environ.get("CARROTLINK_OPENPILOT_REPO", "").strip()
   if env_repo:
     candidates.append(env_repo)
-  candidates.extend(("/data/openpilot", "/home/comma/openpilot"))
+  # Prefer local script-relative repo first when deployed under selfdrive/carrot.
+  try:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_from_script = os.path.abspath(os.path.join(script_dir, "..", ".."))
+    if repo_from_script:
+      candidates.append(repo_from_script)
+  except Exception:
+    pass
+
+  candidates.extend(
+    (
+      "/data/openpilot",
+      "/home/comma/openpilot",
+      "/data/media/0/openpilot",
+      "/data/openpilot_source/openpilot",
+    )
+  )
   for path in candidates:
-    if os.path.isdir(path):
+    if os.path.isdir(path) and os.path.isdir(os.path.join(path, "selfdrive")):
       return path
   return ""
 
@@ -76,6 +92,9 @@ _VIEW_FROM_DEVICE = (
   (0.0, 0.0, 1.0),
   (1.0, 0.0, 0.0),
 )
+
+# Keep per-camera lead anchor state to match carrot/openpilot-style smoothing.
+_LEAD_ANCHOR_STATE: dict[str, dict[str, float]] = {}
 
 
 def _as_double_list(v: Any) -> list[float]:
@@ -428,12 +447,23 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
   right_lane_line = _safe_int(car_state.get("rightLaneLine")) or 0
 
   active = _as_bool(selfdrive_state.get("active"))
+  long_active = _as_bool(selfdrive_state.get("enabled"))
   active_lane_line = _as_bool(controls_state.get("activeLaneLine"))
   accel0 = _safe_float(long_plan.get("accel0")) or 0.0
+  long_plan_source = _safe_int(long_plan.get("longitudinalPlanSource"))
+  x_state = _safe_int(long_plan.get("xState")) or 0
+  traffic_state = _safe_int(long_plan.get("trafficState")) or 0
+  t_follow = _safe_float(long_plan.get("tFollow")) or 0.0
+  desired_distance = _safe_float(long_plan.get("desiredDistance")) or 0.0
   lead_one = radar_state.get("leadOne") if isinstance(radar_state.get("leadOne"), dict) else {}
+  lead_two = radar_state.get("leadTwo") if isinstance(radar_state.get("leadTwo"), dict) else {}
+  leads_left = radar_state.get("leadsLeft") if isinstance(radar_state.get("leadsLeft"), list) else []
+  leads_right = radar_state.get("leadsRight") if isinstance(radar_state.get("leadsRight"), list) else []
+  leads_center = radar_state.get("leadsCenter") if isinstance(radar_state.get("leadsCenter"), list) else []
   lead_detected = _as_bool(lead_one.get("status"))
 
   model_frame_id = _safe_int(model_v2.get("frameId"))
+  lead_vision = model_v2.get("leadVision") if isinstance(model_v2.get("leadVision"), dict) else {}
   model_path_x = _as_double_list(model_v2.get("pathX"))
   model_path_y = _as_double_list(model_v2.get("pathY"))
   model_path_z = _as_double_list(model_v2.get("pathZ"))
@@ -493,8 +523,12 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
   wide_from_device_euler: list[float] = []
   path_offset_z = 1.22
 
-  def _apply_calibration(raw: dict[str, Any]) -> None:
+  def _apply_calibration(raw: dict[str, Any]) -> bool:
     nonlocal calibration_rpy, wide_from_device_euler, path_offset_z
+    status = _safe_int(raw.get("calStatus"))
+    # Match openpilot UI behavior: only apply when calibration is CALIBRATED(1).
+    if status is not None and status != 1:
+      return False
     rpy = _as_double_list(raw.get("rpyCalib"))
     if len(rpy) >= 3:
       calibration_rpy = rpy[:3]
@@ -504,10 +538,12 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
     h = _safe_float(raw.get("height"))
     if h is not None and math.isfinite(h) and 0.3 < h < 4.0:
       path_offset_z = float(h)
+    return (len(calibration_rpy) >= 3) and (len(wide_from_device_euler) >= 3)
 
+  live_applied = False
   if live_calib:
-    _apply_calibration(live_calib)
-  if len(calibration_rpy) < 3 or len(wide_from_device_euler) < 3:
+    live_applied = _apply_calibration(live_calib)
+  if (not live_applied) and (len(calibration_rpy) < 3 or len(wide_from_device_euler) < 3):
     if cached_calib:
       _apply_calibration(cached_calib)
 
@@ -540,6 +576,11 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
   show_path_color_lane = _safe_int(path_style.get("showPathColorLane")) or 3
   show_path_color_off = _safe_int(path_style.get("showPathColorCruiseOff")) or 3
   show_path_width = _safe_int(path_style.get("showPathWidth")) or 100
+  show_radar_info = _safe_int(path_style.get("showRadarInfo")) or 0
+  radar_lat_factor_raw = _safe_float(path_style.get("radarLatFactor"))
+  if radar_lat_factor_raw is None:
+    radar_lat_factor_raw = 20.0
+  radar_lat_factor = float(_clamp(radar_lat_factor_raw / 100.0, 0.0, 2.0))
   path_width_ratio = _clamp(float(show_path_width) / 100.0, 0.1, 3.0)
   path_mode = show_path_mode_lane if active_lane_line else show_path_mode_normal
   path_color = show_path_color_lane if active_lane_line else show_path_color_normal
@@ -567,10 +608,42 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
   lane_base_x = lane_lines[0]["x"] if lane_lines else path_x
   lane_max_idx = _get_path_length_idx(lane_base_x, max_distance) if lane_base_x else 0
 
-  camera_inputs = (
-    ("road", False, _safe_int(road_state.get("frameId"))),
-    ("wideRoad", True, _safe_int(wide_state.get("frameId"))),
-  )
+  model_line_x = _monotonic_x(model_path_x)
+  model_line_y = model_path_y
+  model_line_z = model_path_z
+  model_line_count = min(len(model_line_x), len(model_line_y), len(model_line_z))
+
+  # Carrot/openpilot lead projection uses model.position z as the primary
+  # reference, not lane-line z.
+  z_ref_x = model_line_x[:model_line_count]
+  z_ref_z = model_line_z[:model_line_count]
+  if len(z_ref_x) < 2 or len(z_ref_z) < 2:
+    z_ref_x = _monotonic_x(path_x)
+    z_ref_z = path_z
+
+  def _z_at_distance(distance: float, fallback: float = 0.0) -> float:
+    if not math.isfinite(distance) or distance < 0.0:
+      return fallback
+    count = min(len(z_ref_x), len(z_ref_z))
+    if count < 2:
+      return fallback
+    z = _interp1d(distance, z_ref_x[:count], z_ref_z[:count])
+    return float(z) if math.isfinite(z) else fallback
+
+  camera_mode = str(payload.get("_overlayCameraMode", "both")).strip()
+  if camera_mode == "road":
+    camera_inputs = (
+      ("road", False, _safe_int(road_state.get("frameId"))),
+    )
+  elif camera_mode == "wideRoad":
+    camera_inputs = (
+      ("wideRoad", True, _safe_int(wide_state.get("frameId"))),
+    )
+  else:
+    camera_inputs = (
+      ("road", False, _safe_int(road_state.get("frameId"))),
+      ("wideRoad", True, _safe_int(wide_state.get("frameId"))),
+    )
   cameras: dict[str, Any] = {}
   for camera_name, is_wide, camera_frame_id in camera_inputs:
     transform = _build_car_space_transform(
@@ -580,6 +653,23 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
       calibration_rpy,
       wide_from_device_euler,
     )
+    intrinsic = _intrinsic_for_source(source_w, source_h, is_wide)
+    zoom = 2.0 if is_wide else 1.1
+    center_x = intrinsic[0][2]
+    center_y = intrinsic[1][2]
+    x_offset = 0.0
+    y_offset = 0.0
+    tx = (source_w - (source_w * zoom)) * 0.5
+    ty = (source_h - (source_h * zoom)) * 0.5
+    inf_x, inf_y, inf_z = _m3_transform(transform, 1000.0, 0.0, 0.0)
+    if math.isfinite(inf_z) and abs(inf_z) > 1e-6:
+      max_x_offset = max(0.0, center_x * zoom - source_w * 0.5 - 5.0)
+      max_y_offset = max(0.0, center_y * zoom - source_h * 0.5 - 5.0)
+      x_offset = _clamp(((inf_x / inf_z) - center_x) * zoom, -max_x_offset, max_x_offset)
+      y_offset = _clamp(((inf_y / inf_z) - center_y) * zoom, -max_y_offset, max_y_offset)
+      tx = (source_w * 0.5 - x_offset) - (center_x * zoom)
+      ty = (source_h * 0.5 - y_offset) - (center_y * zoom)
+
     lane_polys: list[dict[str, Any]] = []
     for lane in lane_lines:
       line_width = 0.025
@@ -672,10 +762,410 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
       allow_invert=False,
     )
 
+    tf_marker: dict[str, Any] | None = None
+    if (
+      model_line_count >= 2
+      and math.isfinite(desired_distance)
+      and desired_distance > 0.0
+      and desired_distance <= (model_line_x[model_line_count - 1] + 5.0)
+    ):
+      tf_y = _interp1d(desired_distance, model_line_x[:model_line_count], model_line_y[:model_line_count])
+      tf_z = _interp1d(desired_distance, model_line_x[:model_line_count], model_line_z[:model_line_count])
+      if math.isfinite(tf_y) and math.isfinite(tf_z):
+        tf_left = _map_to_source(
+          transform,
+          source_w,
+          source_h,
+          desired_distance,
+          tf_y - 1.0,
+          tf_z + 1.22,
+        )
+        tf_right = _map_to_source(
+          transform,
+          source_w,
+          source_h,
+          desired_distance,
+          tf_y + 1.0,
+          tf_z + 1.22,
+        )
+        if tf_left is not None and tf_right is not None:
+          tf_marker = {
+            "points": _flatten_points([tf_left, tf_right]),
+            "distance": desired_distance,
+            "tFollow": t_follow,
+          }
+
+    lead_area_boxes: list[dict[str, Any]] = []
+    anchor_state = _LEAD_ANCHOR_STATE.setdefault(camera_name, {})
+
+    def _build_box_from_anchor(
+      anchor_x: float,
+      anchor_y: float,
+      anchor_w: float,
+      top_y: float | None = None,
+    ) -> list[tuple[float, float]]:
+      x_left = anchor_x - (anchor_w / 2.0) - 10.0
+      x_right = anchor_x + (anchor_w / 2.0) + 10.0
+      y_base = anchor_y
+      y_top_fallback = anchor_y - max(anchor_w * 0.86, 12.0)
+      if top_y is not None and math.isfinite(top_y):
+        # Respect projected roof point if it is above base enough.
+        y_top = min(float(top_y), y_base - 4.0)
+      else:
+        y_top = y_top_fallback
+      if y_top >= y_base - 2.0:
+        y_top = y_top_fallback
+      return [
+        (x_left, y_top),
+        (x_right, y_top),
+        (x_right, y_base),
+        (x_left, y_base),
+      ]
+
+    def _project_lead_pair_from_car_space(
+      d_rel: float,
+      y_center: float,
+      z_center: float,
+      half_width: float = 1.0,
+    ) -> tuple[tuple[float, float], tuple[float, float]] | None:
+      if (not math.isfinite(d_rel)) or d_rel <= 0.5:
+        return None
+      lane_half_w = _clamp(abs(half_width), 0.6, 1.4)
+      left = _map_to_source(
+        transform,
+        source_w,
+        source_h,
+        d_rel,
+        y_center - lane_half_w,
+        z_center + 1.22,
+      )
+      right = _map_to_source(
+        transform,
+        source_w,
+        source_h,
+        d_rel,
+        y_center + lane_half_w,
+        z_center + 1.22,
+      )
+      if left is None or right is None:
+        return None
+      return left, right
+
+    def _project_lead_top_from_car_space(
+      d_rel: float,
+      y_center: float,
+      z_center: float,
+      body_height: float = 1.45,
+    ) -> tuple[float, float] | None:
+      if (not math.isfinite(d_rel)) or d_rel <= 0.5:
+        return None
+      # car-space z axis in this pipeline behaves as "down"; subtract to move to roof.
+      return _map_to_source(
+        transform,
+        source_w,
+        source_h,
+        d_rel,
+        y_center,
+        (z_center + 1.22) - body_height,
+      )
+
+    def _update_primary_anchor(
+      left: tuple[float, float],
+      right: tuple[float, float],
+    ) -> None:
+      lex, ley = left
+      rex, rey = right
+      path_width_raw = rex - lex
+      path_x_raw = (lex + rex) / 2.0
+      path_y_raw = (ley + rey) / 2.0
+      if (
+        (not math.isfinite(path_width_raw))
+        or (not math.isfinite(path_x_raw))
+        or (not math.isfinite(path_y_raw))
+      ):
+        return
+      # Do not over-clamp to center area; keep near-full source domain for parity.
+      path_x_clamped = _clamp(path_x_raw, -_CLIP_MARGIN, source_w + _CLIP_MARGIN)
+      path_y_clamped = _clamp(path_y_raw, -_CLIP_MARGIN, source_h + _CLIP_MARGIN)
+      path_width_clamped = _clamp(abs(path_width_raw), 40.0, 900.0)
+      # Lower inertia to follow lead movement faster.
+      alpha = 0.65
+      keep = alpha
+      mix = 1.0 - alpha
+      fx_old = _safe_float(anchor_state.get("path_fx"))
+      fy_old = _safe_float(anchor_state.get("path_fy"))
+      fw_old = _safe_float(anchor_state.get("path_fw"))
+      if fx_old is None or fy_old is None or fw_old is None:
+        fx = path_x_clamped
+        fy = path_y_clamped
+        fw = path_width_clamped
+      else:
+        fx = fx_old * keep + path_x_clamped * mix
+        fy = fy_old * keep + path_y_clamped * mix
+        fw = fw_old * keep + path_width_clamped * mix
+      anchor_state["path_fx"] = fx
+      anchor_state["path_fy"] = fy
+      anchor_state["path_fw"] = fw
+
+    def _current_primary_anchor() -> tuple[float, float, float] | None:
+      fx = _safe_float(anchor_state.get("path_fx"))
+      fy = _safe_float(anchor_state.get("path_fy"))
+      fw = _safe_float(anchor_state.get("path_fw"))
+      if fx is None or fy is None or fw is None:
+        return None
+      return (float(fx), float(fy), float(fw))
+
+    def _lead_badge_offsets(anchor_w: float) -> tuple[float, float]:
+      dx = _clamp(anchor_w * 0.45, 56.0, 120.0)
+      dy = _clamp(anchor_w * 0.32, 40.0, 96.0)
+      return float(dx), float(dy)
+
+    def _lead_state_offset_y(anchor_w: float) -> float:
+      return float(_clamp(anchor_w * 0.52, 52.0, 140.0))
+
+    lead_one_status = _as_bool(lead_one.get("status"))
+    lead_one_d_rel = _safe_float(lead_one.get("dRel")) or 0.0
+    lead_one_y_rel = _safe_float(lead_one.get("yRel")) or 0.0
+    lead_one_d_path = _safe_float(lead_one.get("dPath"))
+    lead_one_radar = _as_bool(lead_one.get("radar"))
+    lead_one_track_id = _safe_int(lead_one.get("radarTrackId"))
+    anchor_one: tuple[float, float, float] | None = None
+    if lead_one_status:
+      lead_distance = lead_one_d_rel
+      if (
+        lead_one_d_path is not None
+        and math.isfinite(lead_one_d_path)
+        and abs(lead_one_d_path) <= 4.0
+      ):
+        lead_y_center = -lead_one_d_path
+      else:
+        lead_y_center = -lead_one_y_rel
+      lead_z_center = _z_at_distance(lead_distance, 0.0)
+      pair_one = _project_lead_pair_from_car_space(
+        lead_distance,
+        lead_y_center,
+        lead_z_center,
+        half_width=1.0,
+      )
+      if pair_one is not None:
+        _update_primary_anchor(pair_one[0], pair_one[1])
+        anchor_one = _current_primary_anchor()
+      else:
+        # Strict behavior: do not reuse stale anchor when current projection fails.
+        anchor_state.pop("path_fx", None)
+        anchor_state.pop("path_fy", None)
+        anchor_state.pop("path_fw", None)
+        anchor_one = None
+    else:
+      # Keep lead overlay strict: no stale anchor/box when lead is not detected.
+      anchor_state.pop("path_fx", None)
+      anchor_state.pop("path_fy", None)
+      anchor_state.pop("path_fw", None)
+
+    if lead_one_status and anchor_one is not None:
+      anchor_x, anchor_y, anchor_w = anchor_one
+      lead_top_point = _project_lead_top_from_car_space(
+        lead_one_d_rel,
+        lead_y_center,
+        _z_at_distance(lead_one_d_rel, 0.0),
+      )
+      lead_one_box = _build_box_from_anchor(
+        anchor_x,
+        anchor_y,
+        anchor_w,
+        top_y=lead_top_point[1] if lead_top_point is not None else None,
+      )
+      badge_dx, badge_dy = _lead_badge_offsets(anchor_w)
+      state_dy = _lead_state_offset_y(anchor_w)
+      vision_prob = _safe_float(lead_vision.get("prob")) or 0.0
+      vision_x0 = _safe_float(lead_vision.get("x0")) or 0.0
+      vision_dist = vision_x0 - 1.52 if vision_prob > 0.5 else 0.0
+      if vision_dist < 0.0:
+        vision_dist = 0.0
+      lead_one_is_scc = (lead_one_track_id if lead_one_track_id is not None else -1) < 1
+      lead_one_stroke_argb = (
+        0xFF3D7BFF
+        if not lead_one_radar
+        else (0xFFFF3B30 if lead_one_is_scc else 0xFFFFA726)
+      )
+      lead_area_boxes.append(
+        {
+          "kind": "leadOne",
+          "points": _flatten_points(lead_one_box),
+          "radar": lead_one_radar,
+          "radarTrackId": lead_one_track_id if lead_one_track_id is not None else -1,
+          "status": 1,
+          "radarDistance": lead_one_d_rel if lead_one_radar else 0.0,
+          "visionDistance": vision_dist,
+          "anchorCenter": [anchor_x, anchor_y],
+          "anchorWidth": anchor_w,
+          "radarBadgeCenter": [anchor_x - badge_dx, anchor_y + badge_dy],
+          "visionBadgeCenter": [anchor_x + badge_dx, anchor_y + badge_dy],
+          "stateTextCenter": [anchor_x, anchor_y + state_dy],
+          "strokeColorArgb": int(lead_one_stroke_argb),
+          "fillColorArgb": int(0x33000000),
+          "radarBadgeColorArgb": int(0xFFFF3B30 if lead_one_is_scc else 0xFFFFA726),
+          "visionBadgeColorArgb": int(0xFF3D7BFF),
+        }
+      )
+
+    lead_two_status_flag = _as_bool(lead_two.get("status"))
+    lead_two_d_rel = _safe_float(lead_two.get("dRel")) or 0.0
+    lead_two_y_rel = _safe_float(lead_two.get("yRel")) or 0.0
+    lead_two_d_path = _safe_float(lead_two.get("dPath"))
+    lead_two_radar = _as_bool(lead_two.get("radar"))
+    lead_two_track_id = _safe_int(lead_two.get("radarTrackId"))
+    lead_two_prev_status = int(_safe_int(anchor_state.get("lead_two_status")) or 0)
+    same_track_as_primary = (
+      lead_one_track_id is not None
+      and lead_two_track_id is not None
+      and lead_two_track_id == lead_one_track_id
+    )
+    # Keep leadTwo gate close to radarState semantics:
+    # - status/radar must be valid
+    # - positive distance
+    # - do not duplicate leadOne when both point to same radar track
+    if lead_two_status_flag and lead_two_radar and lead_two_d_rel > 0.5 and not same_track_as_primary:
+      z2 = _z_at_distance(lead_two_d_rel, 0.0)
+      if (
+        lead_two_d_path is not None
+        and math.isfinite(lead_two_d_path)
+        and abs(lead_two_d_path) <= 4.0
+      ):
+        lead_two_y_center = -lead_two_d_path
+      else:
+        lead_two_y_center = -lead_two_y_rel
+      pair = _project_lead_pair_from_car_space(
+        lead_two_d_rel,
+        lead_two_y_center,
+        z2,
+        half_width=0.95,
+      )
+      if pair is not None:
+        left, right = pair
+        x_left = left[0]
+        x_right = right[0]
+        y_base = left[1]
+        if lead_two_prev_status > 0:
+          x_left = (anchor_state.get("lead_two_xl", x_left) * 0.8) + (x_left * 0.2)
+          x_right = (anchor_state.get("lead_two_xr", x_right) * 0.8) + (x_right * 0.2)
+          y_base = (anchor_state.get("lead_two_y", y_base) * 0.8) + (y_base * 0.2)
+        anchor_state["lead_two_xl"] = x_left
+        anchor_state["lead_two_xr"] = x_right
+        anchor_state["lead_two_y"] = y_base
+        width2 = abs(x_right - x_left)
+        lead_two_top_point = _project_lead_top_from_car_space(
+          lead_two_d_rel,
+          lead_two_y_center,
+          z2,
+        )
+        y_top_fallback = y_base - max(width2 * 0.86, 12.0)
+        if lead_two_top_point is not None and math.isfinite(lead_two_top_point[1]):
+          y_top = min(float(lead_two_top_point[1]), y_base - 4.0)
+        else:
+          y_top = y_top_fallback
+        if y_top >= y_base - 2.0:
+          y_top = y_top_fallback
+        lead_two_box = [
+          (x_left - 10.0, y_top),
+          (x_right + 10.0, y_top),
+          (x_right + 10.0, y_base),
+          (x_left - 10.0, y_base),
+        ]
+        lead_two_status = 2 if long_plan_source == 1 else 1
+        anchor_state["lead_two_status"] = float(lead_two_status)
+        lead_area_boxes.append(
+          {
+            "kind": "leadTwo",
+            "points": _flatten_points(lead_two_box),
+            "radar": True,
+            "radarTrackId": lead_two_track_id if lead_two_track_id is not None else -1,
+            "status": lead_two_status,
+            "radarDistance": lead_two_d_rel,
+            "anchorCenter": [((x_left + x_right) * 0.5), y_base],
+            "anchorWidth": width2,
+            "strokeColorArgb": int(0xFFB68A3A),
+            "fillColorArgb": int(0x66FF3B30 if lead_two_status >= 2 else 0x33000000),
+          }
+        )
+      else:
+        anchor_state["lead_two_status"] = 0.0
+    else:
+      anchor_state["lead_two_status"] = 0.0
+
+    radar_targets: list[dict[str, Any]] = []
+    if show_radar_info > 0:
+      for group_name, group in (
+        ("leadsLeft", leads_left),
+        ("leadsRight", leads_right),
+        ("leadsCenter", leads_center),
+      ):
+        for raw_track in group:
+          if not isinstance(raw_track, dict):
+            continue
+          d_rel = _safe_float(raw_track.get("dRel"))
+          if d_rel is None or (not math.isfinite(d_rel)) or d_rel <= 2.5:
+            continue
+          y_rel = _safe_float(raw_track.get("yRel")) or 0.0
+          z = _z_at_distance(d_rel, 0.0) - 0.61
+          center = _map_to_source(
+            transform,
+            source_w,
+            source_h,
+            d_rel,
+            -y_rel,
+            z,
+          )
+          if center is None:
+            continue
+          v_lead = _safe_float(raw_track.get("vLeadK"))
+          if v_lead is None:
+            v_lead = _safe_float(raw_track.get("vRel")) or 0.0
+          v_lat = _safe_float(raw_track.get("vLat")) or 0.0
+          v_abs = math.sqrt((v_lead * v_lead) + (v_lat * v_lat))
+          v_sum = v_abs if v_lead >= 0.0 else -v_abs
+          item: dict[str, Any] = {
+            "group": group_name,
+            "center": [center[0], center[1]],
+            "dRel": d_rel,
+            "yRel": y_rel,
+            "vLeadK": v_lead,
+            "vLat": v_lat,
+            "speedMpsSigned": v_sum,
+            "speedKphSigned": v_sum * 3.6,
+            "radar": _as_bool(raw_track.get("radar")),
+            "modelProb": _safe_float(raw_track.get("modelProb")) or 0.0,
+          }
+          if v_abs > 3.0 and abs(v_lead) > 3.0 and radar_lat_factor > 0.0:
+            a_d_rel = d_rel + (v_lead * radar_lat_factor)
+            if a_d_rel < 2.0:
+              a_d_rel = 2.0
+            a_y_rel = y_rel + (v_lat * radar_lat_factor)
+            future = _map_to_source(
+              transform,
+              source_w,
+              source_h,
+              a_d_rel,
+              -a_y_rel,
+              z,
+            )
+            if future is not None:
+              item["future"] = [future[0], future[1]]
+          radar_targets.append(item)
+
     cameras[camera_name] = {
       "camera": camera_name,
       "sourceWidth": source_w,
       "sourceHeight": source_h,
+      "displayTransform": {
+        "zoom": zoom,
+        "centerX": center_x,
+        "centerY": center_y,
+        "xOffset": x_offset,
+        "yOffset": y_offset,
+        "tx": tx,
+        "ty": ty,
+      },
       "modelFrameId": model_frame_id,
       "cameraFrameId": camera_frame_id,
       "pathMode": path_mode,
@@ -683,17 +1173,29 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
       "pathTrackVertices": _flatten_points(track_vertices) if track_vertices is not None else [],
       "lanePolygons": lane_polys,
       "roadEdgePolygons": edge_polys,
+      "leadAreaBoxes": lead_area_boxes,
+      "radarTargets": radar_targets,
+      "tfMarker": tf_marker,
       "meta": {
         "usingLateralPath": using_lateral_path,
         "modelPathXMax": model_path_x_max,
         "lateralPathXMax": lateral_path_x_max,
         "brakeLights": brake_lights,
+        "showRadarInfo": show_radar_info,
+        "radarLatFactor": radar_lat_factor,
+        "xState": x_state,
+        "trafficState": traffic_state,
+        "longActive": long_active,
+        "vEgoMps": speed_mps,
+        "tFollow": t_follow,
+        "desiredDistance": desired_distance,
       },
     }
 
   return {
     "version": 1,
     "source": "sidecar_projected",
+    "cameraMode": camera_mode,
     "cameras": cameras,
   }
 
@@ -747,29 +1249,92 @@ def _extract_h264_codec(payload: bytes) -> str | None:
 
 
 class CameraRelayHub:
-  CAMERA_TO_SERVICE = {
-    "road": "livestreamRoadEncodeData",
-    "wideRoad": "livestreamWideRoadEncodeData",
-    "driver": "livestreamDriverEncodeData",
+  CAMERA_QUEUE_MAXSIZE = 2
+  CAMERA_SERVICE_CANDIDATES = {
+    "road": [
+      "livestreamRoadEncodeData",
+      "roadEncodeData",
+    ],
+    "wideRoad": [
+      "livestreamWideRoadEncodeData",
+      "wideRoadEncodeData",
+    ],
+    "driver": [
+      "livestreamDriverEncodeData",
+      "driverEncodeData",
+    ],
   }
+  QUALITY_MODES = ("quality", "stable")
 
   def __init__(self, messaging: Any):
     self.messaging = messaging
     self.clients: dict[str, set[web.WebSocketResponse]] = {
-      cam: set() for cam in self.CAMERA_TO_SERVICE.keys()
+      cam: set() for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
     }
-    self._tasks: dict[str, asyncio.Task] = {}
-    self._sockets: dict[str, Any] = {}
+    self._producer_tasks: dict[str, asyncio.Task] = {}
+    self._sender_tasks: dict[str, asyncio.Task] = {}
+    self._sockets: dict[str, dict[str, Any]] = {
+      cam: {} for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+    }
+    self._queues: dict[str, asyncio.Queue[bytes]] = {
+      cam: asyncio.Queue(maxsize=self.CAMERA_QUEUE_MAXSIZE)
+      for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+    }
     self._frame_count: dict[str, int] = {
-      cam: 0 for cam in self.CAMERA_TO_SERVICE.keys()
+      cam: 0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
     }
     self._drop_count: dict[str, int] = {
-      cam: 0 for cam in self.CAMERA_TO_SERVICE.keys()
+      cam: 0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
     }
+    self._ws_send_failures: dict[web.WebSocketResponse, int] = {}
     self._last_codec: dict[str, str] = {
-      cam: "" for cam in self.CAMERA_TO_SERVICE.keys()
+      cam: "" for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
     }
+    self._selected_service: dict[str, str] = {
+      cam: ""
+      for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+    }
+    self._queue_drop_count: dict[str, int] = {
+      cam: 0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+    }
+    self._send_drop_count: dict[str, int] = {
+      cam: 0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+    }
+    self._last_frame_at_mono: dict[str, float] = {
+      cam: 0.0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+    }
+    self._last_frame_id: dict[str, int] = {
+      cam: -1 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+    }
+    self._last_send_batch_ms: dict[str, float] = {
+      cam: 0.0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+    }
+    self._quality_mode = self._normalize_quality_mode(
+      os.environ.get("CARROTLINK_CAMERA_QUALITY_MODE", "quality")
+    )
     self._lock = asyncio.Lock()
+
+  def _normalize_quality_mode(self, mode: Any) -> str:
+    value = str(mode or "").strip().lower()
+    if value in ("stable", "low_latency", "low-latency", "latency"):
+      return "stable"
+    return "quality"
+
+  def set_quality_mode(self, mode: Any) -> str:
+    self._quality_mode = self._normalize_quality_mode(mode)
+    return self._quality_mode
+
+  def get_quality_mode(self) -> str:
+    return self._quality_mode
+
+  def _ordered_camera_services(self, camera: str) -> list[str]:
+    base = list(self.CAMERA_SERVICE_CANDIDATES.get(camera, []))
+    if not base:
+      return []
+    if self._quality_mode == "stable":
+      return base[:1]
+    # quality mode: prefer full encode first, then livestream fallback.
+    return list(reversed(base))
 
   def _pack_frame(self, camera: str, frame: Any) -> bytes:
     header = getattr(frame, "header", b"") or b""
@@ -795,15 +1360,16 @@ class CameraRelayHub:
     except Exception:
       pass
     # loggerd uses V4L2_BUF_FLAG_KEYFRAME(0x8) in EncodeIndex.flags
-    is_key = bool(flags is not None and (flags & 0x8))
-    if not is_key:
+    if flags is not None:
+      is_key = bool(flags & 0x8)
+    else:
       is_key = _is_h264_keyframe(payload)
-
-    codec = _extract_h264_codec(payload)
-    if codec:
-      self._last_codec[camera] = codec
-    elif self._last_codec[camera]:
-      codec = self._last_codec[camera]
+    codec = self._last_codec[camera]
+    if not codec:
+      parsed_codec = _extract_h264_codec(payload)
+      if parsed_codec:
+        self._last_codec[camera] = parsed_codec
+        codec = parsed_codec
 
     meta = {
       "camera": camera,
@@ -826,23 +1392,53 @@ class CameraRelayHub:
     )
     return struct.pack(">I", len(meta_bytes)) + meta_bytes + payload
 
-  async def _camera_loop(self, camera: str) -> None:
-    service = self.CAMERA_TO_SERVICE[camera]
+  async def _get_camera_socket(self, camera: str, service: str) -> Any:
+    camera_sockets = self._sockets.get(camera)
+    if camera_sockets is None:
+      camera_sockets = {}
+      self._sockets[camera] = camera_sockets
+    existing = camera_sockets.get(service)
+    if existing is not None:
+      return existing
+    try:
+      sock = self.messaging.sub_sock(service, conflate=True)
+      camera_sockets[service] = sock
+      return sock
+    except Exception:
+      return None
+
+  async def _camera_producer_loop(self, camera: str) -> None:
     if self.messaging is None:
       return
-    if camera not in self._sockets:
-      self._sockets[camera] = self.messaging.sub_sock(service, conflate=True)
-
-    sock = self._sockets[camera]
+    queue = self._queues[camera]
     while True:
       try:
         if not self.clients.get(camera):
-          await asyncio.sleep(0.06)
+          await asyncio.sleep(0.03)
           continue
 
-        msg = self.messaging.recv_one_or_none(sock)
+        services = self._ordered_camera_services(camera)
+        if not services:
+          await asyncio.sleep(0.1)
+          continue
+
+        msg = None
+        source_service = ""
+        for service in services:
+          sock = await self._get_camera_socket(camera, service)
+          if sock is None:
+            continue
+          try:
+            candidate = self.messaging.recv_one_or_none(sock)
+          except Exception:
+            continue
+          if candidate is not None:
+            msg = candidate
+            source_service = service
+            break
+
         if msg is None:
-          await asyncio.sleep(0.004)
+          await asyncio.sleep(0.002)
           continue
 
         which = ""
@@ -860,33 +1456,103 @@ class CameraRelayHub:
           await asyncio.sleep(0.001)
           continue
 
+        frame_id = _safe_int(getattr(frame, "frameId", None))
         packet = self._pack_frame(camera, frame)
-        stale: list[web.WebSocketResponse] = []
-        for ws in list(self.clients.get(camera, set())):
+        if queue.full():
           try:
-            await asyncio.wait_for(ws.send_bytes(packet), timeout=0.04)
+            queue.get_nowait()
+            self._queue_drop_count[camera] += 1
           except Exception:
-            stale.append(ws)
-            self._drop_count[camera] += 1
-        for ws in stale:
-          self.clients[camera].discard(ws)
+            pass
+        try:
+          queue.put_nowait(packet)
+        except Exception:
+          await asyncio.sleep(0.001)
+          continue
         self._frame_count[camera] += 1
+        self._last_frame_at_mono[camera] = time.monotonic()
+        if frame_id is not None and frame_id >= 0:
+          self._last_frame_id[camera] = frame_id
+        if source_service:
+          self._selected_service[camera] = source_service
       except asyncio.CancelledError:
         break
       except Exception:
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.01)
+
+  async def _camera_sender_loop(self, camera: str) -> None:
+    queue = self._queues[camera]
+    while True:
+      try:
+        quality_mode = self._quality_mode
+        send_timeout = 0.35 if quality_mode == "quality" else 0.25
+        timeout_fail_limit = 5 if quality_mode == "quality" else 4
+        if not self.clients.get(camera):
+          keep_count = 1
+          while queue.qsize() > keep_count:
+            try:
+              queue.get_nowait()
+              self._queue_drop_count[camera] += 1
+            except Exception:
+              break
+          await asyncio.sleep(0.03)
+          continue
+
+        try:
+          packet = await asyncio.wait_for(queue.get(), timeout=0.25)
+        except asyncio.TimeoutError:
+          continue
+
+        stale: list[web.WebSocketResponse] = []
+        clients = list(self.clients.get(camera, set()))
+        send_started = time.monotonic()
+        results = await asyncio.gather(
+          *[
+            asyncio.wait_for(ws.send_bytes(packet), timeout=send_timeout)
+            for ws in clients
+          ],
+          return_exceptions=True,
+        )
+        self._last_send_batch_ms[camera] = max(
+          0.0,
+          (time.monotonic() - send_started) * 1000.0,
+        )
+        for ws, result in zip(clients, results):
+          if not isinstance(result, Exception):
+            self._ws_send_failures.pop(ws, None)
+            continue
+          fail_count = self._ws_send_failures.get(ws, 0) + 1
+          self._ws_send_failures[ws] = fail_count
+          if fail_count >= timeout_fail_limit:
+            stale.append(ws)
+            self._drop_count[camera] += 1
+            self._send_drop_count[camera] += 1
+        for ws in stale:
+          self.clients[camera].discard(ws)
+          self._ws_send_failures.pop(ws, None)
+          try:
+            await ws.close(code=1011, message=b"camera_send_timeout")
+          except Exception:
+            pass
+      except asyncio.CancelledError:
+        break
+      except Exception:
+        await asyncio.sleep(0.01)
 
   async def ensure_camera_task(self, camera: str) -> None:
     async with self._lock:
-      task = self._tasks.get(camera)
-      if task and not task.done():
-        return
-      self._tasks[camera] = asyncio.create_task(self._camera_loop(camera))
+      producer = self._producer_tasks.get(camera)
+      if producer is None or producer.done():
+        self._producer_tasks[camera] = asyncio.create_task(self._camera_producer_loop(camera))
+      sender = self._sender_tasks.get(camera)
+      if sender is None or sender.done():
+        self._sender_tasks[camera] = asyncio.create_task(self._camera_sender_loop(camera))
 
   async def stop_all(self) -> None:
     async with self._lock:
-      tasks = list(self._tasks.values())
-      self._tasks = {}
+      tasks = list(self._producer_tasks.values()) + list(self._sender_tasks.values())
+      self._producer_tasks = {}
+      self._sender_tasks = {}
     for task in tasks:
       task.cancel()
       try:
@@ -896,7 +1562,7 @@ class CameraRelayHub:
 
   async def ws_camera(self, request: web.Request) -> web.WebSocketResponse:
     camera = request.match_info.get("camera", "").strip()
-    if camera not in self.CAMERA_TO_SERVICE:
+    if camera not in self.CAMERA_SERVICE_CANDIDATES:
       raise web.HTTPNotFound(text=f"unknown camera: {camera}")
     if self.messaging is None:
       raise web.HTTPServiceUnavailable(text="messaging unavailable")
@@ -921,6 +1587,7 @@ class CameraRelayHub:
         pass
     finally:
       self.clients[camera].discard(ws)
+      self._ws_send_failures.pop(ws, None)
       try:
         await ws.close()
       except Exception:
@@ -929,15 +1596,29 @@ class CameraRelayHub:
 
   def status(self) -> dict[str, Any]:
     cameras: dict[str, Any] = {}
-    for camera in self.CAMERA_TO_SERVICE.keys():
+    for camera in self.CAMERA_SERVICE_CANDIDATES.keys():
+      last_frame_at = self._last_frame_at_mono.get(camera, 0.0)
+      last_frame_age_ms = (
+        max(0, int((time.monotonic() - last_frame_at) * 1000.0))
+        if last_frame_at > 0.0 else None
+      )
       cameras[camera] = {
         "clients": len(self.clients.get(camera, set())),
         "frames": self._frame_count.get(camera, 0),
         "drops": self._drop_count.get(camera, 0),
         "codec": self._last_codec.get(camera, ""),
+        "queue": self._queues[camera].qsize(),
+        "queueMax": self.CAMERA_QUEUE_MAXSIZE,
+        "queueDrops": self._queue_drop_count.get(camera, 0),
+        "sendDrops": self._send_drop_count.get(camera, 0),
+        "lastFrameId": self._last_frame_id.get(camera, -1),
+        "lastFrameAgeMs": last_frame_age_ms,
+        "lastSendBatchMs": round(self._last_send_batch_ms.get(camera, 0.0), 1),
+        "service": self._selected_service.get(camera, ""),
       }
     return {
-      "mode": "single_sub_fanout",
+      "mode": "queued_multi_sub_fanout",
+      "qualityMode": self._quality_mode,
       "cameras": cameras,
     }
 
@@ -950,27 +1631,53 @@ class SidecarApp:
       "carState",
       "deviceState",
       "selfdriveState",
+      "carControl",
       "controlsState",
       "longitudinalPlan",
       "lateralPlan",
       "liveCalibration",
+      "liveParameters",
       "modelV2",
       "radarState",
       "roadCameraState",
       "wideRoadCameraState",
+      "carrotMan",
+      "navInstructionCarrot",
     ],
     "p3": [
       "carState",
       "deviceState",
       "selfdriveState",
+      "carControl",
       "controlsState",
       "longitudinalPlan",
       "lateralPlan",
       "liveCalibration",
+      "liveParameters",
       "modelV2",
       "radarState",
       "roadCameraState",
       "wideRoadCameraState",
+      "carrotMan",
+      "navInstructionCarrot",
+    ],
+    # p4: high-rate alias of p3 services for aggressive HUD refresh.
+    "p4": [
+      "carState",
+      "deviceState",
+      "selfdriveState",
+      "carControl",
+      "controlsState",
+      "longitudinalPlan",
+      "lateralPlan",
+      "liveCalibration",
+      "liveParameters",
+      "modelV2",
+      "radarState",
+      "roadCameraState",
+      "wideRoadCameraState",
+      "carrotMan",
+      "navInstructionCarrot",
     ],
   }
 
@@ -979,47 +1686,41 @@ class SidecarApp:
     "p1": 0.12,
     "p2": 0.04,
     "p3": 0.04,
+    "p4": 0.03,
   }
 
   def __init__(self, profile: str):
-    self.profile = profile if profile in self.PROFILE_SERVICES else "p1"
-    self.clients: dict[web.WebSocketResponse, str] = {}
+    self.profile = profile if profile in self.PROFILE_SERVICES else "p2"
+    self.clients: dict[web.WebSocketResponse, tuple[str, str]] = {}
     self.repo = _detect_repo()
-    self.realdata_root = (
-      os.environ.get("CARROTLINK_REALDATA_ROOT", "/data/media/0/realdata").strip()
-      or "/data/media/0/realdata"
-    )
     self.messaging = None
     self.sm = None
     self.last_error = ""
 
     self._camera_hub: CameraRelayHub | None = None
-    self._logreader_cls = None
-    self.replay_active = False
-    self.replay_finished = False
-    self.replay_route = ""
-    self.replay_segment = -1
-    self.replay_log_path = ""
-    self.replay_error = ""
-    self.replay_speed = 1.0
-    self._replay_reader = None
-    self._replay_iter = None
-    self._replay_cache: dict[str, Any] = {}
-    self._replay_timeline_cache: dict[tuple[str, int, str], dict[str, Any]] = {}
     self._params = None
     self._path_style_last_read = 0.0
     self._path_style_cache: dict[str, Any] = {
-      "showPathMode": 13,
-      "showPathColor": 14,
-      "showPathModeLane": 13,
-      "showPathColorLane": 14,
-      "showPathColorCruiseOff": 14,
+      "showPathMode": 0,
+      "showPathColor": 3,
+      "showPathModeLane": 0,
+      "showPathColorLane": 3,
+      "showPathColorCruiseOff": 3,
+      "showRadarInfo": 0,
+      "radarLatFactor": 20.0,
     }
+    self._plot_mode_last_read = 0.0
+    self._plot_mode_cache = 0
     self._cached_calibration_last_read = 0.0
     self._cached_calibration_cache: dict[str, Any] | None = None
+    self._overlay2d_cache_key: tuple[Any, ...] | None = None
+    self._overlay2d_cache_value: dict[str, Any] | None = None
+    self._live_send_failures: dict[web.WebSocketResponse, int] = {}
+    self._live_send_drop_count = 0
+    self._last_live_build_ms = 0.0
+    self._last_live_send_batch_ms = 0.0
 
     self._init_messaging()
-    self._init_logreader()
     self._init_params()
 
   def _init_messaging(self) -> None:
@@ -1038,17 +1739,6 @@ class SidecarApp:
       self._camera_hub = None
       self.last_error = f"messaging init failed: {e}"
       print(f"[sidecar] {self.last_error}")
-
-  def _init_logreader(self) -> None:
-    try:
-      _ensure_pythonpath(self.repo)
-      from tools.lib.logreader import LogReader  # type: ignore
-
-      self._logreader_cls = LogReader
-      print("[sidecar] logreader ready")
-    except Exception as e:
-      self._logreader_cls = None
-      print(f"[sidecar] logreader unavailable: {e}")
 
   def _init_params(self) -> None:
     try:
@@ -1078,10 +1768,133 @@ class SidecarApp:
         "showPathColorLane": int(self._params.get_int("ShowPathColorLane")),
         "showPathColorCruiseOff": int(self._params.get_int("ShowPathColorCruiseOff")),
         "showPathWidth": int(self._params.get_int("ShowPathWidth")),
+        "showRadarInfo": int(self._params.get_int("ShowRadarInfo")),
+        "radarLatFactor": float(self._params.get_float("RadarLatFactor")),
       }
     except Exception:
       pass
     return dict(self._path_style_cache)
+
+  def _read_plot_mode(self) -> int:
+    now = time.monotonic()
+    if now - self._plot_mode_last_read < 1.0:
+      return self._plot_mode_cache
+    self._plot_mode_last_read = now
+    if self._params is None:
+      return self._plot_mode_cache
+    try:
+      self._plot_mode_cache = int(self._params.get_int("ShowPlotMode"))
+    except Exception:
+      pass
+    return self._plot_mode_cache
+
+  def _build_debug_plot(self) -> dict[str, Any] | None:
+    mode = self._read_plot_mode()
+    if mode <= 0 or self.sm is None:
+      return None
+    if not self.sm.alive.get("carState", False):
+      return None
+    if not self.sm.alive.get("longitudinalPlan", False):
+      return None
+
+    car_state = self.sm["carState"]
+    lp = self.sm["longitudinalPlan"]
+    car_control = self.sm["carControl"] if self.sm.alive.get("carControl", False) else None
+    controls_state = self.sm["controlsState"] if self.sm.alive.get("controlsState", False) else None
+    model = self.sm["modelV2"] if self.sm.alive.get("modelV2", False) else None
+    radar_state = self.sm["radarState"] if self.sm.alive.get("radarState", False) else None
+    live_params = self.sm["liveParameters"] if self.sm.alive.get("liveParameters", False) else None
+
+    def fv(raw: Any, default: float = 0.0) -> float:
+      value = _safe_float(raw)
+      if value is None or not math.isfinite(value):
+        return default
+      return float(value)
+
+    def seq_value(raw: Any, idx: int, default: float = 0.0) -> float:
+      try:
+        seq = list(raw)
+      except Exception:
+        return default
+      if idx < 0 or idx >= len(seq):
+        return default
+      return fv(seq[idx], default)
+
+    actuators = getattr(car_control, "actuators", None) if car_control is not None else None
+    lateral_state = getattr(controls_state, "lateralControlState", None) if controls_state is not None else None
+    torque_state = None
+    if lateral_state is not None:
+      try:
+        if lateral_state.which() == "torqueState":
+          torque_state = getattr(lateral_state, "torqueState", None)
+      except Exception:
+        torque_state = getattr(lateral_state, "torqueState", None)
+
+    position = getattr(model, "position", None) if model is not None else None
+    velocity = getattr(model, "velocity", None) if model is not None else None
+    lead_one = getattr(radar_state, "leadOne", None) if radar_state is not None else None
+
+    values = [0.0, 0.0, 0.0]
+    title = "no data"
+    if mode == 1:
+      values = [
+        fv(getattr(car_state, "aEgo", None)),
+        seq_value(getattr(lp, "accels", []), 0),
+        fv(getattr(actuators, "accel", None)),
+      ]
+      title = "1.Accel (Y:a_ego, G:a_target, O:a_out)"
+    elif mode == 2:
+      values = [
+        seq_value(getattr(lp, "speeds", []), 0),
+        fv(getattr(car_state, "vEgo", None)),
+        fv(getattr(car_state, "aEgo", None)),
+      ]
+      title = "2.Speed/Accel(Y:speed_0, G:v_ego, O:a_ego)"
+    elif mode == 3:
+      values = [
+        seq_value(getattr(position, "x", []), 32),
+        seq_value(getattr(velocity, "x", []), 32),
+        seq_value(getattr(velocity, "x", []), 0),
+      ]
+      title = "3.Model(Y:pos_32, G:vel_32, O:vel_0)"
+    elif mode == 4:
+      values = [
+        seq_value(getattr(lp, "accels", []), 0),
+        fv(getattr(lead_one, "aLeadK", None)),
+        fv(getattr(lead_one, "vRel", None)),
+      ]
+      title = "4.Lead(Y:accel, G:a_lead, O:v_rel)"
+    elif mode == 5:
+      values = [
+        fv(getattr(car_state, "aEgo", None)),
+        fv(getattr(lead_one, "aLead", None)),
+        fv(getattr(lead_one, "jLead", None)),
+      ]
+      title = "5.Lead(Y:a_ego, G:a_lead, O:j_lead)"
+    elif mode == 6:
+      values = [
+        fv(getattr(torque_state, "actualLateralAccel", None)) * 10.0,
+        fv(getattr(torque_state, "desiredLateralAccel", None)) * 10.0,
+        fv(getattr(torque_state, "output", None)) * 10.0,
+      ]
+      title = "6.Steer(Y:actual, G:desire, O:output)"
+    elif mode == 7:
+      values = [
+        fv(getattr(car_state, "steeringAngleDeg", None)),
+        fv(getattr(actuators, "steeringAngleDeg", None)),
+        fv(getattr(live_params, "angleOffsetDeg", None)) * 10.0,
+      ]
+      title = "7.SteerA (Y:Actual, G:Target, O:Offset*10)"
+    elif mode == 8:
+      curvature = fv(getattr(actuators, "curvature", None)) * 10000.0
+      values = [curvature, curvature, curvature]
+      title = "8.SteerA (Y:Actual, G:Target, O:Offset*10)"
+
+    return {
+      "mode": mode,
+      "title": title,
+      "values": values,
+    }
 
   def _read_cached_calibration(self) -> dict[str, Any] | None:
     now = time.monotonic()
@@ -1152,9 +1965,19 @@ class SidecarApp:
   def _payload_device_state(self, ds: Any) -> dict[str, Any]:
     cpu_list = getattr(ds, "cpuTempC", None)
     cpu_temp = None
-    if isinstance(cpu_list, (list, tuple)) and len(cpu_list) > 0:
+    if cpu_list is not None:
       try:
-        cpu_temp = max(float(v) for v in cpu_list)
+        values: list[float] = []
+        for v in cpu_list:
+          fv = _safe_float(v)
+          if fv is not None and math.isfinite(fv) and fv > 0.0:
+            values.append(fv)
+        if values:
+          cpu_temp = max(values)
+      except TypeError:
+        fv = _safe_float(cpu_list)
+        if fv is not None and math.isfinite(fv) and fv > 0.0:
+          cpu_temp = fv
       except Exception:
         cpu_temp = None
     mem_pct = _safe_float(getattr(ds, "memoryUsagePercent", None))
@@ -1185,6 +2008,10 @@ class SidecarApp:
   def _payload_longitudinal_plan(self, lp: Any) -> dict[str, Any]:
     out = {
       "xState": _safe_int(getattr(lp, "xState", None)),
+      "trafficState": _safe_int(getattr(lp, "trafficState", None)),
+      "longitudinalPlanSource": _safe_int(getattr(lp, "longitudinalPlanSource", None)),
+      "tFollow": _safe_float(getattr(lp, "tFollow", None)),
+      "desiredDistance": _safe_float(getattr(lp, "desiredDistance", None)),
     }
     try:
       accels = list(getattr(lp, "accels", []))
@@ -1246,6 +2073,75 @@ class SidecarApp:
   def _payload_wide_road_camera_state(self, rcs: Any) -> dict[str, Any]:
     return self._payload_road_camera_state(rcs)
 
+  def _payload_carrot_man(self, cm: Any) -> dict[str, Any]:
+    navi_paths = str(getattr(cm, "naviPaths", "") or "")
+    # Keep payload bounded when path text is unexpectedly large.
+    if len(navi_paths) > 12000:
+      navi_paths = navi_paths[:12000]
+    return {
+      "activeCarrot": _safe_int(getattr(cm, "activeCarrot", None)),
+      "xTurnInfo": _safe_int(getattr(cm, "xTurnInfo", None)),
+      "xDistToTurn": _safe_float(getattr(cm, "xDistToTurn", None)),
+      "xTurnCountDown": _safe_int(getattr(cm, "xTurnCountDown", None)),
+      "szTBTMainText": str(getattr(cm, "szTBTMainText", "") or ""),
+      "szPosRoadName": str(getattr(cm, "szPosRoadName", "") or ""),
+      "szSdiDescr": str(getattr(cm, "szSdiDescr", "") or ""),
+      "trafficState": _safe_int(getattr(cm, "trafficState", None)),
+      "atcType": str(getattr(cm, "atcType", "") or ""),
+      "remote": str(getattr(cm, "remote", "") or ""),
+      "nRoadLimitSpeed": _safe_int(getattr(cm, "nRoadLimitSpeed", None)),
+      "xSpdType": _safe_int(getattr(cm, "xSpdType", None)),
+      "xSpdLimit": _safe_int(getattr(cm, "xSpdLimit", None)),
+      "xSpdDist": _safe_float(getattr(cm, "xSpdDist", None)),
+      "xSpdCountDown": _safe_int(getattr(cm, "xSpdCountDown", None)),
+      "vTurnSpeed": _safe_float(getattr(cm, "vTurnSpeed", None)),
+      "nGoPosDist": _safe_float(getattr(cm, "nGoPosDist", None)),
+      "nGoPosTime": _safe_float(getattr(cm, "nGoPosTime", None)),
+      "leftSec": _safe_int(getattr(cm, "leftSec", None)),
+      "xPosLat": _safe_float(getattr(cm, "xPosLat", None)),
+      "xPosLon": _safe_float(getattr(cm, "xPosLon", None)),
+      "xPosAngle": _safe_float(getattr(cm, "xPosAngle", None)),
+      "xPosSpeed": _safe_float(getattr(cm, "xPosSpeed", None)),
+      "naviPaths": navi_paths,
+    }
+
+  def _payload_nav_instruction_carrot(self, ni: Any) -> dict[str, Any]:
+    all_maneuvers: list[dict[str, Any]] = []
+    try:
+      for m in list(getattr(ni, "allManeuvers", []))[:8]:
+        if isinstance(m, dict):
+          all_maneuvers.append(
+            {
+              "distance": _safe_float(m.get("distance")),
+              "type": str(m.get("type", "") or ""),
+              "modifier": str(m.get("modifier", "") or ""),
+            }
+          )
+        else:
+          all_maneuvers.append(
+            {
+              "distance": _safe_float(getattr(m, "distance", None)),
+              "type": str(getattr(m, "type", "") or ""),
+              "modifier": str(getattr(m, "modifier", "") or ""),
+            }
+          )
+    except Exception:
+      pass
+    return {
+      "maneuverPrimaryText": str(getattr(ni, "maneuverPrimaryText", "") or ""),
+      "maneuverSecondaryText": str(getattr(ni, "maneuverSecondaryText", "") or ""),
+      "maneuverType": str(getattr(ni, "maneuverType", "") or ""),
+      "maneuverModifier": str(getattr(ni, "maneuverModifier", "") or ""),
+      "maneuverDistance": _safe_float(getattr(ni, "maneuverDistance", None)),
+      "distanceRemaining": _safe_float(getattr(ni, "distanceRemaining", None)),
+      "timeRemaining": _safe_float(getattr(ni, "timeRemaining", None)),
+      "timeRemainingTypical": _safe_float(getattr(ni, "timeRemainingTypical", None)),
+      "speedLimit": _safe_float(getattr(ni, "speedLimit", None)),
+      "speedLimitSign": str(getattr(ni, "speedLimitSign", "") or ""),
+      "showFull": bool(getattr(ni, "showFull", False)),
+      "allManeuvers": all_maneuvers,
+    }
+
   def _payload_model_v2(self, mv2: Any) -> dict[str, Any]:
     out: dict[str, Any] = {}
     try:
@@ -1261,6 +2157,18 @@ class SidecarApp:
         out["pathX"] = _downsample([float(v) for v in list(getattr(pos, "x", []))], 33)
         out["pathY"] = _downsample([float(v) for v in list(getattr(pos, "y", []))], 33)
         out["pathZ"] = _downsample([float(v) for v in list(getattr(pos, "z", []))], 33)
+    except Exception:
+      pass
+
+    try:
+      leads_v3 = list(getattr(mv2, "leadsV3", []))
+      if leads_v3:
+        lead0 = leads_v3[0]
+        lead_x = [float(v) for v in list(getattr(lead0, "x", []))]
+        out["leadVision"] = {
+          "prob": _safe_float(getattr(lead0, "prob", None)),
+          "x0": _safe_float(lead_x[0]) if len(lead_x) > 0 else None,
+        }
     except Exception:
       pass
 
@@ -1314,19 +2222,67 @@ class SidecarApp:
 
     return out
 
+  def _payload_radar_lead(self, lead: Any) -> dict[str, Any]:
+    out = {
+      "status": bool(getattr(lead, "status", False)),
+      "dRel": _safe_float(getattr(lead, "dRel", None)),
+      "yRel": _safe_float(getattr(lead, "yRel", None)),
+      "vRel": _safe_float(getattr(lead, "vRel", None)),
+      "vLeadK": _safe_float(getattr(lead, "vLeadK", None)),
+      "vLat": _safe_float(getattr(lead, "vLat", None)),
+      "aRel": _safe_float(getattr(lead, "aRel", None)),
+      "aLeadK": _safe_float(getattr(lead, "aLeadK", None)),
+      "radar": bool(getattr(lead, "radar", False)),
+      "radarTrackId": _safe_int(getattr(lead, "radarTrackId", None)),
+      "modelProb": _safe_float(getattr(lead, "modelProb", None)),
+      "score": _safe_float(getattr(lead, "score", None)),
+    }
+    d_path = _safe_float(getattr(lead, "dPath", None))
+    if d_path is not None:
+      out["dPath"] = d_path
+    return out
+
+  def _payload_radar_track(self, track: Any) -> dict[str, Any]:
+    out = {
+      "dRel": _safe_float(getattr(track, "dRel", None)),
+      "yRel": _safe_float(getattr(track, "yRel", None)),
+      "vRel": _safe_float(getattr(track, "vRel", None)),
+      "vLeadK": _safe_float(getattr(track, "vLeadK", None)),
+      "vLat": _safe_float(getattr(track, "vLat", None)),
+      "aRel": _safe_float(getattr(track, "aRel", None)),
+      "aLeadK": _safe_float(getattr(track, "aLeadK", None)),
+      "radar": bool(getattr(track, "radar", False)),
+      "radarTrackId": _safe_int(getattr(track, "radarTrackId", None)),
+      "modelProb": _safe_float(getattr(track, "modelProb", None)),
+      "score": _safe_float(getattr(track, "score", None)),
+    }
+    d_path = _safe_float(getattr(track, "dPath", None))
+    if d_path is not None:
+      out["dPath"] = d_path
+    return out
+
   def _payload_radar_state(self, rs: Any) -> dict[str, Any]:
     out: dict[str, Any] = {}
     try:
-      lead = getattr(rs, "leadOne", None)
-      if lead is not None:
-        out["leadOne"] = {
-          "status": bool(getattr(lead, "status", False)),
-          "dRel": _safe_float(getattr(lead, "dRel", None)),
-          "vRel": _safe_float(getattr(lead, "vRel", None)),
-          "aRel": _safe_float(getattr(lead, "aRel", None)),
-        }
+      lead_one = getattr(rs, "leadOne", None)
+      if lead_one is not None:
+        out["leadOne"] = self._payload_radar_lead(lead_one)
     except Exception:
       pass
+    try:
+      lead_two = getattr(rs, "leadTwo", None)
+      if lead_two is not None:
+        out["leadTwo"] = self._payload_radar_lead(lead_two)
+    except Exception:
+      pass
+    for group in ("leadsLeft", "leadsRight", "leadsCenter"):
+      try:
+        packed: list[dict[str, Any]] = []
+        for track in list(getattr(rs, group, []))[:16]:
+          packed.append(self._payload_radar_track(track))
+        out[group] = packed
+      except Exception:
+        pass
     return out
 
   def _build_live_payload(self) -> dict[str, Any]:
@@ -1388,13 +2344,26 @@ class SidecarApp:
         )
     except Exception:
       pass
-    if self.profile in ("p2", "p3"):
+    if self.profile in ("p2", "p3", "p4"):
+      try:
+        if self.sm.alive.get("carrotMan", False):
+          payload["carrotMan"] = self._payload_carrot_man(self.sm["carrotMan"])
+      except Exception:
+        pass
+      try:
+        if self.sm.alive.get("navInstructionCarrot", False):
+          payload["navInstructionCarrot"] = self._payload_nav_instruction_carrot(
+            self.sm["navInstructionCarrot"]
+          )
+      except Exception:
+        pass
+    if self.profile in ("p2", "p3", "p4"):
       try:
         if self.sm.alive.get("modelV2", False):
           payload["modelV2"] = self._payload_model_v2(self.sm["modelV2"])
       except Exception:
         pass
-    if self.profile in ("p2", "p3"):
+    if self.profile in ("p2", "p3", "p4"):
       try:
         if self.sm.alive.get("radarState", False):
           payload["radarState"] = self._payload_radar_state(self.sm["radarState"])
@@ -1406,431 +2375,96 @@ class SidecarApp:
     if cached_calib is not None:
       payload["cachedCalibration"] = cached_calib
     payload["pathStyle"] = self._read_path_style()
-    return payload
-
-  def _list_replay_routes(self, limit: int = 200) -> list[dict[str, Any]]:
-    root = self.realdata_root
-    if not os.path.isdir(root):
-      return []
-
-    grouped: dict[str, dict[str, Any]] = {}
-    try:
-      names = os.listdir(root)
-    except Exception:
-      return []
-    for name in names:
-      full = os.path.join(root, name)
-      if not os.path.isdir(full):
-        continue
-      if "--" not in name:
-        continue
-      base, seg_str = name.rsplit("--", 1)
-      try:
-        seg = int(seg_str)
-      except Exception:
-        continue
-      latest = int(os.path.getmtime(full))
-      entry = grouped.get(base)
-      if entry is None:
-        entry = {
-          "route": base,
-          "segments": [],
-          "latestModifiedEpoch": latest,
-        }
-        grouped[base] = entry
-      entry["segments"].append(seg)
-      if latest > entry["latestModifiedEpoch"]:
-        entry["latestModifiedEpoch"] = latest
-
-    items = []
-    for value in grouped.values():
-      segs = sorted(set(value["segments"]))
-      items.append(
-        {
-          "route": value["route"],
-          "segments": segs,
-          "latestModifiedEpoch": value["latestModifiedEpoch"],
-        }
-      )
-    items.sort(
-      key=lambda x: (int(x["latestModifiedEpoch"]), str(x["route"])),
-      reverse=True,
-    )
-    return items[: max(1, limit)]
-
-  def _resolve_replay_log(self, route: str, segment: int) -> tuple[str | None, str]:
-    route = route.strip()
-    if not route:
-      return None, "route is empty"
-    if segment < 0:
-      return None, "segment must be >= 0"
-    folder = f"{route}--{segment}"
-    base = os.path.join(self.realdata_root, folder)
-    if not os.path.isdir(base):
-      return None, f"segment folder not found: {base}"
-
-    candidates = [
-      "rlog.zst",
-      "rlog.bz2",
-      "rlog",
-      "qlog.zst",
-      "qlog.bz2",
-      "qlog",
-    ]
-    for name in candidates:
-      path = os.path.join(base, name)
-      if os.path.isfile(path):
-        return path, ""
-
-    try:
-      dynamic = sorted(os.listdir(base))
-    except Exception:
-      dynamic = []
-    for name in dynamic:
-      lower = name.lower()
-      if lower.startswith("rlog") or lower.startswith("qlog"):
-        path = os.path.join(base, name)
-        if os.path.isfile(path):
-          return path, ""
-    return None, f"no rlog/qlog file in {base}"
-
-  def _estimate_fps(self, times_sec: list[float]) -> float | None:
-    if len(times_sec) < 3:
-      return None
-    deltas: list[float] = []
-    for i in range(1, len(times_sec)):
-      dt = times_sec[i] - times_sec[i - 1]
-      if dt > 1e-6:
-        deltas.append(dt)
-    if not deltas:
-      return None
-    deltas.sort()
-    median_dt = deltas[len(deltas) // 2]
-    if median_dt <= 1e-6:
-      return None
-    return 1.0 / median_dt
-
-  def _build_replay_camera_timeline(self, route: str, segment: int) -> tuple[dict[str, Any] | None, str]:
-    if self._logreader_cls is None:
-      return None, "logreader unavailable (tools.lib.logreader)"
-
-    path, error = self._resolve_replay_log(route, segment)
-    if path is None:
-      return None, error
-
-    try:
-      st = os.stat(path)
-      mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
-      size_b = int(st.st_size)
-    except Exception:
-      mtime_ns = 0
-      size_b = 0
-    cache_key = (route, int(segment), f"{path}:{mtime_ns}:{size_b}")
-    cached = self._replay_timeline_cache.get(cache_key)
-    if cached is not None:
-      return cached, ""
-
-    try:
-      reader = self._logreader_cls(path)
-      iterator = iter(reader)
-    except Exception as e:
-      return None, f"failed to open log: {e}"
-
-    road_ids: list[int] = []
-    road_ts: list[int] = []
-    wide_ids: list[int] = []
-    wide_ts: list[int] = []
-
-    for msg in iterator:
-      try:
-        which = msg.which()
-      except Exception:
-        continue
-      if which != "roadCameraState" and which != "wideRoadCameraState":
-        continue
-      try:
-        item = getattr(msg, which)
-      except Exception:
-        continue
-      frame_id = _safe_int(getattr(item, "frameId", None))
-      ts_eof = _safe_int(getattr(item, "timestampEof", None))
-      if frame_id is None or ts_eof is None:
-        continue
-      if which == "roadCameraState":
-        if road_ids and frame_id <= road_ids[-1]:
-          continue
-        if road_ts and ts_eof <= road_ts[-1]:
-          continue
-        road_ids.append(frame_id)
-        road_ts.append(ts_eof)
-      else:
-        if wide_ids and frame_id <= wide_ids[-1]:
-          continue
-        if wide_ts and ts_eof <= wide_ts[-1]:
-          continue
-        wide_ids.append(frame_id)
-        wide_ts.append(ts_eof)
-
-    def _pack(ids: list[int], ts: list[int]) -> dict[str, Any]:
-      if not ids or not ts:
-        return {
-          "frameIds": [],
-          "tSec": [],
-          "fps": None,
-          "startFrameId": None,
-          "endFrameId": None,
-          "durationSec": 0.0,
-        }
-      base_ts = ts[0]
-      t_sec = [max(0.0, (t - base_ts) / 1e9) for t in ts]
-      fps = self._estimate_fps(t_sec)
-      duration = t_sec[-1] if t_sec else 0.0
-      return {
-        "frameIds": ids,
-        "tSec": t_sec,
-        "fps": fps,
-        "startFrameId": ids[0],
-        "endFrameId": ids[-1],
-        "durationSec": duration,
-      }
-
-    road = _pack(road_ids, road_ts)
-    wide = _pack(wide_ids, wide_ts)
-    preferred = "road"
-    if not road["frameIds"] and wide["frameIds"]:
-      preferred = "wideRoad"
-
-    timeline: dict[str, Any] = {
-      "ok": True,
-      "route": route,
-      "segment": int(segment),
-      "logPath": path,
-      "preferredCamera": preferred,
-      "streams": {
-        "road": road,
-        "wideRoad": wide,
-      },
-    }
-    self._replay_timeline_cache[cache_key] = timeline
-    return timeline, ""
-
-  def _stop_replay(self) -> None:
-    self.replay_active = False
-    self.replay_finished = False
-    self.replay_route = ""
-    self.replay_segment = -1
-    self.replay_log_path = ""
-    self.replay_error = ""
-    self.replay_speed = 1.0
-    self._replay_reader = None
-    self._replay_iter = None
-    self._replay_cache = {}
-
-  def _start_replay(self, route: str, segment: int, speed: float = 1.0) -> tuple[bool, str]:
-    if self._logreader_cls is None:
-      return False, "logreader unavailable (tools.lib.logreader)"
-
-    path, error = self._resolve_replay_log(route, segment)
-    if path is None:
-      return False, error
-
-    self._stop_replay()
-    try:
-      self._replay_reader = self._logreader_cls(path)
-      self._replay_iter = iter(self._replay_reader)
-    except Exception as e:
-      self._stop_replay()
-      return False, f"failed to open log: {e}"
-
-    self.replay_active = True
-    self.replay_finished = False
-    self.replay_route = route.strip()
-    self.replay_segment = int(segment)
-    self.replay_log_path = path
-    self.replay_speed = max(0.25, min(float(speed), 8.0))
-    return True, "replay started"
-
-  def _apply_replay_message(self, which: str, item: Any) -> None:
-    if which == "carState":
-      self._replay_cache["carState"] = self._payload_car_state(item)
-      return
-    if which == "deviceState":
-      self._replay_cache["deviceState"] = self._payload_device_state(item)
-      return
-    if which == "selfdriveState":
-      self._replay_cache["selfdriveState"] = self._payload_selfdrive_state(item)
-      return
-    if which == "controlsState":
-      self._replay_cache["controlsState"] = self._payload_controls_state(item)
-      return
-    if which == "longitudinalPlan":
-      self._replay_cache["longitudinalPlan"] = self._payload_longitudinal_plan(item)
-      return
-    if which == "lateralPlan":
-      self._replay_cache["lateralPlan"] = self._payload_lateral_plan(item)
-      return
-    if which == "liveCalibration":
-      self._replay_cache["liveCalibration"] = self._payload_live_calibration(item)
-      return
-    if which == "roadCameraState":
-      self._replay_cache["roadCameraState"] = self._payload_road_camera_state(item)
-      return
-    if which == "wideRoadCameraState":
-      self._replay_cache["wideRoadCameraState"] = self._payload_wide_road_camera_state(item)
-      return
-    if which == "modelV2":
-      self._replay_cache["modelV2"] = self._payload_model_v2(item)
-      return
-    if which == "radarState":
-      self._replay_cache["radarState"] = self._payload_radar_state(item)
-      return
-
-  def _build_replay_payload(self) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-      "ts": time.time(),
-      "profile": self.profile,
-      "repo": self.repo,
-      "source": "replay",
-      "replay": {
-        "active": self.replay_active,
-        "finished": self.replay_finished,
-        "route": self.replay_route,
-        "segment": self.replay_segment,
-        "speed": self.replay_speed,
-      },
-    }
-    cached_calib = self._read_cached_calibration()
-    if cached_calib is not None:
-      payload["cachedCalibration"] = cached_calib
-    payload["pathStyle"] = self._read_path_style()
-
-    if not self.replay_active or self._replay_iter is None:
-      payload["error"] = self.replay_error or "replay not active"
-      return payload
-
-    model_needed = self.profile in ("p2", "p3")
-    message_budget = int(220 * self.replay_speed)
-    message_budget = min(max(message_budget, 80), 1200)
-
-    got_model = False
-    target_model_frame: int | None = None
-    best_road: dict[str, Any] | None = None
-    best_road_gap: int | None = None
-    best_wide: dict[str, Any] | None = None
-    best_wide_gap: int | None = None
-    post_model_scan_budget = 140 if model_needed else 0
-    post_model_scan_count = 0
-
-    def _update_best_camera(which: str) -> None:
-      nonlocal best_road, best_road_gap, best_wide, best_wide_gap
-      if target_model_frame is None:
-        return
-      if which == "roadCameraState":
-        candidate = self._replay_cache.get("roadCameraState")
-        if not isinstance(candidate, dict):
-          return
-        frame_id = _safe_int(candidate.get("frameId"))
-        if frame_id is None:
-          return
-        gap = abs(frame_id - target_model_frame)
-        if best_road_gap is None or gap < best_road_gap:
-          best_road_gap = gap
-          best_road = dict(candidate)
-        return
-      if which == "wideRoadCameraState":
-        candidate = self._replay_cache.get("wideRoadCameraState")
-        if not isinstance(candidate, dict):
-          return
-        frame_id = _safe_int(candidate.get("frameId"))
-        if frame_id is None:
-          return
-        gap = abs(frame_id - target_model_frame)
-        if best_wide_gap is None or gap < best_wide_gap:
-          best_wide_gap = gap
-          best_wide = dict(candidate)
-        return
-
-    for _ in range(message_budget):
-      try:
-        msg = next(self._replay_iter)
-      except StopIteration:
-        self.replay_active = False
-        self.replay_finished = True
-        break
-      except Exception as e:
-        self.replay_active = False
-        self.replay_error = f"replay read failed: {e}"
-        break
-
-      try:
-        which = msg.which()
-      except Exception:
-        continue
-      if which not in self.PROFILE_SERVICES.get(self.profile, []):
-        continue
-      try:
-        item = getattr(msg, which)
-      except Exception:
-        continue
-      self._apply_replay_message(which, item)
-      if which == "modelV2":
-        got_model = True
-        model = self._replay_cache.get("modelV2")
-        if isinstance(model, dict):
-          target_model_frame = _safe_int(model.get("frameId"))
-          _update_best_camera("roadCameraState")
-          _update_best_camera("wideRoadCameraState")
-        if not model_needed:
-          break
-        if post_model_scan_budget <= 0:
-          break
-        continue
-      if target_model_frame is not None:
-        if which == "roadCameraState" or which == "wideRoadCameraState":
-          _update_best_camera(which)
-        if model_needed and got_model:
-          post_model_scan_count += 1
-          if post_model_scan_count >= post_model_scan_budget:
-            break
-
-    if best_road is not None:
-      self._replay_cache["roadCameraState"] = best_road
-    if best_wide is not None:
-      self._replay_cache["wideRoadCameraState"] = best_wide
-
-    payload.update(self._replay_cache)
-    replay_meta = payload.get("replay")
-    if isinstance(replay_meta, dict):
-      replay_meta["modelFrameId"] = target_model_frame
-      road = payload.get("roadCameraState")
-      if isinstance(road, dict):
-        road_id = _safe_int(road.get("frameId"))
-        replay_meta["roadFrameId"] = road_id
-        if road_id is not None and target_model_frame is not None:
-          replay_meta["roadGap"] = abs(target_model_frame - road_id)
-      wide = payload.get("wideRoadCameraState")
-      if isinstance(wide, dict):
-        wide_id = _safe_int(wide.get("frameId"))
-        replay_meta["wideRoadFrameId"] = wide_id
-        if wide_id is not None and target_model_frame is not None:
-          replay_meta["wideRoadGap"] = abs(target_model_frame - wide_id)
-    if self.replay_error:
-      payload["error"] = self.replay_error
-      payload["replay"]["error"] = self.replay_error
-    if self.replay_finished:
-      payload["replay"]["active"] = False
-      payload["replay"]["finished"] = True
-    if model_needed and not got_model and "modelV2" not in self._replay_cache:
-      payload["replay"]["note"] = "modelV2 not found yet"
+    debug_plot = self._build_debug_plot()
+    if debug_plot is not None:
+      payload["debugPlot"] = debug_plot
     return payload
 
   def _build_payload(self) -> dict[str, Any]:
-    if self.replay_active:
-      payload = self._build_replay_payload()
-    else:
-      payload = self._build_live_payload()
+    return self._build_payload_for_camera_mode("both")
+
+  def _normalize_overlay_camera_mode(self, mode: Any) -> str:
+    v = str(mode or "").strip()
+    if v == "road":
+      return "road"
+    if v == "wideRoad":
+      return "wideRoad"
+    return "both"
+
+  def _overlay2d_cache_key_for(
+    self,
+    payload: dict[str, Any],
+    camera_mode: str,
+  ) -> tuple[Any, ...]:
+    model_v2 = payload.get("modelV2") if isinstance(payload.get("modelV2"), dict) else {}
+    road_state = payload.get("roadCameraState") if isinstance(payload.get("roadCameraState"), dict) else {}
+    wide_state = payload.get("wideRoadCameraState") if isinstance(payload.get("wideRoadCameraState"), dict) else {}
+    path_style = payload.get("pathStyle") if isinstance(payload.get("pathStyle"), dict) else {}
+    controls_state = payload.get("controlsState") if isinstance(payload.get("controlsState"), dict) else {}
+    selfdrive_state = payload.get("selfdriveState") if isinstance(payload.get("selfdriveState"), dict) else {}
+    car_state = payload.get("carState") if isinstance(payload.get("carState"), dict) else {}
+    radar_state = payload.get("radarState") if isinstance(payload.get("radarState"), dict) else {}
+    live_calib = payload.get("liveCalibration") if isinstance(payload.get("liveCalibration"), dict) else {}
+    cached_calib = payload.get("cachedCalibration") if isinstance(payload.get("cachedCalibration"), dict) else {}
+
+    def _calib_tuple(raw: dict[str, Any]) -> tuple[Any, ...]:
+      rpy = _as_double_list(raw.get("rpyCalib"))
+      wide = _as_double_list(raw.get("wideFromDeviceEuler"))
+      h = _safe_float(raw.get("height"))
+      return (
+        tuple(round(v, 6) for v in rpy[:3]),
+        tuple(round(v, 6) for v in wide[:3]),
+        round(h, 6) if h is not None else None,
+      )
+
+    def _lead_tuple(raw: Any) -> tuple[Any, ...]:
+      lead = raw if isinstance(raw, dict) else {}
+      return (
+        _as_bool(lead.get("status")),
+        _as_bool(lead.get("radar")),
+        _safe_int(lead.get("radarTrackId")),
+        round((_safe_float(lead.get("dRel")) or 0.0), 3),
+        round((_safe_float(lead.get("yRel")) or 0.0), 3),
+        round((_safe_float(lead.get("dPath")) or 0.0), 3),
+      )
+
+    return (
+      camera_mode,
+      _safe_int(model_v2.get("frameId")),
+      _safe_int(road_state.get("frameId")),
+      _safe_int(wide_state.get("frameId")),
+      _safe_int(path_style.get("showPathMode")),
+      _safe_int(path_style.get("showPathColor")),
+      _safe_int(path_style.get("showPathModeLane")),
+      _safe_int(path_style.get("showPathColorLane")),
+      _safe_int(path_style.get("showPathColorCruiseOff")),
+      _safe_int(path_style.get("showPathWidth")),
+      _safe_int(path_style.get("showRadarInfo")),
+      _safe_int(car_state.get("leftLaneLine")),
+      _safe_int(car_state.get("rightLaneLine")),
+      _safe_int(car_state.get("useLaneLineSpeed")),
+      _as_bool(car_state.get("brakeLights")),
+      _as_bool(controls_state.get("activeLaneLine")),
+      _as_bool(selfdrive_state.get("active")),
+      _lead_tuple(radar_state.get("leadOne")),
+      _lead_tuple(radar_state.get("leadTwo")),
+      _calib_tuple(live_calib),
+      _calib_tuple(cached_calib),
+    )
+
+  def _build_payload_for_camera_mode(self, camera_mode: str) -> dict[str, Any]:
+    payload = self._build_live_payload()
     try:
-      overlay2d = _build_overlay2d(payload)
+      mode = self._normalize_overlay_camera_mode(camera_mode)
+      cache_key = self._overlay2d_cache_key_for(payload, mode)
+      overlay2d: dict[str, Any] | None = None
+      if self._overlay2d_cache_key == cache_key and self._overlay2d_cache_value is not None:
+        overlay2d = self._overlay2d_cache_value
+      else:
+        payload["_overlayCameraMode"] = mode
+        overlay2d = _build_overlay2d(payload)
+        self._overlay2d_cache_key = cache_key
+        self._overlay2d_cache_value = overlay2d
       if overlay2d is not None:
         payload["overlay2d"] = overlay2d
     except Exception:
@@ -1841,30 +2475,81 @@ class SidecarApp:
   async def _broadcast_loop(self, app: web.Application) -> None:
     while True:
       try:
+        base_interval = self.PROFILE_INTERVAL.get(self.profile, 0.12)
+        live_send_timeout = min(max(base_interval * 2.5, 0.08), 0.2)
         if self.clients:
-          payload = self._build_payload()
-          message = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-          message_bytes = message.encode("utf-8")
-          compressed: bytes | None = None
+          payload_cache: dict[str, tuple[str, bytes]] = {}
+          compressed_cache: dict[str, bytes] = {}
           stale: list[web.WebSocketResponse] = []
-          for ws, encoding in list(self.clients.items()):
+          send_jobs: list[tuple[web.WebSocketResponse, asyncio.Task[Any]]] = []
+          batch_started = time.monotonic()
+          for ws, entry in list(self.clients.items()):
+            encoding, camera_mode = entry
             try:
-              if encoding == "zlib-json":
-                if compressed is None:
-                  compressed = zlib.compress(message_bytes, level=1)
-                await ws.send_bytes(compressed)
+              mode = self._normalize_overlay_camera_mode(camera_mode)
+              cached = payload_cache.get(mode)
+              if cached is None:
+                build_started = time.monotonic()
+                payload = self._build_payload_for_camera_mode(mode)
+                message = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+                message_bytes = message.encode("utf-8")
+                payload_cache[mode] = (message, message_bytes)
+                self._last_live_build_ms = max(
+                  0.0,
+                  (time.monotonic() - build_started) * 1000.0,
+                )
               else:
-                await ws.send_str(message)
+                message, message_bytes = cached
+              if encoding == "zlib-json":
+                comp = compressed_cache.get(mode)
+                if comp is None:
+                  comp = zlib.compress(message_bytes, level=1)
+                  compressed_cache[mode] = comp
+                send_jobs.append(
+                  (
+                    ws,
+                    asyncio.create_task(
+                      asyncio.wait_for(ws.send_bytes(comp), timeout=live_send_timeout)
+                    ),
+                  )
+                )
+              else:
+                send_jobs.append(
+                  (
+                    ws,
+                    asyncio.create_task(
+                      asyncio.wait_for(ws.send_str(message), timeout=live_send_timeout)
+                    ),
+                  )
+                )
             except Exception:
               stale.append(ws)
+          if send_jobs:
+            results = await asyncio.gather(
+              *[task for _, task in send_jobs],
+              return_exceptions=True,
+            )
+            self._last_live_send_batch_ms = max(
+              0.0,
+              (time.monotonic() - batch_started) * 1000.0,
+            )
+            for (ws, _), result in zip(send_jobs, results):
+              if not isinstance(result, Exception):
+                self._live_send_failures.pop(ws, None)
+                continue
+              fail_count = self._live_send_failures.get(ws, 0) + 1
+              self._live_send_failures[ws] = fail_count
+              if fail_count >= 3:
+                stale.append(ws)
+                self._live_send_drop_count += 1
           for ws in stale:
             self.clients.pop(ws, None)
-        base_interval = self.PROFILE_INTERVAL.get(self.profile, 0.12)
-        if self.replay_active:
-          sleep_s = max(0.03, base_interval / max(self.replay_speed, 0.25))
-        else:
-          sleep_s = base_interval
-        await asyncio.sleep(sleep_s)
+            self._live_send_failures.pop(ws, None)
+            try:
+              await ws.close(code=1011, message=b"broadcast_send_failed")
+            except Exception:
+              pass
+        await asyncio.sleep(base_interval)
       except asyncio.CancelledError:
         break
       except Exception as e:
@@ -1875,17 +2560,19 @@ class SidecarApp:
     encoding = request.query.get("encoding", "json").strip().lower()
     if encoding not in {"json", "zlib-json"}:
       encoding = "json"
+    camera_mode = self._normalize_overlay_camera_mode(request.query.get("camera", "both"))
     ws = web.WebSocketResponse(heartbeat=20)
     await ws.prepare(request)
-    self.clients[ws] = encoding
+    self.clients[ws] = (encoding, camera_mode)
     try:
       await ws.send_str(
         json.dumps(
           {
             "type": "hello",
             "profile": self.profile,
-            "source": "replay" if self.replay_active else "live",
+            "source": "live",
             "encoding": encoding,
+            "cameraMode": camera_mode,
           }
         )
       )
@@ -1914,17 +2601,14 @@ class SidecarApp:
         "profile": self.profile,
         "clients": len(self.clients),
         "repo": self.repo,
-        "mode": "replay" if self.replay_active else "live",
         "error": self.last_error,
-        "cameraRelay": camera_status,
-        "replay": {
-          "active": self.replay_active,
-          "finished": self.replay_finished,
-          "route": self.replay_route,
-          "segment": self.replay_segment,
-          "logPath": self.replay_log_path,
-          "error": self.replay_error,
+        "liveRelay": {
+          "clients": len(self.clients),
+          "sendDrops": self._live_send_drop_count,
+          "lastBuildMs": round(self._last_live_build_ms, 1),
+          "lastSendBatchMs": round(self._last_live_send_batch_ms, 1),
         },
+        "cameraRelay": camera_status,
       }
     )
 
@@ -1933,6 +2617,38 @@ class SidecarApp:
       {
         "profile": self.profile,
         "profiles": list(self.PROFILE_SERVICES.keys()),
+      }
+    )
+
+  async def get_camera_quality(self, request: web.Request) -> web.Response:
+    mode = "stable"
+    if self._camera_hub is not None:
+      mode = self._camera_hub.get_quality_mode()
+    return web.json_response(
+      {
+        "ok": True,
+        "mode": mode,
+        "modes": list(CameraRelayHub.QUALITY_MODES),
+      }
+    )
+
+  async def set_camera_quality(self, request: web.Request) -> web.Response:
+    if self._camera_hub is None:
+      return web.json_response(
+        {"ok": False, "error": "camera hub unavailable"},
+        status=503,
+      )
+    try:
+      body = await request.json()
+    except Exception:
+      body = {}
+    mode = body.get("mode")
+    applied = self._camera_hub.set_quality_mode(mode)
+    return web.json_response(
+      {
+        "ok": True,
+        "mode": applied,
+        "modes": list(CameraRelayHub.QUALITY_MODES),
       }
     )
 
@@ -1948,101 +2664,6 @@ class SidecarApp:
       self.profile = profile
       self._init_messaging()
     return web.json_response({"ok": True, "profile": self.profile})
-
-  async def get_replay_routes(self, request: web.Request) -> web.Response:
-    limit_raw = request.query.get("limit", "").strip()
-    limit = 200
-    if limit_raw:
-      try:
-        limit = max(1, min(2000, int(limit_raw)))
-      except Exception:
-        limit = 200
-    routes = self._list_replay_routes(limit=limit)
-    return web.json_response(
-      {
-        "ok": True,
-        "realdataRoot": self.realdata_root,
-        "count": len(routes),
-        "routes": routes,
-      }
-    )
-
-  async def get_replay_status(self, request: web.Request) -> web.Response:
-    return web.json_response(
-      {
-        "ok": True,
-        "active": self.replay_active,
-        "finished": self.replay_finished,
-        "route": self.replay_route,
-        "segment": self.replay_segment,
-        "logPath": self.replay_log_path,
-        "speed": self.replay_speed,
-        "error": self.replay_error,
-      }
-    )
-
-  async def get_replay_camera_timeline(self, request: web.Request) -> web.Response:
-    route = request.query.get("route", "").strip()
-    segment_raw = request.query.get("segment", "").strip()
-    if not route:
-      route = self.replay_route
-    if not route:
-      return web.json_response({"ok": False, "error": "route is required"}, status=400)
-
-    if segment_raw:
-      try:
-        segment = int(segment_raw)
-      except Exception:
-        return web.json_response({"ok": False, "error": "segment must be integer"}, status=400)
-    else:
-      if self.replay_segment < 0:
-        return web.json_response({"ok": False, "error": "segment is required"}, status=400)
-      segment = int(self.replay_segment)
-
-    timeline, error = self._build_replay_camera_timeline(route, segment)
-    if timeline is None:
-      return web.json_response({"ok": False, "error": error}, status=400)
-    return web.json_response(timeline)
-
-  async def post_replay_start(self, request: web.Request) -> web.Response:
-    try:
-      body = await request.json()
-    except Exception:
-      return web.json_response({"ok": False, "error": "invalid json"}, status=400)
-    route = str(body.get("route", "")).strip()
-    segment_raw = body.get("segment", None)
-    try:
-      segment = int(segment_raw)
-    except Exception:
-      return web.json_response(
-        {"ok": False, "error": "segment must be integer"},
-        status=400,
-      )
-    speed = 1.0
-    try:
-      if body.get("speed", None) is not None:
-        speed = float(body.get("speed"))
-    except Exception:
-      speed = 1.0
-
-    ok, message = self._start_replay(route=route, segment=segment, speed=speed)
-    if not ok:
-      return web.json_response({"ok": False, "error": message}, status=400)
-    return web.json_response(
-      {
-        "ok": True,
-        "message": message,
-        "active": self.replay_active,
-        "route": self.replay_route,
-        "segment": self.replay_segment,
-        "logPath": self.replay_log_path,
-        "speed": self.replay_speed,
-      }
-    )
-
-  async def post_replay_stop(self, request: web.Request) -> web.Response:
-    self._stop_replay()
-    return web.json_response({"ok": True, "active": False})
 
   async def on_startup(self, app: web.Application) -> None:
     app["broadcast_task"] = asyncio.create_task(self._broadcast_loop(app))
@@ -2060,7 +2681,7 @@ class SidecarApp:
 
 
 def main() -> None:
-  profile = os.environ.get("CARROTLINK_SIDECAR_PROFILE", "p1").strip().lower()
+  profile = os.environ.get("CARROTLINK_SIDECAR_PROFILE", "p2").strip().lower()
   port = int(os.environ.get("CARROTLINK_SIDECAR_PORT", "7766"))
   host = os.environ.get("CARROTLINK_SIDECAR_HOST", "0.0.0.0").strip() or "0.0.0.0"
 
@@ -2069,11 +2690,8 @@ def main() -> None:
   app.router.add_get("/health", app_state.get_health)
   app.router.add_get("/profile", app_state.get_profile)
   app.router.add_post("/profile", app_state.set_profile)
-  app.router.add_get("/replay/routes", app_state.get_replay_routes)
-  app.router.add_get("/replay/status", app_state.get_replay_status)
-  app.router.add_get("/replay/camera_timeline", app_state.get_replay_camera_timeline)
-  app.router.add_post("/replay/start", app_state.post_replay_start)
-  app.router.add_post("/replay/stop", app_state.post_replay_stop)
+  app.router.add_get("/camera_quality", app_state.get_camera_quality)
+  app.router.add_post("/camera_quality", app_state.set_camera_quality)
   app.router.add_get("/ws/live", app_state.ws_live)
   app.router.add_get("/ws/camera/{camera}", app_state.ws_camera)
   app.on_startup.append(app_state.on_startup)
@@ -2085,3 +2703,4 @@ def main() -> None:
 
 if __name__ == "__main__":
   main()
+

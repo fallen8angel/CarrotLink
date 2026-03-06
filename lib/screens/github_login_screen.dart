@@ -7,6 +7,8 @@ import 'package:url_launcher/url_launcher.dart';
 import '../services/diagnostics_service.dart';
 import '../services/github_oauth_ui_service.dart';
 import '../services/github_service.dart';
+import '../ui/adaptive/layout_tokens.dart';
+import '../ui/adaptive/window_class.dart';
 import '../widgets/custom_toast.dart';
 
 class GithubLoginScreen extends StatefulWidget {
@@ -312,6 +314,9 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
     return PopScope(
       canPop: true,
       onPopInvokedWithResult: (didPop, result) {
@@ -344,69 +349,118 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
         body: _isLoading
             ? const Center(child: CircularProgressIndicator())
             : ListView(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+                padding: EdgeInsets.fromLTRB(
+                  tokens.screenPadding.clamp(14.0, 24.0).toDouble(),
+                  16,
+                  tokens.screenPadding.clamp(14.0, 24.0).toDouble(),
+                  24,
+                ),
                 children: [
                   Container(
                     width: double.infinity,
-                    padding: const EdgeInsets.all(16),
+                    padding: EdgeInsets.all(
+                      window.isCompact ? 14.0 : 16.0,
+                    ),
                     decoration: BoxDecoration(
-                      color: Colors.grey[900],
+                      color: scheme.surfaceContainerHigh,
                       borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: Colors.grey[700]!),
+                      border: Border.all(
+                        color: scheme.outlineVariant.withValues(alpha: 0.6),
+                      ),
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text(
+                        Text(
                           "외부 브라우저에서 인증하세요",
-                          style: TextStyle(fontSize: 13, color: Colors.grey),
+                          style: TextStyle(
+                            fontSize: window.isCompact ? 12.5 : 13,
+                            color: scheme.onSurfaceVariant,
+                          ),
                         ),
                         const SizedBox(height: 10),
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.symmetric(
-                              vertical: 12, horizontal: 14),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFFF6D00),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            _userCode ?? "ERROR",
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              fontSize: 28,
-                              fontWeight: FontWeight.bold,
-                              letterSpacing: 6,
-                              color: Colors.white,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: FilledButton.icon(
-                                onPressed: () =>
-                                    unawaited(_openInExternalBrowser()),
-                                icon: const Icon(Icons.open_in_browser),
-                                label: const Text("브라우저 열기"),
+                        LayoutBuilder(
+                          builder: (context, constraints) {
+                            final compactCode =
+                                window.isCompact || constraints.maxWidth < 360;
+                            return Container(
+                              width: double.infinity,
+                              padding: EdgeInsets.symmetric(
+                                vertical: compactCode ? 11 : 12,
+                                horizontal: compactCode ? 10 : 14,
                               ),
-                            ),
-                            const SizedBox(width: 8),
-                            OutlinedButton.icon(
-                              onPressed: () =>
-                                  unawaited(_copyUserCode(toast: true)),
-                              icon: const Icon(Icons.copy_all),
-                              label: const Text("복사"),
-                            ),
-                          ],
+                              decoration: BoxDecoration(
+                                color: scheme.primary,
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                child: Text(
+                                  _userCode ?? "ERROR",
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    fontSize: compactCode ? 22 : 28,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: compactCode ? 4 : 6,
+                                    color: scheme.onPrimary,
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                        const SizedBox(width: 8),
+                        LayoutBuilder(
+                          builder: (context, constraints) {
+                            final compactActions =
+                                window.isCompact || constraints.maxWidth < 380;
+                            if (compactActions) {
+                              return Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  FilledButton.icon(
+                                    onPressed: () =>
+                                        unawaited(_openInExternalBrowser()),
+                                    icon: const Icon(Icons.open_in_browser),
+                                    label: const Text("브라우저 열기"),
+                                  ),
+                                  OutlinedButton.icon(
+                                    onPressed: () =>
+                                        unawaited(_copyUserCode(toast: true)),
+                                    icon: const Icon(Icons.copy_all),
+                                    label: const Text("복사"),
+                                  ),
+                                ],
+                              );
+                            }
+                            return Row(
+                              children: [
+                                Expanded(
+                                  child: FilledButton.icon(
+                                    onPressed: () =>
+                                        unawaited(_openInExternalBrowser()),
+                                    icon: const Icon(Icons.open_in_browser),
+                                    label: const Text("브라우저 열기"),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                OutlinedButton.icon(
+                                  onPressed: () =>
+                                      unawaited(_copyUserCode(toast: true)),
+                                  icon: const Icon(Icons.copy_all),
+                                  label: const Text("복사"),
+                                ),
+                              ],
+                            );
+                          },
                         ),
                       ],
                     ),
                   ),
                   const SizedBox(height: 14),
                   Container(
-                    padding: const EdgeInsets.all(12),
+                    padding: EdgeInsets.all(window.isCompact ? 10 : 12),
                     decoration: BoxDecoration(
                       color: Theme.of(context).colorScheme.surfaceContainer,
                       borderRadius: BorderRadius.circular(10),
@@ -421,17 +475,19 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
                             color: Theme.of(context).colorScheme.primary,
                           ),
                         ),
-                        const SizedBox(width: 8),
+                        const SizedBox(height: 12),
                         Expanded(
                           child: Text(
                             _pollStatusText,
-                            style: const TextStyle(fontSize: 12),
+                            style: TextStyle(
+                              fontSize: window.isCompact ? 11.5 : 12,
+                            ),
                           ),
                         ),
                         Text(
                           "${_remainingFlowSeconds()}s",
                           style: TextStyle(
-                            fontSize: 12,
+                            fontSize: window.isCompact ? 11.5 : 12,
                             color:
                                 Theme.of(context).colorScheme.onSurfaceVariant,
                           ),
@@ -447,7 +503,7 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
                     "3. 외부 브라우저에서 로그인/2FA/패스키(WebAuthn)를 진행하세요.\n"
                     "4. 승인 후 앱이 자동으로 로그인 완료됩니다.",
                     style: TextStyle(
-                      fontSize: 12,
+                      fontSize: window.isCompact ? 11.5 : 12,
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
                   ),

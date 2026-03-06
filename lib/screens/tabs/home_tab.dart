@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:provider/provider.dart';
@@ -8,8 +9,8 @@ import '../../services/native_overlay_hud_service.dart';
 import '../../widgets/custom_toast.dart';
 import '../../widgets/home_hud_preview_card.dart';
 import '../drive/live_drive_canvas_screen.dart';
-
-import 'package:carrot_pilot_manager/widgets/design_components.dart';
+import '../../ui/adaptive/layout_tokens.dart';
+import '../../ui/adaptive/window_class.dart';
 
 class HomeTab extends StatefulWidget {
   final bool isActive;
@@ -33,6 +34,10 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   bool _appForeground = true;
   Timer? _prereqTimer;
   Timer? _overlaySyncTimer;
+  Timer? _hudFallbackTimer;
+  double? _fallbackCpuTempC;
+  double? _fallbackMemPct;
+  double? _fallbackDiskPct;
 
   @override
   void initState() {
@@ -56,6 +61,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _prereqTimer?.cancel();
     _overlaySyncTimer?.cancel();
+    _hudFallbackTimer?.cancel();
     super.dispose();
   }
 
@@ -90,10 +96,15 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
           (_) => unawaited(_syncOverlayEndpoint()),
         );
       }
+      _hudFallbackTimer ??= Timer.periodic(
+        const Duration(seconds: 5),
+        (_) => unawaited(_refreshHudFallbackMetrics()),
+      );
       if (forceRefresh) {
         unawaited(_refreshConnectionPrerequisites());
         unawaited(_refreshStatus());
         unawaited(_syncOverlayEndpoint(forceProbe: true));
+        unawaited(_refreshHudFallbackMetrics());
       }
       return;
     }
@@ -102,6 +113,8 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     _prereqTimer = null;
     _overlaySyncTimer?.cancel();
     _overlaySyncTimer = null;
+    _hudFallbackTimer?.cancel();
+    _hudFallbackTimer = null;
   }
 
   Future<void> _refreshStatus() async {
@@ -209,12 +222,50 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     }
   }
 
-  void _openWebRtcView(SSHService ssh) {
+  Future<void> _refreshHudFallbackMetrics() async {
+    if (!_realtimeWorkEnabled) return;
+    if (!mounted) return;
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    if (!ssh.isConnected) return;
+    final metrics = await ssh.getHudFallbackMetrics();
+    if (metrics == null) return;
+
+    if (NativeOverlayHudService.isSupported) {
+      final overlayEnabled = await NativeOverlayHudService.isEnabled();
+      if (!overlayEnabled) {
+        return;
+      }
+      final overlayRunning = await NativeOverlayHudService.isRunning();
+      if (!overlayRunning) {
+        return;
+      }
+      await NativeOverlayHudService.updateFallbackMetrics(
+        cpuTempC: metrics.cpuTempC,
+        memPct: metrics.memPct,
+        diskPct: metrics.diskPct,
+      );
+    }
+
+    if (!mounted) return;
+    final sameCpu = _fallbackCpuTempC == metrics.cpuTempC;
+    final sameMem = _fallbackMemPct == metrics.memPct;
+    final sameDisk = _fallbackDiskPct == metrics.diskPct;
+    if (sameCpu && sameMem && sameDisk) return;
+    setState(() {
+      _fallbackCpuTempC = metrics.cpuTempC;
+      _fallbackMemPct = metrics.memPct;
+      _fallbackDiskPct = metrics.diskPct;
+    });
+  }
+
+  Future<void> _openWebRtcView(SSHService ssh) async {
     final host = (ssh.connectedIp ?? ssh.targetIp ?? '').trim();
     if (host.isEmpty) {
       CustomToast.show(context, '연결 IP를 먼저 확인하세요.', isError: true);
       return;
     }
+
+    if (!mounted) return;
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => LiveDriveCanvasScreen(hostIp: host),
@@ -224,166 +275,439 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    final tokens = UiLayoutTokens.of(context);
+    final window = UiWindowInfo.of(context);
     return Consumer<SSHService>(
       builder: (context, ssh, child) {
+        final media = MediaQuery.of(context);
+        final compactStatusStack = window.windowClass == UiWindowClass.compact;
+        final statusFontSize = switch (window.windowClass) {
+          UiWindowClass.compact => 20.0,
+          UiWindowClass.medium => 24.0,
+          UiWindowClass.expanded => 25.0,
+          UiWindowClass.large => 26.0,
+          UiWindowClass.extraLarge => 27.0,
+        };
+        final ipFontSize = switch (window.windowClass) {
+          UiWindowClass.compact => 14.0,
+          UiWindowClass.medium => 17.0,
+          UiWindowClass.expanded => 18.0,
+          UiWindowClass.large => 19.0,
+          UiWindowClass.extraLarge => 20.0,
+        };
+        final blockGap = switch (window.windowClass) {
+          UiWindowClass.compact => 8.0,
+          UiWindowClass.medium => 9.0,
+          UiWindowClass.expanded => 10.0,
+          UiWindowClass.large || UiWindowClass.extraLarge => 11.0,
+        };
+        final compactActionSize = switch (window.windowClass) {
+          UiWindowClass.compact => 34.0,
+          UiWindowClass.medium => 36.0,
+          UiWindowClass.expanded => 38.0,
+          UiWindowClass.large || UiWindowClass.extraLarge => 40.0,
+        };
+        final hasIp = ssh.isConnected ||
+            ssh.connectionStatus.startsWith("Connecting") ||
+            ssh.targetIp != null;
+        final ipFieldText =
+            hasIp ? (ssh.connectedIp ?? ssh.targetIp ?? "Unknown") : "연동 필요";
+        final isLandscape = window.isLandscape;
+        final homeContentMaxWidth = switch (window.windowClass) {
+          UiWindowClass.compact => double.infinity,
+          UiWindowClass.medium => isLandscape ? 640.0 : 600.0,
+          UiWindowClass.expanded => isLandscape ? 760.0 : 680.0,
+          UiWindowClass.large => isLandscape ? 840.0 : 740.0,
+          UiWindowClass.extraLarge => isLandscape ? 920.0 : 800.0,
+        };
+        final clampedHomeContentMaxWidth = homeContentMaxWidth.isFinite
+            ? math.min(homeContentMaxWidth, media.size.width - 24.0)
+            : homeContentMaxWidth;
+        final estimatedHeaderHeight = switch (window.windowClass) {
+          UiWindowClass.compact => 242.0,
+          UiWindowClass.medium => 256.0,
+          UiWindowClass.expanded => 272.0,
+          UiWindowClass.large => 286.0,
+          UiWindowClass.extraLarge => 300.0,
+        };
+        final estimatedVerticalChrome =
+            (tokens.screenPadding * 2) + tokens.sectionGap + 34.0;
+        final viewportAwareHudCap = math
+            .max(
+              220.0,
+              media.size.height -
+                  estimatedHeaderHeight -
+                  estimatedVerticalChrome,
+            )
+            .clamp(220.0, 520.0)
+            .toDouble();
+        final hudPreviewMaxWidth = () {
+          if (!window.isLandscape) return clampedHomeContentMaxWidth;
+          final heightRatio = switch (window.windowClass) {
+            UiWindowClass.compact => 0.54,
+            UiWindowClass.medium => 0.50,
+            UiWindowClass.expanded => 0.48,
+            UiWindowClass.large => 0.46,
+            UiWindowClass.extraLarge => 0.44,
+          };
+          final capByHeight = math
+              .min(
+                media.size.height * heightRatio,
+                viewportAwareHudCap,
+              )
+              .clamp(220.0, 520.0)
+              .toDouble();
+          return math.min(clampedHomeContentMaxWidth, capByHeight);
+        }();
+        final cardPadding = switch (window.windowClass) {
+          UiWindowClass.compact => 14.0,
+          UiWindowClass.medium => 16.0,
+          UiWindowClass.expanded => 18.0,
+          UiWindowClass.large || UiWindowClass.extraLarge => 20.0,
+        };
+        final ipChipLabelSize = switch (window.windowClass) {
+          UiWindowClass.compact => 11.0,
+          UiWindowClass.medium => 11.5,
+          UiWindowClass.expanded => 12.0,
+          UiWindowClass.large || UiWindowClass.extraLarge => 12.5,
+        };
+
         return ListView(
-          padding: const EdgeInsets.all(16.0),
+          padding: EdgeInsets.all(tokens.screenPadding),
           children: [
             // Header Card
-            DesignCard(
-              child: Column(
-                children: [
-                  Row(
+            Center(
+              child: ConstrainedBox(
+                constraints:
+                    BoxConstraints(maxWidth: clampedHomeContentMaxWidth),
+                child: Container(
+                  padding: EdgeInsets.all(cardPadding),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context)
+                        .colorScheme
+                        .surfaceContainer
+                        .withValues(alpha: 0.84),
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(
+                      color: Theme.of(context)
+                          .colorScheme
+                          .outlineVariant
+                          .withValues(alpha: 0.36),
+                    ),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: (ssh.isConnected
-                                  ? Theme.of(context).colorScheme.primary
-                                  : Colors.grey)
-                              .withValues(alpha: 0.1),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Icon(
-                          Icons.directions_car,
-                          color: ssh.isConnected
-                              ? Theme.of(context).colorScheme.primary
-                              : Colors.grey,
-                          size: 32,
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: Column(
+                      if (compactStatusStack)
+                        Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
-                              '상태',
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .labelMedium
-                                  ?.copyWith(
-                                    color: Colors.grey,
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                Container(
+                                  width: 10,
+                                  height: 10,
+                                  decoration: BoxDecoration(
+                                    color: _statusColor(context, ssh),
+                                    shape: BoxShape.circle,
                                   ),
-                            ),
-                            GestureDetector(
-                              onTap: () {
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    _statusHeadline(ssh),
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleLarge
+                                        ?.copyWith(
+                                          fontWeight: FontWeight.w900,
+                                          color: _statusColor(context, ssh),
+                                          fontSize: statusFontSize,
+                                          height: 1.0,
+                                        ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
                                 if (ssh.isConnected ||
                                     ssh.connectionStatus
-                                        .startsWith("Connecting")) {
-                                  ssh.disconnect();
-                                  CustomToast.show(context, "연결이 해제되었습니다.");
-                                }
-                              },
+                                        .startsWith("Connecting"))
+                                  SizedBox(
+                                    width: compactActionSize * 0.88,
+                                    height: compactActionSize * 0.88,
+                                    child: IconButton(
+                                      padding: EdgeInsets.zero,
+                                      tooltip: '연결 해제',
+                                      iconSize: compactActionSize * 0.52,
+                                      color: Colors.white70,
+                                      onPressed: () {
+                                        ssh.disconnect();
+                                        CustomToast.show(
+                                            context, "연결이 해제되었습니다.");
+                                      },
+                                      icon: const Icon(Icons.link_off_rounded),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                            SizedBox(height: blockGap),
+                            _buildIpField(
+                              context: context,
+                              blockGap: blockGap,
+                              ipChipLabelSize: ipChipLabelSize,
+                              ipFieldText: ipFieldText,
+                              ipFontSize: ipFontSize,
+                            ),
+                          ],
+                        )
+                      else
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Container(
+                              width: 10,
+                              height: 10,
+                              decoration: BoxDecoration(
+                                color: _statusColor(context, ssh),
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
                               child: Text(
                                 _statusHeadline(ssh),
                                 style: Theme.of(context)
                                     .textTheme
                                     .titleLarge
                                     ?.copyWith(
-                                      fontWeight: FontWeight.bold,
+                                      fontWeight: FontWeight.w900,
                                       color: _statusColor(context, ssh),
+                                      fontSize: statusFontSize,
+                                      height: 1.0,
                                     ),
-                                maxLines: 2,
+                                maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
-                            const SizedBox(height: 4),
-                            Text(
-                              (ssh.isConnected ||
-                                      ssh.connectionStatus
-                                          .startsWith("Connecting") ||
-                                      ssh.targetIp != null)
-                                  ? "IP: ${ssh.connectedIp ?? ssh.targetIp ?? "Unknown"}"
-                                  : "GitHub 로그인 및 SSH 키 적용 후 연결 가능합니다.",
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .bodySmall
-                                  ?.copyWith(
-                                    color: Colors.grey,
-                                    fontWeight: FontWeight.w500,
-                                  ),
+                            const SizedBox(width: 10),
+                            Flexible(
+                              flex: 5,
+                              child: _buildIpField(
+                                context: context,
+                                blockGap: blockGap,
+                                ipChipLabelSize: ipChipLabelSize,
+                                ipFieldText: ipFieldText,
+                                ipFontSize: ipFontSize,
+                              ),
                             ),
+                            if (ssh.isConnected ||
+                                ssh.connectionStatus
+                                    .startsWith("Connecting")) ...[
+                              SizedBox(width: blockGap * 0.6),
+                              SizedBox(
+                                width: compactActionSize * 0.88,
+                                height: compactActionSize * 0.88,
+                                child: IconButton(
+                                  padding: EdgeInsets.zero,
+                                  tooltip: '연결 해제',
+                                  iconSize: compactActionSize * 0.52,
+                                  color: Colors.white70,
+                                  onPressed: () {
+                                    ssh.disconnect();
+                                    CustomToast.show(context, "연결이 해제되었습니다.");
+                                  },
+                                  icon: const Icon(Icons.link_off_rounded),
+                                ),
+                              ),
+                            ],
                           ],
                         ),
+                      SizedBox(height: blockGap),
+                      Divider(
+                        height: 1,
+                        thickness: 1,
+                        color: Colors.white.withValues(alpha: 0.08),
+                      ),
+                      SizedBox(height: blockGap),
+                      LayoutBuilder(
+                        builder: (context, infoConstraints) {
+                          final itemSpacing = switch (window.windowClass) {
+                            UiWindowClass.compact => 8.0,
+                            UiWindowClass.medium => 9.0,
+                            UiWindowClass.expanded => 10.0,
+                            UiWindowClass.large ||
+                            UiWindowClass.extraLarge =>
+                              11.0,
+                          };
+                          final columns =
+                              infoConstraints.maxWidth >= 720 ? 4 : 2;
+                          final itemWidth = (infoConstraints.maxWidth -
+                                  (itemSpacing * (columns - 1))) /
+                              columns;
+                          final itemValues = <MapEntry<String, String>>[
+                            MapEntry(
+                                "브랜치", ssh.isConnected ? _branch : "연결 안 됨"),
+                            MapEntry(
+                                "커밋", ssh.isConnected ? _commit : "연결 안 됨"),
+                            MapEntry("Dongle ID",
+                                ssh.isConnected ? _dongleId : "연결 안 됨"),
+                            MapEntry(
+                                "Serial", ssh.isConnected ? _serial : "연결 안 됨"),
+                          ];
+                          return Wrap(
+                            spacing: itemSpacing,
+                            runSpacing: itemSpacing,
+                            children: itemValues
+                                .map(
+                                  (entry) => SizedBox(
+                                    width: itemWidth,
+                                    child:
+                                        _buildInfoItem(entry.key, entry.value),
+                                  ),
+                                )
+                                .toList(),
+                          );
+                        },
                       ),
                     ],
                   ),
-                  const SizedBox(height: 20),
-                  const Divider(),
-                  const SizedBox(height: 20),
-                  // Info Grid
-                  Row(
-                    children: [
-                      Expanded(
-                          child: _buildInfoItem(Icons.call_split, "브랜치",
-                              ssh.isConnected ? _branch : "연결 안 됨")),
-                      Expanded(
-                          child: _buildInfoItem(Icons.commit, "커밋",
-                              ssh.isConnected ? _commit : "연결 안 됨")),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      Expanded(
-                          child: _buildInfoItem(Icons.fingerprint, "Dongle ID",
-                              ssh.isConnected ? _dongleId : "연결 안 됨")),
-                      Expanded(
-                          child: _buildInfoItem(Icons.qr_code, "Serial",
-                              ssh.isConnected ? _serial : "연결 안 됨")),
-                    ],
-                  ),
-                ],
+                ),
               ),
             ),
-            const SizedBox(height: 12),
-            GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: () => _openWebRtcView(ssh),
-              child: Column(
-                children: [
-                  HomeHudPreviewCard(
-                    enabled: _realtimeWorkEnabled,
-                    deviceIp: ssh.connectedIp ?? ssh.targetIp,
+            SizedBox(height: tokens.sectionGap),
+            Center(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: hudPreviewMaxWidth),
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => _openWebRtcView(ssh),
+                  child: Column(
+                    children: [
+                      HomeHudPreviewCard(
+                        enabled: _realtimeWorkEnabled,
+                        deviceIp: ssh.connectedIp ?? ssh.targetIp,
+                        fallbackCpuTempC: _fallbackCpuTempC,
+                        fallbackMemPct: _fallbackMemPct,
+                        fallbackDiskPct: _fallbackDiskPct,
+                        matchParentWidth: true,
+                      ),
+                      SizedBox(height: tokens.itemGap),
+                      Text(
+                        '탭해서 새 주행화면 열기',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 6),
-                  Text(
-                    '탭해서 새 주행화면 열기',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                        ),
-                  ),
-                ],
+                ),
               ),
             ),
 
             // Quick Actions Grid Removed
-            const SizedBox(height: 120),
+            SizedBox(height: tokens.footerSpacer),
           ],
         );
       },
     );
   }
 
-  Widget _buildInfoItem(IconData icon, String label, String value) {
-    return Row(
-      children: [
-        Icon(icon, size: 20, color: Colors.grey[400]),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(label,
-                  style: TextStyle(color: Colors.grey[600], fontSize: 12)),
-              Text(value,
-                  style: const TextStyle(fontWeight: FontWeight.bold),
-                  overflow: TextOverflow.ellipsis),
-            ],
+  Widget _buildInfoItem(String label, String value) {
+    final window = UiWindowInfo.of(context);
+    final labelSize = switch (window.windowClass) {
+      UiWindowClass.compact => 11.0,
+      UiWindowClass.medium => 11.5,
+      UiWindowClass.expanded => 12.0,
+      UiWindowClass.large => 12.5,
+      UiWindowClass.extraLarge => 13.0,
+    };
+    final valueSize = switch (window.windowClass) {
+      UiWindowClass.compact => 15.0,
+      UiWindowClass.medium => 15.5,
+      UiWindowClass.expanded => 16.0,
+      UiWindowClass.large => 16.5,
+      UiWindowClass.extraLarge => 17.0,
+    };
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 2),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              color: Colors.grey[500],
+              fontSize: labelSize,
+              fontWeight: FontWeight.w600,
+              height: 1.0,
+            ),
           ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontWeight: FontWeight.w700,
+              fontSize: valueSize,
+              height: 1.0,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildIpField({
+    required BuildContext context,
+    required double blockGap,
+    required double ipChipLabelSize,
+    required String ipFieldText,
+    required double ipFontSize,
+  }) {
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: blockGap + 3,
+        vertical: blockGap - 1,
+      ),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.24),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.10),
         ),
-      ],
+      ),
+      child: Row(
+        children: [
+          Text(
+            'IP',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Colors.white.withValues(alpha: 0.62),
+                  fontWeight: FontWeight.w700,
+                  fontSize: ipChipLabelSize,
+                ),
+          ),
+          SizedBox(width: blockGap * 0.7),
+          Expanded(
+            child: Text(
+              ipFieldText,
+              textAlign: TextAlign.right,
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    color: Colors.white.withValues(alpha: 0.9),
+                    fontWeight: FontWeight.w700,
+                    fontSize: ipFontSize,
+                    height: 1.0,
+                  ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

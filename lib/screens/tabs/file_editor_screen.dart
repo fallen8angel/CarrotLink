@@ -30,6 +30,8 @@ import 'package:re_highlight/styles/stackoverflow-light.dart';
 import 'package:re_highlight/styles/tokyo-night-dark.dart';
 
 import '../../services/ssh_service.dart';
+import '../../ui/adaptive/layout_tokens.dart';
+import '../../ui/adaptive/window_class.dart';
 import '../../widgets/custom_toast.dart';
 
 class FileEditorScreen extends StatefulWidget {
@@ -430,6 +432,7 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
   }
 
   Widget _buildStatusBar(BuildContext context) {
+    final window = UiWindowInfo.of(context);
     final text = _editorController.text;
     final lineCount = _editorController.lineCount;
     final charCount = text.length;
@@ -463,7 +466,10 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
           if (_isDirty)
             Text(
               '미저장 변경',
-              style: style?.copyWith(color: colors.error),
+              style: style?.copyWith(
+                color: colors.error,
+                fontSize: window.isCompact ? 11.0 : null,
+              ),
             ),
         ],
       ),
@@ -485,6 +491,7 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final tokens = UiLayoutTokens.of(context);
     return PopScope(
       canPop: !_isDirty,
       onPopInvokedWithResult: (didPop, _) async {
@@ -598,7 +605,12 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
             children: [
               Expanded(
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+                  padding: EdgeInsets.fromLTRB(
+                    tokens.screenPadding.clamp(8.0, 16.0).toDouble(),
+                    8,
+                    tokens.screenPadding.clamp(8.0, 16.0).toDouble(),
+                    0,
+                  ),
                   child: _buildEditor(context),
                 ),
               ),
@@ -638,6 +650,7 @@ class _EditorFindPanel extends StatelessWidget implements PreferredSizeWidget {
   Widget build(BuildContext context) {
     final state = controller.value;
     if (state == null) return const SizedBox.shrink();
+    final window = UiWindowInfo.of(context);
 
     final result = state.result;
     final resultText = result == null
@@ -680,7 +693,8 @@ class _EditorFindPanel extends StatelessWidget implements PreferredSizeWidget {
     }
 
     return Container(
-      margin: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+      margin: EdgeInsets.fromLTRB(
+          window.isCompact ? 8 : 12, 8, window.isCompact ? 8 : 12, 0),
       padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
       decoration: BoxDecoration(
         color: panelColor,

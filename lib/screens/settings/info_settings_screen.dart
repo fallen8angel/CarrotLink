@@ -3,6 +3,8 @@ import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../services/update_service.dart';
+import '../../ui/adaptive/layout_tokens.dart';
+import '../../ui/adaptive/window_class.dart';
 import '../../widgets/update_dialog.dart';
 
 class InfoSettingsScreen extends StatefulWidget {
@@ -62,10 +64,16 @@ class _InfoSettingsScreenState extends State<InfoSettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final updateService = context.watch<UpdateService>();
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
 
     return Scaffold(
       appBar: AppBar(title: const Text('정보')),
       body: ListView(
+        padding: EdgeInsets.symmetric(
+          horizontal: tokens.screenPadding.clamp(8.0, 20.0).toDouble(),
+        ),
         children: [
           ListTile(
             title: const Text('버전'),
@@ -90,28 +98,50 @@ class _InfoSettingsScreenState extends State<InfoSettingsScreen> {
                 ? Text('새 버전: ${updateService.latestRelease!['tag_name']}')
                 : const Text('최신 버전입니다'),
             trailing: updateService.latestRelease != null
-                ? const Icon(Icons.system_update, color: Colors.orange)
+                ? Icon(Icons.system_update, color: scheme.tertiary)
                 : const Icon(Icons.check_circle, color: Colors.green),
             onTap: () => _showUpdateDialog(context),
           ),
           const Divider(),
-          ListTile(
-            title: const Text('업데이트 채널'),
-            subtitle: Text(updateService.channel == 'stable'
-                ? 'Stable (안정 버전)'
-                : 'Dev (개발 버전)'),
-            trailing: SegmentedButton<String>(
-              segments: const [
-                ButtonSegment(value: 'stable', label: Text('Stable')),
-                ButtonSegment(value: 'dev', label: Text('Dev')),
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+              tokens.screenPadding.clamp(8.0, 16.0).toDouble(),
+              10,
+              tokens.screenPadding.clamp(8.0, 16.0).toDouble(),
+              10,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '업데이트 채널',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  updateService.channel == 'stable'
+                      ? 'Stable (안정 버전)'
+                      : 'Dev (개발 버전)',
+                  style: TextStyle(
+                    color: scheme.onSurfaceVariant,
+                    fontSize: window.isCompact ? 12.5 : 13,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(value: 'stable', label: Text('Stable')),
+                    ButtonSegment(value: 'dev', label: Text('Dev')),
+                  ],
+                  selected: {updateService.channel},
+                  onSelectionChanged: (Set<String> selection) {
+                    updateService.setChannel(selection.first);
+                  },
+                  style: const ButtonStyle(
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ),
               ],
-              selected: {updateService.channel},
-              onSelectionChanged: (Set<String> selection) {
-                updateService.setChannel(selection.first);
-              },
-              style: const ButtonStyle(
-                visualDensity: VisualDensity.compact,
-              ),
             ),
           ),
         ],

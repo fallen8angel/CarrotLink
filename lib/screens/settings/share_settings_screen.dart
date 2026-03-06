@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../../ui/adaptive/layout_tokens.dart';
 
 class ShareSettingsScreen extends StatefulWidget {
   const ShareSettingsScreen({super.key});
@@ -34,9 +35,13 @@ class _ShareSettingsScreenState extends State<ShareSettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final tokens = UiLayoutTokens.of(context);
     return Scaffold(
       appBar: AppBar(title: const Text('공유 설정')),
       body: ListView(
+        padding: EdgeInsets.symmetric(
+          horizontal: tokens.screenPadding.clamp(8.0, 20.0).toDouble(),
+        ),
         children: [
           SwitchListTile(
             title: const Text('MP4로 변환하여 공유'),

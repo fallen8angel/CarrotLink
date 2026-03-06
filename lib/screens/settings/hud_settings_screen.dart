@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 
 import '../../services/hud_drive_settings_service.dart';
 import '../../services/native_overlay_hud_service.dart';
+import '../../ui/adaptive/layout_tokens.dart';
+import '../../ui/adaptive/window_class.dart';
 import '../../widgets/custom_toast.dart';
 
 class HudSettingsScreen extends StatefulWidget {
@@ -76,11 +78,19 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(title: const Text('HUD')),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : ListView(
+              padding: EdgeInsets.only(
+                left: tokens.screenPadding.clamp(12.0, 24.0).toDouble(),
+                right: tokens.screenPadding.clamp(12.0, 24.0).toDouble(),
+                bottom: tokens.footerSpacer,
+              ),
               children: [
                 SwitchListTile.adaptive(
                   value: _enabled,
@@ -105,7 +115,7 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
                 ListTile(
                   leading: Icon(
                     _running ? Icons.visibility : Icons.visibility_off,
-                    color: _running ? Colors.green : Colors.grey,
+                    color: _running ? Colors.green : scheme.onSurfaceVariant,
                   ),
                   title: const Text('현재 오버레이 상태'),
                   subtitle: Text(_running ? '실행 중' : '중지됨'),
@@ -117,11 +127,15 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
                 ),
                 const Divider(height: 1),
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+                  padding: const EdgeInsets.fromLTRB(4, 14, 4, 6),
                   child: Row(
                     children: [
-                      const Icon(Icons.tune, size: 18, color: Colors.white70),
-                      const SizedBox(width: 8),
+                      Icon(
+                        Icons.tune,
+                        size: 18,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 6),
                       Text(
                         '사이드카 기본 진입 모드',
                         style: Theme.of(context).textTheme.titleSmall?.copyWith(
@@ -132,30 +146,63 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
-                  child: SegmentedButton<String>(
-                    segments: const <ButtonSegment<String>>[
-                      ButtonSegment<String>(
-                        value: HudDriveSettingsService.modeWebrtc,
-                        label: Text('WebRTC'),
-                      ),
-                      ButtonSegment<String>(
-                        value: HudDriveSettingsService.modeOpenpilotOverlay,
-                        label: Text('오픈파일럿 그래픽'),
-                      ),
-                    ],
-                    selected: <String>{_defaultDriveMode},
-                    onSelectionChanged: (selected) {
-                      if (selected.isEmpty) return;
-                      unawaited(_changeDefaultMode(selected.first));
+                  padding: const EdgeInsets.fromLTRB(4, 0, 4, 4),
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final compact =
+                          window.isCompact || constraints.maxWidth < 520;
+                      if (!compact) {
+                        return SegmentedButton<String>(
+                          segments: const <ButtonSegment<String>>[
+                            ButtonSegment<String>(
+                              value: HudDriveSettingsService.modeWebrtc,
+                              label: Text('WebRTC'),
+                            ),
+                            ButtonSegment<String>(
+                              value:
+                                  HudDriveSettingsService.modeOpenpilotOverlay,
+                              label: Text('오픈파일럿 그래픽'),
+                            ),
+                          ],
+                          selected: <String>{_defaultDriveMode},
+                          onSelectionChanged: (selected) {
+                            if (selected.isEmpty) return;
+                            unawaited(_changeDefaultMode(selected.first));
+                          },
+                        );
+                      }
+
+                      return Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          ChoiceChip(
+                            label: const Text('WebRTC'),
+                            selected: _defaultDriveMode ==
+                                HudDriveSettingsService.modeWebrtc,
+                            onSelected: (_) => unawaited(_changeDefaultMode(
+                                HudDriveSettingsService.modeWebrtc)),
+                          ),
+                          ChoiceChip(
+                            label: const Text('오픈파일럿 그래픽'),
+                            selected: _defaultDriveMode ==
+                                HudDriveSettingsService.modeOpenpilotOverlay,
+                            onSelected: (_) => unawaited(_changeDefaultMode(
+                                HudDriveSettingsService.modeOpenpilotOverlay)),
+                          ),
+                        ],
+                      );
                     },
                   ),
                 ),
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(16, 0, 16, 12),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(4, 0, 4, 12),
                   child: Text(
                     'WebRTC: 카메라만 표시, 오픈파일럿 그래픽: 카메라 + 그래픽 오버레이',
-                    style: TextStyle(fontSize: 12, color: Colors.white70),
+                    style: TextStyle(
+                      fontSize: window.isCompact ? 11.5 : 12.0,
+                      color: scheme.onSurfaceVariant,
+                    ),
                   ),
                 ),
               ],

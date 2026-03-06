@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -11,6 +12,8 @@ import '../../services/ssh_service.dart';
 import '../../services/google_drive_service.dart';
 import '../../services/backup_service.dart';
 import '../../services/carrot_server_settings_service.dart';
+import '../ui/adaptive/layout_tokens.dart';
+import '../ui/adaptive/window_class.dart';
 
 class BackupManagerScreen extends StatefulWidget {
   const BackupManagerScreen({super.key});
@@ -125,12 +128,18 @@ class _BackupManagerScreenState extends State<BackupManagerScreen>
 
   Future<void> _deleteSelectedLocalBackups() async {
     if (_selectedLocalPaths.isEmpty) return;
+    final metrics = _dialogMetrics(context);
 
     final confirm = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
+        insetPadding: metrics.insetPadding,
+        contentPadding: metrics.contentPadding,
         title: const Text("선택 삭제"),
-        content: Text("${_selectedLocalPaths.length}개의 로컬 백업을 삭제하시겠습니까?"),
+        content: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: metrics.maxWidth),
+          child: Text("${_selectedLocalPaths.length}개의 로컬 백업을 삭제하시겠습니까?"),
+        ),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -234,14 +243,71 @@ class _BackupManagerScreenState extends State<BackupManagerScreen>
     });
   }
 
+  ({
+    EdgeInsets insetPadding,
+    EdgeInsets contentPadding,
+    double maxWidth,
+  }) _dialogMetrics(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final maxWidth = switch (window.windowClass) {
+      UiWindowClass.compact => 520.0,
+      UiWindowClass.medium => 620.0,
+      UiWindowClass.expanded => 760.0,
+      UiWindowClass.large => 860.0,
+      UiWindowClass.extraLarge => 960.0,
+    };
+    final horizontalInset = switch (window.windowClass) {
+      UiWindowClass.compact => tokens.screenPadding,
+      UiWindowClass.medium => tokens.screenPadding + 8,
+      UiWindowClass.expanded => tokens.screenPadding + 20,
+      UiWindowClass.large => tokens.screenPadding + 32,
+      UiWindowClass.extraLarge => tokens.screenPadding + 40,
+    };
+    final verticalInset = switch (window.windowClass) {
+      UiWindowClass.compact => 24.0,
+      UiWindowClass.medium => 28.0,
+      _ => 36.0,
+    };
+    final contentPadding = EdgeInsets.fromLTRB(
+      tokens.screenPadding,
+      tokens.sectionGap,
+      tokens.screenPadding,
+      tokens.sectionGap,
+    );
+    return (
+      insetPadding: EdgeInsets.symmetric(
+          horizontal: horizontalInset, vertical: verticalInset),
+      contentPadding: contentPadding,
+      maxWidth: maxWidth,
+    );
+  }
+
+  double _contentMaxWidth(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    return switch (window.windowClass) {
+      UiWindowClass.compact => 640.0,
+      UiWindowClass.medium => 760.0,
+      UiWindowClass.expanded => 900.0,
+      UiWindowClass.large => 1040.0,
+      UiWindowClass.extraLarge => 1120.0,
+    };
+  }
+
   Future<void> _deleteSelectedCloudBackups() async {
     if (_selectedCloudIds.isEmpty) return;
+    final metrics = _dialogMetrics(context);
 
     final confirm = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
+        insetPadding: metrics.insetPadding,
+        contentPadding: metrics.contentPadding,
         title: const Text("선택 삭제"),
-        content: Text("${_selectedCloudIds.length}개의 클라우드 백업을 삭제하시겠습니까?"),
+        content: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: metrics.maxWidth),
+          child: Text("${_selectedCloudIds.length}개의 클라우드 백업을 삭제하시겠습니까?"),
+        ),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -589,42 +655,78 @@ class _BackupManagerScreenState extends State<BackupManagerScreen>
       final content = await file.readAsString();
       final Map<String, dynamic> data = jsonDecode(content);
       final keys = data.keys.toList()..sort();
+      final metrics = _dialogMetrics(context);
+      final window = UiWindowInfo.of(context);
+      final titleFontSize = switch (window.windowClass) {
+        UiWindowClass.compact => 13.0,
+        UiWindowClass.medium => 14.0,
+        _ => 15.0,
+      };
+      final subtitleFontSize = switch (window.windowClass) {
+        UiWindowClass.compact => 12.0,
+        UiWindowClass.medium => 13.0,
+        _ => 14.0,
+      };
+      final preferredContentHeight = switch (window.windowClass) {
+        UiWindowClass.compact => 320.0,
+        UiWindowClass.medium => 380.0,
+        _ => 440.0,
+      };
+      final mediaHeight = MediaQuery.of(context).size.height;
+      final contentHeight = math.max(
+        220.0,
+        math.min(
+          preferredContentHeight,
+          mediaHeight * (window.isLandscape ? 0.56 : 0.64),
+        ),
+      );
 
       if (!mounted) return;
 
       showDialog(
         context: context,
         builder: (context) => AlertDialog(
+          insetPadding: metrics.insetPadding,
+          contentPadding: metrics.contentPadding,
           title: Text(_formatBackupName(path.basename(file.path))),
-          content: SizedBox(
-            width: double.maxFinite,
-            height: 300,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text("총 ${keys.length}개 항목"),
-                const Divider(),
-                Expanded(
-                  child: ListView.builder(
-                    itemCount: keys.length,
-                    itemBuilder: (context, index) {
-                      final key = keys[index];
-                      final value = data[key];
-                      return ListTile(
-                        title: Text(key,
-                            style: const TextStyle(
-                                fontSize: 13, fontWeight: FontWeight.bold)),
-                        subtitle: Text(value.toString(),
+          content: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: metrics.maxWidth),
+            child: SizedBox(
+              width: double.maxFinite,
+              height: contentHeight,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text("총 ${keys.length}개 항목"),
+                  const Divider(),
+                  Expanded(
+                    child: ListView.builder(
+                      itemCount: keys.length,
+                      itemBuilder: (context, index) {
+                        final key = keys[index];
+                        final value = data[key];
+                        return ListTile(
+                          title: Text(
+                            key,
+                            style: TextStyle(
+                              fontSize: titleFontSize,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          subtitle: Text(
+                            value.toString(),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 12)),
-                        dense: true,
-                        contentPadding: EdgeInsets.zero,
-                      );
-                    },
+                            style: TextStyle(fontSize: subtitleFontSize),
+                          ),
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                        );
+                      },
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
           actions: [
@@ -662,11 +764,17 @@ class _BackupManagerScreenState extends State<BackupManagerScreen>
   }
 
   Future<void> _deleteCloudFile(String fileId) async {
+    final metrics = _dialogMetrics(context);
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
+        insetPadding: metrics.insetPadding,
+        contentPadding: metrics.contentPadding,
         title: const Text("삭제 확인"),
-        content: const Text("정말 삭제하시겠습니까?"),
+        content: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: metrics.maxWidth),
+          child: const Text("정말 삭제하시겠습니까?"),
+        ),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -806,8 +914,28 @@ class _BackupManagerScreenState extends State<BackupManagerScreen>
   Widget build(BuildContext context) {
     final driveService = Provider.of<GoogleDriveService>(context);
     final backupService = Provider.of<BackupService>(context);
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
     final isSignedIn = driveService.currentUser != null;
     final isLocalTab = _tabController.index == 0;
+    final horizontalPadding = tokens.screenPadding;
+    final statusTopInset =
+        MediaQuery.of(context).padding.top + (window.isCompact ? 10.0 : 14.0);
+    final statusTextSize = switch (window.windowClass) {
+      UiWindowClass.compact => 14.0,
+      UiWindowClass.medium => 14.0,
+      _ => 15.0,
+    };
+    final statusIconSize = switch (window.windowClass) {
+      UiWindowClass.compact => 16.0,
+      UiWindowClass.medium => 17.0,
+      _ => 18.0,
+    };
+    final statusCardVerticalPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.0,
+      _ => 14.0,
+    };
 
     final selectedCount =
         isLocalTab ? _selectedLocalPaths.length : _selectedCloudIds.length;
@@ -917,20 +1045,22 @@ class _BackupManagerScreenState extends State<BackupManagerScreen>
             ),
             if (backupService.isBackingUp)
               Positioned(
-                top: MediaQuery.of(context).padding.top + 10,
-                left: 16,
-                right: 16,
+                top: statusTopInset,
+                left: horizontalPadding,
+                right: horizontalPadding,
                 child: Material(
                   color: Colors.transparent,
                   child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 12),
+                    padding: EdgeInsets.symmetric(
+                      horizontal: tokens.screenPadding,
+                      vertical: statusCardVerticalPadding,
+                    ),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF333333).withOpacity(0.95),
+                      color: const Color(0xFF333333).withValues(alpha: 0.95),
                       borderRadius: BorderRadius.circular(12),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.2),
+                          color: Colors.black.withValues(alpha: 0.2),
                           blurRadius: 8,
                           offset: const Offset(0, 4),
                         ),
@@ -938,21 +1068,23 @@ class _BackupManagerScreenState extends State<BackupManagerScreen>
                     ),
                     child: Row(
                       children: [
-                        const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
-                            )),
-                        const SizedBox(width: 12),
+                        SizedBox(
+                          width: statusIconSize,
+                          height: statusIconSize,
+                          child: const CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        ),
+                        SizedBox(width: tokens.itemGap + 6),
                         Expanded(
                           child: Text(
                             backupService.statusMessage,
-                            style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w500),
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: statusTextSize,
+                              fontWeight: FontWeight.w500,
+                            ),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
@@ -976,70 +1108,139 @@ class _BackupManagerScreenState extends State<BackupManagerScreen>
   }
 
   Widget _buildSortHeader(BackupService backupService, bool isLocalTab) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          // Left: Last Check Time
-          if (backupService.lastCheckTime != null)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
+    final tokens = UiLayoutTokens.of(context);
+    final window = UiWindowInfo.of(context);
+    final maxWidth = _contentMaxWidth(context);
+    final chipFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.0,
+      _ => 13.0,
+    };
+
+    return Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxWidth),
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+            tokens.screenPadding,
+            tokens.itemGap + 2,
+            tokens.screenPadding,
+            tokens.itemGap + 2,
+          ),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < 520;
+              final checkChip = backupService.lastCheckTime != null
+                  ? Container(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: tokens.itemGap + 2,
+                        vertical: window.isCompact ? 4 : 5,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context)
+                            .colorScheme
+                            .surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.access_time,
+                            size: 14,
+                            color:
+                                Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            "확인: ${DateFormat('HH:mm:ss').format(backupService.lastCheckTime!)}",
+                            style: TextStyle(
+                              fontSize: chipFontSize,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  : const SizedBox.shrink();
+
+              final sortButton = TextButton.icon(
+                onPressed: _isSelectionMode
+                    ? null
+                    : () {
+                        setState(() {
+                          if (isLocalTab) {
+                            _localSortAscending = !_localSortAscending;
+                            _sortLocalBackups();
+                          } else {
+                            _cloudSortAscending = !_cloudSortAscending;
+                            _sortCloudBackups();
+                          }
+                        });
+                      },
+                icon: Icon(
+                  (isLocalTab ? _localSortAscending : _cloudSortAscending)
+                      ? Icons.arrow_upward
+                      : Icons.arrow_downward,
+                  size: 16,
+                ),
+                label: Text(
+                  (isLocalTab ? _localSortAscending : _cloudSortAscending)
+                      ? "오래된 순"
+                      : "최신 순",
+                ),
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                ),
+              );
+
+              if (!compact) {
+                return Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    checkChip,
+                    sortButton,
+                  ],
+                );
+              }
+
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Icon(Icons.access_time,
-                      size: 14,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant),
-                  const SizedBox(width: 4),
-                  Text(
-                    "확인: ${DateFormat('HH:mm:ss').format(backupService.lastCheckTime!)}",
-                    style: TextStyle(
-                        fontSize: 12,
-                        color: Theme.of(context).colorScheme.onSurfaceVariant),
+                  if (backupService.lastCheckTime != null) checkChip,
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: sortButton,
                   ),
                 ],
-              ),
-            )
-          else
-            const SizedBox(),
-
-          // Right: Sort Button
-          TextButton.icon(
-            onPressed: _isSelectionMode
-                ? null
-                : () {
-                    setState(() {
-                      if (isLocalTab) {
-                        _localSortAscending = !_localSortAscending;
-                        _sortLocalBackups();
-                      } else {
-                        _cloudSortAscending = !_cloudSortAscending;
-                        _sortCloudBackups();
-                      }
-                    });
-                  },
-            icon: Icon(
-                (isLocalTab ? _localSortAscending : _cloudSortAscending)
-                    ? Icons.arrow_upward
-                    : Icons.arrow_downward,
-                size: 16),
-            label: Text((isLocalTab ? _localSortAscending : _cloudSortAscending)
-                ? "오래된 순"
-                : "최신 순"),
-            style: TextButton.styleFrom(
-              visualDensity: VisualDensity.compact,
-            ),
+              );
+            },
           ),
-        ],
+        ),
       ),
     );
   }
 
   Widget _buildLocalList() {
+    final tokens = UiLayoutTokens.of(context);
+    final window = UiWindowInfo.of(context);
+    final maxWidth = _contentMaxWidth(context);
+    final horizontalPadding = tokens.screenPadding;
+    final cardPadding = window.isCompact ? 12.0 : 14.0;
+    final chipFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 10.0,
+      UiWindowClass.medium => 11.0,
+      _ => 12.0,
+    };
+    final metaFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 11.0,
+      UiWindowClass.medium => 12.0,
+      _ => 12.0,
+    };
+
     if (_isLocalLoading)
       return const Center(child: CircularProgressIndicator());
     if (_localBackups.isEmpty) {
@@ -1060,226 +1261,258 @@ class _BackupManagerScreenState extends State<BackupManagerScreen>
       );
     }
 
-    return ListView.separated(
-      padding: const EdgeInsets.only(bottom: 80), // Space for FAB
-      itemCount: _localBackups.length,
-      separatorBuilder: (context, index) => const SizedBox(height: 8),
-      itemBuilder: (context, index) {
-        final file = _localBackups[index] as File;
-        final name = path.basename(file.path);
+    return Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxWidth),
+        child: ListView.separated(
+          padding:
+              EdgeInsets.only(bottom: tokens.footerSpacer), // Space for FAB
+          itemCount: _localBackups.length,
+          separatorBuilder: (context, index) =>
+              SizedBox(height: tokens.itemGap + 2),
+          itemBuilder: (context, index) {
+            final file = _localBackups[index] as File;
+            final name = path.basename(file.path);
 
-        final info = _parseBackupInfo(name);
-        final displayName = info['displayName'];
-        final branch = info['branch'];
-        final isAuto = info['isAuto'];
+            final info = _parseBackupInfo(name);
+            final displayName = info['displayName'];
+            final branch = info['branch'];
+            final isAuto = info['isAuto'];
 
-        final isComparing = _comparingFile == file;
-        final isLastRestored = _lastRestoredPath == file.path;
-        final isSelected = _selectedLocalPaths.contains(file.path);
-        final isSignedIn =
-            Provider.of<GoogleDriveService>(context).currentUser != null;
+            final isComparing = _comparingFile == file;
+            final isLastRestored = _lastRestoredPath == file.path;
+            final isSelected = _selectedLocalPaths.contains(file.path);
+            final isSignedIn =
+                Provider.of<GoogleDriveService>(context).currentUser != null;
 
-        return Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Card(
-            elevation: 0,
-            color: isSelected
-                ? Theme.of(context).colorScheme.secondaryContainer
-                : Theme.of(context).colorScheme.surfaceContainer,
-            clipBehavior: Clip.antiAlias,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-              side: isSelected
-                  ? BorderSide(
-                      color: Theme.of(context).colorScheme.primary, width: 2)
-                  : BorderSide.none,
-            ),
-            child: InkWell(
-              onTap: _isSelectionMode
-                  ? () => _toggleLocalSelection(file.path)
-                  : () => _showBackupContents(file),
-              onLongPress: () {
-                if (!_isSelectionMode) {
-                  _toggleSelectionMode();
-                  _toggleLocalSelection(file.path);
-                }
-              },
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Row(
-                  children: [
-                    // Icon / Checkbox
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: isLastRestored
-                            ? Colors.green.withOpacity(0.2)
-                            : Theme.of(context)
-                                .colorScheme
-                                .surfaceContainerHighest,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: _isSelectionMode
-                          ? Checkbox(
-                              value: isSelected,
-                              onChanged: (val) =>
-                                  _toggleLocalSelection(file.path),
-                            )
-                          : Icon(
-                              isLastRestored
-                                  ? Icons.check_circle
-                                  : Icons.description,
-                              color: isLastRestored
-                                  ? Colors.green
-                                  : Theme.of(context)
-                                      .colorScheme
-                                      .onSurfaceVariant,
-                            ),
-                    ),
-                    const SizedBox(width: 16),
-                    // Content
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            displayName,
-                            style: Theme.of(context)
-                                .textTheme
-                                .titleSmall
-                                ?.copyWith(
-                                  fontWeight: FontWeight.bold,
-                                  color: isLastRestored ? Colors.green : null,
-                                ),
+            return Padding(
+              padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
+              child: Card(
+                elevation: 0,
+                color: isSelected
+                    ? Theme.of(context).colorScheme.secondaryContainer
+                    : Theme.of(context).colorScheme.surfaceContainer,
+                clipBehavior: Clip.antiAlias,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: isSelected
+                      ? BorderSide(
+                          color: Theme.of(context).colorScheme.primary,
+                          width: 2)
+                      : BorderSide.none,
+                ),
+                child: InkWell(
+                  onTap: _isSelectionMode
+                      ? () => _toggleLocalSelection(file.path)
+                      : () => _showBackupContents(file),
+                  onLongPress: () {
+                    if (!_isSelectionMode) {
+                      _toggleSelectionMode();
+                      _toggleLocalSelection(file.path);
+                    }
+                  },
+                  child: Padding(
+                    padding: EdgeInsets.all(cardPadding),
+                    child: Row(
+                      children: [
+                        // Icon / Checkbox
+                        Container(
+                          width: window.isCompact ? 40 : 44,
+                          height: window.isCompact ? 40 : 44,
+                          decoration: BoxDecoration(
+                            color: isLastRestored
+                                ? Colors.green.withValues(alpha: 0.2)
+                                : Theme.of(context)
+                                    .colorScheme
+                                    .surfaceContainerHighest,
+                            borderRadius: BorderRadius.circular(12),
                           ),
-                          const SizedBox(height: 4),
-                          Row(
+                          child: _isSelectionMode
+                              ? Checkbox(
+                                  value: isSelected,
+                                  onChanged: (val) =>
+                                      _toggleLocalSelection(file.path),
+                                )
+                              : Icon(
+                                  isLastRestored
+                                      ? Icons.check_circle
+                                      : Icons.description,
+                                  color: isLastRestored
+                                      ? Colors.green
+                                      : Theme.of(context)
+                                          .colorScheme
+                                          .onSurfaceVariant,
+                                ),
+                        ),
+                        SizedBox(width: tokens.sectionGap),
+                        // Content
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              if (branch.isNotEmpty)
-                                Container(
-                                  margin: const EdgeInsets.only(right: 6),
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 6, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    color: Theme.of(context)
-                                        .colorScheme
-                                        .surfaceContainerHighest,
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                  child: Text(branch,
-                                      style: TextStyle(
-                                          fontSize: 10,
-                                          color: Theme.of(context)
-                                              .colorScheme
-                                              .onSurfaceVariant)),
-                                ),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: isAuto
-                                      ? Colors.orange.withOpacity(0.2)
-                                      : Colors.blue.withOpacity(0.2),
-                                  borderRadius: BorderRadius.circular(4),
-                                ),
-                                child: Text(isAuto ? "자동" : "수동",
-                                    style: TextStyle(
-                                        fontSize: 10,
-                                        color: isAuto
-                                            ? Colors.orange
-                                            : Colors.blue,
-                                        fontWeight: FontWeight.bold)),
+                              Text(
+                                displayName,
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .titleSmall
+                                    ?.copyWith(
+                                      fontWeight: FontWeight.bold,
+                                      color:
+                                          isLastRestored ? Colors.green : null,
+                                    ),
                               ),
-                              const SizedBox(width: 8),
-                              FutureBuilder<String>(
-                                future: file.length().then((len) =>
-                                    "${(len / 1024).toStringAsFixed(1)} KB"),
-                                builder: (context, snapshot) => Text(
-                                    snapshot.data ?? "...",
-                                    style: TextStyle(
-                                        fontSize: 11,
+                              SizedBox(height: tokens.itemGap),
+                              Row(
+                                children: [
+                                  if (branch.isNotEmpty)
+                                    Container(
+                                      margin: EdgeInsets.only(
+                                          right: tokens.itemGap),
+                                      padding: EdgeInsets.symmetric(
+                                        horizontal: tokens.itemGap,
+                                        vertical: 2,
+                                      ),
+                                      decoration: BoxDecoration(
                                         color: Theme.of(context)
                                             .colorScheme
-                                            .outline)),
+                                            .surfaceContainerHighest,
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                      child: Text(branch,
+                                          style: TextStyle(
+                                              fontSize: chipFontSize,
+                                              color: Theme.of(context)
+                                                  .colorScheme
+                                                  .onSurfaceVariant)),
+                                    ),
+                                  Container(
+                                    padding: EdgeInsets.symmetric(
+                                        horizontal: tokens.itemGap,
+                                        vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: isAuto
+                                          ? Colors.orange.withValues(alpha: 0.2)
+                                          : Colors.blue.withValues(alpha: 0.2),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: Text(isAuto ? "자동" : "수동",
+                                        style: TextStyle(
+                                            fontSize: chipFontSize,
+                                            color: isAuto
+                                                ? Colors.orange
+                                                : Colors.blue,
+                                            fontWeight: FontWeight.bold)),
+                                  ),
+                                  SizedBox(width: tokens.itemGap + 2),
+                                  FutureBuilder<String>(
+                                    future: file.length().then((len) =>
+                                        "${(len / 1024).toStringAsFixed(1)} KB"),
+                                    builder: (context, snapshot) => Text(
+                                        snapshot.data ?? "...",
+                                        style: TextStyle(
+                                            fontSize: metaFontSize,
+                                            color: Theme.of(context)
+                                                .colorScheme
+                                                .outline)),
+                                  ),
+                                ],
                               ),
                             ],
                           ),
-                        ],
-                      ),
+                        ),
+                        // Actions
+                        if (!_isSelectionMode)
+                          isComparing
+                              ? const SizedBox(
+                                  width: 24,
+                                  height: 24,
+                                  child:
+                                      CircularProgressIndicator(strokeWidth: 2))
+                              : PopupMenuButton<String>(
+                                  icon: const Icon(Icons.more_vert),
+                                  onSelected: (value) {
+                                    if (value == 'upload') {
+                                      if (isSignedIn) {
+                                        _uploadToDrive(file);
+                                      } else {
+                                        ScaffoldMessenger.of(context)
+                                            .showSnackBar(const SnackBar(
+                                                content: Text("구글 로그인 필요")));
+                                      }
+                                    } else if (value == 'restore') {
+                                      _restoreWithDiff(file);
+                                    } else if (value == 'delete') {
+                                      _deleteBackup(file);
+                                    }
+                                  },
+                                  itemBuilder: (BuildContext context) =>
+                                      <PopupMenuEntry<String>>[
+                                    PopupMenuItem<String>(
+                                      value: 'upload',
+                                      enabled: isSignedIn,
+                                      child: const Row(
+                                        children: [
+                                          Icon(Icons.cloud_upload, size: 20),
+                                          SizedBox(width: 12),
+                                          Text('업로드'),
+                                        ],
+                                      ),
+                                    ),
+                                    const PopupMenuItem<String>(
+                                      value: 'restore',
+                                      child: Row(
+                                        children: [
+                                          Icon(Icons.restore, size: 20),
+                                          SizedBox(width: 12),
+                                          Text('복원 (비교)'),
+                                        ],
+                                      ),
+                                    ),
+                                    const PopupMenuItem<String>(
+                                      value: 'delete',
+                                      child: Row(
+                                        children: [
+                                          Icon(Icons.delete_outline,
+                                              color: Colors.red, size: 20),
+                                          SizedBox(width: 12),
+                                          Text('삭제',
+                                              style:
+                                                  TextStyle(color: Colors.red)),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                      ],
                     ),
-                    // Actions
-                    if (!_isSelectionMode)
-                      isComparing
-                          ? const SizedBox(
-                              width: 24,
-                              height: 24,
-                              child: CircularProgressIndicator(strokeWidth: 2))
-                          : PopupMenuButton<String>(
-                              icon: const Icon(Icons.more_vert),
-                              onSelected: (value) {
-                                if (value == 'upload') {
-                                  if (isSignedIn) {
-                                    _uploadToDrive(file);
-                                  } else {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                        const SnackBar(
-                                            content: Text("구글 로그인 필요")));
-                                  }
-                                } else if (value == 'restore') {
-                                  _restoreWithDiff(file);
-                                } else if (value == 'delete') {
-                                  _deleteBackup(file);
-                                }
-                              },
-                              itemBuilder: (BuildContext context) =>
-                                  <PopupMenuEntry<String>>[
-                                PopupMenuItem<String>(
-                                  value: 'upload',
-                                  enabled: isSignedIn,
-                                  child: const Row(
-                                    children: [
-                                      Icon(Icons.cloud_upload, size: 20),
-                                      SizedBox(width: 12),
-                                      Text('업로드'),
-                                    ],
-                                  ),
-                                ),
-                                const PopupMenuItem<String>(
-                                  value: 'restore',
-                                  child: Row(
-                                    children: [
-                                      Icon(Icons.restore, size: 20),
-                                      SizedBox(width: 12),
-                                      Text('복원 (비교)'),
-                                    ],
-                                  ),
-                                ),
-                                const PopupMenuItem<String>(
-                                  value: 'delete',
-                                  child: Row(
-                                    children: [
-                                      Icon(Icons.delete_outline,
-                                          color: Colors.red, size: 20),
-                                      SizedBox(width: 12),
-                                      Text('삭제',
-                                          style: TextStyle(color: Colors.red)),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ),
-                  ],
+                  ),
                 ),
               ),
-            ),
-          ),
-        );
-      },
+            );
+          },
+        ),
+      ),
     );
   }
 
   Widget _buildCloudList(bool isSignedIn) {
+    final tokens = UiLayoutTokens.of(context);
+    final window = UiWindowInfo.of(context);
+    final maxWidth = _contentMaxWidth(context);
+    final horizontalPadding = tokens.screenPadding;
+    final cardPadding = window.isCompact ? 12.0 : 14.0;
+    final chipFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 10.0,
+      UiWindowClass.medium => 11.0,
+      _ => 12.0,
+    };
+    final metaFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 11.0,
+      UiWindowClass.medium => 12.0,
+      _ => 12.0,
+    };
+
     if (!isSignedIn) {
       return Center(
         child: Column(
@@ -1320,175 +1553,187 @@ class _BackupManagerScreenState extends State<BackupManagerScreen>
       );
     }
 
-    return ListView.separated(
-      padding: const EdgeInsets.only(bottom: 80),
-      itemCount: _cloudBackups.length,
-      separatorBuilder: (context, index) => const SizedBox(height: 8),
-      itemBuilder: (context, index) {
-        final file = _cloudBackups[index];
-        final info = _parseBackupInfo(file.name ?? "Unknown");
-        final displayName = info['displayName'];
-        final branch = info['branch'];
-        final isAuto = info['isAuto'];
-        final isSelected = _selectedCloudIds.contains(file.id);
+    return Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxWidth),
+        child: ListView.separated(
+          padding: EdgeInsets.only(bottom: tokens.footerSpacer),
+          itemCount: _cloudBackups.length,
+          separatorBuilder: (context, index) =>
+              SizedBox(height: tokens.itemGap + 2),
+          itemBuilder: (context, index) {
+            final file = _cloudBackups[index];
+            final info = _parseBackupInfo(file.name ?? "Unknown");
+            final displayName = info['displayName'];
+            final branch = info['branch'];
+            final isAuto = info['isAuto'];
+            final isSelected = _selectedCloudIds.contains(file.id);
 
-        return Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Card(
-            elevation: 0,
-            color: isSelected
-                ? Theme.of(context).colorScheme.secondaryContainer
-                : Theme.of(context).colorScheme.surfaceContainer,
-            clipBehavior: Clip.antiAlias,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-              side: isSelected
-                  ? BorderSide(
-                      color: Theme.of(context).colorScheme.primary, width: 2)
-                  : BorderSide.none,
-            ),
-            child: InkWell(
-              onTap: _isSelectionMode
-                  ? () => _toggleCloudSelection(file.id!)
-                  : null,
-              onLongPress: () {
-                if (!_isSelectionMode) {
-                  _toggleSelectionMode();
-                  _toggleCloudSelection(file.id!);
-                }
-              },
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: Theme.of(context)
-                            .colorScheme
-                            .surfaceContainerHighest,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: _isSelectionMode
-                          ? Checkbox(
-                              value: isSelected,
-                              onChanged: (val) =>
-                                  _toggleCloudSelection(file.id!),
-                            )
-                          : Icon(
-                              Icons.cloud,
-                              color: Theme.of(context).colorScheme.primary,
-                            ),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            displayName,
-                            style: Theme.of(context)
-                                .textTheme
-                                .titleSmall
-                                ?.copyWith(
-                                  fontWeight: FontWeight.bold,
-                                ),
+            return Padding(
+              padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
+              child: Card(
+                elevation: 0,
+                color: isSelected
+                    ? Theme.of(context).colorScheme.secondaryContainer
+                    : Theme.of(context).colorScheme.surfaceContainer,
+                clipBehavior: Clip.antiAlias,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: isSelected
+                      ? BorderSide(
+                          color: Theme.of(context).colorScheme.primary,
+                          width: 2)
+                      : BorderSide.none,
+                ),
+                child: InkWell(
+                  onTap: _isSelectionMode
+                      ? () => _toggleCloudSelection(file.id!)
+                      : null,
+                  onLongPress: () {
+                    if (!_isSelectionMode) {
+                      _toggleSelectionMode();
+                      _toggleCloudSelection(file.id!);
+                    }
+                  },
+                  child: Padding(
+                    padding: EdgeInsets.all(cardPadding),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: window.isCompact ? 40 : 44,
+                          height: window.isCompact ? 40 : 44,
+                          decoration: BoxDecoration(
+                            color: Theme.of(context)
+                                .colorScheme
+                                .surfaceContainerHighest,
+                            borderRadius: BorderRadius.circular(12),
                           ),
-                          const SizedBox(height: 4),
-                          Row(
+                          child: _isSelectionMode
+                              ? Checkbox(
+                                  value: isSelected,
+                                  onChanged: (val) =>
+                                      _toggleCloudSelection(file.id!),
+                                )
+                              : Icon(
+                                  Icons.cloud,
+                                  color: Theme.of(context).colorScheme.primary,
+                                ),
+                        ),
+                        SizedBox(width: tokens.sectionGap),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              if (branch.isNotEmpty)
-                                Container(
-                                  margin: const EdgeInsets.only(right: 6),
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 6, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    color: Theme.of(context)
-                                        .colorScheme
-                                        .surfaceContainerHighest,
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                  child: Text(branch,
-                                      style: TextStyle(
-                                          fontSize: 10,
-                                          color: Theme.of(context)
-                                              .colorScheme
-                                              .onSurfaceVariant)),
-                                ),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: isAuto
-                                      ? Colors.orange.withOpacity(0.2)
-                                      : Colors.blue.withOpacity(0.2),
-                                  borderRadius: BorderRadius.circular(4),
-                                ),
-                                child: Text(isAuto ? "자동" : "수동",
-                                    style: TextStyle(
-                                        fontSize: 10,
-                                        color: isAuto
-                                            ? Colors.orange
-                                            : Colors.blue,
-                                        fontWeight: FontWeight.bold)),
+                              Text(
+                                displayName,
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .titleSmall
+                                    ?.copyWith(
+                                      fontWeight: FontWeight.bold,
+                                    ),
                               ),
-                              const SizedBox(width: 8),
-                              if (file.size != null)
-                                Text(
-                                    "${(int.parse(file.size!) / 1024).toStringAsFixed(1)} KB",
-                                    style: TextStyle(
-                                        fontSize: 11,
+                              SizedBox(height: tokens.itemGap),
+                              Row(
+                                children: [
+                                  if (branch.isNotEmpty)
+                                    Container(
+                                      margin: EdgeInsets.only(
+                                          right: tokens.itemGap),
+                                      padding: EdgeInsets.symmetric(
+                                          horizontal: tokens.itemGap,
+                                          vertical: 2),
+                                      decoration: BoxDecoration(
                                         color: Theme.of(context)
                                             .colorScheme
-                                            .outline)),
+                                            .surfaceContainerHighest,
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                      child: Text(branch,
+                                          style: TextStyle(
+                                              fontSize: chipFontSize,
+                                              color: Theme.of(context)
+                                                  .colorScheme
+                                                  .onSurfaceVariant)),
+                                    ),
+                                  Container(
+                                    padding: EdgeInsets.symmetric(
+                                        horizontal: tokens.itemGap,
+                                        vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: isAuto
+                                          ? Colors.orange.withValues(alpha: 0.2)
+                                          : Colors.blue.withValues(alpha: 0.2),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: Text(isAuto ? "자동" : "수동",
+                                        style: TextStyle(
+                                            fontSize: chipFontSize,
+                                            color: isAuto
+                                                ? Colors.orange
+                                                : Colors.blue,
+                                            fontWeight: FontWeight.bold)),
+                                  ),
+                                  SizedBox(width: tokens.itemGap + 2),
+                                  if (file.size != null)
+                                    Text(
+                                        "${(int.parse(file.size!) / 1024).toStringAsFixed(1)} KB",
+                                        style: TextStyle(
+                                            fontSize: metaFontSize,
+                                            color: Theme.of(context)
+                                                .colorScheme
+                                                .outline)),
+                                ],
+                              ),
                             ],
                           ),
-                        ],
-                      ),
+                        ),
+                        if (!_isSelectionMode)
+                          PopupMenuButton<String>(
+                            icon: const Icon(Icons.more_vert),
+                            onSelected: (value) {
+                              if (value == 'download') {
+                                _downloadFromDrive(file.id!, file.name!);
+                              } else if (value == 'delete') {
+                                _deleteCloudFile(file.id!);
+                              }
+                            },
+                            itemBuilder: (BuildContext context) =>
+                                <PopupMenuEntry<String>>[
+                              const PopupMenuItem<String>(
+                                value: 'download',
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.download, size: 20),
+                                    SizedBox(width: 12),
+                                    Text('다운로드'),
+                                  ],
+                                ),
+                              ),
+                              const PopupMenuItem<String>(
+                                value: 'delete',
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.delete_outline,
+                                        color: Colors.red, size: 20),
+                                    SizedBox(width: 12),
+                                    Text('삭제',
+                                        style: TextStyle(color: Colors.red)),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                      ],
                     ),
-                    if (!_isSelectionMode)
-                      PopupMenuButton<String>(
-                        icon: const Icon(Icons.more_vert),
-                        onSelected: (value) {
-                          if (value == 'download') {
-                            _downloadFromDrive(file.id!, file.name!);
-                          } else if (value == 'delete') {
-                            _deleteCloudFile(file.id!);
-                          }
-                        },
-                        itemBuilder: (BuildContext context) =>
-                            <PopupMenuEntry<String>>[
-                          const PopupMenuItem<String>(
-                            value: 'download',
-                            child: Row(
-                              children: [
-                                Icon(Icons.download, size: 20),
-                                SizedBox(width: 12),
-                                Text('다운로드'),
-                              ],
-                            ),
-                          ),
-                          const PopupMenuItem<String>(
-                            value: 'delete',
-                            child: Row(
-                              children: [
-                                Icon(Icons.delete_outline,
-                                    color: Colors.red, size: 20),
-                                SizedBox(width: 12),
-                                Text('삭제', style: TextStyle(color: Colors.red)),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                  ],
+                  ),
                 ),
               ),
-            ),
-          ),
-        );
-      },
+            );
+          },
+        ),
+      ),
     );
   }
 }
@@ -1531,6 +1776,70 @@ class _DiffRestoreDialog extends StatefulWidget {
 class _DiffRestoreDialogState extends State<_DiffRestoreDialog> {
   final Set<String> _selectedKeys = {};
 
+  ({
+    EdgeInsets insetPadding,
+    EdgeInsets contentPadding,
+    double maxWidth,
+    double contentHeight,
+    double titleFont,
+    double subtitleFont,
+  }) _dialogMetrics(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final viewportHeight = MediaQuery.of(context).size.height;
+    final maxWidth = switch (window.windowClass) {
+      UiWindowClass.compact => 520.0,
+      UiWindowClass.medium => 620.0,
+      UiWindowClass.expanded => 760.0,
+      UiWindowClass.large => 860.0,
+      UiWindowClass.extraLarge => 960.0,
+    };
+    final preferredContentHeight = switch (window.windowClass) {
+      UiWindowClass.compact => 420.0,
+      UiWindowClass.medium => 500.0,
+      _ => 580.0,
+    };
+    final contentHeight = math.max(
+      260.0,
+      math.min(
+        preferredContentHeight,
+        viewportHeight * (window.isLandscape ? 0.56 : 0.66),
+      ),
+    );
+    final horizontalInset = switch (window.windowClass) {
+      UiWindowClass.compact => tokens.screenPadding,
+      UiWindowClass.medium => tokens.screenPadding + 8,
+      UiWindowClass.expanded => tokens.screenPadding + 20,
+      UiWindowClass.large => tokens.screenPadding + 32,
+      UiWindowClass.extraLarge => tokens.screenPadding + 40,
+    };
+    final verticalInset = math.max(12.0, math.min(24.0, viewportHeight * 0.08));
+    final titleFont = switch (window.windowClass) {
+      UiWindowClass.compact => 13.0,
+      UiWindowClass.medium => 14.0,
+      _ => 15.0,
+    };
+    final subtitleFont = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 13.0,
+      _ => 14.0,
+    };
+    return (
+      insetPadding: EdgeInsets.symmetric(
+          horizontal: horizontalInset, vertical: verticalInset),
+      contentPadding: EdgeInsets.fromLTRB(
+        tokens.screenPadding,
+        tokens.sectionGap,
+        tokens.screenPadding,
+        tokens.sectionGap,
+      ),
+      maxWidth: maxWidth,
+      contentHeight: contentHeight,
+      titleFont: titleFont,
+      subtitleFont: subtitleFont,
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1542,78 +1851,96 @@ class _DiffRestoreDialogState extends State<_DiffRestoreDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final metrics = _dialogMetrics(context);
     return AlertDialog(
+      insetPadding: metrics.insetPadding,
+      contentPadding: metrics.contentPadding,
       title: const Text("변경 사항 비교"),
-      content: SizedBox(
-        width: double.maxFinite,
-        height: 400,
-        child: Column(
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text("총 ${widget.diffs.length}개 항목"),
-                TextButton(
-                  onPressed: () {
-                    setState(() {
-                      if (_selectedKeys.length == widget.diffs.length) {
-                        _selectedKeys.clear();
-                      } else {
-                        for (var diff in widget.diffs) {
-                          _selectedKeys.add(diff['key']!);
-                        }
-                      }
-                    });
-                  },
-                  child: Text(_selectedKeys.length == widget.diffs.length
-                      ? "전체 해제"
-                      : "전체 선택"),
-                ),
-              ],
-            ),
-            const Divider(),
-            Expanded(
-              child: ListView.builder(
-                itemCount: widget.diffs.length,
-                itemBuilder: (context, index) {
-                  final diff = widget.diffs[index];
-                  final key = diff['key']!;
-                  final backupVal = diff['backup']!;
-                  final currentVal = diff['current']!;
-                  final isSelected = _selectedKeys.contains(key);
-
-                  return CheckboxListTile(
-                    value: isSelected,
-                    onChanged: (val) {
+      content: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: metrics.maxWidth),
+        child: SizedBox(
+          width: double.maxFinite,
+          height: metrics.contentHeight,
+          child: Column(
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text("총 ${widget.diffs.length}개 항목"),
+                  TextButton(
+                    onPressed: () {
                       setState(() {
-                        if (val == true) {
-                          _selectedKeys.add(key);
+                        if (_selectedKeys.length == widget.diffs.length) {
+                          _selectedKeys.clear();
                         } else {
-                          _selectedKeys.remove(key);
+                          for (var diff in widget.diffs) {
+                            _selectedKeys.add(diff['key']!);
+                          }
                         }
                       });
                     },
-                    title: Text(key,
-                        style: const TextStyle(
-                            fontWeight: FontWeight.bold, fontSize: 13)),
-                    subtitle: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text("백업: $backupVal",
-                            style: const TextStyle(
-                                color: Colors.green, fontSize: 12)),
-                        Text("현재: $currentVal",
-                            style: const TextStyle(
-                                color: Colors.red, fontSize: 12)),
-                      ],
-                    ),
-                    contentPadding: EdgeInsets.zero,
-                    controlAffinity: ListTileControlAffinity.leading,
-                  );
-                },
+                    child: Text(_selectedKeys.length == widget.diffs.length
+                        ? "전체 해제"
+                        : "전체 선택"),
+                  ),
+                ],
               ),
-            ),
-          ],
+              const Divider(),
+              Expanded(
+                child: ListView.builder(
+                  itemCount: widget.diffs.length,
+                  itemBuilder: (context, index) {
+                    final diff = widget.diffs[index];
+                    final key = diff['key']!;
+                    final backupVal = diff['backup']!;
+                    final currentVal = diff['current']!;
+                    final isSelected = _selectedKeys.contains(key);
+
+                    return CheckboxListTile(
+                      value: isSelected,
+                      onChanged: (val) {
+                        setState(() {
+                          if (val == true) {
+                            _selectedKeys.add(key);
+                          } else {
+                            _selectedKeys.remove(key);
+                          }
+                        });
+                      },
+                      title: Text(
+                        key,
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: metrics.titleFont,
+                        ),
+                      ),
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            "백업: $backupVal",
+                            style: TextStyle(
+                              color: Colors.green,
+                              fontSize: metrics.subtitleFont,
+                            ),
+                          ),
+                          Text(
+                            "현재: $currentVal",
+                            style: TextStyle(
+                              color: Colors.red,
+                              fontSize: metrics.subtitleFont,
+                            ),
+                          ),
+                        ],
+                      ),
+                      contentPadding: EdgeInsets.zero,
+                      controlAffinity: ListTileControlAffinity.leading,
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
         ),
       ),
       actions: [

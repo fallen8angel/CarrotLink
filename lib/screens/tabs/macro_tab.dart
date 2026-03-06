@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../services/ssh_service.dart';
 import '../../services/macro_service.dart';
+import '../../ui/adaptive/layout_tokens.dart';
+import '../../ui/adaptive/window_class.dart';
 import '../../widgets/design_components.dart';
 import '../../widgets/custom_toast.dart';
 
@@ -35,7 +37,8 @@ class _MacroTabState extends State<MacroTab> {
     });
   }
 
-  void _showAddDialog(BuildContext context, {int? index, String? initialName, String? initialCmd}) {
+  void _showAddDialog(BuildContext context,
+      {int? index, String? initialName, String? initialCmd}) {
     final nameCtrl = TextEditingController(text: initialName);
     final cmdCtrl = TextEditingController(text: initialCmd);
     final isEditing = index != null;
@@ -47,16 +50,22 @@ class _MacroTabState extends State<MacroTab> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: "이름")),
-            TextField(controller: cmdCtrl, decoration: const InputDecoration(labelText: "명령어")),
+            TextField(
+                controller: nameCtrl,
+                decoration: const InputDecoration(labelText: "이름")),
+            TextField(
+                controller: cmdCtrl,
+                decoration: const InputDecoration(labelText: "명령어")),
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("취소")),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text("취소")),
           ElevatedButton(
             onPressed: () {
               if (nameCtrl.text.isNotEmpty && cmdCtrl.text.isNotEmpty) {
-                final service = Provider.of<MacroService>(context, listen: false);
+                final service =
+                    Provider.of<MacroService>(context, listen: false);
                 if (isEditing) {
                   service.updateMacro(index, nameCtrl.text, cmdCtrl.text);
                 } else {
@@ -75,6 +84,9 @@ class _MacroTabState extends State<MacroTab> {
   @override
   Widget build(BuildContext context) {
     final macros = Provider.of<MacroService>(context).macros;
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
 
     return Scaffold(
       appBar: AppBar(
@@ -89,12 +101,16 @@ class _MacroTabState extends State<MacroTab> {
                 context: context,
                 builder: (ctx) => AlertDialog(
                   title: const Text("기본 매크로 복원"),
-                  content: const Text("모든 커스텀 매크로가 삭제되고 기본 매크로로 초기화됩니다. 계속하시겠습니까?"),
+                  content:
+                      const Text("모든 커스텀 매크로가 삭제되고 기본 매크로로 초기화됩니다. 계속하시겠습니까?"),
                   actions: [
-                    TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("취소")),
+                    TextButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        child: const Text("취소")),
                     ElevatedButton(
                       onPressed: () {
-                        Provider.of<MacroService>(context, listen: false).resetToDefaults();
+                        Provider.of<MacroService>(context, listen: false)
+                            .resetToDefaults();
                         Navigator.pop(ctx);
                         CustomToast.show(context, "기본 매크로가 복원되었습니다.");
                       },
@@ -112,7 +128,12 @@ class _MacroTabState extends State<MacroTab> {
         child: const Icon(Icons.add),
       ),
       body: ListView.builder(
-        padding: const EdgeInsets.only(left: 16, right: 16, top: 16, bottom: 150),
+        padding: EdgeInsets.only(
+          left: tokens.screenPadding.clamp(12.0, 20.0).toDouble(),
+          right: tokens.screenPadding.clamp(12.0, 20.0).toDouble(),
+          top: 16,
+          bottom: tokens.footerSpacer,
+        ),
         itemCount: macros.length,
         itemBuilder: (ctx, index) {
           final macro = macros[index];
@@ -121,14 +142,16 @@ class _MacroTabState extends State<MacroTab> {
             child: DesignCard(
               padding: EdgeInsets.zero,
               child: ListTile(
-                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                 onTap: () async {
                   final ssh = Provider.of<SSHService>(context, listen: false);
                   if (!ssh.isConnected) {
-                    CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
+                    CustomToast.show(context, "기기와 연결되어 있지 않습니다.",
+                        isError: true);
                     return;
                   }
-                  
+
                   showDialog(
                     context: context,
                     barrierDismissible: false,
@@ -139,20 +162,38 @@ class _MacroTabState extends State<MacroTab> {
                     ),
                   );
                 },
-                title: Text(macro.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                subtitle: Text(macro.command, maxLines: 1, overflow: TextOverflow.ellipsis),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.edit, color: Colors.blue),
-                      onPressed: () => _showAddDialog(context, index: index, initialName: macro.name, initialCmd: macro.command),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.delete, color: Colors.red),
-                      onPressed: () => Provider.of<MacroService>(context, listen: false).removeMacro(index),
-                    ),
-                  ],
+                title: Text(macro.name,
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: window.isCompact ? 14 : 15,
+                    )),
+                titleAlignment: ListTileTitleAlignment.center,
+                subtitle: Text(macro.command,
+                    maxLines: 1, overflow: TextOverflow.ellipsis),
+                trailing: SizedBox(
+                  width: 92,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      IconButton(
+                        visualDensity: VisualDensity.compact,
+                        iconSize: 20,
+                        icon: Icon(Icons.edit, color: scheme.primary),
+                        onPressed: () => _showAddDialog(context,
+                            index: index,
+                            initialName: macro.name,
+                            initialCmd: macro.command),
+                      ),
+                      IconButton(
+                        visualDensity: VisualDensity.compact,
+                        iconSize: 20,
+                        icon: Icon(Icons.delete, color: scheme.error),
+                        onPressed: () =>
+                            Provider.of<MacroService>(context, listen: false)
+                                .removeMacro(index),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),

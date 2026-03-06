@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -14,6 +15,8 @@ import '../../services/carrot_server_settings_service.dart';
 import '../../services/google_drive_service.dart';
 import '../../services/ssh_service.dart';
 import '../../services/storage_layout_service.dart';
+import '../../ui/adaptive/layout_tokens.dart';
+import '../../ui/adaptive/window_class.dart';
 import '../../widgets/custom_toast.dart';
 
 enum _BackupSource { local, cloud }
@@ -77,6 +80,62 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
           _selectedBranch == _allBranches || item.branch == _selectedBranch;
       return dateOk && branchOk;
     }).toList();
+  }
+
+  ({
+    double filterMinHeight,
+    double sourceSwitchMinHeight,
+    double segmentMinHeight,
+    double controlHorizontalPadding,
+    double controlInnerPadding,
+    double labelFontSize,
+    double valueFontSize,
+  }) _uiMetrics(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    return (
+      filterMinHeight: switch (window.windowClass) {
+        UiWindowClass.compact => 36.0,
+        UiWindowClass.medium => 38.0,
+        UiWindowClass.expanded => 40.0,
+        UiWindowClass.large || UiWindowClass.extraLarge => 42.0,
+      },
+      sourceSwitchMinHeight: switch (window.windowClass) {
+        UiWindowClass.compact => 40.0,
+        UiWindowClass.medium => 42.0,
+        UiWindowClass.expanded => 44.0,
+        UiWindowClass.large || UiWindowClass.extraLarge => 46.0,
+      },
+      segmentMinHeight: switch (window.windowClass) {
+        UiWindowClass.compact => 34.0,
+        UiWindowClass.medium => 36.0,
+        UiWindowClass.expanded => 38.0,
+        UiWindowClass.large || UiWindowClass.extraLarge => 40.0,
+      },
+      controlHorizontalPadding: switch (window.windowClass) {
+        UiWindowClass.compact => 8.0,
+        UiWindowClass.medium => 10.0,
+        UiWindowClass.expanded => 10.0,
+        UiWindowClass.large || UiWindowClass.extraLarge => 12.0,
+      },
+      controlInnerPadding: switch (window.windowClass) {
+        UiWindowClass.compact => 2.0,
+        UiWindowClass.medium => 2.5,
+        UiWindowClass.expanded => 3.0,
+        UiWindowClass.large || UiWindowClass.extraLarge => 3.0,
+      },
+      labelFontSize: switch (window.windowClass) {
+        UiWindowClass.compact => 12.0,
+        UiWindowClass.medium => 12.5,
+        UiWindowClass.expanded => 13.0,
+        UiWindowClass.large || UiWindowClass.extraLarge => 13.5,
+      },
+      valueFontSize: switch (window.windowClass) {
+        UiWindowClass.compact => 12.0,
+        UiWindowClass.medium => 12.5,
+        UiWindowClass.expanded => 13.0,
+        UiWindowClass.large || UiWindowClass.extraLarge => 13.5,
+      },
+    );
   }
 
   @override
@@ -467,64 +526,71 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
     final keys = values.keys.map((e) => e.toString()).toList()..sort();
     final action = await showDialog<_BackupDialogAction>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(item.branch),
-        content: SizedBox(
-          width: double.maxFinite,
-          height: 360,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                '${item.timeLabel} · ${keys.length}개 키',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+      builder: (context) {
+        final media = MediaQuery.of(context);
+        final dialogHeight = (media.size.height *
+                (media.size.width > media.size.height ? 0.72 : 0.58))
+            .clamp(300.0, 620.0)
+            .toDouble();
+        return AlertDialog(
+          title: Text(item.branch),
+          content: SizedBox(
+            width: double.maxFinite,
+            height: dialogHeight,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${item.timeLabel} · ${keys.length}개 키',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
                 ),
-              ),
-              const SizedBox(height: 8),
-              const Divider(height: 1),
-              const SizedBox(height: 8),
-              Expanded(
-                child: ListView.separated(
-                  itemCount: keys.length,
-                  separatorBuilder: (_, __) => const SizedBox(height: 8),
-                  itemBuilder: (context, index) {
-                    final key = keys[index];
-                    final value = values[key];
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          key,
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
+                const SizedBox(height: 8),
+                const Divider(height: 1),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: ListView.separated(
+                    itemCount: keys.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 8),
+                    itemBuilder: (context, index) {
+                      final key = keys[index];
+                      final value = values[key];
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            key,
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          value?.toString() ?? '(없음)',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color:
-                                Theme.of(context).colorScheme.onSurfaceVariant,
+                          const SizedBox(height: 2),
+                          Text(
+                            value?.toString() ?? '(없음)',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
                           ),
-                        ),
-                      ],
-                    );
-                  },
+                        ],
+                      );
+                    },
+                  ),
                 ),
-              ),
-              const SizedBox(height: 10),
-              const Divider(height: 1),
-              const SizedBox(height: 8),
-              Align(
-                alignment: Alignment.centerRight,
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
+                const SizedBox(height: 10),
+                const Divider(height: 1),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    alignment: WrapAlignment.end,
                     children: [
                       TextButton(
                         onPressed: () {
@@ -558,11 +624,11 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
                     ],
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
     FocusManager.instance.primaryFocus?.unfocus();
 
@@ -782,9 +848,10 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
     required List<String> options,
     required ValueChanged<String> onChanged,
   }) {
+    final ui = _uiMetrics(context);
     return Container(
-      height: 36,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
+      constraints: BoxConstraints(minHeight: ui.filterMinHeight),
+      padding: EdgeInsets.symmetric(horizontal: ui.controlHorizontalPadding),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(8),
@@ -797,7 +864,7 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
           Text(
             '$label ',
             style: TextStyle(
-              fontSize: 12,
+              fontSize: ui.labelFontSize,
               color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
           ),
@@ -808,7 +875,7 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
                 isExpanded: true,
                 isDense: true,
                 style: TextStyle(
-                  fontSize: 12,
+                  fontSize: ui.valueFontSize,
                   color: Theme.of(context).colorScheme.onSurface,
                 ),
                 items: options
@@ -833,6 +900,7 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
   }
 
   Widget _buildSourceSwitch() {
+    final ui = _uiMetrics(context);
     Widget segment({
       required String text,
       required bool selected,
@@ -842,7 +910,7 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
         child: GestureDetector(
           onTap: onTap,
           child: Container(
-            height: 36,
+            constraints: BoxConstraints(minHeight: ui.segmentMinHeight),
             decoration: BoxDecoration(
               color: selected
                   ? Theme.of(context).colorScheme.primaryContainer
@@ -853,7 +921,7 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
             child: Text(
               text,
               style: TextStyle(
-                fontSize: 12,
+                fontSize: ui.valueFontSize,
                 fontWeight: FontWeight.w700,
                 color: selected
                     ? Theme.of(context).colorScheme.onPrimaryContainer
@@ -866,8 +934,8 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
     }
 
     return Container(
-      height: 40,
-      padding: const EdgeInsets.all(2),
+      constraints: BoxConstraints(minHeight: ui.sourceSwitchMinHeight),
+      padding: EdgeInsets.all(ui.controlInnerPadding),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(10),
@@ -896,97 +964,216 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
   Widget build(BuildContext context) {
     final driveService = Provider.of<GoogleDriveService>(context);
     final backupService = Provider.of<BackupService>(context);
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final ui = _uiMetrics(context);
+    final media = MediaQuery.of(context);
     final isSignedIn = driveService.currentUser != null;
+    final horizontalPadding = tokens.screenPadding.clamp(12.0, 24.0).toDouble();
+    final panelTopPadding = window.isCompact ? 10.0 : 12.0;
+    final sourceSectionGap = window.isCompact ? 8.0 : 9.0;
+    final filterTopPadding = window.isCompact ? 9.0 : 10.0;
+    final filterBottomPadding = window.isCompact ? 7.0 : 8.0;
+    final filterGap = window.isCompact ? 6.0 : 8.0;
+    final fabBottomInset = math.max(16.0, media.padding.bottom + 12.0);
+    final listBottomPadding = math.max(86.0, media.padding.bottom + 82.0);
+    final isTinyLandscape =
+        media.orientation == Orientation.landscape && media.size.height < 560.0;
 
-    return Stack(
+    final topSection = Column(
       children: [
-        Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-              child: Row(
+        Padding(
+          padding: EdgeInsets.fromLTRB(
+            horizontalPadding,
+            panelTopPadding,
+            horizontalPadding,
+            0,
+          ),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final compactActions = constraints.maxWidth < 680;
+              final driveButton = OutlinedButton.icon(
+                onPressed: _isDriveAuthBusy
+                    ? null
+                    : () => _toggleDriveLink(isSignedIn),
+                icon: Icon(
+                  isSignedIn ? Icons.check_circle : Icons.cloud_off,
+                  color: isSignedIn ? Colors.green : null,
+                  size: 18,
+                ),
+                label: Text(
+                  _isDriveAuthBusy ? '처리중' : (isSignedIn ? '연동됨' : '구글 연동'),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              );
+              final menuButton = PopupMenuButton<String>(
+                tooltip: '메뉴',
+                onSelected: (value) {
+                  if (value == 'sync') {
+                    unawaited(_syncNow());
+                  } else if (value == 'local') {
+                    unawaited(_deleteAllLocalBackups());
+                  } else if (value == 'cloud') {
+                    unawaited(_deleteAllCloudBackups());
+                  } else if (value == 'both') {
+                    unawaited(_deleteAllBoth());
+                  }
+                },
+                itemBuilder: (context) => const [
+                  PopupMenuItem(value: 'sync', child: Text('동기화')),
+                  PopupMenuItem(value: 'local', child: Text('로컬 전체 삭제')),
+                  PopupMenuItem(value: 'cloud', child: Text('클라우드 전체 삭제')),
+                  PopupMenuItem(value: 'both', child: Text('로컬+클라우드 전체 삭제')),
+                ],
+              );
+
+              if (!compactActions) {
+                return Row(
+                  children: [
+                    Expanded(child: _buildSourceSwitch()),
+                    SizedBox(width: filterGap),
+                    Flexible(
+                      fit: FlexFit.loose,
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          minHeight: ui.sourceSwitchMinHeight,
+                          minWidth: 98,
+                          maxWidth: switch (window.windowClass) {
+                            UiWindowClass.compact => 132.0,
+                            UiWindowClass.medium => 140.0,
+                            UiWindowClass.expanded => 148.0,
+                            UiWindowClass.large ||
+                            UiWindowClass.extraLarge =>
+                              156.0,
+                          },
+                        ),
+                        child: driveButton,
+                      ),
+                    ),
+                    menuButton,
+                  ],
+                );
+              }
+
+              return Column(
                 children: [
-                  Expanded(child: _buildSourceSwitch()),
-                  const SizedBox(width: 8),
-                  OutlinedButton.icon(
-                    onPressed: _isDriveAuthBusy
-                        ? null
-                        : () => _toggleDriveLink(isSignedIn),
-                    icon: Icon(
-                      isSignedIn ? Icons.check_circle : Icons.cloud_off,
-                      color: isSignedIn ? Colors.green : null,
-                      size: 18,
-                    ),
-                    label: Text(
-                      _isDriveAuthBusy ? '처리중' : (isSignedIn ? '연동됨' : '구글 연동'),
-                    ),
-                  ),
-                  PopupMenuButton<String>(
-                    tooltip: '메뉴',
-                    onSelected: (value) {
-                      if (value == 'sync') {
-                        unawaited(_syncNow());
-                      } else if (value == 'local') {
-                        unawaited(_deleteAllLocalBackups());
-                      } else if (value == 'cloud') {
-                        unawaited(_deleteAllCloudBackups());
-                      } else if (value == 'both') {
-                        unawaited(_deleteAllBoth());
-                      }
-                    },
-                    itemBuilder: (context) => const [
-                      PopupMenuItem(value: 'sync', child: Text('동기화')),
-                      PopupMenuItem(value: 'local', child: Text('로컬 전체 삭제')),
-                      PopupMenuItem(value: 'cloud', child: Text('클라우드 전체 삭제')),
-                      PopupMenuItem(
-                          value: 'both', child: Text('로컬+클라우드 전체 삭제')),
+                  _buildSourceSwitch(),
+                  SizedBox(height: sourceSectionGap),
+                  Row(
+                    children: [
+                      Expanded(child: driveButton),
+                      menuButton,
                     ],
                   ),
                 ],
-              ),
+              );
+            },
+          ),
+        ),
+        if (backupService.isBackingUp)
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+              horizontalPadding,
+              sourceSectionGap,
+              horizontalPadding,
+              0,
             ),
-            if (backupService.isBackingUp)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                child: LinearProgressIndicator(value: backupService.progress),
-              ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
-              child: Row(
+            child: LinearProgressIndicator(value: backupService.progress),
+          ),
+        Padding(
+          padding: EdgeInsets.fromLTRB(
+            horizontalPadding,
+            filterTopPadding,
+            horizontalPadding,
+            filterBottomPadding,
+          ),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final compactFilters = constraints.maxWidth < 700;
+              final dateFilter = _buildCompactFilter(
+                label: '날짜',
+                value: _selectedDate,
+                options: _dateOptions,
+                onChanged: (value) => setState(() => _selectedDate = value),
+              );
+              final branchFilter = _buildCompactFilter(
+                label: '브랜치',
+                value: _selectedBranch,
+                options: _branchOptions,
+                onChanged: (value) => setState(() => _selectedBranch = value),
+              );
+              final refreshButton = IconButton(
+                onPressed: _isLoading ? null : _refreshActive,
+                icon: const Icon(Icons.refresh),
+                tooltip: '새로고침',
+              );
+              final branchWithRefresh = Row(
                 children: [
-                  Expanded(
-                    child: _buildCompactFilter(
-                      label: '날짜',
-                      value: _selectedDate,
-                      options: _dateOptions,
-                      onChanged: (value) =>
-                          setState(() => _selectedDate = value),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _buildCompactFilter(
-                      label: '브랜치',
-                      value: _selectedBranch,
-                      options: _branchOptions,
-                      onChanged: (value) =>
-                          setState(() => _selectedBranch = value),
-                    ),
-                  ),
-                  IconButton(
-                    onPressed: _isLoading ? null : _refreshActive,
-                    icon: const Icon(Icons.refresh),
-                    tooltip: '새로고침',
+                  Expanded(child: branchFilter),
+                  SizedBox(width: filterGap),
+                  SizedBox(
+                    width: ui.filterMinHeight + 4,
+                    height: ui.filterMinHeight + 4,
+                    child: refreshButton,
                   ),
                 ],
-              ),
-            ),
-            Expanded(child: _buildList(isSignedIn: isSignedIn)),
-          ],
+              );
+
+              if (!compactFilters) {
+                return Row(
+                  children: [
+                    Expanded(flex: 5, child: dateFilter),
+                    SizedBox(width: filterGap),
+                    Expanded(flex: 6, child: branchWithRefresh),
+                  ],
+                );
+              }
+
+              return Column(
+                children: [
+                  dateFilter,
+                  SizedBox(height: filterGap),
+                  branchWithRefresh,
+                ],
+              );
+            },
+          ),
         ),
+      ],
+    );
+
+    return Stack(
+      children: [
+        if (isTinyLandscape)
+          CustomScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            slivers: [
+              SliverToBoxAdapter(child: topSection),
+              SliverToBoxAdapter(
+                child: _buildList(
+                  isSignedIn: isSignedIn,
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  listBottomPadding: listBottomPadding,
+                ),
+              ),
+            ],
+          )
+        else
+          Column(
+            children: [
+              topSection,
+              Expanded(
+                child: _buildList(
+                  isSignedIn: isSignedIn,
+                  listBottomPadding: listBottomPadding,
+                ),
+              ),
+            ],
+          ),
         Positioned(
-          right: 16,
-          bottom: 16,
+          right: horizontalPadding,
+          bottom: fabBottomInset,
           child: FloatingActionButton(
             heroTag: 'carrot_backup_create_fab',
             onPressed: backupService.isBackingUp ? null : _backupNow,
@@ -997,7 +1184,14 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
     );
   }
 
-  Widget _buildList({required bool isSignedIn}) {
+  Widget _buildList({
+    required bool isSignedIn,
+    bool shrinkWrap = false,
+    ScrollPhysics? physics,
+    required double listBottomPadding,
+  }) {
+    final horizontalPadding =
+        UiLayoutTokens.of(context).screenPadding.clamp(12.0, 24.0).toDouble();
     if (_isLoading) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -1025,7 +1219,14 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
     }
 
     return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 86),
+      shrinkWrap: shrinkWrap,
+      physics: physics,
+      padding: EdgeInsets.fromLTRB(
+        horizontalPadding,
+        0,
+        horizontalPadding,
+        listBottomPadding,
+      ),
       itemCount: list.length,
       separatorBuilder: (_, __) => const SizedBox(height: 8),
       itemBuilder: (context, index) {

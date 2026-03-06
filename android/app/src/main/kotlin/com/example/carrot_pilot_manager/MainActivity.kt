@@ -33,6 +33,7 @@ class MainActivity : FlutterActivity() {
 
   private val overlayChannelName = "carrotlink/overlay_hud"
   private val oauthChannelName = "carrotlink/github_oauth_ui"
+  private val displayTuningChannelName = "carrotlink/display_tuning"
   private var nativeDriveVideoPlugin: NativeDriveVideoPlugin? = null
   private var oauthCodeHudView: View? = null
   private var oauthCodeHudParams: WindowManager.LayoutParams? = null
@@ -71,6 +72,10 @@ class MainActivity : FlutterActivity() {
             }
 
             "updateFallbackMetrics" -> {
+              if (!OverlayHudService.isRunning()) {
+                result.success(false)
+                return@setMethodCallHandler
+              }
               val cpuTempC = call.argument<Double>("cpuTempC")
               val memPct = call.argument<Double>("memPct")
               val diskPct = call.argument<Double>("diskPct")
@@ -131,6 +136,18 @@ class MainActivity : FlutterActivity() {
 
             "bringAppToFront" -> result.success(bringAppToFront())
 
+            else -> result.notImplemented()
+          }
+        }
+    MethodChannel(flutterEngine.dartExecutor.binaryMessenger, displayTuningChannelName)
+        .setMethodCallHandler { call: MethodCall, result: MethodChannel.Result ->
+          when (call.method) {
+            "setHighRefreshPreferred" -> {
+              val enabled = call.argument<Boolean>("enabled") ?: true
+              result.success(setHighRefreshPreferred(enabled))
+            }
+
+            "getDisplayRefreshInfo" -> result.success(getDisplayRefreshInfo())
             else -> result.notImplemented()
           }
         }
@@ -341,6 +358,84 @@ class MainActivity : FlutterActivity() {
   private fun dpF(value: Float): Float {
     val density = resources.displayMetrics.density
     return value * density
+  }
+
+  private fun getDisplayRefreshInfo(): Map<String, Any> {
+    val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+      this.display
+    } else {
+      @Suppress("DEPRECATION")
+      windowManager.defaultDisplay
+    }
+    val currentRate = display?.refreshRate?.toDouble() ?: 60.0
+    val maxRate = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+      val modes = display?.supportedModes ?: emptyArray()
+      var maxHz = currentRate
+      for (mode in modes) {
+        if (mode.refreshRate.toDouble() > maxHz) {
+          maxHz = mode.refreshRate.toDouble()
+        }
+      }
+      maxHz
+    } else {
+      currentRate
+    }
+    return mapOf(
+        "ok" to true,
+        "currentRefreshRate" to currentRate,
+        "maxRefreshRate" to maxRate
+    )
+  }
+
+  private fun setHighRefreshPreferred(enabled: Boolean): Map<String, Any> {
+    return try {
+      val attrs = window.attributes
+      val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        this.display
+      } else {
+        @Suppress("DEPRECATION")
+        windowManager.defaultDisplay
+      }
+
+      var targetModeId = 0
+      var targetRate = display?.refreshRate ?: 60f
+      if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        val modes = display?.supportedModes ?: emptyArray()
+        for (mode in modes) {
+          if (mode.refreshRate > targetRate + 0.01f) {
+            targetRate = mode.refreshRate
+            targetModeId = mode.modeId
+          }
+        }
+      }
+
+      if (enabled) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && targetModeId > 0) {
+          attrs.preferredDisplayModeId = targetModeId
+        }
+        attrs.preferredRefreshRate = targetRate
+      } else {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+          attrs.preferredDisplayModeId = 0
+        }
+        attrs.preferredRefreshRate = 0f
+      }
+      window.attributes = attrs
+
+      mapOf(
+          "ok" to true,
+          "enabled" to enabled,
+          "refreshRate" to attrs.preferredRefreshRate.toDouble(),
+          "modeId" to targetModeId
+      )
+    } catch (t: Throwable) {
+      Log.w(TAG, "setHighRefreshPreferred failed", t)
+      mapOf(
+          "ok" to false,
+          "enabled" to enabled,
+          "error" to (t.message ?: "unknown")
+      )
+    }
   }
 
   private fun startOverlayService(

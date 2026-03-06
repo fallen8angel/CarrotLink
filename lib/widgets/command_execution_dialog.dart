@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/ssh_service.dart';
+import '../ui/adaptive/layout_tokens.dart';
+import '../ui/adaptive/window_class.dart';
 
 class CommandExecutionDialog extends StatefulWidget {
   final String title;
@@ -35,9 +37,9 @@ class _CommandExecutionDialogState extends State<CommandExecutionDialog> {
 
   void _startExecution() {
     final ssh = Provider.of<SSHService>(context, listen: false);
-    
+
     _logs.add("> ${widget.command}");
-    
+
     try {
       final stream = ssh.executeCommandStream(
         widget.command,
@@ -49,7 +51,7 @@ class _CommandExecutionDialogState extends State<CommandExecutionDialog> {
               _logs.add("\n[Process exited with code $code]");
             });
             _scrollToBottom();
-            
+
             if (widget.autoClose && code == 0) {
               Future.delayed(const Duration(seconds: 1), () {
                 if (mounted) Navigator.pop(context, true);
@@ -113,8 +115,15 @@ class _CommandExecutionDialogState extends State<CommandExecutionDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
     final isSuccess = _exitCode == 0;
-    final isError = _exitCode != null && _exitCode != 0;
+    final media = MediaQuery.of(context);
+    final dialogHeight =
+        (media.size.height * (window.isLandscape ? 0.62 : 0.44))
+            .clamp(220.0, 460.0)
+            .toDouble();
 
     return AlertDialog(
       title: Row(
@@ -128,20 +137,21 @@ class _CommandExecutionDialogState extends State<CommandExecutionDialog> {
           else if (isSuccess)
             const Icon(Icons.check_circle, color: Colors.green)
           else
-            const Icon(Icons.error, color: Colors.red),
+            Icon(Icons.error, color: scheme.error),
           const SizedBox(width: 12),
           Expanded(child: Text(widget.title)),
         ],
       ),
       content: Container(
         width: double.maxFinite,
-        height: 300,
+        height: dialogHeight,
         decoration: BoxDecoration(
-          color: Colors.black,
+          color: scheme.surfaceContainerHighest.withValues(alpha: 0.7),
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.grey.shade800),
+          border:
+              Border.all(color: scheme.outlineVariant.withValues(alpha: 0.7)),
         ),
-        padding: const EdgeInsets.all(8),
+        padding: EdgeInsets.all(tokens.itemGap + 2),
         child: SelectionArea(
           child: ListView.builder(
             controller: _scrollController,
@@ -150,7 +160,7 @@ class _CommandExecutionDialogState extends State<CommandExecutionDialog> {
               return Text(
                 _logs[index],
                 style: const TextStyle(
-                  color: Colors.greenAccent,
+                  color: Color(0xFF9EF3BD),
                   fontFamily: 'monospace',
                   fontSize: 12,
                 ),
@@ -173,7 +183,8 @@ class _CommandExecutionDialogState extends State<CommandExecutionDialog> {
               _subscription?.cancel();
               Navigator.pop(context, false);
             },
-            child: const Text("숨기기"), // "Cancel" might imply killing the process, which we can't guarantee here
+            child: const Text(
+                "숨기기"), // "Cancel" might imply killing the process, which we can't guarantee here
           ),
       ],
     );

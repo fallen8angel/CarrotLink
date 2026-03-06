@@ -5,6 +5,8 @@ import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../ui/adaptive/layout_tokens.dart';
+import '../../ui/adaptive/window_class.dart';
 import '../../services/ssh_service.dart';
 import '../../widgets/connection_required_view.dart';
 import '../../services/device_action_service.dart';
@@ -101,7 +103,7 @@ class _GitTabState extends State<GitTab> {
           }
         });
       } catch (e) {
-        print("Error loading logs: $e");
+        debugPrint("Error loading logs: $e");
       }
     }
   }
@@ -192,6 +194,84 @@ class _GitTabState extends State<GitTab> {
       return httpUri.pathSegments[0];
     }
     return null;
+  }
+
+  ({
+    EdgeInsets insetPadding,
+    EdgeInsets contentPadding,
+    double hintFontSize,
+    double bodyFontSize,
+    double titleFontSize,
+    double gapSmall,
+    double gapMedium,
+    double maxContentWidth,
+  }) _dialogMetrics(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final insetHorizontal = window.isCompact
+        ? 16.0
+        : tokens.screenPadding.clamp(16.0, 30.0).toDouble();
+    final insetVertical = switch (window.windowClass) {
+      UiWindowClass.compact => 22.0,
+      UiWindowClass.medium => 24.0,
+      UiWindowClass.expanded => 26.0,
+      UiWindowClass.large => 28.0,
+      UiWindowClass.extraLarge => 30.0,
+    };
+    final contentPaddingValue = switch (window.windowClass) {
+      UiWindowClass.compact => 16.0,
+      UiWindowClass.medium => 18.0,
+      UiWindowClass.expanded => 20.0,
+      UiWindowClass.large => 22.0,
+      UiWindowClass.extraLarge => 24.0,
+    };
+    final hintFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.0,
+      UiWindowClass.expanded => 13.0,
+      UiWindowClass.large => 13.0,
+      UiWindowClass.extraLarge => 13.0,
+    };
+    final bodyFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 13.0,
+      UiWindowClass.medium => 13.0,
+      UiWindowClass.expanded => 14.0,
+      UiWindowClass.large => 14.0,
+      UiWindowClass.extraLarge => 14.0,
+    };
+    final titleFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 18.0,
+      UiWindowClass.medium => 18.0,
+      UiWindowClass.expanded => 19.0,
+      UiWindowClass.large => 20.0,
+      UiWindowClass.extraLarge => 20.0,
+    };
+    final maxContentWidth = switch (window.windowClass) {
+      UiWindowClass.compact => 420.0,
+      UiWindowClass.medium => 470.0,
+      UiWindowClass.expanded => 540.0,
+      UiWindowClass.large => 600.0,
+      UiWindowClass.extraLarge => 660.0,
+    };
+
+    return (
+      insetPadding: EdgeInsets.symmetric(
+        horizontal: insetHorizontal,
+        vertical: insetVertical,
+      ),
+      contentPadding: EdgeInsets.fromLTRB(
+        contentPaddingValue,
+        12,
+        contentPaddingValue,
+        contentPaddingValue,
+      ),
+      hintFontSize: hintFontSize,
+      bodyFontSize: bodyFontSize,
+      titleFontSize: titleFontSize,
+      gapSmall: 8.0,
+      gapMedium: 12.0,
+      maxContentWidth: maxContentWidth,
+    );
   }
 
   String? _toBrowserRepoUrl(String url) {
@@ -307,47 +387,63 @@ class _GitTabState extends State<GitTab> {
   }
 
   Future<void> _quickSetupFromRepoLink() async {
+    final dialogMetrics = _dialogMetrics(context);
     final initial = (_gitSnapshot?.originUrl.isNotEmpty ?? false)
         ? _gitSnapshot!.originUrl
         : ((_gitSnapshot?.repoUrl ?? '').trim());
     final controller = TextEditingController(text: initial);
     final input = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text("소스 링크 자동 설정"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              "기본 소스(origin)는 유지하고, 링크 저장소를 추가 소스로 등록합니다.\n브랜치 링크(/tree/...)면 해당 브랜치 전환/업데이트 기준 설정도 자동 시도합니다.",
-              style: TextStyle(fontSize: 12, color: Colors.grey),
+      builder: (ctx) {
+        final metrics = _dialogMetrics(ctx);
+        return AlertDialog(
+          insetPadding: metrics.insetPadding,
+          contentPadding: metrics.contentPadding,
+          title: Text(
+            "소스 링크 자동 설정",
+            style: TextStyle(fontSize: metrics.titleFontSize),
+          ),
+          content: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: metrics.maxContentWidth),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  "기본 소스(origin)는 유지하고, 링크 저장소를 추가 소스로 등록합니다.\n브랜치 링크(/tree/...)면 해당 브랜치 전환/업데이트 기준 설정도 자동 시도합니다.",
+                  style: TextStyle(
+                    fontSize: metrics.hintFontSize,
+                    color: Colors.grey,
+                  ),
+                ),
+                SizedBox(height: metrics.gapMedium),
+                TextField(
+                  controller: controller,
+                  autofocus: true,
+                  maxLines: 3,
+                  minLines: 1,
+                  style: TextStyle(fontSize: metrics.bodyFontSize),
+                  decoration: const InputDecoration(
+                    border: OutlineInputBorder(),
+                    labelText: "GitHub 링크",
+                    hintText: "https://github.com/jominki354/openpilot",
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: controller,
-              autofocus: true,
-              maxLines: 3,
-              minLines: 1,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                labelText: "GitHub 링크",
-                hintText: "https://github.com/jominki354/openpilot",
-              ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("취소"),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+              child: const Text("자동 설정"),
             ),
           ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text("취소"),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
-            child: const Text("자동 설정"),
-          ),
-        ],
-      ),
+        );
+      },
     );
 
     final raw = (input ?? '').trim();
@@ -360,6 +456,7 @@ class _GitTabState extends State<GitTab> {
       return;
     }
 
+    if (!mounted) return;
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
       if (!mounted) return;
@@ -371,8 +468,20 @@ class _GitTabState extends State<GitTab> {
       final ok = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
-          title: const Text("확인 필요"),
-          content: const Text("입력한 링크가 openpilot 저장소로 보이지 않습니다. 계속할까요?"),
+          insetPadding: dialogMetrics.insetPadding,
+          contentPadding: dialogMetrics.contentPadding,
+          title: Text(
+            "확인 필요",
+            style: TextStyle(fontSize: dialogMetrics.titleFontSize),
+          ),
+          content: ConstrainedBox(
+            constraints:
+                BoxConstraints(maxWidth: dialogMetrics.maxContentWidth),
+            child: Text(
+              "입력한 링크가 openpilot 저장소로 보이지 않습니다. 계속할까요?",
+              style: TextStyle(fontSize: dialogMetrics.bodyFontSize),
+            ),
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -492,6 +601,25 @@ class _GitTabState extends State<GitTab> {
 
   Future<void> _showAdvancedGitSettingsSheet() async {
     if (!mounted) return;
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final sheetHorizontalPadding = window.isCompact
+        ? 0.0
+        : tokens.screenPadding.clamp(0.0, 18.0).toDouble();
+    final sheetBottomGap = switch (window.windowClass) {
+      UiWindowClass.compact => 8.0,
+      UiWindowClass.medium => 9.0,
+      UiWindowClass.expanded => 10.0,
+      UiWindowClass.large => 10.0,
+      UiWindowClass.extraLarge => 10.0,
+    };
+    final titleFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 15.0,
+      UiWindowClass.medium => 15.0,
+      UiWindowClass.expanded => 16.0,
+      UiWindowClass.large => 16.0,
+      UiWindowClass.extraLarge => 16.0,
+    };
     await showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
@@ -505,60 +633,66 @@ class _GitTabState extends State<GitTab> {
 
         return SafeArea(
           top: false,
-          child: ListView(
-            shrinkWrap: true,
-            children: [
-              const ListTile(
-                dense: true,
-                title: Text(
-                  "고급 Git 설정",
-                  style: TextStyle(fontWeight: FontWeight.w700),
-                ),
-              ),
-              ListTile(
-                leading: const Icon(Icons.link),
-                title: const Text("기본 소스 변경"),
-                subtitle: const Text("origin URL 변경"),
-                onTap: () => run(_GitToolsMenuAction.changeOrigin),
-              ),
-              ListTile(
-                leading: const Icon(Icons.folder_open),
-                title: const Text("코드 폴더 위치"),
-                subtitle: const Text("openpilot 외 저장소 경로 지정"),
-                onTap: () => run(_GitToolsMenuAction.setRepoPath),
-              ),
-              if (_repoPathOverride.trim().isNotEmpty)
+          child: Padding(
+            padding: EdgeInsets.symmetric(horizontal: sheetHorizontalPadding),
+            child: ListView(
+              shrinkWrap: true,
+              children: [
                 ListTile(
-                  leading: const Icon(Icons.refresh),
-                  title: const Text("코드 폴더 자동탐색"),
-                  subtitle: const Text("수동 경로 설정 해제"),
-                  onTap: () => run(_GitToolsMenuAction.clearRepoPath),
+                  dense: true,
+                  title: Text(
+                    "고급 Git 설정",
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: titleFontSize,
+                    ),
+                  ),
                 ),
-              const Divider(height: 1),
-              ListTile(
-                leading: const Icon(Icons.add_link),
-                title: const Text("소스 추가"),
-                onTap: () => run(_GitToolsMenuAction.addRemote),
-              ),
-              ListTile(
-                leading: const Icon(Icons.edit_outlined),
-                title: const Text("소스 수정"),
-                onTap: () => run(_GitToolsMenuAction.editRemote),
-              ),
-              ListTile(
-                leading: const Icon(Icons.link_off),
-                title: const Text("소스 삭제"),
-                onTap: () => run(_GitToolsMenuAction.deleteRemote),
-              ),
-              const Divider(height: 1),
-              ListTile(
-                leading: const Icon(Icons.call_split),
-                title: const Text("업데이트 기준 변경"),
-                subtitle: const Text("현재 브랜치의 upstream 지정"),
-                onTap: () => run(_GitToolsMenuAction.setUpstream),
-              ),
-              const SizedBox(height: 8),
-            ],
+                ListTile(
+                  leading: const Icon(Icons.link),
+                  title: const Text("기본 소스 변경"),
+                  subtitle: const Text("origin URL 변경"),
+                  onTap: () => run(_GitToolsMenuAction.changeOrigin),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.folder_open),
+                  title: const Text("코드 폴더 위치"),
+                  subtitle: const Text("openpilot 외 저장소 경로 지정"),
+                  onTap: () => run(_GitToolsMenuAction.setRepoPath),
+                ),
+                if (_repoPathOverride.trim().isNotEmpty)
+                  ListTile(
+                    leading: const Icon(Icons.refresh),
+                    title: const Text("코드 폴더 자동탐색"),
+                    subtitle: const Text("수동 경로 설정 해제"),
+                    onTap: () => run(_GitToolsMenuAction.clearRepoPath),
+                  ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.add_link),
+                  title: const Text("소스 추가"),
+                  onTap: () => run(_GitToolsMenuAction.addRemote),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.edit_outlined),
+                  title: const Text("소스 수정"),
+                  onTap: () => run(_GitToolsMenuAction.editRemote),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.link_off),
+                  title: const Text("소스 삭제"),
+                  onTap: () => run(_GitToolsMenuAction.deleteRemote),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.call_split),
+                  title: const Text("업데이트 기준 변경"),
+                  subtitle: const Text("현재 브랜치의 upstream 지정"),
+                  onTap: () => run(_GitToolsMenuAction.setUpstream),
+                ),
+                SizedBox(height: sheetBottomGap),
+              ],
+            ),
           ),
         );
       },
@@ -591,7 +725,33 @@ class _GitTabState extends State<GitTab> {
       showDragHandle: true,
       isScrollControlled: true,
       builder: (sheetCtx) {
+        final window = UiWindowInfo.of(sheetCtx);
+        final tokens = UiLayoutTokens.of(sheetCtx);
         final color = Theme.of(sheetCtx).colorScheme;
+        final sheetHorizontalPadding = window.isCompact
+            ? 16.0
+            : tokens.screenPadding.clamp(16.0, 26.0).toDouble();
+        final detailTitleSize = switch (window.windowClass) {
+          UiWindowClass.compact => 16.0,
+          UiWindowClass.medium => 16.0,
+          UiWindowClass.expanded => 17.0,
+          UiWindowClass.large => 18.0,
+          UiWindowClass.extraLarge => 18.0,
+        };
+        final detailMetaLabelSize = switch (window.windowClass) {
+          UiWindowClass.compact => 11.0,
+          UiWindowClass.medium => 11.0,
+          UiWindowClass.expanded => 12.0,
+          UiWindowClass.large => 12.0,
+          UiWindowClass.extraLarge => 12.0,
+        };
+        final detailMetaValueSize = switch (window.windowClass) {
+          UiWindowClass.compact => 13.0,
+          UiWindowClass.medium => 13.0,
+          UiWindowClass.expanded => 14.0,
+          UiWindowClass.large => 14.0,
+          UiWindowClass.extraLarge => 14.0,
+        };
         return SafeArea(
           top: false,
           child: ConstrainedBox(
@@ -599,34 +759,60 @@ class _GitTabState extends State<GitTab> {
               maxHeight: MediaQuery.of(sheetCtx).size.height * 0.78,
             ),
             child: ListView(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+              padding: EdgeInsets.fromLTRB(
+                sheetHorizontalPadding,
+                8,
+                sheetHorizontalPadding,
+                16,
+              ),
               children: [
-                const Text(
+                Text(
                   "현재 Git 상세정보",
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                  style: TextStyle(
+                    fontSize: detailTitleSize,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
                 const SizedBox(height: 10),
-                _detailTile("기본 소스(origin)",
-                    snapshot.originUrl.isEmpty ? "-" : snapshot.originUrl),
                 _detailTile(
-                    "현재 브랜치",
-                    snapshot.currentBranch.isEmpty
-                        ? "-"
-                        : snapshot.currentBranch),
-                _detailTile("업데이트 기준",
-                    snapshot.upstreamRef.isEmpty ? "-" : snapshot.upstreamRef),
-                _detailTile("코드 폴더", snapshot.repoPath),
+                  "기본 소스(origin)",
+                  snapshot.originUrl.isEmpty ? "-" : snapshot.originUrl,
+                  labelFontSize: detailMetaLabelSize,
+                  valueFontSize: detailMetaValueSize,
+                ),
+                _detailTile(
+                  "현재 브랜치",
+                  snapshot.currentBranch.isEmpty ? "-" : snapshot.currentBranch,
+                  labelFontSize: detailMetaLabelSize,
+                  valueFontSize: detailMetaValueSize,
+                ),
+                _detailTile(
+                  "업데이트 기준",
+                  snapshot.upstreamRef.isEmpty ? "-" : snapshot.upstreamRef,
+                  labelFontSize: detailMetaLabelSize,
+                  valueFontSize: detailMetaValueSize,
+                ),
+                _detailTile(
+                  "코드 폴더",
+                  snapshot.repoPath,
+                  labelFontSize: detailMetaLabelSize,
+                  valueFontSize: detailMetaValueSize,
+                ),
                 _detailTile(
                   "설정한 폴더",
                   _repoPathOverride.trim().isEmpty
                       ? "(자동탐색)"
                       : _repoPathOverride.trim(),
+                  labelFontSize: detailMetaLabelSize,
+                  valueFontSize: detailMetaValueSize,
                 ),
                 _detailTile(
                   "탐색 결과",
                   snapshot.repoPathSource.isEmpty
                       ? "-"
                       : snapshot.repoPathSource,
+                  labelFontSize: detailMetaLabelSize,
+                  valueFontSize: detailMetaValueSize,
                 ),
                 if (!snapshot.hasOriginRemote)
                   Padding(
@@ -634,7 +820,7 @@ class _GitTabState extends State<GitTab> {
                     child: Text(
                       "origin이 없어 '${snapshot.primaryRemoteName.isEmpty ? '첫 번째 소스' : snapshot.primaryRemoteName}' 기준으로 표시 중",
                       style: TextStyle(
-                        fontSize: 11,
+                        fontSize: detailMetaLabelSize,
                         color: color.onSurfaceVariant,
                       ),
                     ),
@@ -643,16 +829,19 @@ class _GitTabState extends State<GitTab> {
                 Text(
                   "소스 목록 (${snapshot.remotes.length})",
                   style: TextStyle(
-                    fontSize: 12,
+                    fontSize: detailMetaValueSize,
                     fontWeight: FontWeight.w700,
                     color: color.onSurfaceVariant,
                   ),
                 ),
                 const SizedBox(height: 6),
                 if (snapshot.remotes.isEmpty)
-                  const Text(
+                  Text(
                     "소스 없음",
-                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                    style: TextStyle(
+                      fontSize: detailMetaValueSize,
+                      color: Colors.grey,
+                    ),
                   )
                 else
                   ...snapshot.remotes.map(
@@ -667,7 +856,7 @@ class _GitTabState extends State<GitTab> {
                       ),
                       title: Text(
                         _remoteDisplayName(remote.name, remote.fetchUrl),
-                        style: const TextStyle(fontSize: 13),
+                        style: TextStyle(fontSize: detailMetaValueSize),
                       ),
                       subtitle: Text(
                         (remote.fetchUrl.isNotEmpty
@@ -678,7 +867,7 @@ class _GitTabState extends State<GitTab> {
                             : (remote.fetchUrl.isNotEmpty
                                 ? remote.fetchUrl
                                 : remote.pushUrl),
-                        style: const TextStyle(fontSize: 11),
+                        style: TextStyle(fontSize: detailMetaLabelSize),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -719,7 +908,12 @@ class _GitTabState extends State<GitTab> {
     );
   }
 
-  Widget _detailTile(String label, String value) {
+  Widget _detailTile(
+    String label,
+    String value, {
+    double labelFontSize = 11,
+    double valueFontSize = 13,
+  }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: Column(
@@ -727,12 +921,12 @@ class _GitTabState extends State<GitTab> {
         children: [
           Text(
             label,
-            style: const TextStyle(fontSize: 11, color: Colors.grey),
+            style: TextStyle(fontSize: labelFontSize, color: Colors.grey),
           ),
           const SizedBox(height: 2),
           SelectableText(
             value,
-            style: const TextStyle(fontSize: 13),
+            style: TextStyle(fontSize: valueFontSize),
           ),
         ],
       ),
@@ -801,11 +995,23 @@ class _GitTabState extends State<GitTab> {
       return;
     }
     if (!mounted) return;
+    final metrics = _dialogMetrics(context);
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text("원격 저장소 URL"),
-        content: SelectableText(browserUrl),
+        insetPadding: metrics.insetPadding,
+        contentPadding: metrics.contentPadding,
+        title: Text(
+          "원격 저장소 URL",
+          style: TextStyle(fontSize: metrics.titleFontSize),
+        ),
+        content: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: metrics.maxContentWidth),
+          child: SelectableText(
+            browserUrl,
+            style: TextStyle(fontSize: metrics.bodyFontSize),
+          ),
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -818,6 +1024,7 @@ class _GitTabState extends State<GitTab> {
 
   Future<void> _changeOriginRemoteUrl() async {
     final snapshot = _gitSnapshot;
+    final dialogMetrics = _dialogMetrics(context);
     final initialUrl = snapshot == null
         ? ''
         : (snapshot.originUrl.isNotEmpty
@@ -827,27 +1034,39 @@ class _GitTabState extends State<GitTab> {
     final value = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text("원격 저장소(origin) 변경"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              "예: https://github.com/ajouatom/openpilot 또는 git@github.com:ajouatom/openpilot.git",
-              style: TextStyle(fontSize: 12, color: Colors.grey),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: controller,
-              autofocus: true,
-              maxLines: 3,
-              minLines: 1,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                labelText: "origin URL",
+        insetPadding: dialogMetrics.insetPadding,
+        contentPadding: dialogMetrics.contentPadding,
+        title: Text(
+          "원격 저장소(origin) 변경",
+          style: TextStyle(fontSize: dialogMetrics.titleFontSize),
+        ),
+        content: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: dialogMetrics.maxContentWidth),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                "예: https://github.com/ajouatom/openpilot 또는 git@github.com:ajouatom/openpilot.git",
+                style: TextStyle(
+                  fontSize: dialogMetrics.hintFontSize,
+                  color: Colors.grey,
+                ),
               ),
-            ),
-          ],
+              SizedBox(height: dialogMetrics.gapMedium),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                maxLines: 3,
+                minLines: 1,
+                style: TextStyle(fontSize: dialogMetrics.bodyFontSize),
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                  labelText: "origin URL",
+                ),
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -865,13 +1084,24 @@ class _GitTabState extends State<GitTab> {
     final nextUrl = (value ?? '').trim();
     if (nextUrl.isEmpty || nextUrl == initialUrl.trim()) return;
 
+    if (!mounted) return;
     if (!_looksLikeOpenpilotRepoUrl(nextUrl)) {
       final confirm = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
-          title: const Text("확인 필요"),
-          content: const Text(
-            "입력한 URL이 openpilot 저장소로 보이지 않습니다.\n그래도 origin으로 설정할까요?",
+          insetPadding: dialogMetrics.insetPadding,
+          contentPadding: dialogMetrics.contentPadding,
+          title: Text(
+            "확인 필요",
+            style: TextStyle(fontSize: dialogMetrics.titleFontSize),
+          ),
+          content: ConstrainedBox(
+            constraints:
+                BoxConstraints(maxWidth: dialogMetrics.maxContentWidth),
+            child: Text(
+              "입력한 URL이 openpilot 저장소로 보이지 않습니다.\n그래도 origin으로 설정할까요?",
+              style: TextStyle(fontSize: dialogMetrics.bodyFontSize),
+            ),
           ),
           actions: [
             TextButton(
@@ -888,6 +1118,7 @@ class _GitTabState extends State<GitTab> {
       if (confirm != true) return;
     }
 
+    if (!mounted) return;
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
       CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
@@ -923,12 +1154,12 @@ class _GitTabState extends State<GitTab> {
   }
 
   Future<void> _runGitAction(
-    BuildContext context,
     DeviceActionType action,
     String successMessage, {
     String? branch,
     String? remote,
   }) async {
+    if (!mounted) return;
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
       CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
@@ -982,18 +1213,30 @@ class _GitTabState extends State<GitTab> {
     }
   }
 
-  Future<void> _rebootDevice(BuildContext context) async {
+  Future<void> _rebootDevice() async {
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
       CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
       return;
     }
 
+    final metrics = _dialogMetrics(context);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text("기기 재부팅"),
-        content: const Text("기기를 재부팅하시겠습니까?"),
+        insetPadding: metrics.insetPadding,
+        contentPadding: metrics.contentPadding,
+        title: Text(
+          "기기 재부팅",
+          style: TextStyle(fontSize: metrics.titleFontSize),
+        ),
+        content: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: metrics.maxContentWidth),
+          child: Text(
+            "기기를 재부팅하시겠습니까?",
+            style: TextStyle(fontSize: metrics.bodyFontSize),
+          ),
+        ),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -1013,14 +1256,13 @@ class _GitTabState extends State<GitTab> {
     if (confirmed == true && mounted) {
       _addLog("기기 재부팅 중...");
       await _runGitAction(
-        context,
         DeviceActionType.reboot,
         "재부팅 명령을 전송했습니다.",
       );
     }
   }
 
-  Future<void> _selectBranch(BuildContext context) async {
+  Future<void> _selectBranch() async {
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
       CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
@@ -1059,7 +1301,6 @@ class _GitTabState extends State<GitTab> {
           onSelect: (remote, name) {
             Navigator.pop(ctx);
             _runGitAction(
-              context,
               DeviceActionType.gitCheckout,
               "$name 브랜치로 변경됨",
               branch: name,
@@ -1075,30 +1316,43 @@ class _GitTabState extends State<GitTab> {
   }
 
   Future<void> _configureRepoPath() async {
+    final dialogMetrics = _dialogMetrics(context);
     final controller = TextEditingController(text: _repoPathOverride);
     final result = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text("저장소 경로 설정"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              "openpilot 외 저장소를 쓰는 경우 .git 폴더가 있는 경로를 입력하세요.\n예: /data/openpilot 또는 /data/myrepo",
-              style: TextStyle(fontSize: 12, color: Colors.grey),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: controller,
-              autofocus: true,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                labelText: "저장소 경로",
-                hintText: "/data/openpilot",
+        insetPadding: dialogMetrics.insetPadding,
+        contentPadding: dialogMetrics.contentPadding,
+        title: Text(
+          "저장소 경로 설정",
+          style: TextStyle(fontSize: dialogMetrics.titleFontSize),
+        ),
+        content: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: dialogMetrics.maxContentWidth),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                "openpilot 외 저장소를 쓰는 경우 .git 폴더가 있는 경로를 입력하세요.\n예: /data/openpilot 또는 /data/myrepo",
+                style: TextStyle(
+                  fontSize: dialogMetrics.hintFontSize,
+                  color: Colors.grey,
+                ),
               ),
-            ),
-          ],
+              SizedBox(height: dialogMetrics.gapMedium),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                style: TextStyle(fontSize: dialogMetrics.bodyFontSize),
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                  labelText: "저장소 경로",
+                  hintText: "/data/openpilot",
+                ),
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -1137,6 +1391,7 @@ class _GitTabState extends State<GitTab> {
   }
 
   Future<void> _addOrEditRemote({GitRemoteInfo? existing}) async {
+    final dialogMetrics = _dialogMetrics(context);
     final nameController = TextEditingController(text: existing?.name ?? '');
     final urlController = TextEditingController(
       text: existing == null
@@ -1148,32 +1403,42 @@ class _GitTabState extends State<GitTab> {
     final payload = await showDialog<({String name, String url})>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text(existing == null ? "리모트 추가" : "리모트 수정"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameController,
-              autofocus: existing == null,
-              enabled: existing == null,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                labelText: "리모트 이름",
-                hintText: "origin / jominki354",
+        insetPadding: dialogMetrics.insetPadding,
+        contentPadding: dialogMetrics.contentPadding,
+        title: Text(
+          existing == null ? "리모트 추가" : "리모트 수정",
+          style: TextStyle(fontSize: dialogMetrics.titleFontSize),
+        ),
+        content: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: dialogMetrics.maxContentWidth),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameController,
+                autofocus: existing == null,
+                enabled: existing == null,
+                style: TextStyle(fontSize: dialogMetrics.bodyFontSize),
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                  labelText: "리모트 이름",
+                  hintText: "origin / jominki354",
+                ),
               ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: urlController,
-              autofocus: existing != null,
-              minLines: 1,
-              maxLines: 3,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                labelText: "리모트 URL",
+              SizedBox(height: dialogMetrics.gapMedium),
+              TextField(
+                controller: urlController,
+                autofocus: existing != null,
+                minLines: 1,
+                maxLines: 3,
+                style: TextStyle(fontSize: dialogMetrics.bodyFontSize),
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                  labelText: "리모트 URL",
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -1197,6 +1462,7 @@ class _GitTabState extends State<GitTab> {
     );
     if (payload == null) return;
 
+    if (!mounted) return;
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
       CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
@@ -1231,6 +1497,7 @@ class _GitTabState extends State<GitTab> {
   }
 
   Future<void> _removeRemote() async {
+    final dialogMetrics = _dialogMetrics(context);
     final snapshot = _gitSnapshot;
     if (snapshot == null || snapshot.remotes.isEmpty) {
       CustomToast.show(context, "삭제할 리모트가 없습니다.", isError: true);
@@ -1239,7 +1506,23 @@ class _GitTabState extends State<GitTab> {
     final target = await showDialog<GitRemoteInfo>(
       context: context,
       builder: (ctx) => SimpleDialog(
-        title: const Text("리모트 삭제"),
+        insetPadding: dialogMetrics.insetPadding,
+        titlePadding: EdgeInsets.fromLTRB(
+          dialogMetrics.contentPadding.left,
+          12,
+          dialogMetrics.contentPadding.right,
+          8,
+        ),
+        contentPadding: EdgeInsets.fromLTRB(
+          dialogMetrics.contentPadding.left,
+          0,
+          dialogMetrics.contentPadding.right,
+          dialogMetrics.contentPadding.bottom,
+        ),
+        title: Text(
+          "리모트 삭제",
+          style: TextStyle(fontSize: dialogMetrics.titleFontSize),
+        ),
         children: [
           for (final remote in snapshot.remotes)
             SimpleDialogOption(
@@ -1248,11 +1531,16 @@ class _GitTabState extends State<GitTab> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(remote.name,
-                      style: const TextStyle(fontWeight: FontWeight.w700)),
+                      style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: dialogMetrics.bodyFontSize,
+                      )),
                   if (remote.fetchUrl.isNotEmpty)
                     Text(remote.fetchUrl,
-                        style:
-                            const TextStyle(fontSize: 12, color: Colors.grey)),
+                        style: TextStyle(
+                          fontSize: dialogMetrics.hintFontSize,
+                          color: Colors.grey,
+                        )),
                 ],
               ),
             ),
@@ -1261,11 +1549,23 @@ class _GitTabState extends State<GitTab> {
     );
     if (target == null) return;
 
+    if (!mounted) return;
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text("리모트 삭제"),
-        content: Text("'${target.name}' 리모트를 삭제할까요?"),
+        insetPadding: dialogMetrics.insetPadding,
+        contentPadding: dialogMetrics.contentPadding,
+        title: Text(
+          "리모트 삭제",
+          style: TextStyle(fontSize: dialogMetrics.titleFontSize),
+        ),
+        content: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: dialogMetrics.maxContentWidth),
+          child: Text(
+            "'${target.name}' 리모트를 삭제할까요?",
+            style: TextStyle(fontSize: dialogMetrics.bodyFontSize),
+          ),
+        ),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -1278,6 +1578,7 @@ class _GitTabState extends State<GitTab> {
     );
     if (confirm != true) return;
 
+    if (!mounted) return;
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
       CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
@@ -1306,6 +1607,7 @@ class _GitTabState extends State<GitTab> {
   }
 
   Future<void> _selectRemoteToEdit() async {
+    final dialogMetrics = _dialogMetrics(context);
     final snapshot = _gitSnapshot;
     if (snapshot == null || snapshot.remotes.isEmpty) {
       await _addOrEditRemote();
@@ -1314,16 +1616,38 @@ class _GitTabState extends State<GitTab> {
     final picked = await showDialog<GitRemoteInfo?>(
       context: context,
       builder: (ctx) => SimpleDialog(
-        title: const Text("리모트 수정"),
+        insetPadding: dialogMetrics.insetPadding,
+        titlePadding: EdgeInsets.fromLTRB(
+          dialogMetrics.contentPadding.left,
+          12,
+          dialogMetrics.contentPadding.right,
+          8,
+        ),
+        contentPadding: EdgeInsets.fromLTRB(
+          dialogMetrics.contentPadding.left,
+          0,
+          dialogMetrics.contentPadding.right,
+          dialogMetrics.contentPadding.bottom,
+        ),
+        title: Text(
+          "리모트 수정",
+          style: TextStyle(fontSize: dialogMetrics.titleFontSize),
+        ),
         children: [
           SimpleDialogOption(
             onPressed: () => Navigator.pop(ctx, null),
-            child: const Text("+ 새 리모트 추가"),
+            child: Text(
+              "+ 새 리모트 추가",
+              style: TextStyle(fontSize: dialogMetrics.bodyFontSize),
+            ),
           ),
           ...snapshot.remotes.map(
             (remote) => SimpleDialogOption(
               onPressed: () => Navigator.pop(ctx, remote),
-              child: Text(_remoteDisplayName(remote.name, remote.fetchUrl)),
+              child: Text(
+                _remoteDisplayName(remote.name, remote.fetchUrl),
+                style: TextStyle(fontSize: dialogMetrics.bodyFontSize),
+              ),
             ),
           ),
         ],
@@ -1374,8 +1698,9 @@ class _GitTabState extends State<GitTab> {
                 preferredRepoPath: _preferredRepoPath,
               );
               _addLog("업스트림 지정: ${snapshot.currentBranch} -> $remote/$name");
-              if (result.output.trim().isNotEmpty)
+              if (result.output.trim().isNotEmpty) {
                 _addLog(result.output.trim());
+              }
               if (!mounted) return;
               CustomToast.show(context, result.ok ? "업스트림 지정 완료" : "업스트림 지정 실패",
                   isError: !result.ok);
@@ -1440,148 +1765,369 @@ class _GitTabState extends State<GitTab> {
     }
   }
 
-  Future<void> _performGitSync(BuildContext context) async {
-    await _runGitAction(context, DeviceActionType.gitSync, "Git Sync 완료");
+  Future<void> _performGitSync() async {
+    await _runGitAction(DeviceActionType.gitSync, "Git Sync 완료");
   }
 
   @override
   Widget build(BuildContext context) {
+    final viewportSize = MediaQuery.sizeOf(context);
+    final shortViewport = viewportSize.height < 620;
     final connected = context.watch<SSHService>().isConnected;
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final outerHorizontal = window.isCompact
+        ? 12.0
+        : tokens.screenPadding.clamp(14.0, 28.0).toDouble();
+    final topPadding = switch (window.windowClass) {
+      UiWindowClass.compact => tokens.sectionGap,
+      UiWindowClass.medium => tokens.itemGap + 4,
+      UiWindowClass.expanded => tokens.itemGap + 2,
+      UiWindowClass.large || UiWindowClass.extraLarge => tokens.itemGap + 2,
+    };
+    final bottomPanelPadding =
+        window.isCompact ? tokens.itemGap + 2 : tokens.sectionGap + 2;
+    final logHeaderGap = window.isCompact ? 12.0 : 14.0;
+    final logContainerPadding = window.isCompact ? 8.0 : 10.0;
+    final logContainerRadius = window.isCompact ? 8.0 : 10.0;
+    final logLineFontSize = window.isCompact ? 12.0 : 13.0;
+    final actionSpacing = window.isCompact ? tokens.itemGap + 2 : 10.0;
+    final actionPaneWidth = switch (window.windowClass) {
+      UiWindowClass.compact => 300.0,
+      UiWindowClass.medium => 320.0,
+      UiWindowClass.expanded => 330.0,
+      UiWindowClass.large => 350.0,
+      UiWindowClass.extraLarge => 370.0,
+    };
+    final actionButtonExtent = switch (window.windowClass) {
+      UiWindowClass.compact => 76.0,
+      UiWindowClass.medium => 74.0,
+      UiWindowClass.expanded => 70.0,
+      UiWindowClass.large => 68.0,
+      UiWindowClass.extraLarge => 66.0,
+    };
+    final estimatedGridColumns = actionPaneWidth >= 960
+        ? 4
+        : (actionPaneWidth >= 700 ? 3 : (actionPaneWidth >= 280 ? 2 : 1));
+    const actionButtonCount = 4;
+    final estimatedGridRows =
+        (actionButtonCount + estimatedGridColumns - 1) ~/ estimatedGridColumns;
+    final estimatedActionBodyHeight = (estimatedGridRows * actionButtonExtent) +
+        ((estimatedGridRows - 1) * actionSpacing) +
+        actionSpacing +
+        actionButtonExtent +
+        8.0;
+    final baseActionPanelMaxHeight = switch (window.windowClass) {
+      UiWindowClass.compact => 430.0,
+      UiWindowClass.medium => 390.0,
+      UiWindowClass.expanded => 360.0,
+      UiWindowClass.large => 350.0,
+      UiWindowClass.extraLarge => 340.0,
+    };
+    final computedActionPanelMaxHeight =
+        (viewportSize.height * (shortViewport ? 0.38 : 0.46))
+            .clamp(140.0, baseActionPanelMaxHeight)
+            .toDouble();
+    final wideActionPanelMaxHeight =
+        computedActionPanelMaxHeight < estimatedActionBodyHeight
+            ? estimatedActionBodyHeight
+            : computedActionPanelMaxHeight;
+    final veryShortViewport = viewportSize.height < 520;
+    final useWideSplit =
+        window.isExpandedOrAbove && window.isLandscape && !shortViewport;
+    final actionPanelMaxHeight = useWideSplit
+        ? wideActionPanelMaxHeight
+        : (veryShortViewport
+            ? computedActionPanelMaxHeight.clamp(120.0, 210.0).toDouble()
+            : computedActionPanelMaxHeight);
+    final actionPaneEffectiveMaxWidth =
+        (viewportSize.width * 0.44).clamp(240.0, actionPaneWidth).toDouble();
+    final actionPaneMinWidth = switch (window.windowClass) {
+      UiWindowClass.compact => 200.0,
+      UiWindowClass.medium => 220.0,
+      UiWindowClass.expanded => 228.0,
+      UiWindowClass.large || UiWindowClass.extraLarge => 248.0,
+    };
+
+    Widget buildLogCard() {
+      return DesignCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final compactHeader = constraints.maxWidth < 360;
+                final title = Text(
+                  "Git 로그",
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context)
+                      .textTheme
+                      .titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w700),
+                );
+                final menu = PopupMenuButton<_GitToolsMenuAction>(
+                  tooltip: "Git 옵션",
+                  enabled: !(_isLoading || _isLoadingSourceInfo),
+                  padding: compactHeader
+                      ? const EdgeInsets.all(2)
+                      : const EdgeInsets.all(8),
+                  constraints: compactHeader
+                      ? const BoxConstraints(minWidth: 34, minHeight: 34)
+                      : const BoxConstraints(minWidth: 40, minHeight: 40),
+                  icon: Icon(Icons.settings, size: compactHeader ? 18 : 20),
+                  onSelected: _handleGitToolsMenuAction,
+                  itemBuilder: (_) => [
+                    const PopupMenuItem(
+                      value: _GitToolsMenuAction.quickSetupFromLink,
+                      child: Text("소스 링크 자동 설정"),
+                    ),
+                    const PopupMenuDivider(),
+                    const PopupMenuItem(
+                      value: _GitToolsMenuAction.showDetails,
+                      child: Text("현재 Git 상세정보"),
+                    ),
+                    const PopupMenuDivider(),
+                    const PopupMenuItem(
+                      value: _GitToolsMenuAction.clearLogs,
+                      child: Text("로그 지우기"),
+                    ),
+                    const PopupMenuDivider(),
+                    const PopupMenuItem(
+                      value: _GitToolsMenuAction.advancedSettings,
+                      child: Text("고급 Git 설정"),
+                    ),
+                  ],
+                );
+                final loading = _isLoading
+                    ? Padding(
+                        padding:
+                            EdgeInsets.only(right: compactHeader ? 4.0 : 8.0),
+                        child: SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      )
+                    : const SizedBox.shrink();
+
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Icon(
+                      Icons.terminal,
+                      size: 18,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                    SizedBox(width: tokens.itemGap + 2),
+                    Expanded(child: title),
+                    loading,
+                    menu,
+                  ],
+                );
+              },
+            ),
+            SizedBox(height: logHeaderGap),
+            Expanded(
+              child: connected
+                  ? Container(
+                      padding: EdgeInsets.all(logContainerPadding),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1E1E1E),
+                        borderRadius: BorderRadius.circular(logContainerRadius),
+                        border: Border.all(
+                            color: Colors.grey.withValues(alpha: 0.2)),
+                      ),
+                      child: ListView.builder(
+                        controller: _scrollController,
+                        itemCount: _logs.length,
+                        itemBuilder: (context, index) {
+                          final log = _logs[index];
+                          final isOld = log['isOld'] == 'true';
+                          return Padding(
+                            padding: EdgeInsets.symmetric(
+                              vertical: window.isCompact ? 2.0 : 3.0,
+                            ),
+                            child: RichText(
+                              text: TextSpan(
+                                style: TextStyle(
+                                  fontFamily: 'monospace',
+                                  fontSize: logLineFontSize,
+                                  color: isOld ? Colors.grey : Colors.white,
+                                ),
+                                children: [
+                                  TextSpan(
+                                    text: "[${log['time']}] ",
+                                    style: TextStyle(
+                                      color: isOld
+                                          ? Colors.grey[600]
+                                          : Colors.greenAccent,
+                                    ),
+                                  ),
+                                  TextSpan(text: log['message']),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    )
+                  : const ConnectionRequiredView(
+                      description: 'Git 기능을 사용하려면 먼저 기기에 연결하세요.',
+                    ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    Widget buildActionBody() {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final width = constraints.maxWidth;
+              final crossAxisCount = width >= 960
+                  ? 4
+                  : (width >= 700 ? 3 : (width >= 280 ? 2 : 1));
+              final actions = <Widget>[
+                _buildActionButton(
+                  context,
+                  "브랜치 선택",
+                  Icons.list,
+                  Colors.blue,
+                  _selectBranch,
+                  enabled: connected,
+                ),
+                _buildActionButton(
+                  context,
+                  "Git Pull",
+                  Icons.download,
+                  Colors.green,
+                  () => _runGitAction(
+                    DeviceActionType.gitPull,
+                    "Git Pull 완료",
+                  ),
+                  enabled: connected,
+                ),
+                _buildActionButton(
+                  context,
+                  "Git Reset",
+                  Icons.restore,
+                  Colors.orange,
+                  () => _runGitAction(
+                    DeviceActionType.gitResetHardClean,
+                    "Git Reset 완료",
+                  ),
+                  enabled: connected,
+                ),
+                _buildActionButton(
+                  context,
+                  "Git Sync",
+                  Icons.sync,
+                  Colors.red,
+                  _performGitSync,
+                  enabled: connected,
+                ),
+              ];
+              return GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: crossAxisCount,
+                  mainAxisSpacing: actionSpacing,
+                  crossAxisSpacing: actionSpacing,
+                  mainAxisExtent: actionButtonExtent,
+                ),
+                itemCount: actions.length,
+                itemBuilder: (context, index) => actions[index],
+              );
+            },
+          ),
+          SizedBox(height: actionSpacing),
+          _buildActionButton(
+            context,
+            "Reboot",
+            Icons.restart_alt,
+            Colors.red,
+            _rebootDevice,
+            enabled: connected,
+          ),
+        ],
+      );
+    }
+
+    if (useWideSplit) {
+      return Padding(
+        padding: EdgeInsets.fromLTRB(
+          outerHorizontal,
+          topPadding,
+          outerHorizontal,
+          bottomPanelPadding,
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(child: buildLogCard()),
+            SizedBox(width: actionSpacing),
+            Align(
+              alignment: Alignment.topCenter,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  minWidth: actionPaneMinWidth,
+                  maxWidth: actionPaneEffectiveMaxWidth,
+                ),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).scaffoldBackgroundColor,
+                    borderRadius: BorderRadius.circular(14),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.1),
+                        offset: const Offset(0, 2),
+                        blurRadius: 8,
+                      ),
+                    ],
+                  ),
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(
+                      bottomPanelPadding,
+                      bottomPanelPadding,
+                      bottomPanelPadding,
+                      0,
+                    ),
+                    child: buildActionBody(),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Column(
       children: [
         Expanded(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-            child: Column(
-              children: [
-                Expanded(
-                  child: DesignCard(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Row(
-                          children: [
-                            Icon(
-                              Icons.terminal,
-                              size: 18,
-                              color: Theme.of(context).colorScheme.primary,
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              "Git 로그",
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .titleSmall
-                                  ?.copyWith(fontWeight: FontWeight.w700),
-                            ),
-                            const Spacer(),
-                            if (_isLoading)
-                              const Padding(
-                                padding: EdgeInsets.only(right: 8.0),
-                                child: SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child:
-                                      CircularProgressIndicator(strokeWidth: 2),
-                                ),
-                              ),
-                            PopupMenuButton<_GitToolsMenuAction>(
-                              tooltip: "Git 옵션",
-                              enabled: !(_isLoading || _isLoadingSourceInfo),
-                              icon: const Icon(Icons.settings, size: 20),
-                              onSelected: _handleGitToolsMenuAction,
-                              itemBuilder: (_) => [
-                                const PopupMenuItem(
-                                  value: _GitToolsMenuAction.quickSetupFromLink,
-                                  child: Text("소스 링크 자동 설정"),
-                                ),
-                                const PopupMenuDivider(),
-                                const PopupMenuItem(
-                                  value: _GitToolsMenuAction.showDetails,
-                                  child: Text("현재 Git 상세정보"),
-                                ),
-                                const PopupMenuDivider(),
-                                const PopupMenuItem(
-                                  value: _GitToolsMenuAction.clearLogs,
-                                  child: Text("로그 지우기"),
-                                ),
-                                const PopupMenuDivider(),
-                                const PopupMenuItem(
-                                  value: _GitToolsMenuAction.advancedSettings,
-                                  child: Text("고급 Git 설정"),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 12),
-                        Expanded(
-                          child: connected
-                              ? Container(
-                                  padding: const EdgeInsets.all(8),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF1E1E1E),
-                                    borderRadius: BorderRadius.circular(8),
-                                    border: Border.all(
-                                        color:
-                                            Colors.grey.withValues(alpha: 0.2)),
-                                  ),
-                                  child: ListView.builder(
-                                    controller: _scrollController,
-                                    itemCount: _logs.length,
-                                    itemBuilder: (context, index) {
-                                      final log = _logs[index];
-                                      final isOld = log['isOld'] == 'true';
-                                      return Padding(
-                                        padding: const EdgeInsets.symmetric(
-                                            vertical: 2.0),
-                                        child: RichText(
-                                          text: TextSpan(
-                                            style: TextStyle(
-                                              fontFamily: 'monospace',
-                                              fontSize: 12,
-                                              color: isOld
-                                                  ? Colors.grey
-                                                  : Colors.white,
-                                            ),
-                                            children: [
-                                              TextSpan(
-                                                text: "[${log['time']}] ",
-                                                style: TextStyle(
-                                                  color: isOld
-                                                      ? Colors.grey[600]
-                                                      : Colors.greenAccent,
-                                                ),
-                                              ),
-                                              TextSpan(text: log['message']),
-                                            ],
-                                          ),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                )
-                              : const ConnectionRequiredView(
-                                  description: 'Git 기능을 사용하려면 먼저 기기에 연결하세요.',
-                                ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
+            padding: EdgeInsets.fromLTRB(
+              outerHorizontal,
+              topPadding,
+              outerHorizontal,
+              0,
             ),
+            child: buildLogCard(),
           ),
         ),
-
-        // Bottom Section: Fixed Buttons
         Container(
-          padding: const EdgeInsets.all(16.0),
+          padding: EdgeInsets.all(bottomPanelPadding),
           decoration: BoxDecoration(
             color: Theme.of(context).scaffoldBackgroundColor,
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(0.1),
+                color: Colors.black.withValues(alpha: 0.1),
                 offset: const Offset(0, -2),
                 blurRadius: 8,
               ),
@@ -1589,70 +2135,12 @@ class _GitTabState extends State<GitTab> {
           ),
           child: SafeArea(
             top: false,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                GridView.count(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  crossAxisCount: 2,
-                  mainAxisSpacing: 12,
-                  crossAxisSpacing: 12,
-                  childAspectRatio: 2.8,
-                  children: [
-                    _buildActionButton(
-                      context,
-                      "브랜치 선택",
-                      Icons.list,
-                      Colors.blue,
-                      () => _selectBranch(context),
-                      enabled: connected,
-                    ),
-                    _buildActionButton(
-                      context,
-                      "Git Pull",
-                      Icons.download,
-                      Colors.green,
-                      () => _runGitAction(
-                        context,
-                        DeviceActionType.gitPull,
-                        "Git Pull 완료",
-                      ),
-                      enabled: connected,
-                    ),
-                    _buildActionButton(
-                      context,
-                      "Git Reset",
-                      Icons.restore,
-                      Colors.orange,
-                      () => _runGitAction(
-                        context,
-                        DeviceActionType.gitResetHardClean,
-                        "Git Reset 완료",
-                      ),
-                      enabled: connected,
-                    ),
-                    _buildActionButton(
-                      context,
-                      "Git Sync",
-                      Icons.sync,
-                      Colors.red,
-                      () => _performGitSync(context),
-                      enabled: connected,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                _buildActionButton(
-                  context,
-                  "Reboot",
-                  Icons.restart_alt,
-                  Colors.red,
-                  () => _rebootDevice(context),
-                  enabled: connected,
-                ),
-              ],
+            bottom: false,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: actionPanelMaxHeight),
+              child: SingleChildScrollView(
+                child: buildActionBody(),
+              ),
             ),
           ),
         ),
@@ -1663,17 +2151,20 @@ class _GitTabState extends State<GitTab> {
   Widget _buildActionButton(BuildContext context, String label, IconData icon,
       Color color, VoidCallback onTap,
       {bool enabled = true}) {
+    final window = UiWindowInfo.of(context);
+    final iconSize = window.isCompact ? 18.0 : 20.0;
+    final radius = window.isCompact ? 12.0 : 14.0;
     return FilledButton.icon(
       onPressed: _isLoading || !enabled ? null : onTap,
-      icon: Icon(icon, size: 18),
+      icon: Icon(icon, size: iconSize),
       label: Text(label),
       style: FilledButton.styleFrom(
-        backgroundColor: color.withOpacity(0.15),
+        backgroundColor: color.withValues(alpha: 0.15),
         foregroundColor: color,
         elevation: 0,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-          side: BorderSide(color: color.withOpacity(0.3)),
+          borderRadius: BorderRadius.circular(radius),
+          side: BorderSide(color: color.withValues(alpha: 0.3)),
         ),
       ),
     );
@@ -1712,6 +2203,70 @@ class _BranchListDialogState extends State<_BranchListDialog> {
   String? _selectedRemote;
   String? _currentRemoteForHighlight;
   late List<Map<String, String>> _visibleBranches;
+
+  ({
+    EdgeInsets insetPadding,
+    EdgeInsets contentPadding,
+    double titleFontSize,
+    double bodyFontSize,
+    double maxContentWidth,
+  }) _dialogMetrics(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final insetHorizontal = window.isCompact
+        ? 14.0
+        : tokens.screenPadding.clamp(14.0, 28.0).toDouble();
+    final insetVertical = switch (window.windowClass) {
+      UiWindowClass.compact => 18.0,
+      UiWindowClass.medium => 20.0,
+      UiWindowClass.expanded => 22.0,
+      UiWindowClass.large => 24.0,
+      UiWindowClass.extraLarge => 24.0,
+    };
+    final contentPaddingValue = switch (window.windowClass) {
+      UiWindowClass.compact => 14.0,
+      UiWindowClass.medium => 16.0,
+      UiWindowClass.expanded => 18.0,
+      UiWindowClass.large => 18.0,
+      UiWindowClass.extraLarge => 20.0,
+    };
+    final titleFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 17.0,
+      UiWindowClass.medium => 17.0,
+      UiWindowClass.expanded => 18.0,
+      UiWindowClass.large => 18.0,
+      UiWindowClass.extraLarge => 18.0,
+    };
+    final bodyFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 13.0,
+      UiWindowClass.medium => 13.0,
+      UiWindowClass.expanded => 14.0,
+      UiWindowClass.large => 14.0,
+      UiWindowClass.extraLarge => 14.0,
+    };
+    final maxContentWidth = switch (window.windowClass) {
+      UiWindowClass.compact => 620.0,
+      UiWindowClass.medium => 700.0,
+      UiWindowClass.expanded => 780.0,
+      UiWindowClass.large => 860.0,
+      UiWindowClass.extraLarge => 920.0,
+    };
+    return (
+      insetPadding: EdgeInsets.symmetric(
+        horizontal: insetHorizontal,
+        vertical: insetVertical,
+      ),
+      contentPadding: EdgeInsets.fromLTRB(
+        contentPaddingValue,
+        10,
+        contentPaddingValue,
+        contentPaddingValue,
+      ),
+      titleFontSize: titleFontSize,
+      bodyFontSize: bodyFontSize,
+      maxContentWidth: maxContentWidth,
+    );
+  }
 
   @override
   void initState() {
@@ -2032,13 +2587,44 @@ class _BranchListDialogState extends State<_BranchListDialog> {
     required Map<String, int> branchCounts,
   }) async {
     if (repositories.isEmpty) return;
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final sheetHorizontalPadding = window.isCompact
+        ? 12.0
+        : tokens.screenPadding.clamp(12.0, 24.0).toDouble();
+    final titleBottomGap = switch (window.windowClass) {
+      UiWindowClass.compact => 8.0,
+      UiWindowClass.medium => 9.0,
+      UiWindowClass.expanded => 10.0,
+      UiWindowClass.large => 10.0,
+      UiWindowClass.extraLarge => 10.0,
+    };
+    final repositoryRowHorizontalPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 8.0,
+      UiWindowClass.medium => 9.0,
+      UiWindowClass.expanded => 10.0,
+      UiWindowClass.large => 12.0,
+      UiWindowClass.extraLarge => 12.0,
+    };
+    final repositorySubtitleFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.0,
+      UiWindowClass.expanded => 12.5,
+      UiWindowClass.large => 13.0,
+      UiWindowClass.extraLarge => 13.0,
+    };
     final picked = await showModalBottomSheet<String>(
       context: context,
       useSafeArea: true,
       showDragHandle: true,
       builder: (sheetContext) {
         return Padding(
-          padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
+          padding: EdgeInsets.fromLTRB(
+            sheetHorizontalPadding,
+            6,
+            sheetHorizontalPadding,
+            12,
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -2051,7 +2637,7 @@ class _BranchListDialogState extends State<_BranchListDialog> {
                       ),
                 ),
               ),
-              const SizedBox(height: 8),
+              SizedBox(height: titleBottomGap),
               Flexible(
                 child: ListView.separated(
                   shrinkWrap: true,
@@ -2069,8 +2655,8 @@ class _BranchListDialogState extends State<_BranchListDialog> {
                         : '원격 ${aliases.join(', ')} · $branchCount개 브랜치';
                     return ListTile(
                       dense: true,
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 8,
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: repositoryRowHorizontalPadding,
                         vertical: 2,
                       ),
                       title: Text(
@@ -2084,6 +2670,7 @@ class _BranchListDialogState extends State<_BranchListDialog> {
                         subtitle,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: repositorySubtitleFontSize),
                       ),
                       trailing: isSelected
                           ? Icon(
@@ -2113,6 +2700,53 @@ class _BranchListDialogState extends State<_BranchListDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final dialogMetrics = _dialogMetrics(context);
+    final dialogHeight = switch (window.windowClass) {
+      UiWindowClass.compact => 430.0,
+      UiWindowClass.medium => 460.0,
+      UiWindowClass.expanded => 500.0,
+      UiWindowClass.large => 540.0,
+      UiWindowClass.extraLarge => 560.0,
+    };
+    final contentInset = tokens.screenPadding.clamp(10.0, 18.0).toDouble();
+    final rowGap = switch (window.windowClass) {
+      UiWindowClass.compact => 10.0,
+      UiWindowClass.medium => 10.0,
+      UiWindowClass.expanded => 12.0,
+      UiWindowClass.large => 12.0,
+      UiWindowClass.extraLarge => 12.0,
+    };
+    final branchRowPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.0,
+      UiWindowClass.expanded => 13.0,
+      UiWindowClass.large => 14.0,
+      UiWindowClass.extraLarge => 14.0,
+    };
+    final infoLabelFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 11.0,
+      UiWindowClass.medium => 11.0,
+      UiWindowClass.expanded => 12.0,
+      UiWindowClass.large => 12.0,
+      UiWindowClass.extraLarge => 12.0,
+    };
+    final infoValueFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.0,
+      UiWindowClass.expanded => 13.0,
+      UiWindowClass.large => 13.0,
+      UiWindowClass.extraLarge => 13.0,
+    };
+    final branchSubFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.0,
+      UiWindowClass.expanded => 12.5,
+      UiWindowClass.large => 13.0,
+      UiWindowClass.extraLarge => 13.0,
+    };
+
     final repositories = _availableRemotes();
     final repositoryGroups = _repositoryGroups();
     final remoteLabels = _repositoryLabels(repositories, repositoryGroups);
@@ -2123,249 +2757,311 @@ class _BranchListDialogState extends State<_BranchListDialog> {
         : (remoteLabels[selectedRemote] ?? selectedRemote);
 
     return AlertDialog(
-      title: Text(widget.title),
-      content: SizedBox(
-        width: double.maxFinite,
-        height: 480,
-        child: Column(
-          children: [
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.call_split, size: 16),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      '현재 브랜치: ${widget.currentBranch}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                  Text(
-                    '${_visibleBranches.length}개',
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 10),
-            Material(
-              color: Theme.of(context).colorScheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(12),
-              child: InkWell(
-                borderRadius: BorderRadius.circular(12),
-                onTap: () => _showRepositoryPicker(
-                  repositories: repositories,
-                  repositoryLabels: remoteLabels,
-                  repositoryGroups: repositoryGroups,
-                  branchCounts: branchCounts,
+      insetPadding: dialogMetrics.insetPadding,
+      contentPadding: dialogMetrics.contentPadding,
+      title: Text(
+        widget.title,
+        style: TextStyle(fontSize: dialogMetrics.titleFontSize),
+      ),
+      content: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: dialogMetrics.maxContentWidth,
+        ),
+        child: SizedBox(
+          width: double.maxFinite,
+          height: dialogHeight,
+          child: Column(
+            children: [
+              Container(
+                width: double.infinity,
+                padding:
+                    EdgeInsets.symmetric(horizontal: contentInset, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(10),
                 ),
-                child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.account_tree_outlined, size: 18),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              '저장소',
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: Theme.of(context)
-                                    .colorScheme
-                                    .onSurfaceVariant,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              selectedRemoteLabel,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.w700),
-                            ),
-                          ],
+                child: Row(
+                  children: [
+                    const Icon(Icons.call_split, size: 16),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        '현재 브랜치: ${widget.currentBranch}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: infoValueFontSize,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
-                      const Icon(Icons.expand_more, size: 18),
-                    ],
-                  ),
+                    ),
+                    Text(
+                      '${_visibleBranches.length}개',
+                      style: TextStyle(
+                        fontSize: infoLabelFontSize,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ),
-            const SizedBox(height: 10),
-            if (selectedRemote != null)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    '선택 저장소: $selectedRemoteLabel',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+              SizedBox(height: rowGap),
+              Material(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(12),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(12),
+                  onTap: () => _showRepositoryPicker(
+                    repositories: repositories,
+                    repositoryLabels: remoteLabels,
+                    repositoryGroups: repositoryGroups,
+                    branchCounts: branchCounts,
+                  ),
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(
+                        horizontal: contentInset, vertical: 10),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.account_tree_outlined, size: 18),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '저장소',
+                                style: TextStyle(
+                                  fontSize: infoLabelFontSize,
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .onSurfaceVariant,
+                                ),
+                              ),
+                              SizedBox(height: tokens.itemGap / 2),
+                              Text(
+                                selectedRemoteLabel,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: infoValueFontSize,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const Icon(Icons.expand_more, size: 18),
+                      ],
                     ),
                   ),
                 ),
               ),
-            Expanded(
-              child: _visibleBranches.isEmpty
-                  ? const Center(
-                      child: Text(
-                        "선택한 저장소에 브랜치가 없습니다.",
-                        style: TextStyle(fontSize: 12, color: Colors.grey),
+              SizedBox(height: rowGap),
+              if (selectedRemote != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      '선택 저장소: $selectedRemoteLabel',
+                      style: TextStyle(
+                        fontSize: infoValueFontSize,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
                       ),
-                    )
-                  : ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: ListView.builder(
-                        controller: _scrollController,
-                        shrinkWrap: true,
-                        padding: const EdgeInsets.symmetric(vertical: 2),
-                        clipBehavior: Clip.hardEdge,
-                        itemCount: _visibleBranches.length,
-                        itemBuilder: (ctx, index) {
-                          final branch = _visibleBranches[index];
-                          final name = branch['name']!;
-                          final remote = _normalizedRemote(branch);
-                          final date = branch['date']!;
-                          final hash = branch['hash']!;
-                          final isDefault = name == widget.defaultBranch;
-                          final isCurrent = name == widget.currentBranch &&
-                              _currentRemoteForHighlight != null &&
-                              _currentRemoteForHighlight ==
-                                  _repositoryIdForBranch(branch);
+                    ),
+                  ),
+                ),
+              Expanded(
+                child: _visibleBranches.isEmpty
+                    ? Center(
+                        child: Text(
+                          "선택한 저장소에 브랜치가 없습니다.",
+                          style: TextStyle(
+                            fontSize: branchSubFontSize,
+                            color: Colors.grey,
+                          ),
+                        ),
+                      )
+                    : ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: ListView.builder(
+                          controller: _scrollController,
+                          shrinkWrap: true,
+                          padding: EdgeInsets.symmetric(
+                              vertical: window.isCompact ? 2 : 3),
+                          clipBehavior: Clip.hardEdge,
+                          itemCount: _visibleBranches.length,
+                          itemBuilder: (ctx, index) {
+                            final branch = _visibleBranches[index];
+                            final name = branch['name']!;
+                            final remote = _normalizedRemote(branch);
+                            final date = branch['date']!;
+                            final hash = branch['hash']!;
+                            final isDefault = name == widget.defaultBranch;
+                            final isCurrent = name == widget.currentBranch &&
+                                _currentRemoteForHighlight != null &&
+                                _currentRemoteForHighlight ==
+                                    _repositoryIdForBranch(branch);
 
-                          bool hasUpdate = false;
-                          if (widget.localRefs.containsKey(name)) {
-                            if (widget.localRefs[name] != hash) {
-                              hasUpdate = true;
+                            bool hasUpdate = false;
+                            if (widget.localRefs.containsKey(name)) {
+                              if (widget.localRefs[name] != hash) {
+                                hasUpdate = true;
+                              }
                             }
-                          }
 
-                          return Padding(
-                            key: ValueKey('$remote/$name'),
-                            padding: const EdgeInsets.symmetric(vertical: 2),
-                            child: Material(
-                              color: isCurrent
-                                  ? Theme.of(context)
-                                      .colorScheme
-                                      .secondaryContainer
-                                      .withValues(alpha: 0.72)
-                                  : Colors.transparent,
-                              borderRadius: BorderRadius.circular(10),
-                              clipBehavior: Clip.antiAlias,
-                              child: ListTile(
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                contentPadding: const EdgeInsets.symmetric(
-                                    horizontal: 12, vertical: 2),
-                                leading: const Icon(Icons.alt_route, size: 18),
-                                title: Row(
-                                  children: [
-                                    Text(name,
-                                        style: TextStyle(
+                            return Padding(
+                              key: ValueKey('$remote/$name'),
+                              padding: EdgeInsets.symmetric(
+                                  vertical: window.isCompact ? 2 : 3),
+                              child: Material(
+                                color: isCurrent
+                                    ? Theme.of(context)
+                                        .colorScheme
+                                        .secondaryContainer
+                                        .withValues(alpha: 0.72)
+                                    : Colors.transparent,
+                                borderRadius: BorderRadius.circular(10),
+                                clipBehavior: Clip.antiAlias,
+                                child: ListTile(
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  contentPadding: EdgeInsets.symmetric(
+                                    horizontal: branchRowPadding,
+                                    vertical: 2,
+                                  ),
+                                  leading:
+                                      const Icon(Icons.alt_route, size: 18),
+                                  title: Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          name,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
                                             fontWeight: isDefault
                                                 ? FontWeight.bold
-                                                : FontWeight.normal)),
-                                    if (isDefault) ...[
-                                      const SizedBox(width: 8),
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 6, vertical: 2),
-                                        decoration: BoxDecoration(
-                                          color: Colors.blue.withOpacity(0.2),
-                                          borderRadius:
-                                              BorderRadius.circular(4),
+                                                : FontWeight.normal,
+                                          ),
                                         ),
-                                        child: const Text("Default",
-                                            style: TextStyle(
-                                                fontSize: 10,
-                                                color: Colors.blue)),
                                       ),
+                                      if (isDefault) ...[
+                                        const SizedBox(width: 8),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 6, vertical: 2),
+                                          decoration: BoxDecoration(
+                                            color: Colors.blue
+                                                .withValues(alpha: 0.2),
+                                            borderRadius:
+                                                BorderRadius.circular(4),
+                                          ),
+                                          child: Text(
+                                            "Default",
+                                            style: TextStyle(
+                                              fontSize: infoLabelFontSize - 1,
+                                              color: Colors.blue,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                      if (isCurrent) ...[
+                                        const SizedBox(width: 8),
+                                        const Icon(Icons.check,
+                                            size: 16, color: Colors.green),
+                                      ],
                                     ],
-                                    if (isCurrent) ...[
-                                      const SizedBox(width: 8),
-                                      const Icon(Icons.check,
-                                          size: 16, color: Colors.green),
-                                    ],
-                                  ],
-                                ),
-                                subtitle: Text(date,
-                                    style: const TextStyle(
-                                        fontSize: 12, color: Colors.grey)),
-                                trailing: hasUpdate
-                                    ? IconButton(
-                                        icon: const Icon(Icons.priority_high,
-                                            color: Colors.red, size: 20),
-                                        tooltip: "업데이트 가능",
-                                        onPressed: () async {
-                                          if (widget.repoUrl.isNotEmpty) {
-                                            final baseUrl =
-                                                _browserRepoUrlForRemote(
-                                                    remote);
-                                            if (baseUrl == null ||
-                                                baseUrl.isEmpty) {
-                                              return;
-                                            }
-                                            final url =
-                                                "$baseUrl/commits/$name";
-                                            final uri = Uri.parse(url);
-                                            if (await canLaunchUrl(uri)) {
-                                              await launchUrl(uri,
-                                                  mode: LaunchMode
-                                                      .externalApplication);
-                                            } else {
-                                              if (context.mounted) {
-                                                showDialog(
-                                                  context: context,
-                                                  builder: (_) => AlertDialog(
-                                                    title: const Text("커밋 내역"),
-                                                    content:
-                                                        SelectableText(url),
-                                                    actions: [
-                                                      TextButton(
-                                                          onPressed: () =>
-                                                              Navigator.pop(
-                                                                  context),
-                                                          child:
-                                                              const Text("닫기"))
-                                                    ],
-                                                  ),
-                                                );
+                                  ),
+                                  subtitle: Text(date,
+                                      style: TextStyle(
+                                          fontSize: branchSubFontSize,
+                                          color: Colors.grey)),
+                                  trailing: hasUpdate
+                                      ? IconButton(
+                                          icon: const Icon(Icons.priority_high,
+                                              color: Colors.red, size: 20),
+                                          tooltip: "업데이트 가능",
+                                          onPressed: () async {
+                                            if (widget.repoUrl.isNotEmpty) {
+                                              final baseUrl =
+                                                  _browserRepoUrlForRemote(
+                                                      remote);
+                                              if (baseUrl == null ||
+                                                  baseUrl.isEmpty) {
+                                                return;
+                                              }
+                                              final url =
+                                                  "$baseUrl/commits/$name";
+                                              final uri = Uri.parse(url);
+                                              if (await canLaunchUrl(uri)) {
+                                                await launchUrl(uri,
+                                                    mode: LaunchMode
+                                                        .externalApplication);
+                                              } else {
+                                                if (context.mounted) {
+                                                  final infoDialogMetrics =
+                                                      _dialogMetrics(context);
+                                                  showDialog(
+                                                    context: context,
+                                                    builder: (_) => AlertDialog(
+                                                      insetPadding:
+                                                          infoDialogMetrics
+                                                              .insetPadding,
+                                                      contentPadding:
+                                                          infoDialogMetrics
+                                                              .contentPadding,
+                                                      title: Text(
+                                                        "커밋 내역",
+                                                        style: TextStyle(
+                                                          fontSize:
+                                                              infoDialogMetrics
+                                                                  .titleFontSize,
+                                                        ),
+                                                      ),
+                                                      content: ConstrainedBox(
+                                                        constraints:
+                                                            BoxConstraints(
+                                                          maxWidth:
+                                                              infoDialogMetrics
+                                                                  .maxContentWidth,
+                                                        ),
+                                                        child: SelectableText(
+                                                          url,
+                                                          style: TextStyle(
+                                                            fontSize:
+                                                                infoDialogMetrics
+                                                                    .bodyFontSize,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                      actions: [
+                                                        TextButton(
+                                                            onPressed: () =>
+                                                                Navigator.pop(
+                                                                    context),
+                                                            child: const Text(
+                                                                "닫기"))
+                                                      ],
+                                                    ),
+                                                  );
+                                                }
                                               }
                                             }
-                                          }
-                                        },
-                                      )
-                                    : null,
-                                onTap: () => widget.onSelect(remote, name),
+                                          },
+                                        )
+                                      : null,
+                                  onTap: () => widget.onSelect(remote, name),
+                                ),
                               ),
-                            ),
-                          );
-                        },
+                            );
+                          },
+                        ),
                       ),
-                    ),
-            ),
-          ],
+              ),
+            ],
+          ),
         ),
       ),
       actions: [

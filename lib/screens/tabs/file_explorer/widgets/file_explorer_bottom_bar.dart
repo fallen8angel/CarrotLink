@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 
+import '../../../../ui/adaptive/layout_tokens.dart';
+import '../../../../ui/adaptive/window_class.dart';
+
 class FileExplorerBottomBar extends StatelessWidget {
   final TextEditingController pathController;
   final FocusNode pathFocusNode;
@@ -22,12 +25,14 @@ class FileExplorerBottomBar extends StatelessWidget {
     required IconData icon,
     required String tooltip,
     required VoidCallback? onPressed,
+    required bool compact,
   }) {
+    final buttonSize = compact ? 32.0 : 36.0;
     return SizedBox(
-      width: 32,
-      height: 32,
+      width: buttonSize,
+      height: buttonSize,
       child: IconButton(
-        icon: Icon(icon, size: 18),
+        icon: Icon(icon, size: compact ? 18 : 20),
         tooltip: tooltip,
         onPressed: onPressed,
         padding: EdgeInsets.zero,
@@ -41,18 +46,23 @@ class FileExplorerBottomBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
     return SafeArea(
       top: false,
       child: Container(
-        padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
+        padding: EdgeInsets.fromLTRB(
+          tokens.screenPadding.clamp(8.0, 16.0).toDouble(),
+          6,
+          tokens.screenPadding.clamp(8.0, 16.0).toDouble(),
+          8,
+        ),
         decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.surfaceContainerHigh,
+          color: scheme.surfaceContainerHigh,
           border: Border(
             top: BorderSide(
-              color: Theme.of(context)
-                  .colorScheme
-                  .outlineVariant
-                  .withValues(alpha: 0.5),
+              color: scheme.outlineVariant.withValues(alpha: 0.5),
             ),
           ),
         ),
@@ -66,14 +76,18 @@ class FileExplorerBottomBar extends StatelessWidget {
                 maxLines: 1,
                 autocorrect: false,
                 enableSuggestions: false,
-                style: const TextStyle(fontSize: 13),
-                decoration: const InputDecoration(
+                style: TextStyle(fontSize: window.isCompact ? 12.5 : 13),
+                decoration: InputDecoration(
                   isDense: true,
                   hintText: "/data/openpilot",
-                  hintStyle: TextStyle(fontSize: 12),
-                  border: OutlineInputBorder(),
-                  contentPadding:
-                      EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                  hintStyle: TextStyle(
+                    fontSize: window.isCompact ? 11.5 : 12,
+                  ),
+                  border: const OutlineInputBorder(),
+                  contentPadding: EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: window.isCompact ? 9 : 10,
+                  ),
                 ),
                 onSubmitted: (_) => onNavigate(),
               ),
@@ -83,16 +97,19 @@ class FileExplorerBottomBar extends StatelessWidget {
               icon: Icons.home,
               tooltip: "홈",
               onPressed: onGoHome,
+              compact: window.isCompact,
             ),
             _compactActionButton(
               icon: Icons.arrow_back,
               tooltip: "뒤로",
               onPressed: onGoBack,
+              compact: window.isCompact,
             ),
             _compactActionButton(
               icon: Icons.arrow_forward,
               tooltip: "앞으로",
               onPressed: onGoForward,
+              compact: window.isCompact,
             ),
           ],
         ),

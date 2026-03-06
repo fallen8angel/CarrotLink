@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../services/diagnostics_service.dart';
+import '../ui/adaptive/layout_tokens.dart';
+import '../ui/adaptive/window_class.dart';
 import '../widgets/custom_toast.dart';
 
 class DiagnosticsScreen extends StatelessWidget {
@@ -9,6 +11,9 @@ class DiagnosticsScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final scheme = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(
         title: const Text('진단 로그'),
@@ -39,25 +44,34 @@ class DiagnosticsScreen extends StatelessWidget {
           }
 
           return ListView.separated(
-            padding: const EdgeInsets.all(12),
+            padding: EdgeInsets.all(
+              tokens.screenPadding.clamp(12.0, 20.0).toDouble(),
+            ),
             itemCount: entries.length,
             separatorBuilder: (_, __) => const Divider(height: 16),
             itemBuilder: (context, index) {
               final e = entries[index];
               final color = switch (e.level) {
-                'ERROR' => Colors.redAccent,
-                'WARN' => Colors.orange,
-                _ => Colors.grey,
+                'ERROR' => scheme.error,
+                'WARN' => scheme.tertiary,
+                _ => scheme.onSurfaceVariant,
               };
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
                     '${e.timestamp.toLocal()}  [${e.level}]  ${e.category}',
-                    style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.bold),
+                    style: TextStyle(
+                      fontSize: window.isCompact ? 10.5 : 11,
+                      color: color,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
                   const SizedBox(height: 4),
-                  Text(e.message, style: const TextStyle(fontSize: 13)),
+                  Text(
+                    e.message,
+                    style: TextStyle(fontSize: window.isCompact ? 12.5 : 13),
+                  ),
                 ],
               );
             },

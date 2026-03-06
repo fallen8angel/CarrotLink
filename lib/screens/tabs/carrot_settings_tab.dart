@@ -2,12 +2,15 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../models/carrot_settings_models.dart';
 import '../../services/carrot_server_settings_service.dart';
 import '../../services/ssh_service.dart';
+import '../../ui/adaptive/layout_tokens.dart';
+import '../../ui/adaptive/window_class.dart';
 import '../../widgets/custom_toast.dart';
 import '../../widgets/design_components.dart';
 
@@ -56,7 +59,12 @@ class _CarrotSettingSearchHit {
 }
 
 class CarrotSettingsTab extends StatefulWidget {
-  const CarrotSettingsTab({super.key});
+  final String? initialFocusItemName;
+
+  const CarrotSettingsTab({
+    super.key,
+    this.initialFocusItemName,
+  });
 
   @override
   State<CarrotSettingsTab> createState() => _CarrotSettingsTabState();
@@ -74,9 +82,12 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
   String? _error;
   String _query = '';
   final TextEditingController _groupSearchController = TextEditingController();
+  final FocusNode _groupSearchFocusNode = FocusNode();
   final List<_CarrotSettingFavorite> _favorites = <_CarrotSettingFavorite>[];
   String? _activeHost;
   int _loadEpoch = 0;
+  bool _initialFocusHandled = false;
+  double _lastKeyboardInset = 0.0;
 
   @override
   bool get wantKeepAlive => true;
@@ -86,6 +97,10 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _groupSearchController.addListener(_onGroupSearchChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _lastKeyboardInset = _currentKeyboardInset();
+    });
     unawaited(_loadFavorites());
   }
 
@@ -93,6 +108,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
   void dispose() {
     _groupSearchController.removeListener(_onGroupSearchChanged);
     _groupSearchController.dispose();
+    _groupSearchFocusNode.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -123,6 +139,30 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
           ..addAll(next);
       });
     } catch (_) {}
+  }
+
+  double _currentKeyboardInset() {
+    final view = View.maybeOf(context);
+    if (view != null) {
+      return view.viewInsets.bottom / view.devicePixelRatio;
+    }
+    return MediaQuery.maybeViewInsetsOf(context)?.bottom ?? 0.0;
+  }
+
+  void _dismissSearchKeyboard() {
+    SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+    _groupSearchFocusNode.unfocus();
+    FocusManager.instance.primaryFocus?.unfocus();
+  }
+
+  bool _consumeBackForSearchKeyboard() {
+    final keyboardVisible = _currentKeyboardInset() > 0.0;
+    final searchFocused = _groupSearchFocusNode.hasFocus;
+    if (!keyboardVisible && !searchFocused) {
+      return false;
+    }
+    _dismissSearchKeyboard();
+    return true;
   }
 
   Future<void> _persistFavorites() async {
@@ -172,6 +212,18 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
       CustomToast.show(context, '즐겨찾기 항목이 없습니다.');
       return;
     }
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final sheetHorizontalPadding = window.isCompact
+        ? 12.0
+        : tokens.screenPadding.clamp(12.0, 22.0).toDouble();
+    final sheetItemPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 6.0,
+      UiWindowClass.medium => 7.0,
+      UiWindowClass.expanded => 8.0,
+      UiWindowClass.large => 10.0,
+      UiWindowClass.extraLarge => 10.0,
+    };
     final list = _sortedFavorites();
     final selected = await showModalBottomSheet<_CarrotSettingFavorite>(
       context: context,
@@ -179,13 +231,19 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
       showDragHandle: true,
       builder: (context) {
         return ListView.separated(
-          padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+          padding: EdgeInsets.fromLTRB(
+            sheetHorizontalPadding,
+            4,
+            sheetHorizontalPadding,
+            12,
+          ),
           itemCount: list.length,
           separatorBuilder: (_, __) => const Divider(height: 1),
           itemBuilder: (context, index) {
             final fav = list[index];
             return ListTile(
-              contentPadding: const EdgeInsets.symmetric(horizontal: 6),
+              contentPadding:
+                  EdgeInsets.symmetric(horizontal: sheetItemPadding),
               leading: const Icon(Icons.bookmark, color: Colors.amber),
               title: Text(
                 fav.title.isEmpty ? fav.name : fav.title,
@@ -235,6 +293,20 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
     }
   }
 
+  @override
+  void didChangeMetrics() {
+    if (!mounted) return;
+    final nextInset = _currentKeyboardInset();
+    final keyboardClosed = _lastKeyboardInset > 0.0 && nextInset <= 0.0;
+    _lastKeyboardInset = nextInset;
+    if (keyboardClosed && _groupSearchFocusNode.hasFocus) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _dismissSearchKeyboard();
+      });
+    }
+  }
+
   void _scheduleLoadForHost(String? host) {
     if (host == null || host.isEmpty) return;
     if (_activeHost == host && (_bundle != null || _isLoading)) return;
@@ -265,6 +337,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
         _currentCar = values['CarSelected3']?.toString();
         _error = null;
       });
+      _scheduleInitialFocusIfNeeded();
     } catch (e) {
       if (!mounted || epoch != _loadEpoch) return;
       if (!silent) {
@@ -332,6 +405,50 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
     return out;
   }
 
+  void _scheduleInitialFocusIfNeeded() {
+    if (_initialFocusHandled) return;
+    final targetItemName = widget.initialFocusItemName?.trim() ?? '';
+    if (targetItemName.isEmpty) {
+      _initialFocusHandled = true;
+      return;
+    }
+    final bundle = _bundle;
+    if (bundle == null) return;
+
+    CarrotSettingsGroupMeta? targetGroup;
+    for (final group in bundle.groups) {
+      final items =
+          bundle.itemsByGroup[group.group] ?? const <CarrotSettingItemMeta>[];
+      if (items.any((item) => item.name == targetItemName)) {
+        targetGroup = group;
+        break;
+      }
+    }
+
+    _initialFocusHandled = true;
+    if (targetGroup == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        CustomToast.show(
+          context,
+          '요청한 설정 항목($targetItemName)을 찾지 못했습니다.',
+          isError: true,
+        );
+      });
+      return;
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(
+        _openGroupScreen(
+          targetGroup!,
+          focusItemName: targetItemName,
+        ),
+      );
+    });
+  }
+
   Future<void> _openGroupScreen(
     CarrotSettingsGroupMeta group, {
     String? focusItemName,
@@ -380,67 +497,95 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final horizontalPadding = window.isCompact
+        ? 16.0
+        : tokens.screenPadding.clamp(16.0, 28.0).toDouble();
+    final topPadding = window.isCompact ? 16.0 : 18.0;
+    final itemGap = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.0,
+      UiWindowClass.expanded => 14.0,
+      UiWindowClass.large => 14.0,
+      UiWindowClass.extraLarge => 14.0,
+    };
     final ssh = context.watch<SSHService>();
     final host = ssh.connectedIp ?? ssh.targetIp;
     _scheduleLoadForHost(host);
 
-    if (host == null || host.isEmpty) {
-      return _buildNoHostState();
-    }
+    final body = host == null || host.isEmpty
+        ? _buildNoHostState()
+        : RefreshIndicator(
+            onRefresh: () => _refreshAll(),
+            child: ListView(
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              padding: EdgeInsets.fromLTRB(
+                horizontalPadding,
+                topPadding,
+                horizontalPadding,
+                24 + MediaQuery.of(context).padding.bottom,
+              ),
+              children: [
+                _buildCarCard(),
+                SizedBox(height: itemGap),
+                if (_isLoading && _bundle == null)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 36),
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                else if (_error != null && _bundle == null)
+                  _buildErrorCard(_error!)
+                else ...[
+                  _buildGroupsCard(),
+                ],
+              ],
+            ),
+          );
 
-    return RefreshIndicator(
-      onRefresh: () => _refreshAll(),
-      child: ListView(
-        padding: EdgeInsets.fromLTRB(
-          16,
-          16,
-          16,
-          24 + MediaQuery.of(context).padding.bottom,
-        ),
-        children: [
-          _buildCarCard(),
-          const SizedBox(height: 12),
-          if (_isLoading && _bundle == null)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 36),
-              child: Center(child: CircularProgressIndicator()),
-            )
-          else if (_error != null && _bundle == null)
-            _buildErrorCard(_error!)
-          else ...[
-            _buildGroupsCard(),
-          ],
-        ],
-      ),
+    return WillPopScope(
+      onWillPop: () async => !_consumeBackForSearchKeyboard(),
+      child: body,
     );
   }
 
   Widget _buildNoHostState() {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final horizontalPadding = window.isCompact
+        ? 16.0
+        : tokens.screenPadding.clamp(16.0, 28.0).toDouble();
+    final verticalPadding = window.isCompact ? 16.0 : 18.0;
+
     return ListView(
-      padding: const EdgeInsets.all(16),
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+      padding: EdgeInsets.symmetric(
+        horizontal: horizontalPadding,
+        vertical: verticalPadding,
+      ),
       children: [
         DesignCard(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Row(
+              Row(
                 children: [
-                  Icon(Icons.settings_suggest_outlined),
-                  SizedBox(width: 8),
-                  Text(
+                  const Icon(Icons.settings_suggest_outlined),
+                  SizedBox(width: tokens.itemGap + 2),
+                  const Text(
                     '기기 연결 필요',
                     style: TextStyle(fontWeight: FontWeight.w700),
                   ),
                 ],
               ),
-              const SizedBox(height: 8),
+              SizedBox(height: tokens.itemGap + 2),
               Text(
                 'carrot_server(7000) 연결이 필요합니다.',
                 style: TextStyle(
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
               ),
-              const SizedBox(height: 12),
+              SizedBox(height: tokens.sectionGap),
               FilledButton.tonalIcon(
                 onPressed: () => CustomToast.show(context, '먼저 기기에 연결하세요.'),
                 icon: const Icon(Icons.link),
@@ -454,11 +599,14 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
   }
 
   Widget _buildCarCard() {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
     final carLabel = (_currentCar == null || _currentCar!.trim().isEmpty)
         ? '차량 선택'
         : _currentCar!;
     final disabled = _bundle == null || _isLoading;
-    final borderColor = Theme.of(context).colorScheme.outline.withOpacity(0.45);
+    final borderColor =
+        Theme.of(context).colorScheme.outline.withValues(alpha: 0.45);
     final textColor = Theme.of(context).colorScheme.onSurface;
 
     return Material(
@@ -471,7 +619,10 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
         borderRadius: BorderRadius.circular(12),
         child: Container(
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          padding: EdgeInsets.symmetric(
+            horizontal: window.isCompact ? 12 : 14,
+            vertical: window.isCompact ? 12 : 14,
+          ),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(12),
             border: Border.all(color: borderColor),
@@ -479,7 +630,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
           child: Row(
             children: [
               const Icon(Icons.directions_car_filled_outlined, size: 18),
-              const SizedBox(width: 8),
+              SizedBox(width: tokens.itemGap + 2),
               Expanded(
                 child: Text(
                   carLabel,
@@ -491,7 +642,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
                       ),
                 ),
               ),
-              const SizedBox(width: 8),
+              SizedBox(width: tokens.itemGap + 2),
               if (_isRefreshingCar)
                 const SizedBox(
                   width: 16,
@@ -511,8 +662,10 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
   }
 
   Widget _buildErrorCard(String message) {
+    final tokens = UiLayoutTokens.of(context);
     return DesignCard(
-      color: Theme.of(context).colorScheme.errorContainer.withOpacity(0.4),
+      color:
+          Theme.of(context).colorScheme.errorContainer.withValues(alpha: 0.4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -520,17 +673,17 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
             children: [
               Icon(Icons.error_outline,
                   color: Theme.of(context).colorScheme.error),
-              const SizedBox(width: 8),
+              SizedBox(width: tokens.itemGap + 2),
               const Text('설정 불러오기 실패'),
             ],
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: tokens.itemGap + 2),
           Text(
             message,
             style: TextStyle(
                 color: Theme.of(context).colorScheme.onSurfaceVariant),
           ),
-          const SizedBox(height: 12),
+          SizedBox(height: tokens.sectionGap),
           FilledButton.tonal(
             onPressed: _isLoading ? null : () => _refreshAll(),
             child: const Text('다시 시도'),
@@ -541,6 +694,22 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
   }
 
   Widget _buildGroupsCard() {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final searchFieldWidth = switch (window.windowClass) {
+      UiWindowClass.compact => 170.0,
+      UiWindowClass.medium => 210.0,
+      _ => 240.0,
+    };
+    final searchFieldHeight = window.isCompact ? 38.0 : 40.0;
+    final helperFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.0,
+      _ => 13.0,
+    };
+    final searchTextFontSize = window.isCompact ? 13.0 : 14.0;
+    final groupCountFontSize = window.isCompact ? 11.0 : 12.0;
+
     final bundle = _bundle;
     if (bundle == null) return const SizedBox.shrink();
     final groups = bundle.groups;
@@ -553,7 +722,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
           Row(
             children: [
               Icon(Icons.tune, color: Theme.of(context).colorScheme.primary),
-              const SizedBox(width: 10),
+              SizedBox(width: tokens.itemGap + 4),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -564,13 +733,13 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
                             fontWeight: FontWeight.w700,
                           ),
                     ),
-                    const SizedBox(height: 2),
+                    SizedBox(height: tokens.itemGap / 2),
                     Text(
                       !isSearching
                           ? '${groups.length}개 그룹'
                           : '검색 중: "$_query" · ${hits.length}개 항목',
                       style: TextStyle(
-                        fontSize: 12,
+                        fontSize: helperFontSize,
                         color: Theme.of(context).colorScheme.onSurfaceVariant,
                       ),
                     ),
@@ -578,18 +747,22 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
                 ),
               ),
               SizedBox(
-                width: 170,
+                width: searchFieldWidth,
                 child: SizedBox(
-                  height: 38,
+                  height: searchFieldHeight,
                   child: TextField(
                     controller: _groupSearchController,
+                    focusNode: _groupSearchFocusNode,
                     textInputAction: TextInputAction.search,
-                    style: const TextStyle(fontSize: 13),
+                    onTapOutside: (_) => _dismissSearchKeyboard(),
+                    onEditingComplete: _dismissSearchKeyboard,
+                    onSubmitted: (_) => _dismissSearchKeyboard(),
+                    style: TextStyle(fontSize: searchTextFontSize),
                     decoration: InputDecoration(
                       hintText: '설정 검색',
                       isDense: true,
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 10,
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: tokens.itemGap + 4,
                         vertical: 8,
                       ),
                       prefixIcon: const Icon(Icons.search, size: 16),
@@ -615,7 +788,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
                   ),
                 ),
               ),
-              const SizedBox(width: 4),
+              SizedBox(width: tokens.itemGap / 2),
               IconButton(
                 tooltip: '즐겨찾기 (${_favorites.length})',
                 onPressed:
@@ -627,10 +800,10 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
               ),
             ],
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: tokens.itemGap + 2),
           if (isSearching && hits.isEmpty)
             Padding(
-              padding: const EdgeInsets.symmetric(vertical: 20),
+              padding: EdgeInsets.symmetric(vertical: tokens.sectionGap + 8),
               child: Center(
                 child: Text(
                   '검색 결과가 없습니다.',
@@ -649,7 +822,8 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
               itemBuilder: (context, index) {
                 final hit = hits[index];
                 return ListTile(
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                  contentPadding:
+                      EdgeInsets.symmetric(horizontal: tokens.itemGap / 2),
                   leading: const Icon(Icons.tune, size: 18),
                   title: Text(
                     hit.item.displayTitle,
@@ -679,7 +853,8 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
               itemBuilder: (context, index) {
                 final g = groups[index];
                 return ListTile(
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                  contentPadding:
+                      EdgeInsets.symmetric(horizontal: tokens.itemGap / 2),
                   leading: CircleAvatar(
                     radius: 16,
                     backgroundColor:
@@ -687,7 +862,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
                     child: Text(
                       '${g.count}',
                       style: TextStyle(
-                        fontSize: 11,
+                        fontSize: groupCountFontSize,
                         color: Theme.of(context).colorScheme.onPrimaryContainer,
                         fontWeight: FontWeight.w700,
                       ),
@@ -904,13 +1079,30 @@ class _CarrotSettingsGroupScreenState
       CustomToast.show(context, '검색 결과가 없습니다.');
       return;
     }
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final sheetHorizontalPadding = window.isCompact
+        ? 12.0
+        : tokens.screenPadding.clamp(12.0, 22.0).toDouble();
+    final searchSubtitleFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.0,
+      UiWindowClass.expanded => 12.5,
+      UiWindowClass.large => 13.0,
+      UiWindowClass.extraLarge => 13.0,
+    };
     final selected = await showModalBottomSheet<CarrotSettingItemMeta>(
       context: context,
       useSafeArea: true,
       showDragHandle: true,
       builder: (context) {
         return ListView.separated(
-          padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
+          padding: EdgeInsets.fromLTRB(
+            sheetHorizontalPadding,
+            4,
+            sheetHorizontalPadding,
+            12,
+          ),
           itemCount: items.length,
           separatorBuilder: (_, __) => const Divider(height: 1),
           itemBuilder: (context, index) {
@@ -921,6 +1113,7 @@ class _CarrotSettingsGroupScreenState
                 item.name,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: searchSubtitleFontSize),
               ),
               trailing: const Icon(Icons.my_location),
               onTap: () => Navigator.of(context).pop(item),
@@ -1113,17 +1306,54 @@ class _CarrotSettingsGroupScreenState
 
   Future<void> _showQuickValueInput(CarrotSettingItemMeta item) async {
     if (_savingNames.contains(item.name)) return;
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final dialogHorizontalInset = window.isCompact
+        ? 18.0
+        : tokens.screenPadding.clamp(18.0, 32.0).toDouble();
+    final dialogVerticalInset = switch (window.windowClass) {
+      UiWindowClass.compact => 22.0,
+      UiWindowClass.medium => 24.0,
+      UiWindowClass.expanded => 26.0,
+      UiWindowClass.large => 28.0,
+      UiWindowClass.extraLarge => 28.0,
+    };
+    final dialogContentPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 16.0,
+      UiWindowClass.medium => 18.0,
+      UiWindowClass.expanded => 20.0,
+      UiWindowClass.large => 20.0,
+      UiWindowClass.extraLarge => 22.0,
+    };
+    final dialogFieldFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 13.0,
+      UiWindowClass.medium => 13.0,
+      UiWindowClass.expanded => 14.0,
+      UiWindowClass.large => 14.0,
+      UiWindowClass.extraLarge => 14.0,
+    };
     final cur = _effectiveValue(item);
     final controller = TextEditingController(text: _displaySettingValue(cur));
     final submitted = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
+        insetPadding: EdgeInsets.symmetric(
+          horizontal: dialogHorizontalInset,
+          vertical: dialogVerticalInset,
+        ),
+        contentPadding: EdgeInsets.fromLTRB(
+          dialogContentPadding,
+          12,
+          dialogContentPadding,
+          dialogContentPadding,
+        ),
         title: Text(item.displayTitle),
         content: TextField(
           controller: controller,
           autofocus: true,
           keyboardType: const TextInputType.numberWithOptions(
               decimal: true, signed: true),
+          style: TextStyle(fontSize: dialogFieldFontSize),
           decoration: const InputDecoration(
             labelText: '값 입력',
             border: OutlineInputBorder(),
@@ -1154,15 +1384,29 @@ class _CarrotSettingsGroupScreenState
 
   Future<void> _openEditor(CarrotSettingItemMeta item) async {
     final current = _effectiveValue(item);
+    final window = UiWindowInfo.of(context);
+    final maxSheetWidth = switch (window.windowClass) {
+      UiWindowClass.compact => double.infinity,
+      UiWindowClass.medium => 620.0,
+      UiWindowClass.expanded => 700.0,
+      UiWindowClass.large => 760.0,
+      UiWindowClass.extraLarge => 820.0,
+    };
     final changed = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      builder: (context) => _SettingEditSheet(
-        item: item,
-        currentValue: current,
-        unitCycle: widget.bundle.unitCycle,
-        onCommit: (value) => _setValue(item, value),
+      builder: (context) => Align(
+        alignment: Alignment.topCenter,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: maxSheetWidth),
+          child: _SettingEditSheet(
+            item: item,
+            currentValue: current,
+            unitCycle: widget.bundle.unitCycle,
+            onCommit: (value) => _setValue(item, value),
+          ),
+        ),
       ),
     );
     if (changed == true && mounted) {
@@ -1173,7 +1417,44 @@ class _CarrotSettingsGroupScreenState
   @override
   Widget build(BuildContext context) {
     final items = _filteredItems();
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final horizontalPadding = window.isCompact
+        ? 12.0
+        : tokens.screenPadding.clamp(12.0, 24.0).toDouble();
+    final searchTopPadding = window.isCompact ? 10.0 : 12.0;
+    final searchBottomPadding = window.isCompact ? 6.0 : 8.0;
+    final searchHeight = window.isCompact ? 38.0 : 40.0;
+    final listItemGap = window.isCompact ? 8.0 : 10.0;
     final bottomInset = MediaQuery.of(context).padding.bottom;
+    final searchTextSize = switch (window.windowClass) {
+      UiWindowClass.compact => 13.0,
+      UiWindowClass.medium => 13.0,
+      UiWindowClass.expanded => 14.0,
+      UiWindowClass.large => 14.0,
+      UiWindowClass.extraLarge => 14.0,
+    };
+    final searchIconSize = switch (window.windowClass) {
+      UiWindowClass.compact => 16.0,
+      UiWindowClass.medium => 16.0,
+      UiWindowClass.expanded => 17.0,
+      UiWindowClass.large => 18.0,
+      UiWindowClass.extraLarge => 18.0,
+    };
+    final searchIconConstraint = switch (window.windowClass) {
+      UiWindowClass.compact => 34.0,
+      UiWindowClass.medium => 34.0,
+      UiWindowClass.expanded => 36.0,
+      UiWindowClass.large => 38.0,
+      UiWindowClass.extraLarge => 38.0,
+    };
+    final searchSuffixWidth = switch (window.windowClass) {
+      UiWindowClass.compact => 88.0,
+      UiWindowClass.medium => 88.0,
+      UiWindowClass.expanded => 96.0,
+      UiWindowClass.large => 104.0,
+      UiWindowClass.extraLarge => 104.0,
+    };
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.group.displayName),
@@ -1188,23 +1469,28 @@ class _CarrotSettingsGroupScreenState
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+            padding: EdgeInsets.fromLTRB(
+              horizontalPadding,
+              searchTopPadding,
+              horizontalPadding,
+              searchBottomPadding,
+            ),
             child: SizedBox(
-              height: 38,
+              height: searchHeight,
               child: TextField(
                 controller: _searchController,
-                style: const TextStyle(fontSize: 13),
+                style: TextStyle(fontSize: searchTextSize),
                 decoration: InputDecoration(
                   hintText: '항목 검색',
-                  prefixIcon: const Icon(Icons.search, size: 16),
-                  prefixIconConstraints: const BoxConstraints(
-                    minWidth: 34,
-                    minHeight: 34,
+                  prefixIcon: Icon(Icons.search, size: searchIconSize),
+                  prefixIconConstraints: BoxConstraints(
+                    minWidth: searchIconConstraint,
+                    minHeight: searchIconConstraint,
                   ),
                   suffixIcon: _query.isEmpty
                       ? null
                       : SizedBox(
-                          width: 88,
+                          width: searchSuffixWidth,
                           child: Row(
                             mainAxisAlignment: MainAxisAlignment.end,
                             mainAxisSize: MainAxisSize.min,
@@ -1212,11 +1498,12 @@ class _CarrotSettingsGroupScreenState
                               IconButton(
                                 tooltip: '검색 결과에서 이동',
                                 onPressed: _showSearchResultPicker,
-                                icon: const Icon(Icons.my_location, size: 16),
+                                icon: Icon(Icons.my_location,
+                                    size: searchIconSize),
                               ),
                               IconButton(
                                 onPressed: () => _searchController.clear(),
-                                icon: const Icon(Icons.close, size: 16),
+                                icon: Icon(Icons.close, size: searchIconSize),
                               ),
                             ],
                           ),
@@ -1237,12 +1524,15 @@ class _CarrotSettingsGroupScreenState
           ),
           if (_error != null)
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              padding: EdgeInsets.symmetric(
+                horizontal: horizontalPadding,
+                vertical: 8,
+              ),
               child: Material(
                 color: Theme.of(context)
                     .colorScheme
                     .errorContainer
-                    .withOpacity(0.5),
+                    .withValues(alpha: 0.5),
                 borderRadius: BorderRadius.circular(12),
                 child: ListTile(
                   dense: true,
@@ -1261,9 +1551,15 @@ class _CarrotSettingsGroupScreenState
                   ? const Center(child: CircularProgressIndicator())
                   : ListView.separated(
                       controller: _scrollController,
-                      padding: EdgeInsets.fromLTRB(12, 4, 12, 20 + bottomInset),
+                      padding: EdgeInsets.fromLTRB(
+                        horizontalPadding,
+                        4,
+                        horizontalPadding,
+                        20 + bottomInset,
+                      ),
                       itemCount: items.length,
-                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      separatorBuilder: (_, __) =>
+                          SizedBox(height: listItemGap),
                       itemBuilder: (context, index) {
                         final item = items[index];
                         final effectiveValue = _effectiveValue(item);
@@ -1382,6 +1678,7 @@ class _SettingRowCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
     final description = item.displayDescription?.replaceAll('\n', ' ').trim();
     final rangeText = (item.min != null && item.max != null)
         ? '범위 ${_fmtNum(item.min)} ~ ${_fmtNum(item.max)}'
@@ -1396,8 +1693,57 @@ class _SettingRowCard extends StatelessWidget {
         ? Theme.of(context).colorScheme.primary
         : Colors.transparent;
     final bgColor = isHighlighted
-        ? Theme.of(context).colorScheme.primaryContainer.withOpacity(0.36)
+        ? Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.36)
         : Theme.of(context).colorScheme.surfaceContainer;
+    final controlColumnWidth = switch (window.windowClass) {
+      UiWindowClass.compact => 156.0,
+      UiWindowClass.medium => 166.0,
+      UiWindowClass.expanded => 182.0,
+      UiWindowClass.large => 196.0,
+      UiWindowClass.extraLarge => 208.0,
+    };
+    final cardHorizontalPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.0,
+      UiWindowClass.expanded => 13.0,
+      UiWindowClass.large => 14.0,
+      UiWindowClass.extraLarge => 14.0,
+    };
+    final cardVerticalPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 10.0,
+      UiWindowClass.medium => 10.0,
+      UiWindowClass.expanded => 11.0,
+      UiWindowClass.large => 12.0,
+      UiWindowClass.extraLarge => 12.0,
+    };
+    final titleFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 14.0,
+      UiWindowClass.medium => 14.0,
+      UiWindowClass.expanded => 14.5,
+      UiWindowClass.large => 15.0,
+      UiWindowClass.extraLarge => 15.0,
+    };
+    final nameFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 11.0,
+      UiWindowClass.medium => 11.0,
+      UiWindowClass.expanded => 12.0,
+      UiWindowClass.large => 12.0,
+      UiWindowClass.extraLarge => 12.0,
+    };
+    final subtitleFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.0,
+      UiWindowClass.expanded => 12.5,
+      UiWindowClass.large => 13.0,
+      UiWindowClass.extraLarge => 13.0,
+    };
+    final valueFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 16.0,
+      UiWindowClass.medium => 17.0,
+      UiWindowClass.expanded => 17.0,
+      UiWindowClass.large => 18.0,
+      UiWindowClass.extraLarge => 18.0,
+    };
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 220),
@@ -1416,7 +1762,12 @@ class _SettingRowCard extends StatelessWidget {
               onLongPress: onFavoriteLongPress,
               onTap: onTap,
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                padding: EdgeInsets.fromLTRB(
+                  cardHorizontalPadding,
+                  cardVerticalPadding,
+                  cardHorizontalPadding,
+                  cardVerticalPadding,
+                ),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -1429,8 +1780,10 @@ class _SettingRowCard extends StatelessWidget {
                               Expanded(
                                 child: Text(
                                   item.displayTitle,
-                                  style: const TextStyle(
-                                      fontWeight: FontWeight.w700),
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: titleFontSize,
+                                  ),
                                 ),
                               ),
                               if (isSaving)
@@ -1446,7 +1799,7 @@ class _SettingRowCard extends StatelessWidget {
                           Text(
                             item.name,
                             style: TextStyle(
-                              fontSize: 11,
+                              fontSize: nameFontSize,
                               fontFamily: 'monospace',
                               color: Theme.of(context)
                                   .colorScheme
@@ -1458,7 +1811,7 @@ class _SettingRowCard extends StatelessWidget {
                             Text(
                               subtitleParts.join(' · '),
                               style: TextStyle(
-                                fontSize: 12,
+                                fontSize: subtitleFontSize,
                                 color: Theme.of(context)
                                     .colorScheme
                                     .onSurfaceVariant,
@@ -1469,7 +1822,7 @@ class _SettingRowCard extends StatelessWidget {
                             Text(
                               _displaySettingValue(value),
                               style: TextStyle(
-                                fontSize: 16,
+                                fontSize: valueFontSize,
                                 fontWeight: FontWeight.w800,
                                 color: Theme.of(context).colorScheme.primary,
                               ),
@@ -1485,7 +1838,7 @@ class _SettingRowCard extends StatelessWidget {
                       )
                     else
                       SizedBox(
-                        width: 172,
+                        width: controlColumnWidth,
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
@@ -1599,6 +1952,21 @@ class _InlineActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final buttonSize = switch (window.windowClass) {
+      UiWindowClass.compact => 26.0,
+      UiWindowClass.medium => 28.0,
+      UiWindowClass.expanded => 30.0,
+      UiWindowClass.large => 32.0,
+      UiWindowClass.extraLarge => 32.0,
+    };
+    final iconSize = switch (window.windowClass) {
+      UiWindowClass.compact => 14.0,
+      UiWindowClass.medium => 14.0,
+      UiWindowClass.expanded => 15.0,
+      UiWindowClass.large => 16.0,
+      UiWindowClass.extraLarge => 16.0,
+    };
     return Material(
       color: Theme.of(context).colorScheme.surfaceContainerHighest,
       borderRadius: BorderRadius.circular(8),
@@ -1606,9 +1974,9 @@ class _InlineActionButton extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
         onTap: onTap,
         child: SizedBox(
-          width: 26,
-          height: 26,
-          child: Icon(icon, size: 14),
+          width: buttonSize,
+          height: buttonSize,
+          child: Icon(icon, size: iconSize),
         ),
       ),
     );
@@ -1783,19 +2151,52 @@ class _SettingEditSheetState extends State<_SettingEditSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
     final item = widget.item;
     final sliderDivisions = _sliderDivisions(item);
     final canSlider =
         item.supportsSlider && item.min != null && item.max != null;
+    final sheetHorizontalPadding = window.isCompact
+        ? 16.0
+        : tokens.screenPadding.clamp(16.0, 28.0).toDouble();
+    final sectionGap = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 13.0,
+      UiWindowClass.expanded => 14.0,
+      UiWindowClass.large => 14.0,
+      UiWindowClass.extraLarge => 14.0,
+    };
+    final compactTextSize = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.5,
+      UiWindowClass.expanded => 13.0,
+      UiWindowClass.large => 13.0,
+      UiWindowClass.extraLarge => 13.0,
+    };
+    final verticalInset = switch (window.windowClass) {
+      UiWindowClass.compact => 16.0,
+      UiWindowClass.medium => 16.0,
+      UiWindowClass.expanded => 18.0,
+      UiWindowClass.large => 18.0,
+      UiWindowClass.extraLarge => 18.0,
+    };
+    final compactGap = switch (window.windowClass) {
+      UiWindowClass.compact => 6.0,
+      UiWindowClass.medium => 6.0,
+      UiWindowClass.expanded => 7.0,
+      UiWindowClass.large => 8.0,
+      UiWindowClass.extraLarge => 8.0,
+    };
 
     return Padding(
       padding: EdgeInsets.only(
-        left: 16,
-        right: 16,
-        top: 16,
+        left: sheetHorizontalPadding,
+        right: sheetHorizontalPadding,
+        top: verticalInset,
         bottom: MediaQuery.of(context).viewInsets.bottom +
             MediaQuery.of(context).viewPadding.bottom +
-            16,
+            verticalInset,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -1819,11 +2220,11 @@ class _SettingEditSheetState extends State<_SettingEditSheet> {
           ),
           if ((item.displayDescription ?? '').isNotEmpty)
             Padding(
-              padding: const EdgeInsets.only(bottom: 8),
+              padding: EdgeInsets.only(bottom: compactGap + 2),
               child: Text(
                 item.displayDescription!,
                 style: TextStyle(
-                  fontSize: 12,
+                  fontSize: compactTextSize,
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
               ),
@@ -1842,7 +2243,7 @@ class _SettingEditSheetState extends State<_SettingEditSheet> {
                 ),
             ],
           ),
-          const SizedBox(height: 14),
+          SizedBox(height: sectionGap),
           TextField(
             controller: _inputController,
             keyboardType: const TextInputType.numberWithOptions(
@@ -1875,15 +2276,15 @@ class _SettingEditSheetState extends State<_SettingEditSheet> {
               }
             },
           ),
-          const SizedBox(height: 12),
+          SizedBox(height: sectionGap),
           Text(
             '단위(step)',
             style: TextStyle(
-              fontSize: 12,
+              fontSize: compactTextSize,
               color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
           ),
-          const SizedBox(height: 6),
+          SizedBox(height: compactGap),
           Wrap(
             spacing: 8,
             runSpacing: 8,
@@ -1898,7 +2299,7 @@ class _SettingEditSheetState extends State<_SettingEditSheet> {
                     ))
                 .toList(),
           ),
-          const SizedBox(height: 12),
+          SizedBox(height: sectionGap),
           Row(
             children: [
               Expanded(
@@ -1910,7 +2311,7 @@ class _SettingEditSheetState extends State<_SettingEditSheet> {
                   label: Text('- $_step'),
                 ),
               ),
-              const SizedBox(width: 8),
+              SizedBox(width: compactGap + 2),
               Expanded(
                 child: OutlinedButton.icon(
                   onPressed: _saving
@@ -1938,7 +2339,7 @@ class _SettingEditSheetState extends State<_SettingEditSheet> {
               onChangeEnd: _saving ? null : (v) => unawaited(_commitValue(v)),
             ),
           ],
-          const SizedBox(height: 8),
+          SizedBox(height: sectionGap - compactGap),
           Row(
             children: [
               Expanded(
@@ -1955,7 +2356,7 @@ class _SettingEditSheetState extends State<_SettingEditSheet> {
                   label: const Text('기본값 복원'),
                 ),
               ),
-              const SizedBox(width: 8),
+              SizedBox(width: compactGap + 2),
               FilledButton(
                 onPressed:
                     _saving ? null : () => Navigator.of(context).pop(_changed),
@@ -2000,15 +2401,40 @@ class _MetaChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final window = UiWindowInfo.of(context);
+    final chipHorizontalPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 10.0,
+      UiWindowClass.medium => 10.0,
+      UiWindowClass.expanded => 11.0,
+      UiWindowClass.large => 12.0,
+      UiWindowClass.extraLarge => 12.0,
+    };
+    final chipVerticalPadding = switch (window.windowClass) {
+      UiWindowClass.compact => 6.0,
+      UiWindowClass.medium => 6.0,
+      UiWindowClass.expanded => 7.0,
+      UiWindowClass.large => 7.0,
+      UiWindowClass.extraLarge => 7.0,
+    };
+    final chipFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.0,
+      UiWindowClass.expanded => 13.0,
+      UiWindowClass.large => 13.0,
+      UiWindowClass.extraLarge => 13.0,
+    };
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: EdgeInsets.symmetric(
+        horizontal: chipHorizontalPadding,
+        vertical: chipVerticalPadding,
+      ),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
         '$label: $value',
-        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+        style: TextStyle(fontSize: chipFontSize, fontWeight: FontWeight.w600),
       ),
     );
   }
@@ -2118,6 +2544,35 @@ class _CarSelectorScreenState extends State<_CarSelectorScreen> {
     final cars = _cars;
     final options =
         cars == null ? const <CarrotCarOption>[] : _flattenedOptions(cars);
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final searchHorizontalPadding = window.isCompact
+        ? 16.0
+        : tokens.screenPadding.clamp(16.0, 28.0).toDouble();
+    final carListHorizontalPadding = window.isCompact
+        ? 12.0
+        : tokens.screenPadding.clamp(12.0, 24.0).toDouble();
+    final carListGap = switch (window.windowClass) {
+      UiWindowClass.compact => 6.0,
+      UiWindowClass.medium => 7.0,
+      UiWindowClass.expanded => 8.0,
+      UiWindowClass.large => 8.0,
+      UiWindowClass.extraLarge => 8.0,
+    };
+    final currentCarFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.5,
+      UiWindowClass.expanded => 13.0,
+      UiWindowClass.large => 13.0,
+      UiWindowClass.extraLarge => 13.0,
+    };
+    final avatarTextSize = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 12.0,
+      UiWindowClass.expanded => 13.0,
+      UiWindowClass.large => 13.0,
+      UiWindowClass.extraLarge => 13.0,
+    };
 
     return Scaffold(
       appBar: AppBar(
@@ -2133,7 +2588,12 @@ class _CarSelectorScreenState extends State<_CarSelectorScreen> {
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            padding: EdgeInsets.fromLTRB(
+              searchHorizontalPadding,
+              12,
+              searchHorizontalPadding,
+              8,
+            ),
             child: TextField(
               controller: _searchController,
               decoration: InputDecoration(
@@ -2152,13 +2612,18 @@ class _CarSelectorScreenState extends State<_CarSelectorScreen> {
           ),
           if (widget.currentCar != null && widget.currentCar!.trim().isNotEmpty)
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              padding: EdgeInsets.fromLTRB(
+                searchHorizontalPadding,
+                0,
+                searchHorizontalPadding,
+                8,
+              ),
               child: Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
                   '현재: ${widget.currentCar}',
                   style: TextStyle(
-                    fontSize: 12,
+                    fontSize: currentCarFontSize,
                     color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
                 ),
@@ -2190,9 +2655,14 @@ class _CarSelectorScreenState extends State<_CarSelectorScreen> {
           else
             Expanded(
               child: ListView.separated(
-                padding: const EdgeInsets.fromLTRB(12, 4, 12, 20),
+                padding: EdgeInsets.fromLTRB(
+                  carListHorizontalPadding,
+                  4,
+                  carListHorizontalPadding,
+                  20,
+                ),
                 itemCount: options.length,
-                separatorBuilder: (_, __) => const SizedBox(height: 6),
+                separatorBuilder: (_, __) => SizedBox(height: carListGap),
                 itemBuilder: (context, index) {
                   final option = options[index];
                   final selected = widget.currentCar != null &&
@@ -2219,7 +2689,7 @@ class _CarSelectorScreenState extends State<_CarSelectorScreen> {
                                     .colorScheme
                                     .onSecondaryContainer,
                             fontWeight: FontWeight.w700,
-                            fontSize: 12,
+                            fontSize: avatarTextSize,
                           ),
                         ),
                       ),
