@@ -384,22 +384,25 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
             centerNoticeMessage != null && !_debugOverlayPreviewMode;
         final showBottomStatusBanners = !hasCenterNotice;
         final drawSize = Size(drawW, drawH);
-        final landscapeHudSize = isLandscapeLayout && !hideHudForTinyViewport
-            ? _computeLandscapeHudOverlaySize(window, drawSize)
+        final landscapeHudHeight = isLandscapeLayout && !hideHudForTinyViewport
+            ? _computeLandscapeHudOverlayHeight(window, drawSize)
+            : 0.0;
+        final landscapeHudWidth = landscapeHudHeight > 0
+            ? _computeLandscapeHudOverlayWidth(window, landscapeHudHeight)
             : 0.0;
         final landscapeHudLeftBound = math.max(
           overlayInset,
-          vw - landscapeHudSize - overlayInset,
+          vw - landscapeHudWidth - overlayInset,
         );
         final landscapeHudTopBound = math.max(
           overlayInset,
-          vh - landscapeHudSize - overlayInset,
+          vh - landscapeHudHeight - overlayInset,
         );
         final landscapeHudLeft = (left + overlayInset)
             .clamp(overlayInset, landscapeHudLeftBound)
             .toDouble();
         final landscapeHudTop =
-            (top + drawH - landscapeHudSize - overlayInset)
+            (top + drawH - landscapeHudHeight - overlayInset)
                 .clamp(overlayInset, landscapeHudTopBound)
                 .toDouble();
         final nativeViewportRectChanged =
@@ -558,7 +561,8 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                     child: _buildLandscapeHudOverlay(
                       window,
                       drawSize,
-                      overlaySize: landscapeHudSize,
+                      overlayHeight: landscapeHudHeight,
+                      overlayWidth: landscapeHudWidth,
                     ),
                   ),
                 ),

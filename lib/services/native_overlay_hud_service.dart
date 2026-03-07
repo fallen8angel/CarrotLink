@@ -2,6 +2,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../features/hud/hud.dart';
+
 class NativeOverlayHudService {
   NativeOverlayHudService._();
 
@@ -9,6 +11,8 @@ class NativeOverlayHudService {
   static final RegExp _ipv4Regex = RegExp(r'^(\d{1,3}\.){3}\d{1,3}$');
   static const String _enabledPrefKey = 'hud_overlay_enabled';
   static bool? _enabledCache;
+  static String? _lastSemanticSnapshotJson;
+  static String? _lastSemanticSnapshotHost;
 
   static bool get _isAndroid =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
@@ -58,9 +62,15 @@ class NativeOverlayHudService {
     final normalizedHost = normalizeHost(host);
     if (normalizedHost == null) return false;
     try {
+      final cachedSnapshotJson = _cachedSnapshotJsonForHost(normalizedHost);
       return await _channel.invokeMethod<bool>(
             'start',
-            {'host': normalizedHost},
+            {
+              'host': normalizedHost,
+              if (cachedSnapshotJson != null &&
+                  cachedSnapshotJson.isNotEmpty)
+                'snapshotJson': cachedSnapshotJson,
+            },
           ) ??
           false;
     } catch (_) {
@@ -75,30 +85,34 @@ class NativeOverlayHudService {
     final normalizedHost = normalizeHost(host);
     if (normalizedHost == null) return;
     try {
+      final cachedSnapshotJson = _cachedSnapshotJsonForHost(normalizedHost);
       await _channel.invokeMethod(
         'updateEndpoint',
-        {'host': normalizedHost},
+        {
+          'host': normalizedHost,
+          if (cachedSnapshotJson != null && cachedSnapshotJson.isNotEmpty)
+            'snapshotJson': cachedSnapshotJson,
+        },
       );
     } catch (_) {}
   }
 
-  static Future<void> updateFallbackMetrics({
-    double? cpuTempC,
-    double? memPct,
-    double? diskPct,
-  }) async {
+  static Future<void> updateSemanticSnapshot(
+    OriginalHudSnapshot snapshot,
+  ) async {
     if (!_isAndroid) return;
+    final snapshotJson = HudSnapshotJsonSerializer.encode(snapshot);
+    _lastSemanticSnapshotJson = snapshotJson;
+    _lastSemanticSnapshotHost = normalizeHost(snapshot.source.deviceHost);
     final enabled = await isEnabled();
     if (!enabled) return;
     final running = await isRunning();
     if (!running) return;
     try {
       await _channel.invokeMethod(
-        'updateFallbackMetrics',
+        'updateSemanticSnapshot',
         {
-          'cpuTempC': cpuTempC,
-          'memPct': memPct,
-          'diskPct': diskPct,
+          'snapshotJson': snapshotJson,
         },
       );
     } catch (_) {}
@@ -125,6 +139,18 @@ class NativeOverlayHudService {
     } catch (_) {
       return false;
     }
+  }
+
+  static String? _cachedSnapshotJsonForHost(String normalizedHost) {
+    final cachedSnapshotJson = _lastSemanticSnapshotJson;
+    if (cachedSnapshotJson == null || cachedSnapshotJson.isEmpty) {
+      return null;
+    }
+    final cachedHost = _lastSemanticSnapshotHost;
+    if (cachedHost == null || cachedHost == normalizedHost) {
+      return cachedSnapshotJson;
+    }
+    return null;
   }
 
   static String? normalizeHost(String? raw) {

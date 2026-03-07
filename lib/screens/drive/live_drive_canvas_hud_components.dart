@@ -1,31 +1,17 @@
 part of 'live_drive_canvas_screen.dart';
 
 extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
-  void _startHudFallbackMetricsLoop() {
-    _hudFallbackMetricsTimer?.cancel();
-    _hudFallbackMetricsTimer = null;
-    unawaited(_refreshHudFallbackMetrics());
-    _hudFallbackMetricsTimer =
-        Timer.periodic(const Duration(seconds: 12), (_) {
-      unawaited(_refreshHudFallbackMetrics());
-    });
-  }
-
-  Future<void> _refreshHudFallbackMetrics() async {
-    final ssh = _sshService ??
-        (mounted ? Provider.of<SSHService>(context, listen: false) : null);
-    if (ssh == null || !ssh.isConnected) return;
-    final metrics = await ssh.getHudFallbackMetrics();
-    if (metrics == null || !mounted) return;
-    final sameCpu = _hudFallbackCpuTempC == metrics.cpuTempC;
-    final sameMem = _hudFallbackMemPct == metrics.memPct;
-    final sameDisk = _hudFallbackDiskPct == metrics.diskPct;
-    if (sameCpu && sameMem && sameDisk) return;
-    _safeSetState(() {
-      _hudFallbackCpuTempC = metrics.cpuTempC;
-      _hudFallbackMemPct = metrics.memPct;
-      _hudFallbackDiskPct = metrics.diskPct;
-    });
+  double _hudPreferredAspectRatioForWindowImpl(
+    UiWindowInfo window, {
+    required bool wide,
+  }) {
+    return switch (window.windowClass) {
+      UiWindowClass.compact => wide ? 1.66 : 1.0,
+      UiWindowClass.medium => wide ? 1.78 : 1.04,
+      UiWindowClass.expanded => wide ? 1.84 : 1.08,
+      UiWindowClass.large => wide ? 1.9 : 1.1,
+      UiWindowClass.extraLarge => wide ? 1.94 : 1.12,
+    };
   }
 
   Future<void> _loadHudDefaultModeImpl() async {
@@ -326,47 +312,32 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
       UiWindowInfo window, BoxConstraints constraints) {
     final width = constraints.maxWidth;
     final height = constraints.maxHeight;
-    final aspect = height / math.max(1.0, width);
-    var ratio = switch (window.windowClass) {
-      UiWindowClass.compact => 0.365,
-      UiWindowClass.medium => 0.35,
-      UiWindowClass.expanded => 0.338,
-      UiWindowClass.large => 0.328,
-      UiWindowClass.extraLarge => 0.32,
+    final horizontalInset = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 14.0,
+      UiWindowClass.expanded => 16.0,
+      UiWindowClass.large || UiWindowClass.extraLarge => 18.0,
     };
-
-    if (aspect >= 2.05) {
-      ratio += 0.015;
-    } else if (aspect >= 1.9) {
-      ratio += 0.008;
-    } else if (aspect <= 1.55) {
-      ratio -= 0.02;
-    } else if (aspect <= 1.7) {
-      ratio -= 0.012;
-    }
-
-    if (window.shortestSide >= 720) {
-      ratio -= 0.01;
-    } else if (window.shortestSide <= 380) {
-      ratio += 0.01;
-    }
+    final usableWidth = math.max(1.0, width - (horizontalInset * 2));
+    final aspectRatio = _hudPreferredAspectRatioForWindow(window, wide: true);
+    final desiredHeight = usableWidth / aspectRatio;
 
     final minHeight = switch (window.windowClass) {
-      UiWindowClass.compact => 200.0,
-      UiWindowClass.medium => 212.0,
-      UiWindowClass.expanded => 224.0,
-      UiWindowClass.large => 234.0,
-      UiWindowClass.extraLarge => 244.0,
+      UiWindowClass.compact => 190.0,
+      UiWindowClass.medium => 204.0,
+      UiWindowClass.expanded => 216.0,
+      UiWindowClass.large => 228.0,
+      UiWindowClass.extraLarge => 236.0,
     };
     final maxHeight = switch (window.windowClass) {
-      UiWindowClass.compact => math.min(460.0, height * 0.44),
-      UiWindowClass.medium => math.min(470.0, height * 0.43),
-      UiWindowClass.expanded => math.min(480.0, height * 0.42),
-      UiWindowClass.large => math.min(500.0, height * 0.41),
-      UiWindowClass.extraLarge => math.min(520.0, height * 0.4),
+      UiWindowClass.compact => math.min(430.0, height * 0.42),
+      UiWindowClass.medium => math.min(450.0, height * 0.41),
+      UiWindowClass.expanded => math.min(470.0, height * 0.4),
+      UiWindowClass.large => math.min(490.0, height * 0.39),
+      UiWindowClass.extraLarge => math.min(510.0, height * 0.38),
     };
 
-    return (height * ratio).clamp(minHeight, maxHeight).toDouble();
+    return desiredHeight.clamp(minHeight, maxHeight).toDouble();
   }
 
   Widget _buildPortraitHudPanelImpl(UiWindowInfo window) {
@@ -385,13 +356,12 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
       child: Padding(
         padding:
             EdgeInsets.fromLTRB(panelPadding, panelPadding, panelPadding, 0),
-        child: HomeHudPreviewCard(
+        child: AdaptiveHudHost(
           deviceIp: widget.hostIp,
           enabled: true,
+          surface: HudSurfaceVariant.driveInline,
           fillParent: true,
-          fallbackCpuTempC: _hudFallbackCpuTempC,
-          fallbackMemPct: _hudFallbackMemPct,
-          fallbackDiskPct: _hudFallbackDiskPct,
+          syncNativeOverlay: true,
           key: ValueKey<String>(
               'drive_hud_panel_${window.windowClass.name}_${widget.hostIp}'),
         ),
@@ -431,53 +401,65 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
     return false;
   }
 
-  double _computeLandscapeHudOverlaySizeImpl(UiWindowInfo window, Size drawSize) {
+  double _computeLandscapeHudOverlayHeightImpl(
+    UiWindowInfo window,
+    Size drawSize,
+  ) {
     final base = math.min(drawSize.width, drawSize.height);
     final ratio = switch (window.windowClass) {
-      UiWindowClass.compact => 0.305,
-      UiWindowClass.medium => 0.29,
-      UiWindowClass.expanded => 0.275,
-      UiWindowClass.large => 0.262,
-      UiWindowClass.extraLarge => 0.25,
+      UiWindowClass.compact => 0.23,
+      UiWindowClass.medium => 0.22,
+      UiWindowClass.expanded => 0.21,
+      UiWindowClass.large => 0.2,
+      UiWindowClass.extraLarge => 0.19,
     };
     final minSize = switch (window.windowClass) {
-      UiWindowClass.compact => 182.0,
-      UiWindowClass.medium => 198.0,
-      UiWindowClass.expanded => 214.0,
-      UiWindowClass.large => 230.0,
-      UiWindowClass.extraLarge => 246.0,
+      UiWindowClass.compact => 150.0,
+      UiWindowClass.medium => 162.0,
+      UiWindowClass.expanded => 174.0,
+      UiWindowClass.large => 186.0,
+      UiWindowClass.extraLarge => 198.0,
     };
     final maxSize = switch (window.windowClass) {
-      UiWindowClass.compact => 352.0,
-      UiWindowClass.medium => 376.0,
-      UiWindowClass.expanded => 404.0,
-      UiWindowClass.large => 432.0,
-      UiWindowClass.extraLarge => 460.0,
+      UiWindowClass.compact => 248.0,
+      UiWindowClass.medium => 268.0,
+      UiWindowClass.expanded => 288.0,
+      UiWindowClass.large => 308.0,
+      UiWindowClass.extraLarge => 328.0,
     };
-    final viewportCap = drawSize.height * 0.48;
+    final viewportCap = drawSize.height * 0.34;
     final upperBound = math.max(minSize, math.min(maxSize, viewportCap));
     return (base * ratio).clamp(minSize, upperBound).toDouble();
+  }
+
+  double _computeLandscapeHudOverlayWidthImpl(
+    UiWindowInfo window,
+    double overlayHeight,
+  ) {
+    return overlayHeight * _hudPreferredAspectRatioForWindow(window, wide: true);
   }
 
   Widget _buildLandscapeHudOverlayImpl(
     UiWindowInfo window,
     Size drawSize, {
-    double? overlaySize,
+    double? overlayHeight,
+    double? overlayWidth,
   }) {
-    final size =
-        overlaySize ?? _computeLandscapeHudOverlaySize(window, drawSize);
+    final height =
+        overlayHeight ?? _computeLandscapeHudOverlayHeight(window, drawSize);
+    final width =
+        overlayWidth ?? _computeLandscapeHudOverlayWidth(window, height);
     return Opacity(
       opacity: 0.8,
       child: SizedBox(
-        width: size,
-        height: size,
-        child: HomeHudPreviewCard(
+        width: width,
+        height: height,
+        child: AdaptiveHudHost(
           deviceIp: widget.hostIp,
           enabled: true,
+          surface: HudSurfaceVariant.driveOverlay,
           fillParent: true,
-          fallbackCpuTempC: _hudFallbackCpuTempC,
-          fallbackMemPct: _hudFallbackMemPct,
-          fallbackDiskPct: _hudFallbackDiskPct,
+          syncNativeOverlay: true,
           key: ValueKey<String>(
             'drive_hud_overlay_${window.windowClass.name}_${widget.hostIp}',
           ),

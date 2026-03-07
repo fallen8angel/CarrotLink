@@ -55,36 +55,46 @@ class MainActivity : FlutterActivity() {
 
             "start" -> {
               val host = call.argument<String>("host")?.trim().orEmpty()
+              val snapshotJson = call.argument<String>("snapshotJson")?.trim()
               if (!hasOverlayPermission()) {
                 result.success(false)
                 return@setMethodCallHandler
               }
-              startOverlayService(OverlayHudService.ACTION_START, host)
+              startOverlayService(
+                  OverlayHudService.ACTION_START,
+                  host,
+                  snapshotJson = snapshotJson
+              )
               result.success(true)
             }
 
             "updateEndpoint" -> {
               val host = call.argument<String>("host")?.trim().orEmpty()
+              val snapshotJson = call.argument<String>("snapshotJson")?.trim()
               if (host.isNotEmpty()) {
-                startOverlayService(OverlayHudService.ACTION_UPDATE_ENDPOINT, host)
+                startOverlayService(
+                    OverlayHudService.ACTION_UPDATE_ENDPOINT,
+                    host,
+                    snapshotJson = snapshotJson
+                )
               }
               result.success(true)
             }
 
-            "updateFallbackMetrics" -> {
+            "updateSemanticSnapshot" -> {
               if (!OverlayHudService.isRunning()) {
                 result.success(false)
                 return@setMethodCallHandler
               }
-              val cpuTempC = call.argument<Double>("cpuTempC")
-              val memPct = call.argument<Double>("memPct")
-              val diskPct = call.argument<Double>("diskPct")
+              val snapshotJson = call.argument<String>("snapshotJson")?.trim().orEmpty()
+              if (snapshotJson.isBlank()) {
+                result.success(false)
+                return@setMethodCallHandler
+              }
               startOverlayService(
-                  OverlayHudService.ACTION_UPDATE_FALLBACK_METRICS,
+                  OverlayHudService.ACTION_UPDATE_SNAPSHOT,
                   null,
-                  cpuTempC,
-                  memPct,
-                  diskPct
+                  snapshotJson = snapshotJson
               )
               result.success(true)
             }
@@ -441,23 +451,15 @@ class MainActivity : FlutterActivity() {
   private fun startOverlayService(
       action: String,
       host: String?,
-      cpuTempC: Double? = null,
-      memPct: Double? = null,
-      diskPct: Double? = null
+      snapshotJson: String? = null
   ) {
     val intent = Intent(this, OverlayHudService::class.java).apply {
       this.action = action
       if (!host.isNullOrBlank()) {
         putExtra(OverlayHudService.EXTRA_HOST, host)
       }
-      if (cpuTempC != null) {
-        putExtra(OverlayHudService.EXTRA_CPU_TEMP_C, cpuTempC)
-      }
-      if (memPct != null) {
-        putExtra(OverlayHudService.EXTRA_MEM_PCT, memPct)
-      }
-      if (diskPct != null) {
-        putExtra(OverlayHudService.EXTRA_DISK_PCT, diskPct)
+      if (!snapshotJson.isNullOrBlank()) {
+        putExtra(OverlayHudService.EXTRA_SNAPSHOT_JSON, snapshotJson)
       }
     }
     val useForegroundStart =

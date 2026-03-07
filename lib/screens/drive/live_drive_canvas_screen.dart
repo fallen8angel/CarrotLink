@@ -21,7 +21,7 @@ import '../../services/storage_layout_service.dart';
 import '../../ui/adaptive/display_feature_utils.dart';
 import '../../ui/adaptive/layout_tokens.dart';
 import '../../ui/adaptive/window_class.dart';
-import '../../widgets/home_hud_preview_card.dart';
+import '../../features/hud/hud.dart';
 
 part 'live_drive_canvas_overlay_components.dart';
 part 'live_drive_canvas_overlay_models_components.dart';
@@ -290,10 +290,6 @@ fi
   Map<String, dynamic> _sidecarHealthSnapshot = <String, dynamic>{};
   Map<String, dynamic> _sidecarProfileSnapshot = <String, dynamic>{};
   Map<String, dynamic> _sidecarCameraQualitySnapshot = <String, dynamic>{};
-  double? _hudFallbackCpuTempC;
-  double? _hudFallbackMemPct;
-  double? _hudFallbackDiskPct;
-  Timer? _hudFallbackMetricsTimer;
   DateTime? _sidecarProcessCheckedAt;
   DateTime? _sidecarLastDeployAt;
   DateTime? _sidecarLastStartAt;
@@ -453,7 +449,6 @@ fi
     unawaited(_loadAndApplyLandscapeOrientation());
     unawaited(_loadHudDebugLayerToggles());
     unawaited(_loadHudDefaultMode());
-    _startHudFallbackMetricsLoop();
   }
 
   @override
@@ -649,8 +644,6 @@ fi
     _sidecarRecoveryTimer = null;
     _hudNoticeTimer?.cancel();
     _hudNoticeTimer = null;
-    _hudFallbackMetricsTimer?.cancel();
-    _hudFallbackMetricsTimer = null;
     _stopAdaptiveCameraQualityLoop(resetMode: true);
     _cancelLifecycleSuspendTimer();
     _cancelDelayedSidecarStop();
@@ -859,6 +852,11 @@ fi
   Widget _buildSidecarRevisionBadge(UiWindowInfo window) =>
       _buildSidecarRevisionBadgeImpl(window);
 
+  double _hudPreferredAspectRatioForWindow(
+    UiWindowInfo window, {
+    required bool wide,
+  }) => _hudPreferredAspectRatioForWindowImpl(window, wide: wide);
+
 
   double _computePortraitHudHeight(
     UiWindowInfo window,
@@ -880,21 +878,27 @@ fi
         isLandscape: isLandscape,
       );
 
-
-  double _computeLandscapeHudOverlaySize(
+  double _computeLandscapeHudOverlayHeight(
     UiWindowInfo window,
     Size drawSize,
-  ) => _computeLandscapeHudOverlaySizeImpl(window, drawSize);
+  ) => _computeLandscapeHudOverlayHeightImpl(window, drawSize);
+
+  double _computeLandscapeHudOverlayWidth(
+    UiWindowInfo window,
+    double overlayHeight,
+  ) => _computeLandscapeHudOverlayWidthImpl(window, overlayHeight);
 
 
   Widget _buildLandscapeHudOverlay(
     UiWindowInfo window,
     Size drawSize, {
-    double? overlaySize,
+    double? overlayHeight,
+    double? overlayWidth,
   }) => _buildLandscapeHudOverlayImpl(
       window,
       drawSize,
-      overlaySize: overlaySize,
+      overlayHeight: overlayHeight,
+      overlayWidth: overlayWidth,
     );
 
   Widget _buildDriveScaffoldBody(UiWindowInfo window) =>
