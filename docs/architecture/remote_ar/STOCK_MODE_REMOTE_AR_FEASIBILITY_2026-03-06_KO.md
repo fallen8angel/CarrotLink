@@ -25,6 +25,11 @@
 - road/wide layout profile 분리
 - AR scene 진단 팝업
 - AR scene capture / replay
+- AR replay/session 자동 저장
+- 주행 후 분석용 `session_meta.json`, `timeline.ndjson`, `session_latest.json` export
+- 기존 overlay 대비 AR layer 시각 강조
+- guide ribbon / trail / shell card / status pill / cue chip 시각 강화
+- trail 시간 기반 움직임 추가
 
 현재 아직 실기기에서 최종 튜닝이 필요한 것:
 
@@ -32,6 +37,7 @@
 - anchor quality / stability 임계값 조정
 - clutter / retention / degrade 규칙 실주행 튜닝
 - 장시간 주행에서 flicker / thermal / fps 관찰
+- 현재 사진 기준으로는 "보이긴 하지만 AR 체감이 약함" 문제를 더 개선해야 함
 
 주의:
 
@@ -41,8 +47,40 @@
 
 실기기 테스트 절차는 아래 별도 문서를 따른다.
 
-- `docs/architecture/STOCK_MODE_REMOTE_AR_ON_DEVICE_TEST_2026-03-07_KO.md`
-- `docs/architecture/STOCK_MODE_REMOTE_AR_HANDOFF_2026-03-07_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_ON_DEVICE_TEST_2026-03-07_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_HANDOFF_2026-03-07_KO.md`
+
+### 0.1 현재 평가
+
+2026-03-07 현재 구현은 아래처럼 평가한다.
+
+- 구조/모듈화: 높은 수준까지 완료
+- capture/replay/debug: 실사용 가능한 수준
+- 자동 저장/사후 분석: 가능
+- AR 체감 품질: 아직 최종 전
+
+즉, 지금 병목은 "구조가 없음"이 아니라 "실제 화면에서 얼마나 AR답게 보이느냐"다.
+
+### 0.2 현재 우선순위
+
+지금부터의 우선순위는 아래 순서다.
+
+1. 실주행 로그/세션 확보
+2. `session_meta.json`, `timeline.ndjson` 기반 사후 분석
+3. AR layer 존재감 강화 및 clutter/fallback 조정
+4. `road` / `wideRoad` preset 미세 조정
+5. 장시간 안정화
+
+### 0.3 사용자가 지금 해야 하는 것
+
+현재 사용자는 별도 수동 로그 조작을 거의 하지 않아도 된다.
+
+- 최신 빌드 설치
+- 주행 중 `Native AR scene 전송` 유지
+- 평소처럼 stock 화면으로 주행
+- 주행 후 `logs/ar_scene/session_<...>/` 폴더 또는 스크린샷만 전달
+
+즉, 지금부터는 "주행 후 데이터 전달 -> 사후 분석 -> 튜닝" 루프가 기본 개발 방식이다.
 
 ## 1. 결론
 
@@ -350,11 +388,11 @@
 ## 12. 외부 참고
 
 좌표/맵핑/최적화 내부 참고:
-- `docs/architecture/STOCK_MODE_REMOTE_AR_MVP_EXECUTION_PLAN_2026-03-06_KO.md`
-- `docs/architecture/STOCK_MODE_REMOTE_AR_IMPLEMENTATION_CHECKLIST_2026-03-06_KO.md`
-- `docs/architecture/STOCK_MODE_REMOTE_AR_MAPPING_OPTIMIZATION_2026-03-06_KO.md`
-- `docs/architecture/STOCK_MODE_REMOTE_AR_ON_DEVICE_TEST_2026-03-07_KO.md`
-- `docs/architecture/STOCK_MODE_REMOTE_AR_HANDOFF_2026-03-07_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_MVP_EXECUTION_PLAN_2026-03-06_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_IMPLEMENTATION_CHECKLIST_2026-03-06_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_MAPPING_OPTIMIZATION_2026-03-06_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_ON_DEVICE_TEST_2026-03-07_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_HANDOFF_2026-03-07_KO.md`
 
 - Flutter Android Platform Views
   - https://docs.flutter.dev/platform-integration/android/platform-views
@@ -366,3 +404,4 @@
   - https://developers.google.com/ar/develop/java/geospatial/enable
 - ARCore Geospatial overview
   - https://developers.google.com/ar/develop/geospatial
+

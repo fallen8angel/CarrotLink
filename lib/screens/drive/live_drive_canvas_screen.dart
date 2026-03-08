@@ -92,7 +92,9 @@ extension _DriveViewportZoomPresetX on _DriveViewportZoomPreset {
         _DriveViewportZoomPreset.zoomOut => 0.92,
         _DriveViewportZoomPreset.fit => 1.0,
         _DriveViewportZoomPreset.crop => 1.0,
-        _DriveViewportZoomPreset.zoomIn => 1.12,
+        // The aggressive extra crop on this preset drifts lane/path alignment
+        // more than the other viewports. Keep it only slightly tighter.
+        _DriveViewportZoomPreset.zoomIn => 1.06,
       };
 
   IconData get icon => switch (this) {
@@ -277,14 +279,23 @@ fi
   bool _debugShowStateText = true;
   bool _debugPushNativeArScene = false;
   final bool _debugArCaptureEnabled = true;
+  final bool _debugArAutoPersistEnabled = true;
   bool _debugArReplayMode = false;
   _DriveArReplayFrame? _activeArReplayFrame;
   final ListQueue<_DriveArReplayFrame> _arReplayFrames =
       ListQueue<_DriveArReplayFrame>();
   int _arReplayCaptureSeq = 0;
   int _lastArReplayCaptureUs = 0;
+  int _lastArReplayPersistUs = 0;
   static const int _arReplayCaptureIntervalUs = 250000;
+  static const int _arReplayPersistIntervalUs = 1500000;
   static const int _arReplayMaxFrames = 96;
+  String? _lastArReplayExportPath;
+  String? _arReplaySessionId;
+  String? _arReplaySessionDirPath;
+  String? _arReplaySessionTimelinePath;
+  String? _arReplaySessionMetaPath;
+  int _lastPersistedArReplaySeq = 0;
   Map<String, String> _sidecarProcessSnapshot = <String, String>{};
   Map<String, String> _sidecarCriticalProcSnapshot = <String, String>{};
   Map<String, dynamic> _sidecarHealthSnapshot = <String, dynamic>{};
@@ -637,6 +648,9 @@ fi
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    unawaited(
+      _persistArReplaySessionIfNeeded(force: true, reason: 'dispose'),
+    );
     _stopOverlayPreviewLoop();
     _sidecarTransitionTimer?.cancel();
     _sidecarTransitionTimer = null;
@@ -763,6 +777,9 @@ fi
   Future<void> _debugActionStopArReplay() =>
       _debugActionStopArReplayImpl();
 
+  Future<void> _debugActionExportArReplay() =>
+      _debugActionExportArReplayImpl();
+
   String _arReplayStatusLabel() => _arReplayStatusLabelImpl();
 
   Map<String, dynamic>? _currentLiveArScenePayload() =>
@@ -783,6 +800,11 @@ fi
 
   Future<Map<String, dynamic>?> _fetchNativeArRenderDebug(int viewId) =>
       _fetchNativeArRenderDebugImpl(viewId);
+
+  Future<void> _persistArReplaySessionIfNeeded({
+    bool force = false,
+    String? reason,
+  }) => _persistArReplaySessionIfNeededImpl(force: force, reason: reason);
 
   void _setArReplayMode(
     bool enabled, {

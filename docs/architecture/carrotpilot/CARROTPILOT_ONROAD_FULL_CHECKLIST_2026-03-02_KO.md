@@ -212,5 +212,6 @@
 
 - 이 체크리스트는 "원본 코드 분석 커버리지" 기준 문서로 유지한다.
 - 실제 앱 구현 상태(E01~E23 완료/부분/미구현)는 아래 문서의 최신 스냅샷을 단일 기준으로 사용한다.
-  - `docs/architecture/CARROTPILOT_ONROAD_ELEMENT_MATRIX_2026-03-02_KO.md`
+  - `docs/architecture/carrotpilot/CARROTPILOT_ONROAD_ELEMENT_MATRIX_2026-03-02_KO.md`
   - 섹션: `9. 현재 구현 상태 스냅샷 (2026-03-04, 실코드 기준)`
+

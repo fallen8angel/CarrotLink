@@ -6,16 +6,16 @@ internal data class NativeDriveArBlendParams(
 )
 
 internal object NativeDriveArRenderTuning {
-    const val clutterThreshold = 0.58f
-    const val veryClutteredThreshold = 0.82f
+    const val clutterThreshold = 0.66f
+    const val veryClutteredThreshold = 0.88f
     const val lowAnchorBudgetClampThreshold = 0.22f
     const val shellAnchorStrongThreshold = 0.34f
     const val shellAnchorMediumThreshold = 0.24f
     const val shellAnchorWeakThreshold = 0.14f
-    const val preferAnchoredStatusThreshold = 0.18f
-    const val allowAnchoredGuideThreshold = 0.30f
-    const val drawRibbonThreshold = 0.42f
-    const val drawGateChipThreshold = 0.30f
+    const val preferAnchoredStatusThreshold = 0.15f
+    const val allowAnchoredGuideThreshold = 0.24f
+    const val drawRibbonThreshold = 0.22f
+    const val drawGateChipThreshold = 0.22f
 
     fun overlayComplexityBlend(): NativeDriveArBlendParams = NativeDriveArBlendParams(0.30f, 0.14f)
 
@@ -55,9 +55,9 @@ internal object NativeDriveArRenderTuning {
         arrival: Boolean,
     ): Float =
         when {
-            arrival -> 0.72f
-            immediate -> 0.68f
-            else -> 0.54f
+            arrival -> 0.82f
+            immediate -> 0.78f
+            else -> 0.64f
         }
 
     fun anchoredPlacementBlendFloor(
@@ -65,16 +65,16 @@ internal object NativeDriveArRenderTuning {
         arrival: Boolean,
     ): Float =
         when {
-            arrival -> 0.58f
-            immediate -> 0.52f
-            else -> 0.40f
+            arrival -> 0.68f
+            immediate -> 0.62f
+            else -> 0.48f
         }
 
     fun shellBudgetScale(budget: Int): Float =
         when (budget) {
-            0 -> 0.80f
-            1 -> 0.88f
-            2 -> 0.96f
+            0 -> 0.84f
+            1 -> 0.92f
+            2 -> 0.98f
             else -> 1f
         }
 
@@ -85,8 +85,8 @@ internal object NativeDriveArRenderTuning {
         arrival: Boolean,
     ): Float =
         when {
-            veryCluttered -> if (immediate || arrival) 0.90f else 0.74f
-            cluttered -> if (immediate || arrival) 0.96f else 0.86f
+            veryCluttered -> if (immediate || arrival) 0.94f else 0.80f
+            cluttered -> if (immediate || arrival) 0.98f else 0.90f
             else -> 1f
         }
 
@@ -96,12 +96,12 @@ internal object NativeDriveArRenderTuning {
         anchorQuality: Float,
     ): Float =
         when {
-            wideMonitor -> 0.92f
+            wideMonitor -> 0.94f
             !showGuidePrimitive -> 1f
             anchorQuality >= shellAnchorStrongThreshold -> 1f
-            anchorQuality >= shellAnchorMediumThreshold -> 0.92f
-            anchorQuality >= shellAnchorWeakThreshold -> 0.82f
-            else -> 0.72f
+            anchorQuality >= shellAnchorMediumThreshold -> 0.96f
+            anchorQuality >= shellAnchorWeakThreshold -> 0.88f
+            else -> 0.80f
         }
 
     fun guideAlphaMultiplier(
@@ -115,10 +115,10 @@ internal object NativeDriveArRenderTuning {
     ): Float =
         when {
             budget <= 0 -> 0f
-            veryCluttered -> if (immediate || arrival) 0.82f else 0.68f
-            cluttered -> if (immediate || arrival) 0.92f else 0.82f
-            wideMonitor -> 0.86f
-            anchorQuality < 0.26f -> 0.76f
+            veryCluttered -> if (immediate || arrival) 0.90f else 0.78f
+            cluttered -> if (immediate || arrival) 0.98f else 0.90f
+            wideMonitor -> 0.90f
+            anchorQuality < 0.26f -> 0.84f
             else -> 1f
         }
 
@@ -131,8 +131,8 @@ internal object NativeDriveArRenderTuning {
     ): Float =
         when {
             budget <= 1 -> 0f
-            veryCluttered -> if (immediate) 0.72f else 0.58f
-            cluttered -> 0.84f
+            veryCluttered -> if (immediate) 0.82f else 0.66f
+            cluttered -> 0.92f
             wideMonitor -> 0f
             else -> 1f
         }

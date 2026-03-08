@@ -5,7 +5,13 @@ import 'package:flutter/material.dart';
 import '../../domain/entities/original_hud_snapshot.dart';
 import '../models/hud_adaptive_display_model.dart';
 import '../models/hud_layout_profile.dart';
+import 'adaptive_hud_drive_inline_sections.dart';
+import 'adaptive_hud_home_sections.dart';
 import 'adaptive_hud_primitives.dart';
+import 'adaptive_hud_drive_overlay_sections.dart';
+import 'adaptive_hud_drive_inline_surface.dart';
+import 'adaptive_hud_drive_overlay_surface.dart';
+import 'adaptive_hud_home_preview_surface.dart';
 
 class AdaptiveHudPanel extends StatelessWidget {
   final OriginalHudSnapshot snapshot;
@@ -46,13 +52,17 @@ class AdaptiveHudPanel extends StatelessWidget {
             showStateShell: showStateShell,
           ),
         );
+        final dockedChild = Padding(
+          padding: EdgeInsets.all(profile.dockInset),
+          child: child,
+        );
         if (fillParent) {
-          return SizedBox.expand(child: child);
+          return SizedBox.expand(child: dockedChild);
         }
         if (matchParentWidth && constraints.maxWidth.isFinite) {
           return AspectRatio(
             aspectRatio: profile.preferredAspectRatio,
-            child: child,
+            child: dockedChild,
           );
         }
         final targetWidth = constraints.maxWidth.isFinite
@@ -62,7 +72,7 @@ class AdaptiveHudPanel extends StatelessWidget {
           constraints: BoxConstraints(maxWidth: targetWidth),
           child: AspectRatio(
             aspectRatio: profile.preferredAspectRatio,
-            child: child,
+            child: dockedChild,
           ),
         );
       },
@@ -87,8 +97,8 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const backgroundTop = Color(0xFF0C1220);
-    const backgroundBottom = Color(0xFF05080F);
+    const backgroundTop = Color(0xFF0D3826);
+    const backgroundBottom = Color(0xFF081F15);
     final isOverlay = profile.surface == HudSurfaceVariant.driveOverlay;
     final borderColor = Colors.white.withValues(
       alpha: isOverlay ? 0.12 : 0.18,
@@ -99,12 +109,12 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
         end: Alignment.bottomRight,
         colors: isOverlay
             ? <Color>[
-                const Color(0xC20A1018),
-                const Color(0xB8060A11),
+                const Color(0xDD11442E),
+                const Color(0xCC0A281B),
               ]
             : <Color>[
                 backgroundTop,
-                const Color(0xFF08111D),
+                const Color(0xFF12412C),
                 backgroundBottom,
               ],
       ),
@@ -114,9 +124,9 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
           ? const <BoxShadow>[]
           : const <BoxShadow>[
               BoxShadow(
-                color: Color(0x30000000),
-                blurRadius: 18,
-                offset: Offset(0, 10),
+                color: Color(0x8A000000),
+                blurRadius: 20,
+                offset: Offset(0, 12),
               ),
             ],
     );
@@ -135,15 +145,43 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
                     end: Alignment.bottomCenter,
                     colors: <Color>[
                       Colors.white.withValues(alpha: 0.05),
-                      Colors.transparent,
+                      Colors.white.withValues(alpha: 0.01),
                     ],
                   ),
                 ),
               ),
             ),
-            Padding(
-              padding: profile.padding,
-              child: showStateShell ? _buildStateLayout() : _buildSurfaceLayout(),
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 220),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeInCubic,
+              transitionBuilder: (child, animation) {
+                final fade = CurvedAnimation(
+                  parent: animation,
+                  curve: Curves.easeOutCubic,
+                  reverseCurve: Curves.easeInCubic,
+                );
+                final scale = Tween<double>(
+                  begin: 0.985,
+                  end: 1.0,
+                ).animate(fade);
+                return FadeTransition(
+                  opacity: fade,
+                  child: ScaleTransition(scale: scale, child: child),
+                );
+              },
+              child: KeyedSubtree(
+                key: ValueKey<String>(
+                  showStateShell
+                      ? 'hud-state-${profile.surface.name}'
+                      : 'hud-live-${profile.surface.name}-${model.sourceText}-${model.qualityText}-${model.tsMonoMs > 0}',
+                ),
+                child: Padding(
+                  padding: profile.padding,
+                  child:
+                      showStateShell ? _buildStateLayout() : _buildSurfaceLayout(),
+                ),
+              ),
             ),
           ],
         ),
@@ -184,8 +222,8 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
             textAlign: TextAlign.center,
             style: TextStyle(
               color: Colors.white,
-              fontSize: profile.secondaryValueFontSize,
-              fontWeight: FontWeight.w800,
+              fontSize: profile.secondaryValueFontSize + 1.0,
+              fontWeight: FontWeight.w900,
               letterSpacing: 0.2,
             ),
           ),
@@ -201,8 +239,8 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 color: Colors.white60,
-                fontSize: profile.labelFontSize + 0.4,
-                fontWeight: FontWeight.w600,
+                fontSize: profile.labelFontSize + 1.0,
+                fontWeight: FontWeight.w700,
                 height: 1.24,
               ),
             ),
@@ -213,176 +251,100 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
   }
 
   Widget _buildHomePreviewLayout() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        if (profile.showTopStatusRow) ...<Widget>[
-          _buildTopStatusRow(),
-          SizedBox(height: profile.sectionGap),
-        ],
-        if (profile.showMetrics && model.showDeviceMetrics) ...<Widget>[
-          _buildMetricRow(),
-          SizedBox(height: profile.sectionGap),
-        ],
-        Expanded(
-          child: profile.useThreeColumnMainRow
-              ? Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: <Widget>[
-                    Expanded(flex: 5, child: _buildHomePrimaryColumn()),
-                    SizedBox(width: profile.sectionGap),
-                    Expanded(flex: 4, child: _buildHomeSupportColumn()),
-                  ],
-                )
-              : Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: <Widget>[
-                    Expanded(flex: 5, child: _buildHomePrimaryColumn()),
-                    SizedBox(height: profile.sectionGap),
-                    Expanded(flex: 4, child: _buildHomeSupportColumn()),
-                  ],
-                ),
-        ),
-        if (profile.showFooterDetails) ...<Widget>[
-          SizedBox(height: profile.sectionGap),
-          _buildFooter(),
-        ],
-      ],
+    final qualityLabel = _qualityMetaLabel();
+    final compatibilityLabel = _compatibilityMetaLabel();
+    final showHost = _showHostMetaLabel();
+    return AdaptiveHudHomePreviewSurface(
+      profile: profile,
+      showMetrics: false,
+      showDeviceMetrics: model.showDeviceMetrics,
+      topStatusRow: _buildTopStatusRow(),
+      metricRow: _buildMetricRow(),
+      primaryColumn: AdaptiveHudHomePrimarySection(
+        profile: profile,
+        model: model,
+        speedCluster: _buildSpeedCluster(),
+      ),
+      supportColumn: AdaptiveHudHomeSupportSection(
+        profile: profile,
+        model: model,
+      ),
+      footer: AdaptiveHudHomeFooter(
+        profile: profile,
+        model: model,
+        qualityLabel: qualityLabel,
+        compatibilityLabel: compatibilityLabel,
+        showHost: showHost,
+      ),
     );
   }
 
   Widget _buildDriveInlineLayout() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        if (profile.showTopStatusRow) ...<Widget>[
-          _buildTopStatusRow(),
-          SizedBox(height: profile.sectionGap),
-        ],
-        if (profile.showMetrics && model.showDeviceMetrics) ...<Widget>[
-          _buildMetricRow(),
-          SizedBox(height: profile.sectionGap),
-        ],
-        Expanded(
-          child: profile.useThreeColumnMainRow
-              ? Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: <Widget>[
-                    Expanded(flex: 5, child: _buildDriveInlinePrimaryColumn()),
-                    SizedBox(width: profile.sectionGap),
-                    Expanded(flex: 4, child: _buildDriveInlineSupportColumn()),
-                  ],
-                )
-              : Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: <Widget>[
-                    Expanded(flex: 5, child: _buildDriveInlinePrimaryColumn()),
-                    SizedBox(height: profile.sectionGap),
-                    Expanded(flex: 4, child: _buildDriveInlineSupportColumn()),
-                  ],
-                ),
-        ),
-        SizedBox(height: profile.sectionGap),
-        _buildDriveInlineFooter(),
-      ],
+    final qualityLabel = _qualityMetaLabel();
+    final compatibilityLabel = _compatibilityMetaLabel(
+      compact: profile.density == HudDensityClass.micro,
+    );
+    final showHost = _showHostMetaLabel();
+    return AdaptiveHudDriveInlineSurface(
+      profile: profile,
+      showMetrics: false,
+      showDeviceMetrics: model.showDeviceMetrics,
+      topStatusRow: _buildTopStatusRow(),
+      metricRow: _buildMetricRow(),
+      primaryColumn: AdaptiveHudDriveInlinePrimarySection(
+        profile: profile,
+        model: model,
+      ),
+      supportColumn: AdaptiveHudDriveInlineSupportSection(
+        profile: profile,
+        model: model,
+      ),
+      footer: AdaptiveHudDriveInlineFooter(
+        profile: profile,
+        model: model,
+        qualityLabel: qualityLabel,
+        compatibilityLabel: compatibilityLabel,
+        showHost: showHost,
+      ),
     );
   }
 
   Widget _buildDriveOverlayLayout() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        _buildTopStatusRow(),
-        SizedBox(height: profile.sectionGap * 0.85),
-        Expanded(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              Expanded(flex: 5, child: _buildOverlaySpeedCluster()),
-              SizedBox(width: profile.sectionGap * 0.85),
-              Expanded(flex: 4, child: _buildOverlayCenterColumn()),
-              SizedBox(width: profile.sectionGap * 0.85),
-              Expanded(flex: 2, child: _buildOverlayRightRail()),
-            ],
-          ),
+    final compactMeta = _useCompactMetaPolicy();
+    return AdaptiveHudDriveOverlaySurface(
+      profile: profile,
+      topStatusRow: _buildTopStatusRow(),
+      leftColumn: AdaptiveHudLeftClusterColumn(
+        speedCluster: AdaptiveHudDriveOverlaySpeedCluster(
+          profile: profile,
+          model: model,
         ),
-        SizedBox(height: profile.sectionGap * 0.7),
-        _buildOverlayMetaRow(),
-      ],
+        model: model,
+        profile: profile,
+      ),
+      rightColumn: AdaptiveHudRightClusterColumn(
+        model: model,
+        profile: profile,
+      ),
+      metaRow: AdaptiveHudDriveOverlayMetaRow(
+        profile: profile,
+        model: model,
+        qualityLabel: _qualityMetaLabel(),
+        compatibilityLabel: _compatibilityMetaLabel(compact: compactMeta),
+        showHost: _showOverlayHostMeta(),
+      ),
     );
   }
 
   Widget _buildTopStatusRow() {
-    return Row(
-      children: <Widget>[
-        AdaptiveHudStatusDot(
-          color: model.redDot ? const Color(0xFFFF4D4D) : _signalColor(),
-          size: profile.labelFontSize + 5,
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Text(
-            model.driveModeText,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.88),
-              fontSize: profile.labelFontSize + 1,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.4,
-            ),
-          ),
-        ),
-        AdaptiveHudInfoPill(
-          label: model.sourceText,
-          color: const Color(0xFF7AA7FF),
-          profile: profile,
-        ),
-        if (model.showCompatibilityHint) ...<Widget>[
-          const SizedBox(width: 8),
-          Flexible(
-            child: AdaptiveHudInfoPill(
-              label: model.compatibilityHint,
-              color: const Color(0xFFFFB347),
-              profile: profile,
-            ),
-          ),
-        ],
-      ],
+    return AdaptiveHudTopMetricBar(
+      model: model,
+      profile: profile,
     );
   }
 
   Widget _buildMetricRow() {
-    return Row(
-      children: <Widget>[
-        Expanded(
-          child: AdaptiveHudMetricTile(
-            label: 'CPU',
-            value: model.cpuText,
-            profile: profile,
-            accent: const Color(0xFF4EDC87),
-          ),
-        ),
-        SizedBox(width: profile.metricGap),
-        Expanded(
-          child: AdaptiveHudMetricTile(
-            label: 'MEM',
-            value: model.memText,
-            profile: profile,
-            accent: const Color(0xFF4FA7FF),
-          ),
-        ),
-        SizedBox(width: profile.metricGap),
-        Expanded(
-          child: AdaptiveHudMetricTile(
-            label: model.auxMetricLabel,
-            value: model.auxMetricText,
-            profile: profile,
-            accent: const Color(0xFFFFBF47),
-          ),
-        ),
-      ],
-    );
+    return const SizedBox.shrink();
   }
 
   Widget _buildSpeedCluster() {
@@ -393,72 +355,38 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
         border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
       ),
       child: Padding(
-        padding: EdgeInsets.all(profile.padding.left * 0.82),
+        padding: EdgeInsets.all(profile.padding.left * 0.72),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            Row(
-              children: <Widget>[
-                Text(
-                  model.gpsText,
-                  style: TextStyle(
-                    color: model.hasGpsFix
-                        ? const Color(0xFF7BE495)
-                        : Colors.white54,
-                    fontSize: profile.labelFontSize,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.45,
-                  ),
-                ),
-                const Spacer(),
-                AdaptiveHudActiveChip(
-                  label: 'LON',
-                  active: model.longActive,
-                  profile: profile,
-                ),
-                const SizedBox(width: 6),
-                AdaptiveHudActiveChip(
-                  label: 'LAT',
-                  active: model.latActive,
-                  profile: profile,
-                ),
-              ],
-            ),
-            const Spacer(),
             Text(
-              model.speedText,
+              '현재속도',
               style: TextStyle(
-                color: Colors.white,
-                fontSize: profile.speedFontSize,
-                height: 0.88,
-                fontWeight: FontWeight.w800,
-                letterSpacing: -1.2,
+                color: Colors.white38,
+                fontSize: profile.chipFontSize + 1.4,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 0.3,
               ),
             ),
-            SizedBox(height: profile.metricGap),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: <Widget>[
-                Text(
-                  'SET',
-                  style: TextStyle(
-                    color: Colors.white60,
-                    fontSize: profile.labelFontSize,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.4,
+            SizedBox(height: profile.metricGap * 0.12),
+            Expanded(
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    model.speedText,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: profile.speedFontSize + 10,
+                      height: 0.84,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: -1.4,
+                    ),
                   ),
                 ),
-                const SizedBox(width: 8),
-                Text(
-                  model.setSpeedText,
-                  style: TextStyle(
-                    color: const Color(0xFF83F28F),
-                    fontSize: profile.primaryValueFontSize,
-                    fontWeight: FontWeight.w800,
-                    height: 1.0,
-                  ),
-                ),
-              ],
+              ),
             ),
           ],
         ),
@@ -466,552 +394,52 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
     );
   }
 
-  Widget _buildHomePrimaryColumn() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        Expanded(child: _buildSpeedCluster()),
-        SizedBox(height: profile.sectionGap),
-        Row(
-          children: <Widget>[
-            Expanded(
-              child: AdaptiveHudGapBars(
-                count: model.gapBarCount,
-                label: model.gapText,
-                profile: profile,
-              ),
-            ),
-            SizedBox(width: profile.sectionGap),
-            AdaptiveHudStatusBand(
-              label: 'SIG',
-              value: model.signalState.toUpperCase(),
-              color: _signalColor(),
-              profile: profile,
-            ),
-          ],
-        ),
-      ],
-    );
+  bool _useCompactMetaPolicy() {
+    return profile.density == HudDensityClass.micro ||
+        profile.density == HudDensityClass.compact;
   }
 
-  Widget _buildHomeSupportColumn() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        Expanded(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              Expanded(child: _buildCenterColumn()),
-              SizedBox(width: profile.sectionGap),
-              SizedBox(width: profile.maxWidth * 0.16, child: _buildRightRail()),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildDriveInlinePrimaryColumn() {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        Expanded(flex: 5, child: _buildSpeedCluster()),
-        SizedBox(width: profile.sectionGap),
-        Expanded(
-          flex: 2,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.03),
-              borderRadius: BorderRadius.circular(profile.borderRadius - 10),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
-            ),
-            child: Padding(
-              padding: EdgeInsets.all(profile.padding.left * 0.7),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  Expanded(
-                    child: Center(
-                      child: Text(
-                        model.gearText,
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: profile.gearFontSize,
-                          fontWeight: FontWeight.w800,
-                          height: 1.0,
-                        ),
-                      ),
-                    ),
-                  ),
-                  SizedBox(height: profile.sectionGap * 0.8),
-                  AdaptiveHudGapBars(
-                    count: model.gapBarCount,
-                    label: model.gapText,
-                    profile: profile,
-                    compact: true,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildDriveInlineSupportColumn() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        Expanded(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              Expanded(
-                child: AdaptiveHudTempCard(
-                  label: model.tempLabel,
-                  value: model.tempSpeedText,
-                  profile: profile,
-                  accent: model.tempIsDecel
-                      ? const Color(0xFFFFB347)
-                      : const Color(0xFF4EF28B),
-                ),
-              ),
-              SizedBox(width: profile.sectionGap),
-              SizedBox(
-                width: math.max(74, profile.maxWidth * 0.13),
-                child: AdaptiveHudStatusBand(
-                  label: 'SIG',
-                  value: model.signalState.toUpperCase(),
-                  color: _signalColor(),
-                  profile: profile,
-                ),
-              ),
-            ],
-          ),
-        ),
-        SizedBox(height: profile.sectionGap),
-        AdaptiveHudModeStripe(
-          label: model.driveModeText,
-          kind: model.driveModeKind,
-          profile: profile,
-        ),
-        SizedBox(height: profile.sectionGap),
-        Row(
-          children: <Widget>[
-            Expanded(
-              child: AdaptiveHudInfoPill(
-                label: '${model.limitLabel} ${model.limitValueText}',
-                color: model.limitCritical
-                    ? const Color(0xFFFF6357)
-                    : const Color(0xFFFFD15A),
-                profile: profile,
-                blinking: model.limitBlink,
-              ),
-            ),
-            if (model.showConnectivity) ...<Widget>[
-              SizedBox(width: profile.sectionGap * 0.7),
-              Flexible(
-                child: AdaptiveHudInfoPill(
-                  label: model.connectivityText,
-                  color: const Color(0xFF5BD7FF),
-                  profile: profile,
-                ),
-              ),
-            ],
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildOverlaySpeedCluster() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        Row(
-          children: <Widget>[
-            Text(
-              model.gpsText,
-              style: TextStyle(
-                color: model.hasGpsFix
-                    ? const Color(0xFF7BE495)
-                    : Colors.white54,
-                fontSize: profile.labelFontSize,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0.45,
-              ),
-            ),
-            const Spacer(),
-            AdaptiveHudActiveChip(
-              label: 'LON',
-              active: model.longActive,
-              profile: profile,
-            ),
-            const SizedBox(width: 6),
-            AdaptiveHudActiveChip(
-              label: 'LAT',
-              active: model.latActive,
-              profile: profile,
-            ),
-          ],
-        ),
-        const Spacer(),
-        Text(
-          model.speedText,
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: profile.speedFontSize,
-            height: 0.86,
-            fontWeight: FontWeight.w800,
-            letterSpacing: -1.3,
-          ),
-        ),
-        SizedBox(height: profile.metricGap * 0.7),
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: <Widget>[
-            Text(
-              'SET',
-              style: TextStyle(
-                color: Colors.white60,
-                fontSize: profile.labelFontSize,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0.35,
-              ),
-            ),
-            const SizedBox(width: 8),
-            Text(
-              model.setSpeedText,
-              style: TextStyle(
-                color: const Color(0xFF83F28F),
-                fontSize: profile.primaryValueFontSize,
-                fontWeight: FontWeight.w800,
-                height: 1.0,
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildCenterColumn() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        Expanded(
-          child: AdaptiveHudTempCard(
-            label: model.tempLabel,
-            value: model.tempSpeedText,
-            profile: profile,
-            accent: model.tempIsDecel
-                ? const Color(0xFFFFB347)
-                : const Color(0xFF4EF28B),
-          ),
-        ),
-        SizedBox(height: profile.sectionGap),
-        AdaptiveHudModeStripe(
-          label: model.driveModeText,
-          kind: model.driveModeKind,
-          profile: profile,
-        ),
-        SizedBox(height: profile.sectionGap),
-        Row(
-          children: <Widget>[
-            Expanded(
-              child: AdaptiveHudInfoPill(
-                label: '${model.limitLabel} ${model.limitValueText}',
-                color: model.limitCritical
-                    ? const Color(0xFFFF6357)
-                    : const Color(0xFFFFD15A),
-                profile: profile,
-                blinking: model.limitBlink,
-              ),
-            ),
-            if (model.showConnectivity) ...<Widget>[
-              const SizedBox(width: 8),
-              AdaptiveHudInfoPill(
-                label: model.connectivityText,
-                color: const Color(0xFF5BD7FF),
-                profile: profile,
-              ),
-            ],
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildOverlayCenterColumn() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        Expanded(
-          child: AdaptiveHudTempCard(
-            label: model.tempLabel,
-            value: model.tempSpeedText,
-            profile: profile,
-            accent: model.tempIsDecel
-                ? const Color(0xFFFFB347)
-                : const Color(0xFF4EF28B),
-          ),
-        ),
-        SizedBox(height: profile.sectionGap * 0.75),
-        AdaptiveHudModeStripe(
-          label: model.driveModeText,
-          kind: model.driveModeKind,
-          profile: profile,
-        ),
-        SizedBox(height: profile.sectionGap * 0.75),
-        AdaptiveHudInfoPill(
-          label: '${model.limitLabel} ${model.limitValueText}',
-          color: model.limitCritical
-              ? const Color(0xFFFF6357)
-              : const Color(0xFFFFD15A),
-          profile: profile,
-          blinking: model.limitBlink,
-        ),
-      ],
-    );
-  }
-
-  Widget _buildRightRail() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        Expanded(
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.04),
-              borderRadius: BorderRadius.circular(profile.borderRadius - 10),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
-            ),
-            child: Center(
-              child: Text(
-                model.gearText,
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: profile.gearFontSize,
-                  fontWeight: FontWeight.w800,
-                  height: 1.0,
-                ),
-              ),
-            ),
-          ),
-        ),
-        SizedBox(height: profile.sectionGap),
-        AdaptiveHudGapBars(
-          count: model.gapBarCount,
-          label: model.gapText,
-          profile: profile,
-        ),
-        SizedBox(height: profile.sectionGap),
-        AdaptiveHudStatusBand(
-          label: 'SIG',
-          value: model.signalState.toUpperCase(),
-          color: _signalColor(),
-          profile: profile,
-        ),
-      ],
-    );
-  }
-
-  Widget _buildOverlayRightRail() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        Expanded(
-          child: Center(
-            child: Text(
-              model.gearText,
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: profile.gearFontSize,
-                fontWeight: FontWeight.w800,
-                height: 1.0,
-              ),
-            ),
-          ),
-        ),
-        SizedBox(height: profile.sectionGap * 0.7),
-        AdaptiveHudGapBars(
-          count: model.gapBarCount,
-          label: model.gapText,
-          profile: profile,
-          compact: true,
-        ),
-      ],
-    );
-  }
-
-  Widget _buildFooter() {
-    return Row(
-      children: <Widget>[
-        Text(
-          model.qualityText,
-          style: TextStyle(
-            color: Colors.white38,
-            fontSize: profile.chipFontSize,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 0.35,
-          ),
-        ),
-        if (model.hostText.isNotEmpty) ...<Widget>[
-          const SizedBox(width: 8),
-          Flexible(
-            child: Text(
-              model.hostText,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: Colors.white30,
-                fontSize: profile.chipFontSize,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
-        const Spacer(),
-        if (model.showCompatibilityHint) ...<Widget>[
-          Text(
-            model.compatibilityHint,
-            style: TextStyle(
-              color: const Color(0xFFFFBF75),
-              fontSize: profile.chipFontSize,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const SizedBox(width: 10),
-        ],
-        Text(
-          'gap ${model.gapText}',
-          style: TextStyle(
-            color: Colors.white54,
-            fontSize: profile.chipFontSize,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        const SizedBox(width: 10),
-        Text(
-          model.tsMonoMs > 0 ? '#${model.tsMonoMs}' : '--',
-          style: TextStyle(
-            color: Colors.white24,
-            fontSize: profile.chipFontSize,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildOverlayMetaRow() {
-    return Row(
-      children: <Widget>[
-        if (model.showConnectivity) ...<Widget>[
-          Flexible(
-            child: AdaptiveHudInfoPill(
-              label: model.connectivityText,
-              color: const Color(0xFF5BD7FF),
-              profile: profile,
-            ),
-          ),
-          const SizedBox(width: 8),
-        ],
-        Text(
-          model.qualityText,
-          style: TextStyle(
-            color: Colors.white38,
-            fontSize: profile.chipFontSize,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 0.35,
-          ),
-        ),
-        if (model.hostText.isNotEmpty) ...<Widget>[
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              model.hostText,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: Colors.white30,
-                fontSize: profile.chipFontSize,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ] else
-          const Spacer(),
-        if (model.showCompatibilityHint) ...<Widget>[
-          const SizedBox(width: 8),
-          Text(
-            model.compatibilityHint,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: const Color(0xFFFFBF75),
-              fontSize: profile.chipFontSize,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ],
-      ],
-    );
-  }
-
-  Widget _buildDriveInlineFooter() {
-    return Row(
-      children: <Widget>[
-        Text(
-          model.qualityText,
-          style: TextStyle(
-            color: Colors.white38,
-            fontSize: profile.chipFontSize,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 0.35,
-          ),
-        ),
-        if (model.hostText.isNotEmpty) ...<Widget>[
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              model.hostText,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: Colors.white30,
-                fontSize: profile.chipFontSize,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ] else
-          const Spacer(),
-        if (model.showCompatibilityHint) ...<Widget>[
-          const SizedBox(width: 8),
-          Text(
-            model.compatibilityHint,
-            style: TextStyle(
-              color: const Color(0xFFFFBF75),
-              fontSize: profile.chipFontSize,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ],
-      ],
-    );
-  }
-
-  Color _signalColor() {
-    switch (model.signalState) {
-      case 'red':
-        return const Color(0xFFFF5252);
-      case 'green':
-        return const Color(0xFF41E077);
-      default:
-        return Colors.white24;
+  bool _showHostMetaLabel() {
+    if (model.hostText.isEmpty) return false;
+    switch (profile.surface) {
+      case HudSurfaceVariant.driveOverlay:
+        return !_useCompactMetaPolicy() && model.isDegradedMeta;
+      case HudSurfaceVariant.driveInline:
+        return profile.density != HudDensityClass.micro &&
+            (model.isDegradedMeta ||
+                profile.density == HudDensityClass.spacious);
+      case HudSurfaceVariant.preview:
+      case HudSurfaceVariant.homePreview:
+        return true;
     }
+  }
+
+  bool _showOverlayHostMeta() {
+    return profile.surface == HudSurfaceVariant.driveOverlay &&
+        _showHostMetaLabel();
+  }
+
+  String? _qualityMetaLabel() {
+    final quality = model.qualityText.trim().toLowerCase();
+    if (model.isPreview) return 'preview';
+    if (!model.isDegradedMeta && quality == 'live') {
+      return null;
+    }
+    if (quality.isEmpty || quality == 'live') {
+      if (model.sourceText == 'COMPAT') return 'compat';
+      if (model.sourceText == 'FALLBACK') return 'fallback';
+      return 'degraded';
+    }
+    return quality;
+  }
+
+  String? _compatibilityMetaLabel({bool compact = false}) {
+    if (!model.showCompatibilityHint) return null;
+    if (compact) {
+      return model.compatibilityBadgeText.isEmpty
+          ? model.compatibilityHint
+          : model.compatibilityBadgeText;
+    }
+    return model.compatibilityHint;
   }
 }

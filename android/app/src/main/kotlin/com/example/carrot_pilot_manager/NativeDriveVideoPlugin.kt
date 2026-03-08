@@ -896,6 +896,12 @@ class NativeDriveVideoView(
 }
 
 private class NativeDriveOverlayView(context: Context) : View(context) {
+  private data class OverlayVisualSuppression(
+      val polygonAlphaMultiplier: Float,
+      val strokeAlphaMultiplier: Float,
+      val labelAlphaMultiplier: Float,
+  )
+
   @Volatile private var overlayPayload: NativeDriveOverlayPayload? = null
   private val overlayRenderer = NativeDriveOverlayCanvasRenderer()
   private val arSceneRenderer = NativeDriveArSceneOverlayRenderer()
@@ -935,8 +941,18 @@ private class NativeDriveOverlayView(context: Context) : View(context) {
     val drawWidth = width.toFloat()
     val drawHeight = height.toFloat()
     if (drawWidth <= 1f || drawHeight <= 1f) return
-    val strokeScale = overlayRenderer.draw(canvas, overlay, drawWidth, drawHeight)
     val renderFrame = arRenderPipeline.resolveFrame(overlay = overlay, drawWidth = drawWidth)
+    val suppression = overlayVisualSuppression(renderFrame)
+    val strokeScale =
+        overlayRenderer.draw(
+            canvas,
+            overlay,
+            drawWidth,
+            drawHeight,
+            polygonAlphaMultiplier = suppression.polygonAlphaMultiplier,
+            strokeAlphaMultiplier = suppression.strokeAlphaMultiplier,
+            labelAlphaMultiplier = suppression.labelAlphaMultiplier,
+        )
     if (renderFrame.scene == null || renderFrame.policy == null) return
     arSceneRenderer.draw(
         canvas = canvas,
@@ -946,5 +962,39 @@ private class NativeDriveOverlayView(context: Context) : View(context) {
         strokeScale = strokeScale,
         policy = renderFrame.policy,
     )
+  }
+
+  private fun overlayVisualSuppression(renderFrame: NativeDriveArRenderFrame): OverlayVisualSuppression {
+    val scene = renderFrame.scene
+    val policy = renderFrame.policy
+    if (scene == null || policy == null) {
+      return OverlayVisualSuppression(1f, 1f, 1f)
+    }
+    if (!scene.presentation.showGuidePrimitive && !scene.presentation.showStatusPill && !policy.drawCard) {
+      return OverlayVisualSuppression(1f, 1f, 1f)
+    }
+    val mode = scene.presentation.mode
+    val strongAr = policy.effectiveRenderBudget >= 2 &&
+        (policy.drawRibbon || policy.drawTrail || policy.drawGateChip || policy.drawCard)
+    return when {
+      mode == "turn" || mode == "arrival" ->
+          OverlayVisualSuppression(
+              polygonAlphaMultiplier = if (strongAr) 0.28f else 0.42f,
+              strokeAlphaMultiplier = if (strongAr) 0.52f else 0.66f,
+              labelAlphaMultiplier = 0.86f,
+          )
+      mode == "route" ->
+          OverlayVisualSuppression(
+              polygonAlphaMultiplier = if (strongAr) 0.34f else 0.48f,
+              strokeAlphaMultiplier = if (strongAr) 0.58f else 0.72f,
+              labelAlphaMultiplier = 0.90f,
+          )
+      else ->
+          OverlayVisualSuppression(
+              polygonAlphaMultiplier = 0.56f,
+              strokeAlphaMultiplier = 0.78f,
+              labelAlphaMultiplier = 0.94f,
+          )
+    }
   }
 }

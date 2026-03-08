@@ -44,7 +44,7 @@ class AdaptiveHudHost extends StatelessWidget {
         surface: surface,
         fillParent: fillParent,
         matchParentWidth: matchParentWidth,
-        preferStateShell: true,
+        preferStateShell: false,
         stateTitle: 'HUD 대기',
         stateMessage: preview ? '미리보기 준비 중입니다.' : '기기 연결 후 HUD를 표시합니다.',
       );
@@ -62,6 +62,7 @@ class AdaptiveHudHost extends StatelessWidget {
         );
         return _HudSnapshotCallbackBridge(
           snapshot: snapshot,
+          fallbackHost: resolvedHost,
           syncNativeOverlay: syncNativeOverlay,
           onSnapshot: onSnapshot,
           child: AdaptiveHudPanel(
@@ -120,7 +121,7 @@ class _HudHostViewState {
     }
     if (state.isLoading == true) {
       return _HudHostViewState(
-        preferStateShell: true,
+        preferStateShell: false,
         title: preview ? 'HUD 미리보기' : 'HUD 연결 중',
         message: preview
             ? '미리보기 샘플을 준비하는 중입니다.'
@@ -129,13 +130,13 @@ class _HudHostViewState {
     }
     if (state.lastError != null) {
       return _HudHostViewState(
-        preferStateShell: true,
+        preferStateShell: false,
         title: 'HUD 연결 실패',
         message: '${state.host ?? '기기'}에서 HUD 데이터를 불러오지 못했습니다.',
       );
     }
     return _HudHostViewState(
-      preferStateShell: true,
+      preferStateShell: false,
       title: preview ? 'HUD 미리보기' : 'HUD 대기',
       message: preview
           ? '미리보기 데이터 대기 중입니다.'
@@ -146,12 +147,14 @@ class _HudHostViewState {
 
 class _HudSnapshotCallbackBridge extends StatefulWidget {
   final OriginalHudSnapshot snapshot;
+  final String? fallbackHost;
   final bool syncNativeOverlay;
   final ValueChanged<OriginalHudSnapshot>? onSnapshot;
   final Widget child;
 
   const _HudSnapshotCallbackBridge({
     required this.snapshot,
+    required this.fallbackHost,
     required this.syncNativeOverlay,
     required this.onSnapshot,
     required this.child,
@@ -162,20 +165,45 @@ class _HudSnapshotCallbackBridge extends StatefulWidget {
       _HudSnapshotCallbackBridgeState();
 }
 
-class _HudSnapshotCallbackBridgeState extends State<_HudSnapshotCallbackBridge> {
+class _HudSnapshotCallbackBridgeState extends State<_HudSnapshotCallbackBridge>
+    with WidgetsBindingObserver {
   int _lastDeliveredTs = -1;
   int _lastOverlayPushEpochMs = 0;
+  bool _overlayLifecycleBusy = false;
+  AppLifecycleState? _lastLifecycleState;
+  int _lastLifecycleSyncEpochMs = 0;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _scheduleCallbackIfNeeded();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
   }
 
   @override
   void didUpdateWidget(covariant _HudSnapshotCallbackBridge oldWidget) {
     super.didUpdateWidget(oldWidget);
     _scheduleCallbackIfNeeded();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (!widget.syncNativeOverlay) return;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if (_lastLifecycleState == state &&
+        nowMs - _lastLifecycleSyncEpochMs < 250) {
+      return;
+    }
+    _lastLifecycleState = state;
+    _lastLifecycleSyncEpochMs = nowMs;
+    unawaited(_syncOverlayForLifecycle(state));
   }
 
   void _scheduleCallbackIfNeeded() {
@@ -200,6 +228,43 @@ class _HudSnapshotCallbackBridgeState extends State<_HudSnapshotCallbackBridge> 
         }
       }
     });
+  }
+
+  Future<void> _syncOverlayForLifecycle(AppLifecycleState state) async {
+    if (!mounted) return;
+    if (!NativeOverlayHudService.isSupported) return;
+    if (_overlayLifecycleBusy) return;
+    _overlayLifecycleBusy = true;
+    try {
+      if (state == AppLifecycleState.resumed) {
+        final running = await NativeOverlayHudService.isRunning();
+        if (running) {
+          await NativeOverlayHudService.stop();
+        }
+        return;
+      }
+      if (state != AppLifecycleState.paused &&
+          state != AppLifecycleState.inactive) {
+        return;
+      }
+      final enabled = await NativeOverlayHudService.isEnabled();
+      if (!enabled) return;
+      final hasPermission = await NativeOverlayHudService.hasPermission();
+      if (!hasPermission) return;
+      final host = NativeOverlayHudService.normalizeHost(
+            widget.snapshot.source.deviceHost,
+          ) ??
+          NativeOverlayHudService.normalizeHost(widget.fallbackHost);
+      if (host == null) return;
+      final running = await NativeOverlayHudService.isRunning();
+      if (running) {
+        await NativeOverlayHudService.updateEndpoint(host);
+      } else {
+        await NativeOverlayHudService.start(host);
+      }
+    } finally {
+      _overlayLifecycleBusy = false;
+    }
   }
 
   @override

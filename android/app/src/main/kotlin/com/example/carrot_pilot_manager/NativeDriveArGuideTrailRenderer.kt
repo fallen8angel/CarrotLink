@@ -3,6 +3,7 @@ package com.example.carrot_pilot_manager
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.os.SystemClock
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.max
@@ -58,8 +59,8 @@ internal class NativeDriveArGuideTrailRenderer {
         if (count <= 0) return
 
         val drawChevron = directionKey in setOf("left", "right", "lane_left", "lane_right")
-        for (index in 1..count) {
-            val t = index.toFloat() / (count + 1).toFloat()
+        val animatedTs = animatedSampleTs(count, distanceBucket)
+        for ((index, t) in animatedTs.withIndex()) {
             val point = quadPoint(startX, startY, ctrlX, ctrlY, endX, endY, t)
             val tangent = quadTangent(startX, startY, ctrlX, ctrlY, endX, endY, t)
             val intensity = when {
@@ -67,7 +68,7 @@ internal class NativeDriveArGuideTrailRenderer {
                 distanceBucket == "near" -> 1.0f
                 else -> 0.9f
             }
-            val fade = 1f - (t * 0.35f)
+            val fade = (1f - (t * 0.28f)) * (1f - (index.toFloat() * 0.03f))
             if (drawChevron) {
                 drawChevron(
                     canvas = canvas,
@@ -125,8 +126,8 @@ internal class NativeDriveArGuideTrailRenderer {
 
         val drawChevron = directionKey in setOf("left", "right", "lane_left", "lane_right")
         val lastIndex = sampledPoints.size - 1
-        for (index in 1..count) {
-            val t = index.toFloat() / (count + 1).toFloat()
+        val animatedTs = animatedSampleTs(count, distanceBucket)
+        for ((index, t) in animatedTs.withIndex()) {
             val position = t * lastIndex
             val baseIndex = position.toInt().coerceIn(0, lastIndex - 1)
             val nextIndex = (baseIndex + 1).coerceAtMost(lastIndex)
@@ -152,7 +153,7 @@ internal class NativeDriveArGuideTrailRenderer {
             } else {
                 1f
             }
-            val fade = (1f - (t * 0.30f)) * distanceFade
+            val fade = ((1f - (t * 0.24f)) * distanceFade) * (1f - (index.toFloat() * 0.025f))
             if (drawChevron) {
                 drawChevron(
                     canvas = canvas,
@@ -210,6 +211,31 @@ internal class NativeDriveArGuideTrailRenderer {
         distanceBucket: String,
         detailLevel: Int,
     ): Float = NativeDriveArGuideTuning.displayDistanceLimit(distanceBucket, detailLevel)
+
+    private fun animatedSampleTs(
+        count: Int,
+        distanceBucket: String,
+    ): List<Float> {
+        if (count <= 0) return emptyList()
+        val loopMs =
+            when (distanceBucket) {
+                "immediate" -> 900L
+                "near" -> 1150L
+                "arrival" -> 1050L
+                else -> 1350L
+            }
+        val phase =
+            ((SystemClock.uptimeMillis() % loopMs).toFloat() / loopMs.toFloat())
+                .coerceIn(0f, 0.999f)
+        val out = ArrayList<Float>(count)
+        for (index in 0 until count) {
+            val base = index.toFloat() / count.toFloat()
+            val shifted = (base + phase) % 1f
+            out.add((0.10f + (shifted * 0.80f)).coerceIn(0.08f, 0.92f))
+        }
+        out.sort()
+        return out
+    }
 
     private fun drawDot(
         canvas: Canvas,

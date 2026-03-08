@@ -408,7 +408,7 @@ extension _DriveOverlaySnapshotArSceneX on _DriveOverlaySnapshot {
         distanceBucket: distanceBucket,
         renderBudget: isWide
             ? (distanceBucket == 'immediate' ? 2 : 1)
-            : (distanceBucket == 'immediate' ? 3 : 2),
+            : (distanceBucket == 'immediate' ? 4 : 3),
         showGuidePrimitive: !isWide || distanceBucket != 'far',
         showGuideTrail: !isWide,
         showCard: !isWide,
@@ -418,14 +418,14 @@ extension _DriveOverlaySnapshotArSceneX on _DriveOverlaySnapshot {
         detailLevel: isWide ? 1 : (routePointCount >= 12 ? 3 : 2),
         emphasisLevel: emphasisLevel,
         guideAlpha: switch (distanceBucket) {
-          'immediate' => isWide ? 0.74 : 1.0,
-          'near' => isWide ? 0.68 : 0.92,
-          _ => isWide ? 0.56 : 0.84,
+          'immediate' => isWide ? 0.80 : 1.0,
+          'near' => isWide ? 0.74 : 0.98,
+          _ => isWide ? 0.62 : 0.92,
         },
         trailAlpha: switch (distanceBucket) {
-          'immediate' => isWide ? 0.0 : 0.96,
-          'near' => isWide ? 0.0 : 0.88,
-          _ => isWide ? 0.0 : 0.78,
+          'immediate' => isWide ? 0.0 : 1.0,
+          'near' => isWide ? 0.0 : 0.96,
+          _ => isWide ? 0.0 : 0.88,
         },
       );
     }
@@ -436,17 +436,17 @@ extension _DriveOverlaySnapshotArSceneX on _DriveOverlaySnapshot {
         layoutProfile: isWide ? 'wide_monitor' : 'road_attached',
         turnDirectionKey: directionKey,
         distanceBucket: distanceBucket,
-        renderBudget: isWide ? 0 : 2,
+        renderBudget: isWide ? 1 : 3,
         showGuidePrimitive: !isWide,
         showGuideTrail: !isWide,
-        showCard: !compactPreferred,
-        showStatusPill: !isWide,
+        showCard: !isWide,
+        showStatusPill: true,
         showMeta: false,
         compactPreferred: compactPreferred,
-        detailLevel: isWide ? 0 : (routePointCount >= 16 ? 2 : 1),
-        emphasisLevel: 1,
-        guideAlpha: isWide ? 0.0 : 0.74,
-        trailAlpha: isWide ? 0.0 : 0.66,
+        detailLevel: isWide ? 1 : (routePointCount >= 16 ? 3 : 2),
+        emphasisLevel: 2,
+        guideAlpha: isWide ? 0.42 : 0.96,
+        trailAlpha: isWide ? 0.0 : 0.92,
       );
     }
     return _DriveArPresentation(

@@ -10,10 +10,16 @@ import 'hud_visibility_state.dart';
 class HudSourceInfo {
   final String transport;
   final String? deviceHost;
+  final int? endpointPort;
+  final String? endpointPath;
+  final int? receivedAtMs;
 
   const HudSourceInfo({
     this.transport = 'unknown',
     this.deviceHost,
+    this.endpointPort,
+    this.endpointPath,
+    this.receivedAtMs,
   });
 
   static const empty = HudSourceInfo();
@@ -21,10 +27,16 @@ class HudSourceInfo {
   HudSourceInfo copyWith({
     String? transport,
     String? deviceHost,
+    int? endpointPort,
+    String? endpointPath,
+    int? receivedAtMs,
   }) {
     return HudSourceInfo(
       transport: transport ?? this.transport,
       deviceHost: deviceHost ?? this.deviceHost,
+      endpointPort: endpointPort ?? this.endpointPort,
+      endpointPath: endpointPath ?? this.endpointPath,
+      receivedAtMs: receivedAtMs ?? this.receivedAtMs,
     );
   }
 }

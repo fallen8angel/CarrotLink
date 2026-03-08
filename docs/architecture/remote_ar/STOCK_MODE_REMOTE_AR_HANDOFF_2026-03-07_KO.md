@@ -41,8 +41,19 @@
 - tuning advisor / render bands / stats tracker
 - AR scene inspect dialog
 - AR scene capture / replay
+- AR replay/session 자동 저장
+- session 폴더 단위 자동 기록
+- session 최신 요약 + timeline 누적 기록
+- 기존 overlay보다 AR layer를 더 보이게 하는 시각 강조
+- guide trail 움직임 추가
 
 현재 남은 핵심은 대부분 `실기기 튜닝`이다.
+
+현재 판단:
+
+- 구조 작업은 대부분 끝났다
+- 지금 병목은 `실제 화면 체감`
+- 따라서 다음 작업은 구조 추가보다 `실주행 로그 기반 시각/정책 튜닝`이 우선이다
 
 ## 4. 현재 한계
 
@@ -135,6 +146,7 @@ AR 계산 / policy / tuning:
 - `Native AR scene 전송`
 - `AR scene 보기`
 - `AR 캡처 저장`
+- `AR 파일 저장`
 - `마지막 캡처 재생`
 - `AR 재생 종료`
 
@@ -144,25 +156,45 @@ AR 계산 / policy / tuning:
 - `localRoutePoints`
 - `localTurnInfo`
 - `localCalibrationOk`
+- `replaySessionDir`
+- `replayTimelinePath`
 - `[diagnosis]`
 - `[local payload]`
 - `[native payload]`
 - `[native render summary]`
+
+자동 저장 파일 구조:
+
+- 루트 최신 요약: `logs/ar_scene/session_latest.json`
+- 세션 폴더: `logs/ar_scene/session_<timestamp>_<host>/`
+- 세션 메타: `session_meta.json`
+- 타임라인 로그: `timeline.ndjson`
+
+주의:
+
+- 자동 저장은 `AR scene/debug/session` 계열이다
+- 원본 비디오나 모든 raw 차량 로그를 다 저장하는 구조는 아직 아니다
+
+실사용 흐름:
+
+- 사용자는 주행만 하고 온다
+- 주행 후 `logs/ar_scene/session_<...>/` 폴더를 확인한다
+- 다음 세션에서는 `session_meta.json`, `timeline.ndjson`, 스크린샷으로 사후 분석한다
 
 ## 7. 다음 작업 순서
 
 ### 7.1 실기기 데이터 확보 전까지 할 일
 
 1. 문서와 코드 구조를 유지
-2. debug/diagnosis/capture/replay 경로가 깨지지 않게 유지
-3. tuning 값을 한 군데에서 보이게 하는 정리 작업 위주로 진행
+2. debug/diagnosis/capture/replay/auto-save 경로가 깨지지 않게 유지
+3. 주행 후 세션 로그를 읽을 준비가 된 상태 유지
 4. 기존 projection/frame math 쪽 직접 수정은 하지 않음
 
 ### 7.2 실기기 데이터 확보 후 최우선 작업
 
 1. `road` 카메라 기준 live scene 확보
-2. `AR 캡처 저장`으로 replay seed 확보
-3. `native render summary`와 `stats` 관찰
+2. 자동 저장된 세션 폴더 확보
+3. `session_meta.json`, `timeline.ndjson`, `native render summary`, 스크린샷 함께 검토
 4. 아래 값 조정
 
 - `effectiveAnchorQuality` 관련 threshold
@@ -175,18 +207,29 @@ AR 계산 / policy / tuning:
 
 ### 7.3 실기기 확보 후 두 번째 작업
 
+- 초록 path fill 대비 새 AR layer 분리감 추가 검토
+- trail/ribbon/chip/card의 실제 체감 정도 튜닝
 - clutter가 큰 장면에서 degrade stage 튜닝
 - wideRoad 전용 preset 미세 조정
 - 장시간 주행 중 flicker / unstable frame / thermal 관찰
 - capture/replay 장면을 기준으로 regression 확인
+
+### 7.4 현재 세션 이후 바로 할 일
+
+다음 사용자가 다른 작업을 지시하더라도, remote AR 작업 재개 시 첫 단계는 아래다.
+
+1. 최신 `logs/ar_scene/session_<...>/` 폴더 확보
+2. `session_meta.json` 읽기
+3. `timeline.ndjson`에서 route/turn/budget/retention/anchor 상태 변화 보기
+4. 스크린샷과 로그를 대조해 체감이 약했던 장면의 원인 분리
 
 ## 8. 다음 세션 체크리스트
 
 새 세션 시작 시 먼저 확인할 것:
 
 - 이 문서부터 읽기
-- `docs/architecture/STOCK_MODE_REMOTE_AR_ON_DEVICE_TEST_2026-03-07_KO.md` 읽기
-- `docs/architecture/STOCK_MODE_REMOTE_AR_FEASIBILITY_2026-03-06_KO.md` 최신 상태 확인
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_ON_DEVICE_TEST_2026-03-07_KO.md` 읽기
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_FEASIBILITY_2026-03-06_KO.md` 최신 상태 확인
 - `git status --short`로 작업 트리 확인
 - 아래 검증 명령 실행
 
@@ -215,7 +258,7 @@ flutter build apk --debug
 
 세부 절차는 아래 문서를 따른다.
 
-- `docs/architecture/STOCK_MODE_REMOTE_AR_ON_DEVICE_TEST_2026-03-07_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_ON_DEVICE_TEST_2026-03-07_KO.md`
 
 ## 11. 다음 세션에서 피해야 할 실수
 
@@ -231,10 +274,11 @@ flutter build apk --debug
 
 ## 12. 관련 문서 인덱스
 
-- `docs/architecture/STOCK_MODE_REMOTE_AR_FEASIBILITY_2026-03-06_KO.md`
-- `docs/architecture/STOCK_MODE_REMOTE_AR_ON_DEVICE_TEST_2026-03-07_KO.md`
-- `docs/architecture/STOCK_MODE_REMOTE_AR_MVP_EXECUTION_PLAN_2026-03-06_KO.md`
-- `docs/architecture/STOCK_MODE_REMOTE_AR_IMPLEMENTATION_CHECKLIST_2026-03-06_KO.md`
-- `docs/architecture/STOCK_MODE_REMOTE_AR_MAPPING_OPTIMIZATION_2026-03-06_KO.md`
-- `docs/architecture/STOCK_MODE_REMOTE_AR_DISPLAY_DESIGN_2026-03-06_KO.md`
-- `docs/architecture/TMAP_7712_CARROTPILOT_ANALYSIS_2026-03-06_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_FEASIBILITY_2026-03-06_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_ON_DEVICE_TEST_2026-03-07_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_MVP_EXECUTION_PLAN_2026-03-06_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_IMPLEMENTATION_CHECKLIST_2026-03-06_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_MAPPING_OPTIMIZATION_2026-03-06_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_DISPLAY_DESIGN_2026-03-06_KO.md`
+- `docs/architecture/carrotpilot/TMAP_7712_CARROTPILOT_ANALYSIS_2026-03-06_KO.md`
+

@@ -15,10 +15,16 @@ class HudSnapshotAssembler {
   OriginalHudSnapshot fromRemotePayload({
     required Map<String, dynamic> raw,
     required String host,
+    int? endpointPort,
+    String? endpointPath,
+    int? receivedAtMs,
   }) {
     return remotePayloadMapper.map(
       raw: raw,
       host: host,
+      endpointPort: endpointPort,
+      endpointPath: endpointPath,
+      receivedAtMs: receivedAtMs,
     );
   }
 

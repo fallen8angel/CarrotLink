@@ -20,11 +20,26 @@ class HudRemotePayloadMapper {
   OriginalHudSnapshot map({
     required Map<String, dynamic> raw,
     required String host,
+    int? endpointPort,
+    String? endpointPath,
+    int? receivedAtMs,
   }) {
     if (_looksLikeSemanticSnapshot(raw)) {
-      return _mapSemantic(raw, host);
+      return _mapSemantic(
+        raw,
+        host,
+        endpointPort: endpointPort,
+        endpointPath: endpointPath,
+        receivedAtMs: receivedAtMs,
+      );
     }
-    return _mapLegacy(raw, host);
+    return _mapLegacy(
+      raw,
+      host,
+      endpointPort: endpointPort,
+      endpointPath: endpointPath,
+      receivedAtMs: receivedAtMs,
+    );
   }
 
   bool _looksLikeSemanticSnapshot(Map<String, dynamic> raw) {
@@ -34,6 +49,7 @@ class HudRemotePayloadMapper {
   OriginalHudSnapshot _mapSemantic(
     Map<String, dynamic> raw,
     String host,
+    {int? endpointPort, String? endpointPath, int? receivedAtMs,}
   ) {
     final source = _asMap(raw['source']);
     final vehicle = _asMap(raw['vehicle']);
@@ -54,6 +70,9 @@ class HudRemotePayloadMapper {
       source: HudSourceInfo(
         transport: _asString(source?['transport']) ?? 'sidecar_hud',
         deviceHost: _asString(source?['deviceHost']) ?? host,
+        endpointPort: endpointPort,
+        endpointPath: endpointPath,
+        receivedAtMs: receivedAtMs,
       ),
       vehicle: HudVehicleState(
         speedClusterKph: _asDouble(vehicle?['speedClusterKph']),
@@ -135,6 +154,7 @@ class HudRemotePayloadMapper {
   OriginalHudSnapshot _mapLegacy(
     Map<String, dynamic> raw,
     String host,
+    {int? endpointPort, String? endpointPath, int? receivedAtMs,}
   ) {
     final missingFields = <String>{
       'connectivity.activeCarrot',
@@ -165,6 +185,9 @@ class HudRemotePayloadMapper {
       source: HudSourceInfo(
         transport: 'legacy_ws_carstate',
         deviceHost: host,
+        endpointPort: endpointPort,
+        endpointPath: endpointPath,
+        receivedAtMs: receivedAtMs,
       ),
       vehicle: HudVehicleState(
         speedClusterKph: speedClusterKph,

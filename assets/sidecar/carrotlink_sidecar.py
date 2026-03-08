@@ -2021,7 +2021,7 @@ class SidecarApp:
     payload: dict[str, Any] = {
       "version": 1,
       "tsMonoMs": int(time.monotonic() * 1000.0),
-      "source": {"transport": "sidecar_hud_ws"},
+      "source": {"transport": "sidecar_hud"},
       "meta": {"quality": "semantic"},
     }
     if self.sm is None:
@@ -2047,9 +2047,14 @@ class SidecarApp:
     gear_text = "U"
     if cs is not None:
       speed_cluster_kph = _safe_float(getattr(cs, "vEgoCluster", None))
-      if speed_cluster_kph is None:
-        v_ego = _safe_float(getattr(cs, "vEgo", None))
-        speed_cluster_kph = v_ego * 3.6 if v_ego is not None else None
+      v_ego = _safe_float(getattr(cs, "vEgo", None))
+      v_ego_kph = v_ego * 3.6 if v_ego is not None else None
+      if speed_cluster_kph is None or (
+        v_ego_kph is not None
+        and v_ego_kph > 0.8
+        and speed_cluster_kph <= 0.1
+      ):
+        speed_cluster_kph = v_ego_kph
       set_speed_cluster_kph = _safe_float(getattr(cs, "vCruiseCluster", None))
       gear_text = self._gear_text_for_hud(cs)
 
@@ -2145,6 +2150,14 @@ class SidecarApp:
     limit_label = None
     display_limit_kph = None
     if (
+      camera_limit_kph is not None
+      and camera_limit_kph > 0.0
+      and camera_sign_type == 4
+    ):
+      limit_mode = "section"
+      limit_label = "구간"
+      display_limit_kph = camera_limit_kph
+    elif (
       camera_limit_kph is not None
       and camera_limit_kph > 0.0
       and camera_sign_type not in (22, 4)

@@ -5,6 +5,12 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
     _cancelLifecycleSuspendTimer();
     if (_cameraSuspendedByLifecycle) return;
     debugPrint('[DriveCanvas][lifecycle] suspend');
+    unawaited(
+      _persistArReplaySessionIfNeeded(
+        force: true,
+        reason: 'background_suspend',
+      ),
+    );
     _clearSidecarRecoverySchedule();
     _cameraSuspendedByLifecycle = true;
     _backgroundUiResetDone = false;

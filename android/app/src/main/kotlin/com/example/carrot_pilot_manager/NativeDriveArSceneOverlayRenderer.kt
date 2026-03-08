@@ -285,10 +285,10 @@ internal class NativeDriveArSceneOverlayRenderer {
 
     private fun sceneAccentColor(scene: NativeDriveArScene): Int =
         when (scene.presentation.accentKey) {
-            "warning" -> Color.parseColor("#D97A5100")
-            "arrival" -> Color.parseColor("#E617A84B")
-            "inactive" -> Color.parseColor("#996C7480")
-            else -> Color.parseColor("#CC1C8E54")
+            "warning" -> Color.parseColor("#FFF3A53A")
+            "arrival" -> Color.parseColor("#FF19E57A")
+            "inactive" -> Color.parseColor("#A08C98A8")
+            else -> Color.parseColor("#FF23D6FF")
         }
 
     private fun drawCueBadge(

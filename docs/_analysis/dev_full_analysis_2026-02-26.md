@@ -147,8 +147,8 @@
 | $(android/settings.gradle.kts) | - | - | platform-android | 매니페스트 미매칭 |
 | $(assets/icon.png) | - | - | asset | 매니페스트 미매칭 |
 | $(assets/original_icon.jpg) | - | - | asset | 매니페스트 미매칭 |
-| $(docs/architecture/CODEBASE_DEEP_ANALYSIS_2026-02-26_KO.md) | - | - | docs | 매니페스트 미매칭 |
-| $(docs/architecture/DEV_STRUCTURE_REFACTOR_2026-02-26.md) | - | - | docs | 매니페스트 미매칭 |
+| $(docs/architecture/core/CODEBASE_DEEP_ANALYSIS_2026-02-26_KO.md) | - | - | docs | 매니페스트 미매칭 |
+| $(docs/architecture/core/DEV_STRUCTURE_REFACTOR_2026-02-26.md) | - | - | docs | 매니페스트 미매칭 |
 | $(docs/MASTER_DEVELOPMENT_GUIDE_KO.md) | - | - | docs | 매니페스트 미매칭 |
 | $(docs/operations/APK_SCRIPT_USAGE_KO.md) | - | - | docs | 매니페스트 미매칭 |
 | $(docs/operations/CARROTMAN_APK_SET_PATH_KO.md) | - | - | docs | 매니페스트 미매칭 |
@@ -339,3 +339,4 @@
 - 유지보수 실질 대상은 `lib/` + `scripts/` + `docs/` + 플랫폼 설정(Tracked 215개 중심)이다.
 - `android/app/google-services.json` 등 민감 설정 파일이 존재하므로 배포/공유 정책 분리 필요.
 - `windows/flutter/ephemeral`, `ios/Flutter/ephemeral`, `android/.gradle`은 생성물로 정기 정리 가능하다.
+

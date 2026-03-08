@@ -42,14 +42,14 @@ internal object NativeDriveArGuideVisualTuning {
         strokeScale: Float,
     ): NativeDriveArStrokeStyle =
         NativeDriveArStrokeStyle(
-            glowAlpha = ((56f + (emphasisLevel * 5f)) * alphaScale).toInt(),
+            glowAlpha = ((92f + (emphasisLevel * 10f)) * alphaScale).toInt(),
             glowWidth =
-                (((16f + (emphasisLevel * 1.1f)) * lerp(0.82f, 1f, anchoredBlend)) * strokeScale)
-                    .coerceAtLeast(8f),
-            coreAlpha = ((214f + (emphasisLevel * 7f)) * alphaScale).toInt(),
+                (((22f + (emphasisLevel * 1.8f)) * lerp(0.86f, 1.08f, anchoredBlend)) * strokeScale)
+                    .coerceAtLeast(11f),
+            coreAlpha = ((244f + (emphasisLevel * 4f)) * alphaScale).toInt(),
             coreWidth =
-                (((6f + (emphasisLevel * 0.4f)) * lerp(0.88f, 1f, anchoredBlend)) * strokeScale)
-                    .coerceAtLeast(3f),
+                (((8.2f + (emphasisLevel * 0.65f)) * lerp(0.92f, 1.08f, anchoredBlend)) * strokeScale)
+                    .coerceAtLeast(4.4f),
         )
 
     fun routePathStyle(
@@ -58,10 +58,10 @@ internal object NativeDriveArGuideVisualTuning {
         strokeScale: Float,
     ): NativeDriveArStrokeStyle =
         NativeDriveArStrokeStyle(
-            glowAlpha = (54f * alphaScale).toInt(),
-            glowWidth = ((16f + (emphasisLevel * 1.1f)) * strokeScale).coerceAtLeast(8f),
-            coreAlpha = (210f * alphaScale).toInt(),
-            coreWidth = ((6f + (emphasisLevel * 0.4f)) * strokeScale).coerceAtLeast(3f),
+            glowAlpha = (88f * alphaScale).toInt(),
+            glowWidth = ((20f + (emphasisLevel * 1.5f)) * strokeScale).coerceAtLeast(10f),
+            coreAlpha = (238f * alphaScale).toInt(),
+            coreWidth = ((8f + (emphasisLevel * 0.65f)) * strokeScale).coerceAtLeast(4f),
         )
 
     fun turnPathStyle(
@@ -71,10 +71,10 @@ internal object NativeDriveArGuideVisualTuning {
         strokeScale: Float,
     ): NativeDriveArStrokeStyle =
         NativeDriveArStrokeStyle(
-            glowAlpha = (((if (immediate) 74f else 56f) + (emphasisLevel * 4f)) * alphaScale).toInt(),
-            glowWidth = (((if (immediate) 20f else 16f) + (emphasisLevel * 1.2f)) * strokeScale),
-            coreAlpha = ((224f + (emphasisLevel * 6f)) * alphaScale).toInt(),
-            coreWidth = (((if (immediate) 7f else 6f) + (emphasisLevel * 0.35f)) * strokeScale),
+            glowAlpha = (((if (immediate) 108f else 88f) + (emphasisLevel * 7f)) * alphaScale).toInt(),
+            glowWidth = (((if (immediate) 26f else 22f) + (emphasisLevel * 1.6f)) * strokeScale),
+            coreAlpha = ((248f + (emphasisLevel * 3f)) * alphaScale).toInt(),
+            coreWidth = (((if (immediate) 9f else 8f) + (emphasisLevel * 0.45f)) * strokeScale),
         )
 
     fun secondaryTurnPathStyle(
@@ -82,25 +82,25 @@ internal object NativeDriveArGuideVisualTuning {
         strokeScale: Float,
     ): NativeDriveArStrokeStyle =
         NativeDriveArStrokeStyle(
-            glowAlpha = (32f * alphaScale).toInt(),
-            glowWidth = (10f * strokeScale).coerceAtLeast(5f),
-            coreAlpha = (122f * alphaScale).toInt(),
-            coreWidth = (3f * strokeScale).coerceAtLeast(2f),
+            glowAlpha = (56f * alphaScale).toInt(),
+            glowWidth = (12f * strokeScale).coerceAtLeast(6f),
+            coreAlpha = (162f * alphaScale).toInt(),
+            coreWidth = (3.8f * strokeScale).coerceAtLeast(2.2f),
         )
 
     fun arrivalHaloStyle(
         alphaScale: Float,
         strokeScale: Float,
     ): NativeDriveArHaloStyle {
-        val outer = (34f * strokeScale).coerceAtLeast(18f)
+        val outer = (42f * strokeScale).coerceAtLeast(22f)
         return NativeDriveArHaloStyle(
             outerRadius = outer,
             innerRadius = outer * 0.56f,
-            glowAlpha = (50f * alphaScale).toInt(),
-            glowWidth = (12f * strokeScale).coerceAtLeast(6f),
-            coreAlpha = (220f * alphaScale).toInt(),
-            coreWidth = (3.2f * strokeScale).coerceAtLeast(2f),
-            fillAlpha = (68f * alphaScale).toInt(),
+            glowAlpha = (82f * alphaScale).toInt(),
+            glowWidth = (16f * strokeScale).coerceAtLeast(8f),
+            coreAlpha = (238f * alphaScale).toInt(),
+            coreWidth = (4f * strokeScale).coerceAtLeast(2.4f),
+            fillAlpha = (98f * alphaScale).toInt(),
         )
     }
 
@@ -109,13 +109,13 @@ internal object NativeDriveArGuideVisualTuning {
         alphaScale: Float,
         strokeScale: Float,
     ): NativeDriveArAnchorStyle {
-        val outer = (if (emphasize) 10f else 8f) * strokeScale
+        val outer = (if (emphasize) 13f else 10f) * strokeScale
         return NativeDriveArAnchorStyle(
             outerRadius = outer,
             innerRadius = outer * 0.42f,
-            fillAlpha = (86f * alphaScale).toInt(),
-            strokeAlpha = (212f * alphaScale).toInt(),
-            strokeWidth = (2f * strokeScale).coerceAtLeast(1.5f),
+            fillAlpha = (118f * alphaScale).toInt(),
+            strokeAlpha = (236f * alphaScale).toInt(),
+            strokeWidth = (2.4f * strokeScale).coerceAtLeast(1.8f),
             innerFillAlpha = (255f * alphaScale).toInt(),
         )
     }
@@ -126,11 +126,11 @@ internal object NativeDriveArGuideVisualTuning {
         strokeScale: Float,
     ): NativeDriveArHeadStyle =
         NativeDriveArHeadStyle(
-            width = (if (emphasize) 18f else 14f) * strokeScale,
-            height = (if (emphasize) 12f else 10f) * strokeScale,
-            fillAlpha = (210f * alphaScale).toInt(),
-            strokeAlpha = (212f * alphaScale).toInt(),
-            strokeWidth = (1.8f * strokeScale).coerceAtLeast(1.3f),
+            width = (if (emphasize) 22f else 18f) * strokeScale,
+            height = (if (emphasize) 15f else 12f) * strokeScale,
+            fillAlpha = (232f * alphaScale).toInt(),
+            strokeAlpha = (236f * alphaScale).toInt(),
+            strokeWidth = (2.2f * strokeScale).coerceAtLeast(1.5f),
         )
 
     private fun lerp(

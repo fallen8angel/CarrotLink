@@ -3,10 +3,13 @@ import 'dart:convert';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../models/hud_remote_stream_event.dart';
+
 class HudRemoteStreamDataSource {
   final List<({int port, String path})> candidates;
   final Duration reconnectDelay;
   final Duration idleTimeout;
+  final bool stickToPrimaryAfterSuccess;
 
   const HudRemoteStreamDataSource({
     this.candidates = const <({int port, String path})>[
@@ -14,21 +17,36 @@ class HudRemoteStreamDataSource {
       (port: 7000, path: '/ws/carstate'),
     ],
     this.reconnectDelay = const Duration(seconds: 2),
-    this.idleTimeout = const Duration(seconds: 12),
+    this.idleTimeout = const Duration(seconds: 4),
+    this.stickToPrimaryAfterSuccess = true,
   });
 
-  Stream<Map<String, dynamic>> watch({
+  Stream<HudRemoteStreamEvent> watch({
     required String host,
   }) {
-    late final StreamController<Map<String, dynamic>> controller;
+    late final StreamController<HudRemoteStreamEvent> controller;
     WebSocketChannel? channel;
     var disposed = false;
+    final primaryCandidate = candidates.isEmpty ? null : candidates.first;
+    var primaryDeliveredOnce = false;
+
+    bool isPrimary(({int port, String path}) candidate) {
+      if (primaryCandidate == null) {
+        return false;
+      }
+      return candidate.port == primaryCandidate.port &&
+          candidate.path == primaryCandidate.path;
+    }
 
     Future<void> run() async {
       while (!disposed) {
         Object? lastError;
         StackTrace? lastStackTrace;
-        for (final candidate in candidates) {
+        final activeCandidates =
+            primaryDeliveredOnce && primaryCandidate != null && stickToPrimaryAfterSuccess
+                ? <({int port, String path})>[primaryCandidate]
+                : candidates;
+        for (final candidate in activeCandidates) {
           if (disposed) break;
           var deliveredPayload = false;
           try {
@@ -41,7 +59,17 @@ class HudRemoteStreamDataSource {
               final payload = _decodePayload(event);
               if (payload != null) {
                 deliveredPayload = true;
-                controller.add(payload);
+                if (isPrimary(candidate)) {
+                  primaryDeliveredOnce = true;
+                }
+                controller.add(
+                  HudRemoteStreamEvent(
+                    payload: payload,
+                    port: candidate.port,
+                    path: candidate.path,
+                    receivedAtMs: DateTime.now().millisecondsSinceEpoch,
+                  ),
+                );
               }
             }
           } catch (error, stackTrace) {
@@ -76,7 +104,7 @@ class HudRemoteStreamDataSource {
       }
     }
 
-    controller = StreamController<Map<String, dynamic>>(
+    controller = StreamController<HudRemoteStreamEvent>(
       onListen: () {
         unawaited(run());
       },

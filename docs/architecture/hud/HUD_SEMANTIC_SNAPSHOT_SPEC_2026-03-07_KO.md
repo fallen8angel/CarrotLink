@@ -7,8 +7,8 @@
 - 홈탭 HUD, 주행화면 HUD, HUD 오버레이, preview HUD가 모두 같은 의미 체계를 쓰도록 만드는 것이 목적이다.
 
 관련 문서:
-- [CARROTPILOT_ORIGINAL_ONROAD_HUD_ANALYSIS_2026-03-07_KO.md](/d:/CarrotLink/CarrotLink-dev/docs/architecture/CARROTPILOT_ORIGINAL_ONROAD_HUD_ANALYSIS_2026-03-07_KO.md)
-- [ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md](/d:/CarrotLink/CarrotLink-dev/docs/architecture/ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md)
+- [CARROTPILOT_ORIGINAL_ONROAD_HUD_ANALYSIS_2026-03-07_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/carrotpilot/CARROTPILOT_ORIGINAL_ONROAD_HUD_ANALYSIS_2026-03-07_KO.md)
+- [ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/hud/ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md)
 
 ---
 
@@ -539,4 +539,6 @@ fallback 금지:
 3. sidecar / endpoint 설계
 4. adaptive HUD layout spec
 5. 최종 UI 구현
+
+
 

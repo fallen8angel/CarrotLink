@@ -28,207 +28,227 @@ internal class OverlayHudViewFactory(
       background = GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
         cornerRadius = dpF(profile.radiusDp)
-        setColor(Color.parseColor("#D9010A18"))
-        setStroke(dp(1), Color.parseColor("#66FFFFFF"))
+        setColor(Color.parseColor("#E1134A32"))
+        setStroke(dp(1), Color.parseColor("#48FFFFFF"))
       }
       elevation = dpF(6f)
     }
-
-    val topRow = LinearLayout(context).apply {
-      orientation = LinearLayout.HORIZONTAL
-      gravity = Gravity.CENTER_VERTICAL
-    }
-    val statusDotView = View(context).apply {
-      layoutParams = LinearLayout.LayoutParams(dp(10), dp(10))
-      background = GradientDrawable().apply {
-        shape = GradientDrawable.OVAL
-        setColor(Color.parseColor("#55FFFFFF"))
-      }
-    }
-    topRow.addView(statusDotView)
-    topRow.addView(space(profile.sectionGapDp))
-    val modeValue = textView(profile.bodySp, bold = true).apply {
-      text = "NORM"
-      setTextColor(Color.parseColor("#1A1F26"))
-      background = GradientDrawable().apply {
-        shape = GradientDrawable.RECTANGLE
-        cornerRadius = dpF(profile.radiusDp - 8f)
-        setColor(Color.parseColor("#E7EEF7"))
-      }
-      setPadding(dp(10), dp(4), dp(10), dp(4))
-    }
-    topRow.addView(modeValue)
-    topRow.addView(space(profile.sectionGapDp))
-    val sourceValue = textView(profile.smallSp, bold = true).apply {
-      text = "LIVE"
-      setTextColor(Color.WHITE)
-      background = GradientDrawable().apply {
-        shape = GradientDrawable.RECTANGLE
-        cornerRadius = dpF(profile.radiusDp - 8f)
-        setColor(Color.parseColor("#1D375A"))
-        setStroke(dp(1), Color.parseColor("#447AA7FF"))
-      }
-      setPadding(dp(10), dp(4), dp(10), dp(4))
-    }
-    topRow.addView(sourceValue)
-    topRow.addView(LinearLayout(context).apply {
-      layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
-    })
-    val gpsValue = textView(profile.smallSp, bold = true).apply {
-      text = "GPS --"
-      setTextColor(Color.parseColor("#A0FFFFFF"))
-    }
-    topRow.addView(gpsValue)
-    card.addView(topRow)
-    card.addView(spaceVertical(profile.sectionGapDp))
 
     val metricsRow = LinearLayout(context).apply {
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.CENTER_VERTICAL
     }
-    val cpuMetric = createMetricCell(profile, "CPU", "--°C", "#2A7B54")
+    val cpuMetric = createMetricCell(profile, "CPU", "--°C", "#CC145B3C")
     val metricCpuValue = cpuMetric.second
-    val memMetric = createMetricCell(profile, "MEM", "--%", "#2A4D7B")
+    val memMetric = createMetricCell(profile, "MEM", "--%", "#CC145B3C")
     val metricMemValue = memMetric.second
-    val voltMetric = createMetricCell(profile, "VOLT", "--.-V", "#7A5A24")
+    val voltMetric = createMetricCell(profile, "VOLT", "--.-V", "#CC145B3C")
     val metricVoltLabel = voltMetric.first.findViewWithTag<TextView>("label")
     val metricVoltValue = voltMetric.second
 
+    cpuMetric.first.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+    memMetric.first.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+    voltMetric.first.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
     metricsRow.addView(cpuMetric.first)
-    metricsRow.addView(space(profile.sectionGapDp - 2))
+    metricsRow.addView(space(profile.sectionGapDp - 3))
     metricsRow.addView(memMetric.first)
-    metricsRow.addView(space(profile.sectionGapDp - 2))
+    metricsRow.addView(space(profile.sectionGapDp - 3))
     metricsRow.addView(voltMetric.first)
-    metricsRow.visibility = if (profile.showMetricsRow) View.VISIBLE else View.GONE
     card.addView(metricsRow)
-    if (profile.showMetricsRow) {
-      card.addView(spaceVertical(profile.sectionGapDp))
-    }
+    card.addView(spaceVertical(profile.sectionGapDp))
 
-    val contentContainer = LinearLayout(context).apply {
-      orientation = if (profile.wide) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
-      gravity = Gravity.TOP
+    val leftCard = createContentCard(profile).apply {
+      layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1.6f)
     }
-
-    val leftColumn = LinearLayout(context).apply {
-      orientation = LinearLayout.VERTICAL
-      layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.3f)
+    val leftLabel = textView(profile.smallSp, bold = true).apply {
+      text = "현재속도"
+      setTextColor(Color.parseColor("#66FFFFFF"))
     }
     val speedValue = textView(profile.speedSp, bold = true).apply {
       text = "--"
       setTextColor(Color.WHITE)
-      minWidth = dp(72)
-      gravity = Gravity.START
+      gravity = Gravity.START or Gravity.CENTER_VERTICAL
     }
-    val setSpeedValue = textView(profile.secondarySp, bold = true).apply {
-      text = "SET --"
-      setTextColor(Color.parseColor("#22FF61"))
-    }
-    leftColumn.addView(speedValue)
-    leftColumn.addView(spaceVertical(4))
-    leftColumn.addView(setSpeedValue)
+    leftCard.addView(leftLabel)
+    leftCard.addView(LinearLayout(context).apply {
+      layoutParams = LinearLayout.LayoutParams(
+          LinearLayout.LayoutParams.MATCH_PARENT,
+          0,
+          1f,
+      )
+      gravity = Gravity.START or Gravity.CENTER_VERTICAL
+      addView(speedValue)
+    })
 
-    val centerColumn = LinearLayout(context).apply {
-      orientation = LinearLayout.VERTICAL
-      gravity = Gravity.START
-      layoutParams = if (profile.wide) {
-        LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.15f)
-      } else {
-        LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-        )
-      }
+    val rightCard = createContentCard(profile).apply {
+      layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
     }
-    val tempSourceValue = textView(profile.bodySp, bold = true).apply {
-      text = "eco"
-      setTextColor(Color.parseColor("#22FF61"))
-    }
-    val tempSpeedValue = textView(profile.secondarySp + 2f, bold = true).apply {
-      text = "--"
-      setTextColor(Color.parseColor("#22FF61"))
-    }
-    val limitValue = textView(profile.bodySp, bold = true).apply {
-      text = "LIMIT --"
-      setTextColor(Color.WHITE)
-    }
-    centerColumn.addView(tempSourceValue)
-    centerColumn.addView(spaceVertical(2))
-    centerColumn.addView(tempSpeedValue)
-    centerColumn.addView(spaceVertical(8))
-    centerColumn.addView(limitValue)
-
-    val rightColumn = LinearLayout(context).apply {
-      orientation = LinearLayout.VERTICAL
-      gravity = Gravity.END
-      layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.82f)
-    }
-    val gearValue = textView(profile.gearSp, bold = true).apply {
-      text = "U"
-      setTextColor(Color.WHITE)
-      background = GradientDrawable().apply {
-        shape = GradientDrawable.RECTANGLE
-        cornerRadius = dpF(profile.radiusDp - 8f)
-        setStroke(dp(1), Color.parseColor("#88FFFFFF"))
-      }
-      setPadding(dp(10), dp(2), dp(10), dp(2))
-    }
-    val barWrap = LinearLayout(context).apply {
+    val headerRow = LinearLayout(context).apply {
       orientation = LinearLayout.HORIZONTAL
-      gravity = Gravity.END or Gravity.CENTER_VERTICAL
+      gravity = Gravity.CENTER_VERTICAL
     }
-    repeat(4) { idx ->
+    val setSpeedLabel = textView(profile.smallSp, bold = true).apply {
+      text = "설정속도"
+      setTextColor(Color.parseColor("#66FFFFFF"))
+      layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+    }
+    headerRow.addView(setSpeedLabel)
+    val setSpeedValue = textView(profile.secondarySp + 2f, bold = true).apply {
+      text = "--"
+      setTextColor(Color.WHITE)
+    }
+    val tempRow = LinearLayout(context).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER_VERTICAL
+    }
+    val tempSourceValue = textView(profile.bodySp - 1f, bold = true).apply {
+      text = "TEMP"
+      setTextColor(Color.WHITE)
+      layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+    }
+    val tempSpeedValue = textView(profile.bodySp - 1f, bold = true).apply {
+      text = "--"
+      setTextColor(Color.WHITE)
+      gravity = Gravity.END
+    }
+    tempRow.addView(tempSourceValue)
+    tempRow.addView(tempSpeedValue)
+    val supportRow = LinearLayout(context).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER_VERTICAL
+    }
+    val gapCluster = LinearLayout(context).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER_VERTICAL
+      layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+    }
+    val tfBarRow = LinearLayout(context).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER_VERTICAL
+    }
+    repeat(4) { index ->
       val bar = View(context).apply {
-        layoutParams = LinearLayout.LayoutParams(dp(12), dp(8)).also {
-          if (idx > 0) it.marginStart = dp(3)
+        layoutParams = LinearLayout.LayoutParams(
+            dp(if (profile.metaMode == OverlayHudMetaMode.Tiny) 10 else 12),
+            dp(if (profile.metaMode == OverlayHudMetaMode.Tiny) 4 else 5),
+        ).also { params ->
+          if (index > 0) params.marginStart = dp(2)
         }
         background = GradientDrawable().apply {
           shape = GradientDrawable.RECTANGLE
-          cornerRadius = dpF(3f)
-          setColor(Color.parseColor("#505862"))
+          cornerRadius = dpF(99f)
+          setColor(Color.parseColor("#36FFFFFF"))
         }
-        alpha = 0.55f
       }
       tfBarViews.add(bar)
-      barWrap.addView(bar)
+      tfBarRow.addView(bar)
     }
-    rightColumn.addView(gearValue)
-    rightColumn.addView(spaceVertical(12))
-    rightColumn.addView(barWrap)
-
-    if (profile.wide) {
-      contentContainer.addView(leftColumn)
-      contentContainer.addView(space(profile.sectionGapDp))
-      contentContainer.addView(centerColumn)
-      contentContainer.addView(space(profile.sectionGapDp))
-      contentContainer.addView(rightColumn)
-    } else {
-      val topContentRow = LinearLayout(context).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.TOP
+    val gapValue = textView(profile.smallSp, bold = true).apply {
+      text = "(--)"
+      setTextColor(Color.parseColor("#D6FFFFFF"))
+    }
+    gapCluster.addView(tfBarRow)
+    gapCluster.addView(space(6))
+    gapCluster.addView(gapValue)
+    val gearCluster = LinearLayout(context).apply {
+      orientation = LinearLayout.VERTICAL
+      gravity = Gravity.CENTER_HORIZONTAL
+      val label = textView(profile.smallSp - 1f, bold = true).apply {
+        text = "GEAR"
+        setTextColor(Color.parseColor("#90FFFFFF"))
       }
-      topContentRow.addView(leftColumn)
-      topContentRow.addView(space(profile.sectionGapDp))
-      topContentRow.addView(rightColumn)
-      contentContainer.addView(topContentRow)
-      contentContainer.addView(spaceVertical(profile.sectionGapDp))
-      contentContainer.addView(centerColumn)
+      val value = textView(profile.secondarySp - 2f, bold = true).apply {
+        text = "–"
+        setTextColor(Color.WHITE)
+        tag = "gearValueInner"
+      }
+      addView(label)
+      addView(spaceVertical(2))
+      addView(value)
+    }
+    supportRow.addView(gapCluster)
+    supportRow.addView(gearCluster)
+    rightCard.addView(headerRow)
+    rightCard.addView(spaceVertical(4))
+    rightCard.addView(setSpeedValue)
+    rightCard.addView(spaceVertical(8))
+    rightCard.addView(tempRow)
+    rightCard.addView(spaceVertical(4))
+    rightCard.addView(supportRow)
+
+    val contentContainer = LinearLayout(context).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.TOP
+      addView(leftCard)
+      addView(space(profile.sectionGapDp))
+      addView(rightCard)
     }
     card.addView(contentContainer)
     card.addView(spaceVertical(profile.sectionGapDp))
 
-    val statusValue = textView(profile.smallSp, bold = false).apply {
-      text = "대기 중"
-      setTextColor(Color.parseColor("#A0FFFFFF"))
+    val bottomStrip = LinearLayout(context).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER_VERTICAL
+      background = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = dpF(profile.radiusDp - 10f)
+        setColor(Color.parseColor("#D7145B3C"))
+        setStroke(dp(1), Color.parseColor("#36FFFFFF"))
+      }
+      setPadding(dp(12), dp(6), dp(12), dp(6))
     }
-    card.addView(statusValue)
-    card.addView(spaceVertical(2))
-    val detailValue = textView(profile.smallSp - 0.5f, bold = false).apply {
+    val statusDotView = View(context).apply {
+      layoutParams = LinearLayout.LayoutParams(dp(8), dp(8))
+      background = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL
+        setColor(Color.parseColor("#55FFFFFF"))
+      }
+    }
+    val modeValue = textView(profile.bodySp - 1f, bold = true).apply {
+      text = "일반"
+      setTextColor(Color.WHITE)
+    }
+    val slashOne = textView(profile.bodySp - 1f, bold = false).apply {
+      text = " / "
+      setTextColor(Color.parseColor("#66FFFFFF"))
+    }
+    val limitValue = textView(profile.bodySp - 1f, bold = true).apply {
+      text = "LIMIT --"
+      setTextColor(Color.WHITE)
+    }
+    val slashTwo = textView(profile.bodySp - 1f, bold = false).apply {
+      text = " / "
+      setTextColor(Color.parseColor("#66FFFFFF"))
+    }
+    val connectivityValue = textView(profile.bodySp - 1f, bold = true).apply {
       text = ""
-      setTextColor(Color.parseColor("#70FFFFFF"))
-      visibility = if (profile.showDetailLine) View.VISIBLE else View.GONE
+      setTextColor(Color.WHITE)
     }
-    card.addView(detailValue)
+    val centerStrip = LinearLayout(context).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER
+      layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+      addView(modeValue)
+      addView(slashOne)
+      addView(limitValue)
+      addView(slashTwo)
+      addView(connectivityValue)
+    }
+    val signalValue = textView(profile.smallSp, bold = true).apply {
+      text = "--"
+      setTextColor(Color.parseColor("#66FFFFFF"))
+      gravity = Gravity.END
+    }
+    bottomStrip.addView(statusDotView)
+    bottomStrip.addView(space(8))
+    bottomStrip.addView(centerStrip)
+    bottomStrip.addView(signalValue)
+    card.addView(bottomStrip)
+
+    val sourceValue = textView(profile.smallSp, bold = true).apply { visibility = View.GONE }
+    val gpsValue = textView(profile.smallSp, bold = true).apply { visibility = View.GONE }
+    val statusValue = textView(profile.smallSp, bold = false).apply { visibility = View.GONE }
+    val detailValue = textView(profile.smallSp - 0.5f, bold = false).apply { visibility = View.GONE }
 
     return OverlayHudBuiltView(
         rootView = card,
@@ -237,15 +257,18 @@ internal class OverlayHudViewFactory(
             metricMemValue = metricMemValue,
             metricVoltLabel = metricVoltLabel,
             metricVoltValue = metricVoltValue,
-            sourceValue = sourceValue,
             statusDotView = statusDotView,
             speedValue = speedValue,
             setSpeedValue = setSpeedValue,
             tempSourceValue = tempSourceValue,
             tempSpeedValue = tempSpeedValue,
-            gearValue = gearValue,
+            gapValue = gapValue,
+            gearValue = gearCluster.findViewWithTag("gearValueInner"),
             modeValue = modeValue,
             limitValue = limitValue,
+            connectivityValue = connectivityValue,
+            signalValue = signalValue,
+            sourceValue = sourceValue,
             gpsValue = gpsValue,
             statusValue = statusValue,
             detailValue = detailValue,
@@ -263,7 +286,7 @@ internal class OverlayHudViewFactory(
     val labelView = textView(profile.metricLabelSp, bold = true).apply {
       text = label
       tag = "label"
-      setTextColor(Color.parseColor("#D8FFFFFF"))
+      setTextColor(Color.WHITE)
       gravity = Gravity.CENTER_HORIZONTAL
     }
     val valueView = textView(profile.metricValueSp, bold = true).apply {
@@ -279,6 +302,7 @@ internal class OverlayHudViewFactory(
         shape = GradientDrawable.RECTANGLE
         cornerRadius = dpF(profile.radiusDp - 10f)
         setColor(Color.parseColor(backgroundColorHex))
+        setStroke(dp(1), Color.parseColor("#36FFFFFF"))
       }
       setPadding(dp(8), dp(4), dp(8), dp(4))
       addView(labelView)
@@ -287,11 +311,26 @@ internal class OverlayHudViewFactory(
     return Pair(cell, valueView)
   }
 
+  private fun createContentCard(profile: OverlayHudLayoutProfile): LinearLayout {
+    return LinearLayout(context).apply {
+      orientation = LinearLayout.VERTICAL
+      background = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = dpF(profile.radiusDp - 8f)
+        setColor(Color.parseColor("#D9114A31"))
+        setStroke(dp(1), Color.parseColor("#2AFFFFFF"))
+      }
+      setPadding(dp(12), dp(10), dp(12), dp(10))
+    }
+  }
+
   private fun textView(sizeSp: Float, bold: Boolean): TextView {
     return TextView(context).apply {
       textSize = sizeSp
       typeface = if (bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
       includeFontPadding = false
+      setTextColor(Color.WHITE)
+      setShadowLayer(dpF(1.8f), 0f, dpF(0.8f), Color.parseColor("#F0000000"))
     }
   }
 

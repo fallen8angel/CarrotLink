@@ -31,8 +31,8 @@ internal class NativeDriveArGuideRibbonRenderer {
 
         val emphasis = scene.presentation.emphasisLevel
         val alphaScale = (scene.presentation.guideAlpha * alphaMultiplier).coerceIn(0f, 1f)
-        val baseWidth = ((30f + (emphasis * 3.5f)) * strokeScale).coerceAtLeast(18f)
-        val tailWidth = ((10f + (emphasis * 1.3f)) * strokeScale).coerceAtLeast(7f)
+        val baseWidth = ((40f + (emphasis * 5.5f)) * strokeScale).coerceAtLeast(24f)
+        val tailWidth = ((16f + (emphasis * 2.2f)) * strokeScale).coerceAtLeast(10f)
         val maxDistance = distances.lastOrNull()?.takeIf { it.isFinite() && it > 0f }
 
         val left = ArrayList<Pair<Float, Float>>(points.size)
@@ -68,8 +68,8 @@ internal class NativeDriveArGuideRibbonRenderer {
         }
         ribbonPath.close()
 
-        glowPaint.color = withAlpha(accentColor, (44f * alphaScale).toInt())
-        fillPaint.color = withAlpha(accentColor, (92f * alphaScale).toInt())
+        glowPaint.color = withAlpha(accentColor, (74f * alphaScale).toInt())
+        fillPaint.color = withAlpha(accentColor, (148f * alphaScale).toInt())
         canvas.drawPath(ribbonPath, glowPaint)
         canvas.drawPath(ribbonPath, fillPaint)
     }

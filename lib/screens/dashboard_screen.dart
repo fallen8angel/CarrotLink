@@ -330,8 +330,6 @@ class _DashboardScreenState extends State<DashboardScreen>
       final running = await NativeOverlayHudService.isRunning();
       if (running) {
         await NativeOverlayHudService.updateEndpoint(host);
-      } else {
-        await NativeOverlayHudService.start(host);
       }
       _diag.info('overlay',
           'Lifecycle sync: foreground=$appForeground reason=$reason host=$host');

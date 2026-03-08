@@ -6,7 +6,6 @@ import '../../../../services/ssh_service.dart';
 import '../../application/hud_controller.dart';
 import '../../application/hud_controller_state.dart';
 import '../../application/hud_module.dart';
-import '../../domain/repositories/hud_repository.dart';
 
 typedef HudControllerViewBuilder = Widget Function(
   BuildContext context,
@@ -33,7 +32,7 @@ class HudControllerBuilder extends StatefulWidget {
 }
 
 class _HudControllerBuilderState extends State<HudControllerBuilder> {
-  HudRepository? _repository;
+  HudRepositoryLease? _repositoryLease;
   HudController? _controller;
 
   @override
@@ -61,45 +60,45 @@ class _HudControllerBuilderState extends State<HudControllerBuilder> {
   @override
   void dispose() {
     final controller = _controller;
-    final repository = _repository;
+    final repositoryLease = _repositoryLease;
     _controller = null;
-    _repository = null;
+    _repositoryLease = null;
     if (controller != null) {
       controller.removeListener(_handleControllerChanged);
       unawaited(controller.clear());
       controller.dispose();
     }
-    if (repository != null) {
-      unawaited(repository.dispose());
+    if (repositoryLease != null) {
+      unawaited(repositoryLease.release());
     }
     super.dispose();
   }
 
   void _createBinding() {
-    final repository = HudModule.createRepository(
+    final repositoryLease = HudModule.acquireSharedRepository(
       sshService: widget.sshService,
     );
     final controller = HudModule.createController(
-      repository: repository,
+      repository: repositoryLease.repository,
     );
     controller.addListener(_handleControllerChanged);
-    _repository = repository;
+    _repositoryLease = repositoryLease;
     _controller = controller;
     unawaited(_bindCurrent());
   }
 
   void _recreateBinding() {
     final oldController = _controller;
-    final oldRepository = _repository;
+    final oldRepositoryLease = _repositoryLease;
     _controller = null;
-    _repository = null;
+    _repositoryLease = null;
     if (oldController != null) {
       oldController.removeListener(_handleControllerChanged);
       unawaited(oldController.clear());
       oldController.dispose();
     }
-    if (oldRepository != null) {
-      unawaited(oldRepository.dispose());
+    if (oldRepositoryLease != null) {
+      unawaited(oldRepositoryLease.release());
     }
     _createBinding();
   }

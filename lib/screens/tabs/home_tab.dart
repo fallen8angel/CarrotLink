@@ -298,22 +298,25 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
             )
             .clamp(220.0, 520.0)
             .toDouble();
+        final homeHudHeightCap = switch (window.windowClass) {
+          UiWindowClass.compact => viewportAwareHudCap.clamp(220.0, 360.0),
+          UiWindowClass.medium => viewportAwareHudCap.clamp(240.0, 390.0),
+          UiWindowClass.expanded => viewportAwareHudCap.clamp(260.0, 420.0),
+          UiWindowClass.large => viewportAwareHudCap.clamp(280.0, 450.0),
+          UiWindowClass.extraLarge => viewportAwareHudCap.clamp(300.0, 480.0),
+        }.toDouble();
+        final homePreviewProfile = HudLayoutProfile.fromConstraints(
+          BoxConstraints(
+            maxWidth: clampedHomeContentMaxWidth.isFinite
+                ? clampedHomeContentMaxWidth
+                : media.size.width - (tokens.screenPadding * 2),
+            maxHeight: homeHudHeightCap,
+          ),
+          surface: HudSurfaceVariant.homePreview,
+        );
         final hudPreviewMaxWidth = () {
-          if (!window.isLandscape) return clampedHomeContentMaxWidth;
-          final heightRatio = switch (window.windowClass) {
-            UiWindowClass.compact => 0.54,
-            UiWindowClass.medium => 0.50,
-            UiWindowClass.expanded => 0.48,
-            UiWindowClass.large => 0.46,
-            UiWindowClass.extraLarge => 0.44,
-          };
-          final capByHeight = math
-              .min(
-                media.size.height * heightRatio,
-                viewportAwareHudCap,
-              )
-              .clamp(220.0, 520.0)
-              .toDouble();
+          final capByHeight =
+              homeHudHeightCap * homePreviewProfile.preferredAspectRatio;
           return math.min(clampedHomeContentMaxWidth, capByHeight);
         }();
         final cardPadding = switch (window.windowClass) {
@@ -542,25 +545,15 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: () => _openWebRtcView(ssh),
-                  child: Column(
-                    children: [
-                      AdaptiveHudHost(
-                        enabled: _realtimeWorkEnabled,
-                        deviceIp: ssh.connectedIp ?? ssh.targetIp,
-                        surface: HudSurfaceVariant.homePreview,
-                        matchParentWidth: true,
-                        syncNativeOverlay: true,
-                      ),
-                      SizedBox(height: tokens.itemGap),
-                      Text(
-                        '탭해서 새 주행화면 열기',
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .onSurfaceVariant,
-                            ),
-                      ),
-                    ],
+                  child: SizedBox(
+                    width: hudPreviewMaxWidth,
+                    child: AdaptiveHudHost(
+                      enabled: _realtimeWorkEnabled,
+                      deviceIp: ssh.connectedIp ?? ssh.targetIp,
+                      surface: HudSurfaceVariant.homePreview,
+                      matchParentWidth: true,
+                      syncNativeOverlay: false,
+                    ),
                   ),
                 ),
               ),

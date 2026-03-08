@@ -6,15 +6,15 @@
 - home / drive / overlay / preview를 어떤 순서로 새 구조로 이관할지 정리한다.
 
 관련 문서:
-- [ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md](/d:/CarrotLink/CarrotLink-dev/docs/architecture/ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md)
-- [HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md](/d:/CarrotLink/CarrotLink-dev/docs/architecture/HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md)
-- [HUD_DATA_PIPELINE_REFACTOR_PLAN_2026-03-07_KO.md](/d:/CarrotLink/CarrotLink-dev/docs/architecture/HUD_DATA_PIPELINE_REFACTOR_PLAN_2026-03-07_KO.md)
-- [HUD_ADAPTIVE_LAYOUT_SPEC_2026-03-07_KO.md](/d:/CarrotLink/CarrotLink-dev/docs/architecture/HUD_ADAPTIVE_LAYOUT_SPEC_2026-03-07_KO.md)
-- [HUD_PROGRESS_HANDOFF_2026-03-07_1622_KO.md](/d:/CarrotLink/CarrotLink-dev/docs/architecture/HUD_PROGRESS_HANDOFF_2026-03-07_1622_KO.md)
+- [ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/hud/ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md)
+- [HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/hud/HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md)
+- [HUD_DATA_PIPELINE_REFACTOR_PLAN_2026-03-07_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/hud/HUD_DATA_PIPELINE_REFACTOR_PLAN_2026-03-07_KO.md)
+- [HUD_ADAPTIVE_LAYOUT_SPEC_2026-03-07_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/hud/HUD_ADAPTIVE_LAYOUT_SPEC_2026-03-07_KO.md)
+- [HUD_PROGRESS_HANDOFF_2026-03-07_1622_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/hud/HUD_PROGRESS_HANDOFF_2026-03-07_1622_KO.md)
 
 ## 최신 진행 현황
 - 기준 시각: 2026-03-07 16:22 KST
-- 최신 handoff 문서: [HUD_PROGRESS_HANDOFF_2026-03-07_1622_KO.md](/d:/CarrotLink/CarrotLink-dev/docs/architecture/HUD_PROGRESS_HANDOFF_2026-03-07_1622_KO.md)
+- 최신 handoff 문서: [HUD_PROGRESS_HANDOFF_2026-03-07_1622_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/hud/HUD_PROGRESS_HANDOFF_2026-03-07_1622_KO.md)
 - 구조 기준 진척: 약 90%
 - 실제 UX/UI polish 포함 진척: 약 80~85%
 
@@ -495,3 +495,5 @@ lib/features/hud/
 
 즉 다음 실제 코드 작업은
 **`lib/features/hud` skeleton 생성부터 시작하는 것이 맞다.**
+
+

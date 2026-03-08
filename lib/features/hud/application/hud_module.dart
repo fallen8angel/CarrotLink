@@ -10,7 +10,28 @@ import '../data/repositories/hud_repository_impl.dart';
 import '../domain/repositories/hud_repository.dart';
 import 'hud_controller.dart';
 
+class HudRepositoryLease {
+  final HudRepository repository;
+  final Future<void> Function() _release;
+  bool _released = false;
+
+  HudRepositoryLease._({
+    required this.repository,
+    required Future<void> Function() release,
+  }) : _release = release;
+
+  Future<void> release() async {
+    if (_released) return;
+    _released = true;
+    await _release();
+  }
+}
+
 class HudModule {
+  static final Object _nullSshKey = Object();
+  static final Map<Object, _HudRepositoryPoolEntry> _repositoryPool =
+      <Object, _HudRepositoryPoolEntry>{};
+
   static HudRepository createRepository({
     SSHService? sshService,
     HudRemoteStreamDataSource? remoteStreamDataSource,
@@ -41,6 +62,33 @@ class HudModule {
     );
   }
 
+  static HudRepositoryLease acquireSharedRepository({
+    SSHService? sshService,
+  }) {
+    final key = sshService ?? _nullSshKey;
+    final entry = _repositoryPool.putIfAbsent(
+      key,
+      () => _HudRepositoryPoolEntry(
+        repository: createRepository(sshService: sshService),
+      ),
+    );
+    entry.refCount += 1;
+    return HudRepositoryLease._(
+      repository: entry.repository,
+      release: () async {
+        final current = _repositoryPool[key];
+        if (current == null) {
+          return;
+        }
+        current.refCount -= 1;
+        if (current.refCount <= 0) {
+          _repositoryPool.remove(key);
+          await current.repository.dispose();
+        }
+      },
+    );
+  }
+
   static HudController createController({
     SSHService? sshService,
     HudRepository? repository,
@@ -49,4 +97,13 @@ class HudModule {
       repository ?? createRepository(sshService: sshService),
     );
   }
+}
+
+class _HudRepositoryPoolEntry {
+  final HudRepository repository;
+  int refCount = 0;
+
+  _HudRepositoryPoolEntry({
+    required this.repository,
+  });
 }

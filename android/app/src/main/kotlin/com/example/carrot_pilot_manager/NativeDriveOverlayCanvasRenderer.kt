@@ -25,6 +25,9 @@ internal class NativeDriveOverlayCanvasRenderer {
         payload: NativeDriveOverlayPayload?,
         drawWidth: Float,
         drawHeight: Float,
+        polygonAlphaMultiplier: Float = 1f,
+        strokeAlphaMultiplier: Float = 1f,
+        labelAlphaMultiplier: Float = 1f,
     ): Float {
         if (payload == null || payload.isEmpty) return 1f
         val srcWidth = if (payload.canvasWidth > 1f) payload.canvasWidth else drawWidth
@@ -43,22 +46,27 @@ internal class NativeDriveOverlayCanvasRenderer {
                 i += 2
             }
             reusablePath.close()
-            fillPaint.color = polygon.fillColor
+            fillPaint.color = withScaledAlpha(polygon.fillColor, polygonAlphaMultiplier)
             canvas.drawPath(reusablePath, fillPaint)
             if (polygon.strokeColor != null && polygon.strokeWidth > 0f) {
-                strokePaint.color = polygon.strokeColor
+                strokePaint.color = withScaledAlpha(polygon.strokeColor, strokeAlphaMultiplier)
                 strokePaint.strokeWidth = (polygon.strokeWidth * strokeScale).coerceAtLeast(1f)
                 canvas.drawPath(reusablePath, strokePaint)
             }
         }
 
         for (label in payload.labels) {
-            textPaint.color = label.color
+            textPaint.color = withScaledAlpha(label.color, labelAlphaMultiplier)
             textPaint.textSize = (label.size * strokeScale).coerceIn(8f, 28f)
             textPaint.setShadowLayer(3f, 0f, 0f, Color.BLACK)
             canvas.drawText(label.text, label.x * scaleX, label.y * scaleY, textPaint)
         }
 
         return strokeScale
+    }
+
+    private fun withScaledAlpha(color: Int, alphaMultiplier: Float): Int {
+        val alpha = (Color.alpha(color) * alphaMultiplier.coerceIn(0f, 1f)).toInt().coerceIn(0, 255)
+        return Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
     }
 }

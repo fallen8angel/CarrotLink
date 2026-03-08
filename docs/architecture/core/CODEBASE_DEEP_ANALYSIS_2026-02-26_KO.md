@@ -3,7 +3,7 @@
 최종 분석일: 2026-02-26  
 분석 대상 경로: `/mnt/e/CarrotLink/CarrotLink`
 
-이 문서는 CarrotLink 저장소 전체(앱 코드, 서비스 계층, 주요 화면, 운영 스크립트, 문서)의 구조를 정밀 분석한 결과를 정리한다. 기존 `docs/MASTER_DEVELOPMENT_GUIDE_KO.md`와 `docs/architecture/DEV_STRUCTURE_REFACTOR_2026-02-26.md`를 참고하되, 실제 코드 구현 기준으로 재확인한 내용 중심으로 작성했다.
+이 문서는 CarrotLink 저장소 전체(앱 코드, 서비스 계층, 주요 화면, 운영 스크립트, 문서)의 구조를 정밀 분석한 결과를 정리한다. 기존 `docs/MASTER_DEVELOPMENT_GUIDE_KO.md`와 `docs/architecture/core/DEV_STRUCTURE_REFACTOR_2026-02-26.md`를 참고하되, 실제 코드 구현 기준으로 재확인한 내용 중심으로 작성했다.
 
 ## 1. 한눈 요약
 
@@ -346,7 +346,7 @@
 
 평가:
 
-- 문서(`docs/architecture/DEV_STRUCTURE_REFACTOR_2026-02-26.md`)의 분리 의도가 실제 코드에도 잘 반영됨
+- 문서(`docs/architecture/core/DEV_STRUCTURE_REFACTOR_2026-02-26.md`)의 분리 의도가 실제 코드에도 잘 반영됨
 - 인증/키/저장/디스커버리/UI 책임이 비교적 명확
 
 ## 6. `ConnectionSettings` 워크플로우 정밀 분석
@@ -700,4 +700,5 @@ Windows 기준 운영 편의성이 잘 정리되어 있음:
 CarrotLink는 단순 SSH 유틸리티를 넘어, openpilot 장치 운영(연결/업데이트/Git/시스템 제어/백업/로그/파일 탐색)을 통합한 실사용 앱 구조를 갖추고 있다. 특히 `SSHService`, `DashboardScreen`, `ConnectionSettings`, `FileExplorerController`의 조합이 제품의 핵심 경쟁력을 형성한다.
 
 현재 가장 큰 과제는 "기능 추가"보다 "안전성/보안/복잡도 관리"이며, 이 문서의 우선순위 항목만 정리해도 유지보수 비용과 운영 리스크를 크게 낮출 수 있다.
+
 

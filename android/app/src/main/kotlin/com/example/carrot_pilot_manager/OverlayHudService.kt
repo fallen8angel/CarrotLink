@@ -543,7 +543,8 @@ class OverlayHudService : Service() {
     lastAppliedUiState = state
     mainHandler.post {
       val bindings = hudBindings ?: return@post
-      OverlayHudUiApplier.apply(bindings, state)
+      val renderState = OverlayHudUiCompactor.compress(state, currentOverlayLayoutProfile())
+      OverlayHudUiApplier.apply(bindings, renderState)
     }
   }
 

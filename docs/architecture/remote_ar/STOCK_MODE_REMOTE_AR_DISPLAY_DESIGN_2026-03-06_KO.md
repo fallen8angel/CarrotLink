@@ -399,11 +399,11 @@ AR 표시 설계는 다음 4층으로 나뉜다.
 
 ## 11. 참고 문서
 
-- `docs/architecture/STOCK_MODE_REMOTE_AR_MVP_EXECUTION_PLAN_2026-03-06_KO.md`
-- `docs/architecture/STOCK_MODE_REMOTE_AR_IMPLEMENTATION_CHECKLIST_2026-03-06_KO.md`
-- `docs/architecture/STOCK_MODE_REMOTE_AR_MAPPING_OPTIMIZATION_2026-03-06_KO.md`
-- `docs/architecture/TMAP_7712_CARROTPILOT_ANALYSIS_2026-03-06_KO.md`
-- `docs/architecture/STOCK_MODE_REMOTE_AR_FEASIBILITY_2026-03-06_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_MVP_EXECUTION_PLAN_2026-03-06_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_IMPLEMENTATION_CHECKLIST_2026-03-06_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_MAPPING_OPTIMIZATION_2026-03-06_KO.md`
+- `docs/architecture/carrotpilot/TMAP_7712_CARROTPILOT_ANALYSIS_2026-03-06_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_FEASIBILITY_2026-03-06_KO.md`
 
 공식 참고:
 - Flutter Platform Views
@@ -416,3 +416,4 @@ AR 표시 설계는 다음 4층으로 나뉜다.
   - https://developer.android.com/reference/android/media/MediaCodec
 - ARCore enable AR
   - https://developers.google.com/ar/develop/java/enable-arcore
+

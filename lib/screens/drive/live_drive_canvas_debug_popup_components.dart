@@ -1322,6 +1322,18 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                     onPressed: actionRunning
                                                         ? null
                                                         : () => runAction(
+                                                            _debugActionExportArReplay),
+                                                    icon: const Icon(Icons.file_download_outlined),
+                                                    label: const Text('AR 파일 저장'),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: OutlinedButton.icon(
+                                                    onPressed: actionRunning
+                                                        ? null
+                                                        : () => runAction(
                                                             _debugActionUseLatestArReplay),
                                                     icon: const Icon(Icons.play_circle_outline_rounded),
                                                     label: const Text('마지막 캡처 재생'),

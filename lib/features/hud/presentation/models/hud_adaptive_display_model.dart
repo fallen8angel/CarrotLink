@@ -1,6 +1,8 @@
 import '../../domain/entities/original_hud_snapshot.dart';
 
 class HudAdaptiveDisplayModel {
+  static const int _assistFreshnessMs = 2500;
+
   final String speedText;
   final String setSpeedText;
   final String gearText;
@@ -8,18 +10,26 @@ class HudAdaptiveDisplayModel {
   final String driveModeKind;
   final String tempLabel;
   final String tempSpeedText;
+  final bool showTempControl;
   final bool tempIsDecel;
   final String limitLabel;
   final String limitValueText;
+  final String limitDisplayText;
+  final bool showLimit;
   final bool limitCritical;
   final bool limitBlink;
   final String connectivityText;
+  final String connectivityDisplayText;
   final bool showConnectivity;
   final bool hasGpsFix;
   final String gpsText;
+  final bool showGpsBadge;
   final int gapBarCount;
   final String gapText;
+  final bool showGap;
   final String signalState;
+  final String signalDisplayText;
+  final bool showSignalState;
   final bool redDot;
   final String cpuText;
   final String memText;
@@ -33,7 +43,9 @@ class HudAdaptiveDisplayModel {
   final String qualityText;
   final String hostText;
   final String compatibilityHint;
+  final String compatibilityBadgeText;
   final bool showCompatibilityHint;
+  final bool isDegradedMeta;
   final int tsMonoMs;
 
   const HudAdaptiveDisplayModel({
@@ -44,18 +56,26 @@ class HudAdaptiveDisplayModel {
     required this.driveModeKind,
     required this.tempLabel,
     required this.tempSpeedText,
+    required this.showTempControl,
     required this.tempIsDecel,
     required this.limitLabel,
     required this.limitValueText,
+    required this.limitDisplayText,
+    required this.showLimit,
     required this.limitCritical,
     required this.limitBlink,
     required this.connectivityText,
+    required this.connectivityDisplayText,
     required this.showConnectivity,
     required this.hasGpsFix,
     required this.gpsText,
+    required this.showGpsBadge,
     required this.gapBarCount,
     required this.gapText,
+    required this.showGap,
     required this.signalState,
+    required this.signalDisplayText,
+    required this.showSignalState,
     required this.redDot,
     required this.cpuText,
     required this.memText,
@@ -69,11 +89,15 @@ class HudAdaptiveDisplayModel {
     required this.qualityText,
     required this.hostText,
     required this.compatibilityHint,
+    required this.compatibilityBadgeText,
     required this.showCompatibilityHint,
+    required this.isDegradedMeta,
     required this.tsMonoMs,
   });
 
   factory HudAdaptiveDisplayModel.fromSnapshot(OriginalHudSnapshot snapshot) {
+    final assistContext = _shouldShowAssistContext(snapshot);
+    final semanticLive = _isSemanticLive(snapshot);
     final auxIsVolt = snapshot.device.metricPrimaryMode == 'volt';
     final tempLabel = (snapshot.tempControl.label ?? snapshot.tempControl.mode)
         .trim()
@@ -81,35 +105,69 @@ class HudAdaptiveDisplayModel {
     final limitLabel = (snapshot.limits.label ?? snapshot.limits.mode)
         .trim()
         .toUpperCase();
+    final showTempControl = semanticLive &&
+        assistContext &&
+        snapshot.tempControl.mode != 'hidden' &&
+        ((_safeHasText(snapshot.tempControl.label)) ||
+            snapshot.tempControl.speedKph != null);
+    final showLimit = semanticLive &&
+        assistContext &&
+        snapshot.limits.mode != 'hidden' &&
+        snapshot.limits.displaySpeedKph != null;
+    final showGpsBadge = snapshot.gps.hasFix;
+    final gapValue = snapshot.gap.displayValue > 0
+        ? '${snapshot.gap.displayValue}'
+        : '--';
+    final showGap = semanticLive && assistContext && snapshot.gap.displayValue > 0;
+    final normalizedSignalState =
+        snapshot.signals.visualState.trim().toLowerCase();
+    final showSignalState = semanticLive &&
+        assistContext &&
+        (normalizedSignalState == 'red' ||
+            normalizedSignalState == 'green' ||
+            normalizedSignalState == 'yellow');
     final sourceText = _buildSourceText(snapshot);
     final qualityText = _buildQualityText(snapshot);
     final compatibilityHint = _buildCompatibilityHint(snapshot);
+    final compatibilityBadgeText = _buildCompatibilityBadgeText(snapshot);
+    final connectivityText = _buildConnectivityText(snapshot);
+    final showConnectivity =
+        semanticLive && assistContext && connectivityText.isNotEmpty;
+    final limitDisplayText = _buildLimitDisplayText(snapshot);
+    final signalDisplayText = _buildSignalDisplayText(snapshot);
     return HudAdaptiveDisplayModel(
       speedText: _formatInt(snapshot.vehicle.speedClusterKph),
       setSpeedText: _formatInt(snapshot.vehicle.setSpeedClusterKph),
       gearText: snapshot.vehicle.gearText.trim().isEmpty
           ? 'U'
           : snapshot.vehicle.gearText.trim(),
-      driveModeText: snapshot.driveMode.nameOriginal,
+      driveModeText: _buildDriveModeText(snapshot),
       driveModeKind: snapshot.driveMode.kind,
-      tempLabel: tempLabel.isEmpty ? 'apply' : tempLabel,
+      tempLabel: showTempControl ? (tempLabel.isEmpty ? 'apply' : tempLabel) : '',
       tempSpeedText: _formatInt(snapshot.tempControl.speedKph),
+      showTempControl: showTempControl,
       tempIsDecel: snapshot.tempControl.isDecel,
-      limitLabel: limitLabel.isEmpty ? 'LIMIT' : limitLabel,
+      limitLabel: showLimit
+          ? (limitLabel.isEmpty ? 'LIMIT' : limitLabel)
+          : '',
       limitValueText: _formatInt(snapshot.limits.displaySpeedKph),
+      limitDisplayText: limitDisplayText,
+      showLimit: showLimit,
       limitCritical: snapshot.limits.isOverLimit,
       limitBlink: snapshot.limits.shouldBlink,
-      connectivityText: (snapshot.connectivity.badgeLabel ?? '').trim(),
-      showConnectivity:
-          (snapshot.connectivity.badgeLabel ?? '').trim().isNotEmpty,
+      connectivityText: connectivityText,
+      connectivityDisplayText: connectivityText,
+      showConnectivity: showConnectivity,
       hasGpsFix: snapshot.gps.hasFix,
-      gpsText: snapshot.gps.hasFix ? 'GPS' : 'NO GPS',
+      gpsText: snapshot.gps.hasFix ? 'GPS' : '',
+      showGpsBadge: showGpsBadge,
       gapBarCount: snapshot.gap.barCount.clamp(0, 4),
-      gapText: snapshot.gap.displayValue > 0
-          ? '${snapshot.gap.displayValue}'
-          : '--',
+      gapText: gapValue,
+      showGap: showGap,
       signalState: snapshot.signals.visualState,
-      redDot: snapshot.signals.redDot,
+      signalDisplayText: signalDisplayText,
+      showSignalState: showSignalState,
+      redDot: semanticLive && assistContext && snapshot.signals.redDot,
       cpuText: _formatTemperature(snapshot.device.cpuTempAvgC),
       memText: _formatPercent(snapshot.device.memUsagePct),
       auxMetricLabel: auxIsVolt ? 'VOLT' : 'DISK',
@@ -124,12 +182,17 @@ class HudAdaptiveDisplayModel {
       qualityText: qualityText,
       hostText: (snapshot.source.deviceHost ?? '').trim(),
       compatibilityHint: compatibilityHint,
+      compatibilityBadgeText: compatibilityBadgeText,
       showCompatibilityHint: compatibilityHint.isNotEmpty,
+      isDegradedMeta: _isDegradedMeta(snapshot),
       tsMonoMs: snapshot.tsMonoMs,
     );
   }
 
   static String _buildSourceText(OriginalHudSnapshot snapshot) {
+    if (snapshot.tsMonoMs <= 0 && !snapshot.meta.isPreview) {
+      return 'STBY';
+    }
     if (snapshot.meta.isPreview) return 'PREVIEW';
     switch (snapshot.source.transport.trim().toLowerCase()) {
       case 'sidecar_hud':
@@ -164,6 +227,108 @@ class HudAdaptiveDisplayModel {
     return '';
   }
 
+  static String _buildDriveModeText(OriginalHudSnapshot snapshot) {
+    final raw = snapshot.driveMode.nameOriginal.trim().toUpperCase();
+    return switch (raw) {
+      'ECO' => '에코',
+      'SAFE' => '안전',
+      'FAST' => '고속',
+      _ => '일반',
+    };
+  }
+
+  static bool _shouldShowAssistContext(OriginalHudSnapshot snapshot) {
+    if (snapshot.meta.isPreview) return true;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final receivedAtMs = snapshot.source.receivedAtMs;
+    final isFresh = receivedAtMs == null ||
+        (nowMs - receivedAtMs).abs() <= _assistFreshnessMs;
+    final speedClusterKph = snapshot.vehicle.speedClusterKph ?? 0.0;
+    final hasMotionContext = speedClusterKph > 1.0;
+    return isFresh &&
+        (snapshot.vehicle.longActive || snapshot.vehicle.latActive || hasMotionContext);
+  }
+
+  static bool _isSemanticLive(OriginalHudSnapshot snapshot) {
+    if (snapshot.meta.isPreview) return false;
+    final transport = snapshot.source.transport.trim().toLowerCase();
+    if (transport != 'sidecar_hud') return false;
+    final quality = snapshot.meta.quality.trim().toLowerCase();
+    if (quality.isNotEmpty && quality != 'live') return false;
+    final receivedAtMs = snapshot.source.receivedAtMs;
+    if (receivedAtMs == null) return false;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    return (nowMs - receivedAtMs).abs() <= _assistFreshnessMs;
+  }
+
+  static String _buildLimitDisplayText(OriginalHudSnapshot snapshot) {
+    final speedText = _formatInt(snapshot.limits.displaySpeedKph);
+    final rawLabel = (snapshot.limits.label ?? '').trim();
+    final upperLabel = rawLabel.toUpperCase();
+    final isSection = rawLabel.contains('구간') ||
+        upperLabel.contains('SECTION') ||
+        upperLabel.contains('AVG');
+    final baseLabel = snapshot.limits.isOverLimit
+        ? '과속중'
+        : isSection
+            ? '구간'
+            : snapshot.limits.mode == 'camera'
+                ? 'CAM'
+                : 'LIMIT';
+    if (snapshot.limits.displaySpeedKph == null) {
+      return '$baseLabel --';
+    }
+    return '$baseLabel $speedText';
+  }
+
+  static String _buildConnectivityText(OriginalHudSnapshot snapshot) {
+    final badge = (snapshot.connectivity.badgeLabel ?? '').trim().toUpperCase();
+    final mode = snapshot.connectivity.badgeMode.trim().toLowerCase();
+    if (badge == 'APN' || mode == 'apn') return 'APN';
+    if (badge == 'APM' || mode == 'apm') return 'APM';
+    return '';
+  }
+
+  static String _buildSignalDisplayText(OriginalHudSnapshot snapshot) {
+    final normalized = snapshot.signals.visualState.trim().toLowerCase();
+    return switch (normalized) {
+      'red' => '적색',
+      'green' => '녹색',
+      'yellow' => '황색',
+      _ => '없음',
+    };
+  }
+
+  static String _buildCompatibilityBadgeText(OriginalHudSnapshot snapshot) {
+    final missingCount = snapshot.meta.missingFields.length;
+    if (missingCount > 0) {
+      return '$missingCount miss';
+    }
+    if (snapshot.meta.isFallbackMetricsApplied) {
+      return 'fallback';
+    }
+    return '';
+  }
+
+  static bool _isDegradedMeta(OriginalHudSnapshot snapshot) {
+    if (snapshot.meta.isPreview) return true;
+
+    final transport = snapshot.source.transport.trim().toLowerCase();
+    if (transport == 'legacy_ws_carstate' ||
+        transport == 'ssh_fallback' ||
+        transport == 'fallback') {
+      return true;
+    }
+
+    final quality = snapshot.meta.quality.trim().toLowerCase();
+    if (quality.isNotEmpty && quality != 'live') {
+      return true;
+    }
+
+    return snapshot.meta.missingFields.isNotEmpty ||
+        snapshot.meta.isFallbackMetricsApplied;
+  }
+
   static String _formatInt(double? value) {
     if (value == null) return '--';
     return '${value.round()}';
@@ -183,4 +348,6 @@ class HudAdaptiveDisplayModel {
     if (value == null) return '--.-V';
     return '${value.toStringAsFixed(1)}V';
   }
+
+  static bool _safeHasText(String? value) => (value ?? '').trim().isNotEmpty;
 }

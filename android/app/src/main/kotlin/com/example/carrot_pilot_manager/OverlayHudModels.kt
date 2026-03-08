@@ -1,5 +1,11 @@
 package com.example.carrot_pilot_manager
 
+internal enum class OverlayHudMetaMode {
+  Tiny,
+  Compact,
+  Full,
+}
+
 internal data class OverlayHudLayoutProfile(
     val wide: Boolean,
     val minWidthDp: Int,
@@ -18,6 +24,7 @@ internal data class OverlayHudLayoutProfile(
     val sectionGapDp: Int,
     val showMetricsRow: Boolean,
     val showDetailLine: Boolean,
+    val metaMode: OverlayHudMetaMode,
 )
 
 internal data class OverlayHudUiState(
@@ -35,14 +42,20 @@ internal data class OverlayHudUiState(
     val tempSourceText: String,
     val tempSpeedText: String,
     val tempIsDecel: Boolean,
+    val gapText: String,
     val limitText: String,
     val limitOver: Boolean,
+    val connectivityText: String,
     val modeText: String,
     val modeKind: String,
     val tfBars: Int,
     val signalState: String,
     val redDot: Boolean,
     val statusText: String,
+    val qualityText: String = "",
+    val hostText: String = "",
+    val compatibilityHint: String = "",
+    val compatibilityBadgeText: String = "",
 )
 
 internal enum class OverlayHudPayloadKind {

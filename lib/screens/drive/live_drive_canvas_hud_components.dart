@@ -6,11 +6,11 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
     required bool wide,
   }) {
     return switch (window.windowClass) {
-      UiWindowClass.compact => wide ? 1.66 : 1.0,
-      UiWindowClass.medium => wide ? 1.78 : 1.04,
-      UiWindowClass.expanded => wide ? 1.84 : 1.08,
-      UiWindowClass.large => wide ? 1.9 : 1.1,
-      UiWindowClass.extraLarge => wide ? 1.94 : 1.12,
+      UiWindowClass.compact => wide ? 1.24 : 0.92,
+      UiWindowClass.medium => wide ? 1.30 : 0.96,
+      UiWindowClass.expanded => wide ? 1.36 : 1.00,
+      UiWindowClass.large => wide ? 1.42 : 1.04,
+      UiWindowClass.extraLarge => wide ? 1.46 : 1.06,
     };
   }
 
@@ -407,27 +407,27 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
   ) {
     final base = math.min(drawSize.width, drawSize.height);
     final ratio = switch (window.windowClass) {
-      UiWindowClass.compact => 0.23,
-      UiWindowClass.medium => 0.22,
-      UiWindowClass.expanded => 0.21,
-      UiWindowClass.large => 0.2,
-      UiWindowClass.extraLarge => 0.19,
+      UiWindowClass.compact => 0.30,
+      UiWindowClass.medium => 0.29,
+      UiWindowClass.expanded => 0.28,
+      UiWindowClass.large => 0.27,
+      UiWindowClass.extraLarge => 0.26,
     };
     final minSize = switch (window.windowClass) {
-      UiWindowClass.compact => 150.0,
-      UiWindowClass.medium => 162.0,
-      UiWindowClass.expanded => 174.0,
-      UiWindowClass.large => 186.0,
-      UiWindowClass.extraLarge => 198.0,
+      UiWindowClass.compact => 184.0,
+      UiWindowClass.medium => 196.0,
+      UiWindowClass.expanded => 208.0,
+      UiWindowClass.large => 220.0,
+      UiWindowClass.extraLarge => 232.0,
     };
     final maxSize = switch (window.windowClass) {
-      UiWindowClass.compact => 248.0,
-      UiWindowClass.medium => 268.0,
-      UiWindowClass.expanded => 288.0,
-      UiWindowClass.large => 308.0,
-      UiWindowClass.extraLarge => 328.0,
+      UiWindowClass.compact => 304.0,
+      UiWindowClass.medium => 324.0,
+      UiWindowClass.expanded => 344.0,
+      UiWindowClass.large => 364.0,
+      UiWindowClass.extraLarge => 384.0,
     };
-    final viewportCap = drawSize.height * 0.34;
+    final viewportCap = drawSize.height * 0.44;
     final upperBound = math.max(minSize, math.min(maxSize, viewportCap));
     return (base * ratio).clamp(minSize, upperBound).toDouble();
   }

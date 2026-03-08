@@ -16,8 +16,17 @@
 - anchor smoothing / render smoothing / policy / retention / stabilize
 - AR scene 진단 팝업
 - AR scene capture / replay
+- AR session 자동 저장
+- 주행 후 분석용 session/timeline 파일 기록
+- 시각 강조형 AR 표현 강화
 
 즉, 코드 구조와 디버그 도구는 준비된 상태다. 내일부터 필요한 것은 실제 주행 장면에서 입력이 들어올 때 어떤 값이 올라오는지 확인하는 것이다.
+
+현재 판단:
+
+- live scene 입력 경로는 꽤 준비됨
+- 자동 저장도 준비됨
+- 남은 핵심은 "화면에서 AR답게 체감되느냐"를 실제 장면으로 검증하는 것
 
 ## 2. 지금 당장 안 되는 것
 
@@ -74,6 +83,10 @@
 
 - `Native AR scene 전송` 켜기
 - 필요하면 기존 overlay 디버그는 그대로 둬도 됨
+- 현재 구현은 replay/session을 `AR 파일 저장`으로 수동 export 가능
+- 자동 최신 세션 파일은 가능하면 `/storage/emulated/0/CarrotLink/logs/ar_scene/session_latest.json`에 기록됨
+- 자동 세션 폴더는 가능하면 `/storage/emulated/0/CarrotLink/logs/ar_scene/session_<timestamp>_<host>/` 아래에 생성됨
+- 세션 폴더에는 최소 `session_meta.json`, `timeline.ndjson`가 누적됨
 
 ### 5.3 AR scene 상태 확인
 
@@ -90,6 +103,7 @@
 - `[local payload]`가 `null`이 아님
 - `[native payload]`가 `null`이 아님
 - `[native render summary]`가 `-`가 아님
+- `replaySessionDir` 또는 `replayTimelinePath`가 `-`가 아님
 
 ### 5.4 첫 캡처 저장
 
@@ -99,6 +113,11 @@ scene 이 살아 있으면 바로 `AR 캡처 저장`을 누른다.
 
 - 토스트에 `AR 캡처 저장 완료 (...)`
 - 이후 `AR scene 보기`에서 `replayStatus=captures=N`
+
+원하면 이어서:
+
+- `AR 파일 저장` 버튼으로 타임스탬프 JSON export 저장
+- 종료 직전/백그라운드 전환 시 자동 flush가 한 번 더 수행됨
 
 ### 5.5 replay 확인
 
@@ -191,7 +210,15 @@ replay 확인 후에는 `AR 재생 종료`를 눌러 다시 live 상태로 돌�
 - `AR scene 보기` 스크린샷 2장 이상
 - `local payload` 또는 `native render summary` 내용
 - `AR 캡처 저장` 성공 여부
+- 가능하면 `AR 파일 저장` 결과 파일 1개
+- 가능하면 `session_meta.json` 또는 `timeline.ndjson` 1세트
 - 어떤 장면에서 scene 이 비거나 약해졌는지 짧은 메모
+
+추가로, 사용자가 별도 복잡한 조작을 하지 않아도 된다.
+
+- 기본적으로는 주행만 하고 오면 됨
+- 자동 저장이 켜져 있으므로 종료 후 `logs/ar_scene`만 확보하면 됨
+- 수동 버튼은 `AR 파일 저장`이 있으면 더 좋지만 필수는 아님
 
 특히 아래 중 하나면 좋다.
 
@@ -219,6 +246,7 @@ replay 확인 후에는 `AR 재생 종료`를 눌러 다시 live 상태로 돌�
 종료 전:
 
 - `AR scene 보기` 스크린샷 저장
+- 가능하면 `/storage/emulated/0/CarrotLink/logs/ar_scene/` 아래 최신 `session_<...>` 폴더 경로 확인
 - 문제 장면 메모
 
 ## 10. 권장 판단 기준
@@ -231,9 +259,23 @@ replay 확인 후에는 `AR 재생 종료`를 눌러 다시 live 상태로 돌�
 
 즉 내일 목표는 "완성형 AR 품질 확인"이 아니라 "실기기 입력 경로 확인과 캡처 확보"다.
 
-## 11. 관련 문서
+## 11. 주행 후 개발자에게 전달할 것
 
-- `docs/architecture/STOCK_MODE_REMOTE_AR_FEASIBILITY_2026-03-06_KO.md`
-- `docs/architecture/STOCK_MODE_REMOTE_AR_HANDOFF_2026-03-07_KO.md`
-- `docs/architecture/STOCK_MODE_REMOTE_AR_MVP_EXECUTION_PLAN_2026-03-06_KO.md`
-- `docs/architecture/STOCK_MODE_REMOTE_AR_IMPLEMENTATION_CHECKLIST_2026-03-06_KO.md`
+주행 후 개발자에게 전달할 최소 항목은 아래다.
+
+- 최신 `session_<...>` 폴더 경로
+- `AR scene 보기` 스크린샷 1~2장
+- 실제 화면 체감 메모
+  - 잘 보였는지
+  - 보이긴 했는데 AR 같지 않았는지
+  - 특정 장면에서 사라졌는지
+
+이 3가지만 있으면 다음 튜닝을 이어갈 수 있다.
+
+## 12. 관련 문서
+
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_FEASIBILITY_2026-03-06_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_HANDOFF_2026-03-07_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_MVP_EXECUTION_PLAN_2026-03-06_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_REMOTE_AR_IMPLEMENTATION_CHECKLIST_2026-03-06_KO.md`
+

@@ -20,6 +20,7 @@ class HudLayoutProfile {
   final bool wide;
   final double preferredAspectRatio;
   final double borderRadius;
+  final double dockInset;
   final EdgeInsets padding;
   final double sectionGap;
   final double metricGap;
@@ -41,6 +42,7 @@ class HudLayoutProfile {
     required this.wide,
     required this.preferredAspectRatio,
     required this.borderRadius,
+    required this.dockInset,
     required this.padding,
     required this.sectionGap,
     required this.metricGap,
@@ -67,11 +69,19 @@ class HudLayoutProfile {
             : width / 1.76;
     final shortest = width < height ? width : height;
     final aspect = width / (height <= 0 ? 1 : height);
-    final density = shortest < 190
+    final heightWeightedShortest = (() {
+      final heightBudget = switch (surface) {
+        HudSurfaceVariant.driveOverlay => height * 0.76,
+        HudSurfaceVariant.driveInline => height * 0.84,
+        _ => height,
+      };
+      return shortest < heightBudget ? shortest : heightBudget;
+    })();
+    final density = heightWeightedShortest < 190
         ? HudDensityClass.micro
-        : shortest < 280
+        : heightWeightedShortest < 280
             ? HudDensityClass.compact
-            : shortest < 420
+            : heightWeightedShortest < 420
                 ? HudDensityClass.regular
                 : HudDensityClass.spacious;
     final wideThreshold = switch (surface) {
@@ -89,30 +99,31 @@ class HudLayoutProfile {
           surface: surface,
           wide: false,
           preferredAspectRatio: switch (surface) {
-            HudSurfaceVariant.driveOverlay => 1.86,
-            HudSurfaceVariant.driveInline => 1.74,
-            HudSurfaceVariant.preview => 1.64,
-            HudSurfaceVariant.homePreview => 1.58,
+            HudSurfaceVariant.driveOverlay => 1.14,
+            HudSurfaceVariant.driveInline => 1.08,
+            HudSurfaceVariant.preview => 1.28,
+            HudSurfaceVariant.homePreview => 0.92,
           },
           borderRadius: 18,
-          padding: const EdgeInsets.all(12),
-          sectionGap: 10,
-          metricGap: 8,
-          speedFontSize: 58,
-          primaryValueFontSize: 26,
-          secondaryValueFontSize: 18,
-          labelFontSize: 11,
-          chipFontSize: 10,
-          gearFontSize: 30,
+          dockInset: surface == HudSurfaceVariant.driveOverlay ? 4 : 6,
+          padding: const EdgeInsets.all(13),
+          sectionGap: 11,
+          metricGap: 9,
+          speedFontSize: 74,
+          primaryValueFontSize: 34,
+          secondaryValueFontSize: 24,
+          labelFontSize: 13.5,
+          chipFontSize: 12.5,
+          gearFontSize: 38,
           showMetrics: true,
-          showTopStatusRow: surface != HudSurfaceVariant.homePreview,
-          showFooterDetails: surface == HudSurfaceVariant.homePreview,
+          showTopStatusRow: true,
+          showFooterDetails: true,
           useThreeColumnMainRow: false,
           maxWidth: switch (surface) {
-            HudSurfaceVariant.driveOverlay => 420.0,
-            HudSurfaceVariant.driveInline => 380.0,
-            HudSurfaceVariant.preview => 360.0,
-            HudSurfaceVariant.homePreview => 340.0,
+            HudSurfaceVariant.driveOverlay => 452.0,
+            HudSurfaceVariant.driveInline => 404.0,
+            HudSurfaceVariant.preview => 384.0,
+            HudSurfaceVariant.homePreview => 360.0,
           },
         );
       case HudDensityClass.compact:
@@ -121,31 +132,32 @@ class HudLayoutProfile {
           surface: surface,
           wide: wide,
           preferredAspectRatio: switch (surface) {
-            HudSurfaceVariant.driveOverlay => wide ? 1.94 : 1.32,
-            HudSurfaceVariant.driveInline => wide ? 1.76 : 1.08,
-            HudSurfaceVariant.preview => wide ? 1.72 : 1.02,
-            HudSurfaceVariant.homePreview => wide ? 1.66 : 1.0,
+            HudSurfaceVariant.driveOverlay => wide ? 1.16 : 0.94,
+            HudSurfaceVariant.driveInline => wide ? 1.08 : 0.80,
+            HudSurfaceVariant.preview => wide ? 1.30 : 0.90,
+            HudSurfaceVariant.homePreview => wide ? 0.98 : 0.88,
           },
           borderRadius: 20,
-          padding: const EdgeInsets.all(14),
-          sectionGap: 12,
-          metricGap: 9,
-          speedFontSize: 70,
-          primaryValueFontSize: 29,
-          secondaryValueFontSize: 20,
-          labelFontSize: 12,
-          chipFontSize: 11,
-          gearFontSize: 36,
+          dockInset: surface == HudSurfaceVariant.driveOverlay ? 6 : 8,
+          padding: const EdgeInsets.all(16),
+          sectionGap: 13,
+          metricGap: 10,
+          speedFontSize: 90,
+          primaryValueFontSize: 38,
+          secondaryValueFontSize: 26,
+          labelFontSize: 14.5,
+          chipFontSize: 13.5,
+          gearFontSize: 46,
           showMetrics: true,
           showTopStatusRow: true,
           showFooterDetails: surface != HudSurfaceVariant.driveOverlay,
           useThreeColumnMainRow:
               wide && surface != HudSurfaceVariant.driveInline,
           maxWidth: switch (surface) {
-            HudSurfaceVariant.driveOverlay => 500.0,
-            HudSurfaceVariant.driveInline => 440.0,
-            HudSurfaceVariant.preview => 420.0,
-            HudSurfaceVariant.homePreview => 400.0,
+            HudSurfaceVariant.driveOverlay => 540.0,
+            HudSurfaceVariant.driveInline => 476.0,
+            HudSurfaceVariant.preview => 452.0,
+            HudSurfaceVariant.homePreview => 428.0,
           },
         );
       case HudDensityClass.regular:
@@ -154,30 +166,31 @@ class HudLayoutProfile {
           surface: surface,
           wide: wide,
           preferredAspectRatio: switch (surface) {
-            HudSurfaceVariant.driveOverlay => wide ? 2.06 : 1.46,
-            HudSurfaceVariant.driveInline => wide ? 1.88 : 1.18,
-            HudSurfaceVariant.preview => wide ? 1.84 : 1.12,
-            HudSurfaceVariant.homePreview => wide ? 1.78 : 1.08,
+            HudSurfaceVariant.driveOverlay => wide ? 1.20 : 0.98,
+            HudSurfaceVariant.driveInline => wide ? 1.10 : 0.84,
+            HudSurfaceVariant.preview => wide ? 1.36 : 0.96,
+            HudSurfaceVariant.homePreview => wide ? 1.02 : 0.92,
           },
           borderRadius: 24,
-          padding: const EdgeInsets.all(18),
-          sectionGap: 14,
-          metricGap: 10,
-          speedFontSize: 86,
-          primaryValueFontSize: 34,
-          secondaryValueFontSize: 24,
-          labelFontSize: 13,
-          chipFontSize: 11.5,
-          gearFontSize: 44,
+          dockInset: surface == HudSurfaceVariant.driveOverlay ? 8 : 10,
+          padding: const EdgeInsets.all(20),
+          sectionGap: 15,
+          metricGap: 11,
+          speedFontSize: 110,
+          primaryValueFontSize: 45,
+          secondaryValueFontSize: 31,
+          labelFontSize: 15.5,
+          chipFontSize: 14.5,
+          gearFontSize: 56,
           showMetrics: true,
           showTopStatusRow: true,
           showFooterDetails: surface != HudSurfaceVariant.driveOverlay,
           useThreeColumnMainRow: wide,
           maxWidth: switch (surface) {
-            HudSurfaceVariant.driveOverlay => 620.0,
-            HudSurfaceVariant.driveInline => 560.0,
-            HudSurfaceVariant.preview => 520.0,
-            HudSurfaceVariant.homePreview => 500.0,
+            HudSurfaceVariant.driveOverlay => 670.0,
+            HudSurfaceVariant.driveInline => 604.0,
+            HudSurfaceVariant.preview => 560.0,
+            HudSurfaceVariant.homePreview => 536.0,
           },
         );
       case HudDensityClass.spacious:
@@ -186,30 +199,31 @@ class HudLayoutProfile {
           surface: surface,
           wide: wide,
           preferredAspectRatio: switch (surface) {
-            HudSurfaceVariant.driveOverlay => wide ? 2.18 : 1.54,
-            HudSurfaceVariant.driveInline => wide ? 2.0 : 1.22,
-            HudSurfaceVariant.preview => wide ? 1.98 : 1.16,
-            HudSurfaceVariant.homePreview => wide ? 1.94 : 1.12,
+            HudSurfaceVariant.driveOverlay => wide ? 1.26 : 1.02,
+            HudSurfaceVariant.driveInline => wide ? 1.16 : 0.90,
+            HudSurfaceVariant.preview => wide ? 1.44 : 1.00,
+            HudSurfaceVariant.homePreview => wide ? 1.08 : 0.96,
           },
           borderRadius: 28,
-          padding: const EdgeInsets.all(22),
-          sectionGap: 16,
-          metricGap: 12,
-          speedFontSize: 100,
-          primaryValueFontSize: 40,
-          secondaryValueFontSize: 28,
-          labelFontSize: 14,
-          chipFontSize: 12.5,
-          gearFontSize: 52,
+          dockInset: surface == HudSurfaceVariant.driveOverlay ? 10 : 12,
+          padding: const EdgeInsets.all(24),
+          sectionGap: 18,
+          metricGap: 13,
+          speedFontSize: 128,
+          primaryValueFontSize: 52,
+          secondaryValueFontSize: 36,
+          labelFontSize: 16.5,
+          chipFontSize: 15.5,
+          gearFontSize: 68,
           showMetrics: true,
           showTopStatusRow: true,
           showFooterDetails: surface != HudSurfaceVariant.driveOverlay,
           useThreeColumnMainRow: true,
           maxWidth: switch (surface) {
-            HudSurfaceVariant.driveOverlay => 760.0,
-            HudSurfaceVariant.driveInline => 680.0,
-            HudSurfaceVariant.preview => 640.0,
-            HudSurfaceVariant.homePreview => 620.0,
+            HudSurfaceVariant.driveOverlay => 820.0,
+            HudSurfaceVariant.driveInline => 734.0,
+            HudSurfaceVariant.preview => 690.0,
+            HudSurfaceVariant.homePreview => 668.0,
           },
         );
     }

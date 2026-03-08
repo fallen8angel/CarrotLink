@@ -225,6 +225,6 @@ lib/
 ## 12. 문서 운영 규칙
 
 - 구조 변경 시 이 문서를 같은 날 갱신
-- 변경 보고서는 `docs/architecture/`에 누적
+- 변경 보고서는 `docs/architecture/<category>/`에 누적
 - 운영 명령/스크립트 변경은 `docs/operations/` 갱신
 

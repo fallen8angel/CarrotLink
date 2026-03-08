@@ -92,14 +92,25 @@ internal object OverlayHudPayloadParser {
                 tempSourceText = tempSource,
                 tempSpeedText = tempSpeed,
                 tempIsDecel = tempIsDecel,
+                gapText = if (tfBars > 0) "GAP ($tfBars)" else "GAP (--)",
                 limitText = "LIMIT $limit",
                 limitOver = limitOver,
+                connectivityText = "stock",
                 modeText = modeName,
                 modeKind = modeKind,
                 tfBars = tfBars,
                 signalState = "off",
                 redDot = false,
-                statusText = "연결됨 · ${context.hostIp ?: "-"}",
+                statusText = buildStatusText(
+                    sourceText = "COMPAT",
+                    hostLabel = context.hostIp,
+                    qualityText = "legacy",
+                    compatibilityHint = if (parsedCpu == null || parsedMem == null || parsedDisk == null) "metric fallback" else null,
+                ),
+                qualityText = "legacy",
+                hostText = context.hostIp.orEmpty(),
+                compatibilityHint = if (parsedCpu == null || parsedMem == null || parsedDisk == null) "metric fallback" else "",
+                compatibilityBadgeText = if (parsedCpu == null || parsedMem == null || parsedDisk == null) "fallback" else "",
             ),
     )
   }
@@ -157,6 +168,12 @@ internal object OverlayHudPayloadParser {
     val limitLabel = limits?.optString("label")?.takeIf { it.isNotBlank() } ?: "LIMIT"
     val limit = optDouble(limits, "displaySpeedKph")?.roundToInt()?.toString() ?: "--"
     val limitOver = limits?.optBoolean("isOverLimit", false) ?: false
+    val gapText = gap?.optInt("displayValue", 0)?.takeIf { it > 0 }?.let { "GAP ($it)" } ?: "GAP (--)"
+    val connectivity = obj.optJSONObject("connectivity")
+    val connectivityText = normalizeConnectivityText(
+        connectivity?.optString("badgeLabel"),
+        connectivity?.optString("badgeMode"),
+    )
 
     val visualState = signals?.optString("visualState", "off")?.lowercase(Locale.US) ?: "off"
     val redDot = signals?.optBoolean("redDot", false) ?: false
@@ -170,6 +187,11 @@ internal object OverlayHudPayloadParser {
       missingCount > 0 -> "$missingCount missing"
       meta?.optBoolean("isFallbackMetricsApplied", false) == true -> "metric fallback"
       else -> null
+    }
+    val compatibilityBadgeText = when {
+      missingCount > 0 -> "$missingCount miss"
+      meta?.optBoolean("isFallbackMetricsApplied", false) == true -> "fallback"
+      else -> ""
     }
 
     return OverlayHudParseResult(
@@ -200,14 +222,25 @@ internal object OverlayHudPayloadParser {
                 tempSourceText = tempSource,
                 tempSpeedText = tempSpeed,
                 tempIsDecel = tempIsDecel,
+                gapText = gapText,
                 limitText = "$limitLabel $limit",
                 limitOver = limitOver,
+                connectivityText = connectivityText,
                 modeText = modeName,
                 modeKind = modeKind,
                 tfBars = tfBars,
                 signalState = visualState,
                 redDot = redDot,
-                statusText = "연결됨 · ${hostLabel ?: "-"}",
+                statusText = buildStatusText(
+                    sourceText = sourceText,
+                    hostLabel = hostLabel,
+                    qualityText = qualityText,
+                    compatibilityHint = compatibilityHint,
+                ),
+                qualityText = qualityText,
+                hostText = hostLabel.orEmpty(),
+                compatibilityHint = compatibilityHint.orEmpty(),
+                compatibilityBadgeText = compatibilityBadgeText,
             ),
     )
   }
@@ -254,6 +287,41 @@ internal object OverlayHudPayloadParser {
         host?.trim()?.takeIf { it.isNotEmpty() },
         compatibilityHint?.trim()?.takeIf { it.isNotEmpty() },
     ).joinToString(" · ")
+  }
+
+  private fun buildStatusText(
+      sourceText: String,
+      hostLabel: String?,
+      qualityText: String?,
+      compatibilityHint: String?,
+  ): String {
+    val prefix = when (sourceText) {
+      "COMPAT" -> "호환 모드"
+      "FALLBACK" -> "Fallback"
+      "PREVIEW" -> "미리보기"
+      else -> {
+        val quality = qualityText?.trim()?.lowercase(Locale.US).orEmpty()
+        when {
+          quality.isNotEmpty() && quality != "live" -> "저하 모드"
+          compatibilityHint?.isNotBlank() == true -> "저하 모드"
+          else -> "연결됨"
+        }
+      }
+    }
+    return listOfNotNull(
+        prefix,
+        hostLabel?.trim()?.takeIf { it.isNotEmpty() },
+    ).joinToString(" · ")
+  }
+
+  private fun normalizeConnectivityText(label: String?, mode: String?): String {
+    val rawLabel = label?.trim()?.uppercase(Locale.US).orEmpty()
+    val rawMode = mode?.trim()?.lowercase(Locale.US).orEmpty()
+    return when {
+      rawLabel == "APN" || rawMode == "apn" -> "APN"
+      rawLabel == "APM" || rawMode == "apm" -> "APM"
+      else -> ""
+    }
   }
 
   private fun optDoubleAny(obj: JSONObject?, vararg keys: String): Double? {

@@ -7,9 +7,19 @@
 - 목표는 “모든 size class와 surface에서 같은 의미를 다른 밀도로 보여주는 HUD”다.
 
 관련 문서:
-- [ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md](/d:/CarrotLink/CarrotLink-dev/docs/architecture/ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md)
-- [HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md](/d:/CarrotLink/CarrotLink-dev/docs/architecture/HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md)
-- [HUD_DATA_PIPELINE_REFACTOR_PLAN_2026-03-07_KO.md](/d:/CarrotLink/CarrotLink-dev/docs/architecture/HUD_DATA_PIPELINE_REFACTOR_PLAN_2026-03-07_KO.md)
+- [ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/hud/ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md)
+- [HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/hud/HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md)
+- [HUD_DATA_PIPELINE_REFACTOR_PLAN_2026-03-07_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/hud/HUD_DATA_PIPELINE_REFACTOR_PLAN_2026-03-07_KO.md)
+- [HUD_CLUSTER_LAYOUT_VISUAL_GUIDE_2026-03-08_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/hud/HUD_CLUSTER_LAYOUT_VISUAL_GUIDE_2026-03-08_KO.md)
+
+주의:
+- 이 문서는 adaptive 일반 원칙 문서다.
+- 2026-03-08 기준 최신 시각 방향은 `원본 좌하단 HUD 클러스터 기반 재배치`이며, 실제 시각 구조와 색상 방향은 [HUD_CLUSTER_LAYOUT_VISUAL_GUIDE_2026-03-08_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/hud/HUD_CLUSTER_LAYOUT_VISUAL_GUIDE_2026-03-08_KO.md)를 우선 참고한다.
+- 현재 최신 레이아웃 키워드는 `상단 3분할 metric bar + 본문 좌측정보/우측정보 + 하단 상태바`다.
+- 상단: `CPU / MEM / VOLT(DISK)` 3분할 고정 바
+- 좌측정보: `현재속도` 메인 + `LIMIT / APN/APM/N/C`
+- 우측정보: `설정속도` 메인 + `tempControl / gap / gear`
+- 하단 상태바: `좌 red dot / 중앙 mode pill / 우 signal`
 
 ---
 
@@ -581,4 +591,6 @@ adaptive HUD는 아래 케이스를 모두 통과해야 한다.
 
 이 문서 기준으로 가면,
 기존처럼 화면마다 다른 비율 보정 코드를 누적하는 방향은 끊을 수 있다.
+
+
 

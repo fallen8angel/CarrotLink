@@ -6,9 +6,9 @@
 - 이 문서는 `원본 HUD 값 의미를 손상시키지 않는 데이터 파이프라인`을 설계하는 문서다.
 
 관련 문서:
-- [CARROTPILOT_ORIGINAL_ONROAD_HUD_ANALYSIS_2026-03-07_KO.md](/d:/CarrotLink/CarrotLink-dev/docs/architecture/CARROTPILOT_ORIGINAL_ONROAD_HUD_ANALYSIS_2026-03-07_KO.md)
-- [ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md](/d:/CarrotLink/CarrotLink-dev/docs/architecture/ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md)
-- [HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md](/d:/CarrotLink/CarrotLink-dev/docs/architecture/HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md)
+- [CARROTPILOT_ORIGINAL_ONROAD_HUD_ANALYSIS_2026-03-07_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/carrotpilot/CARROTPILOT_ORIGINAL_ONROAD_HUD_ANALYSIS_2026-03-07_KO.md)
+- [ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/hud/ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md)
+- [HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/hud/HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md)
 
 ---
 
@@ -136,7 +136,7 @@ preview / live / overlay는 **같은 snapshot consumer**가 된다.
 - `HudDeviceMetricsState`
 
 참조:
-- [HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md](/d:/CarrotLink/CarrotLink-dev/docs/architecture/HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md)
+- [HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/hud/HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md)
 
 ## 4-2. Data Source Layer
 목적:
@@ -424,7 +424,7 @@ fallback이 대신 의미를 만들면 안 된다.
 
 ## 단계 1. semantic spec 고정
 완료 기준:
-- [HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md](/d:/CarrotLink/CarrotLink-dev/docs/architecture/HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md) 확정
+- [HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/hud/HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md) 확정
 
 ## 단계 2. data pipeline 설계 고정
 완료 기준:
@@ -490,4 +490,6 @@ preview 전용 필드를 live HUD 타입에 섞기
 
 다음으로 이어질 문서는:
 - `HUD adaptive layout spec`
+
+
 

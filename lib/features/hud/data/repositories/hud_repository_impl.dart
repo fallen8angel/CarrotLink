@@ -5,8 +5,10 @@ import '../../domain/repositories/hud_repository.dart';
 import '../datasources/hud_fallback_metrics_data_source.dart';
 import '../datasources/hud_preview_data_source.dart';
 import '../datasources/hud_remote_stream_data_source.dart';
+import '../logging/hud_stream_log_writer.dart';
 import '../mappers/hud_snapshot_assembler.dart';
 import '../models/hud_fallback_metrics_sample.dart';
+import '../models/hud_remote_stream_event.dart';
 
 class HudRepositoryImpl implements HudRepository {
   final HudRemoteStreamDataSource remoteStreamDataSource;
@@ -89,15 +91,28 @@ class HudRepositoryImpl implements HudRepository {
 
   _HudLiveSession _ensureSession(String host) {
     return _sessions.putIfAbsent(host, () {
-      final controller = StreamController<OriginalHudSnapshot>.broadcast();
+      late final StreamController<OriginalHudSnapshot> controller;
+      controller = StreamController<OriginalHudSnapshot>.broadcast(
+        onCancel: () {
+          if (!controller.hasListener) {
+            unawaited(disposeHost(host));
+          }
+        },
+      );
       final session = _HudLiveSession(controller: controller);
+      session.logWriter = HudStreamLogWriter(host: host);
+      unawaited(session.logWriter?.logSessionStart());
 
       session.remoteSubscription = remoteStreamDataSource
           .watch(host: host)
-          .listen((rawPayload) {
+          .listen((event) {
+        unawaited(session.logWriter?.logRaw(event));
         final remoteSnapshot = snapshotAssembler.fromRemotePayload(
-          raw: rawPayload,
+          raw: event.payload,
           host: host,
+          endpointPort: event.port,
+          endpointPath: event.path,
+          receivedAtMs: event.receivedAtMs,
         );
         session.latestRemote = remoteSnapshot;
         final mergedSnapshot = snapshotAssembler.applyFallback(
@@ -106,10 +121,20 @@ class HudRepositoryImpl implements HudRepository {
         );
         session.latestMerged = mergedSnapshot;
         _latestByHost[host] = mergedSnapshot;
+        unawaited(
+          session.logWriter?.logMapped(snapshot: mergedSnapshot),
+        );
         if (!controller.isClosed) {
           controller.add(mergedSnapshot);
         }
       }, onError: (error, stackTrace) {
+        unawaited(
+          session.logWriter?.logError(
+            type: 'remote_stream_error',
+            error: error,
+            stackTrace: stackTrace,
+          ),
+        );
         final degraded = snapshotAssembler.degrade(
           host: host,
           base: session.latestMerged ?? session.latestRemote,
@@ -117,6 +142,9 @@ class HudRepositoryImpl implements HudRepository {
         );
         session.latestMerged = degraded;
         _latestByHost[host] = degraded;
+        unawaited(
+          session.logWriter?.logMapped(snapshot: degraded),
+        );
         if (!controller.isClosed) {
           controller.add(degraded);
           controller.addError(error, stackTrace);
@@ -137,10 +165,20 @@ class HudRepositoryImpl implements HudRepository {
           );
           session.latestMerged = mergedSnapshot;
           _latestByHost[host] = mergedSnapshot;
+          unawaited(
+            session.logWriter?.logMapped(snapshot: mergedSnapshot),
+          );
           if (!controller.isClosed) {
             controller.add(mergedSnapshot);
           }
         }, onError: (error, stackTrace) {
+          unawaited(
+            session.logWriter?.logError(
+              type: 'fallback_metrics_error',
+              error: error,
+              stackTrace: stackTrace,
+            ),
+          );
           if (!controller.isClosed) {
             controller.addError(error, stackTrace);
           }
@@ -154,7 +192,8 @@ class HudRepositoryImpl implements HudRepository {
 
 class _HudLiveSession {
   final StreamController<OriginalHudSnapshot> controller;
-  StreamSubscription<Map<String, dynamic>>? remoteSubscription;
+  StreamSubscription<HudRemoteStreamEvent>? remoteSubscription;
+  HudStreamLogWriter? logWriter;
   StreamSubscription<HudFallbackMetricsSample>? fallbackSubscription;
   OriginalHudSnapshot? latestRemote;
   OriginalHudSnapshot? latestMerged;
@@ -167,6 +206,7 @@ class _HudLiveSession {
   Future<void> dispose() async {
     await remoteSubscription?.cancel();
     await fallbackSubscription?.cancel();
+    await logWriter?.dispose();
     await controller.close();
   }
 }
