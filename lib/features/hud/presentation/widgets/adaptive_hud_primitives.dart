@@ -376,11 +376,16 @@ class AdaptiveHudSetSpeedPanel extends StatelessWidget {
         final height = constraints.maxHeight.isFinite
             ? constraints.maxHeight
             : 180.0;
-        final tight = height < 230 || width < 230;
-        final veryTight = height < 198 || width < 206;
-        final supportCompact = veryTight || width < 248;
+        final tight = height < 240 || width < 238;
+        final veryTight = height < 214 || width < 214;
+        final veryCompact = height < 286 || width < 244;
+        final supportCompact = veryTight || veryCompact || width < 252;
         final blockPadding = EdgeInsets.all(
-          (profile.padding.left * (tight ? 0.52 : 0.66)).clamp(8.0, 16.0),
+          (profile.padding.left *
+                  (veryCompact
+                      ? 0.46
+                      : (tight ? 0.52 : 0.66)))
+              .clamp(8.0, 16.0),
         );
         final tempLabelText =
             model.showTempControl ? model.tempLabel : 'TEMP';
@@ -447,14 +452,21 @@ class AdaptiveHudSetSpeedPanel extends StatelessWidget {
                   rightText: tempSpeedText,
                   profile: profile,
                   compact: supportCompact,
+                  veryCompact: veryCompact,
                 ),
-                SizedBox(height: profile.metricGap * (supportCompact ? 0.18 : 0.26)),
+                SizedBox(
+                  height: profile.metricGap *
+                      (veryCompact
+                          ? 0.10
+                          : (supportCompact ? 0.18 : 0.26)),
+                ),
                 _AdaptiveHudSupportDetailArea(
                   count: model.showGap ? model.gapBarCount : 0,
                   gapLabel: model.showGap ? model.gapText : '--',
                   gearText: hasGear ? model.gearText : '',
                   profile: profile,
                   compact: supportCompact,
+                  veryCompact: veryCompact,
                 ),
               ],
             ),
@@ -835,22 +847,65 @@ class _AdaptiveHudSupportLine extends StatelessWidget {
   final String rightText;
   final HudLayoutProfile profile;
   final bool compact;
+  final bool veryCompact;
 
   const _AdaptiveHudSupportLine({
     required this.leftText,
     required this.rightText,
     required this.profile,
     required this.compact,
+    required this.veryCompact,
   });
 
   @override
   Widget build(BuildContext context) {
-    final labelFontSize = compact
-        ? profile.chipFontSize + 0.4
-        : profile.labelFontSize + 1.8;
-    final valueFontSize = compact
-        ? profile.chipFontSize + 1.4
-        : profile.labelFontSize + 2.4;
+    final labelFontSize = veryCompact
+        ? profile.chipFontSize + 0.2
+        : compact
+            ? profile.chipFontSize + 0.4
+            : profile.labelFontSize + 1.8;
+    final valueFontSize = veryCompact
+        ? profile.chipFontSize + 0.9
+        : compact
+            ? profile.chipFontSize + 1.4
+            : profile.labelFontSize + 2.4;
+    if (veryCompact) {
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: <Widget>[
+          Expanded(
+            child: Text(
+              leftText,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: labelFontSize,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 0.18,
+                shadows: hudStrongTextShadows,
+              ),
+            ),
+          ),
+          SizedBox(width: profile.metricGap * 0.24),
+          Flexible(
+            child: Text(
+              rightText,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.right,
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.86),
+                fontSize: valueFontSize,
+                fontWeight: FontWeight.w900,
+                height: 1.0,
+                shadows: hudStrongTextShadows,
+              ),
+            ),
+          ),
+        ],
+      );
+    }
     if (compact) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -928,6 +983,7 @@ class _AdaptiveHudSupportDetailArea extends StatelessWidget {
   final String gearText;
   final HudLayoutProfile profile;
   final bool compact;
+  final bool veryCompact;
 
   const _AdaptiveHudSupportDetailArea({
     required this.count,
@@ -935,6 +991,7 @@ class _AdaptiveHudSupportDetailArea extends StatelessWidget {
     required this.gearText,
     required this.profile,
     required this.compact,
+    required this.veryCompact,
   });
 
   @override
@@ -943,14 +1000,26 @@ class _AdaptiveHudSupportDetailArea extends StatelessWidget {
       gearText: gearText,
       profile: profile,
       compact: compact,
+      veryCompact: veryCompact,
     );
     final gapWidget = _AdaptiveHudMiniGapStatus(
       count: count,
       label: gapLabel,
       profile: profile,
       compact: compact,
+      veryCompact: veryCompact,
       stacked: false,
     );
+    if (veryCompact) {
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: <Widget>[
+          Expanded(child: gapWidget),
+          SizedBox(width: profile.metricGap * 0.32),
+          gearWidget,
+        ],
+      );
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -971,6 +1040,7 @@ class _AdaptiveHudMiniGapStatus extends StatelessWidget {
   final String label;
   final HudLayoutProfile profile;
   final bool compact;
+  final bool veryCompact;
   final bool stacked;
 
   const _AdaptiveHudMiniGapStatus({
@@ -978,14 +1048,15 @@ class _AdaptiveHudMiniGapStatus extends StatelessWidget {
     required this.label,
     required this.profile,
     required this.compact,
+    required this.veryCompact,
     this.stacked = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final barCount = count.clamp(0, 4);
-    final activeHeight = compact ? 8.0 : 10.0;
-    final inactiveHeight = compact ? 3.0 : 4.0;
+    final activeHeight = veryCompact ? 7.0 : (compact ? 8.0 : 10.0);
+    final inactiveHeight = veryCompact ? 2.0 : (compact ? 3.0 : 4.0);
     final gapText = '(${label == '--' ? '--' : label})';
     final barRow = SizedBox(
       height: activeHeight,
@@ -1017,9 +1088,11 @@ class _AdaptiveHudMiniGapStatus extends StatelessWidget {
       textAlign: stacked ? TextAlign.left : TextAlign.right,
       style: TextStyle(
         color: Colors.white.withValues(alpha: 0.84),
-        fontSize: compact
-            ? profile.chipFontSize + 0.3
-            : profile.labelFontSize + 0.9,
+        fontSize: veryCompact
+            ? profile.chipFontSize - 0.4
+            : compact
+                ? profile.chipFontSize + 0.3
+                : profile.labelFontSize + 0.9,
         fontWeight: FontWeight.w900,
         letterSpacing: 0.16,
         shadows: hudStrongTextShadows,
@@ -1050,17 +1123,40 @@ class _AdaptiveHudMiniGearStatus extends StatelessWidget {
   final String gearText;
   final HudLayoutProfile profile;
   final bool compact;
+  final bool veryCompact;
 
   const _AdaptiveHudMiniGearStatus({
     required this.gearText,
     required this.profile,
     required this.compact,
+    required this.veryCompact,
   });
 
   @override
   Widget build(BuildContext context) {
     final hasGear = gearText.trim().isNotEmpty;
     final value = hasGear ? gearText.trim().toUpperCase() : '–';
+    if (veryCompact) {
+      return ConstrainedBox(
+        constraints: const BoxConstraints(minWidth: 20, maxWidth: 28),
+        child: Text(
+          value,
+          textAlign: TextAlign.center,
+          maxLines: 1,
+          overflow: TextOverflow.fade,
+          softWrap: false,
+          style: TextStyle(
+            color: Colors.white.withValues(alpha: hasGear ? 0.95 : 0.42),
+            fontSize: compact
+                ? profile.secondaryValueFontSize - 6.0
+                : profile.secondaryValueFontSize - 4.8,
+            fontWeight: FontWeight.w900,
+            height: 1.0,
+            shadows: hudStrongTextShadows,
+          ),
+        ),
+      );
+    }
     return ConstrainedBox(
       constraints: BoxConstraints(
         minWidth: compact ? 46 : 58,

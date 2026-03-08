@@ -99,8 +99,8 @@ class HudLayoutProfile {
           surface: surface,
           wide: false,
           preferredAspectRatio: switch (surface) {
-            HudSurfaceVariant.driveOverlay => 1.14,
-            HudSurfaceVariant.driveInline => 1.08,
+            HudSurfaceVariant.driveOverlay => 1.02,
+            HudSurfaceVariant.driveInline => 0.98,
             HudSurfaceVariant.preview => 1.28,
             HudSurfaceVariant.homePreview => 0.92,
           },
@@ -132,8 +132,8 @@ class HudLayoutProfile {
           surface: surface,
           wide: wide,
           preferredAspectRatio: switch (surface) {
-            HudSurfaceVariant.driveOverlay => wide ? 1.16 : 0.94,
-            HudSurfaceVariant.driveInline => wide ? 1.08 : 0.80,
+            HudSurfaceVariant.driveOverlay => wide ? 1.02 : 0.94,
+            HudSurfaceVariant.driveInline => wide ? 0.96 : 0.80,
             HudSurfaceVariant.preview => wide ? 1.30 : 0.90,
             HudSurfaceVariant.homePreview => wide ? 0.98 : 0.88,
           },
@@ -166,8 +166,8 @@ class HudLayoutProfile {
           surface: surface,
           wide: wide,
           preferredAspectRatio: switch (surface) {
-            HudSurfaceVariant.driveOverlay => wide ? 1.20 : 0.98,
-            HudSurfaceVariant.driveInline => wide ? 1.10 : 0.84,
+            HudSurfaceVariant.driveOverlay => wide ? 1.08 : 0.98,
+            HudSurfaceVariant.driveInline => wide ? 1.00 : 0.84,
             HudSurfaceVariant.preview => wide ? 1.36 : 0.96,
             HudSurfaceVariant.homePreview => wide ? 1.02 : 0.92,
           },

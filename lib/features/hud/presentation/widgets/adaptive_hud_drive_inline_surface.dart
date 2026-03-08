@@ -26,8 +26,18 @@ class AdaptiveHudDriveInlineSurface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final leftFlex = profile.wide ? 6 : 5;
-    final rightFlex = profile.wide ? 5 : 4;
+    final leftFlex = profile.wide
+        ? (profile.density == HudDensityClass.micro ||
+                profile.density == HudDensityClass.compact
+            ? 5
+            : 6)
+        : 5;
+    final rightFlex = profile.wide
+        ? (profile.density == HudDensityClass.micro ||
+                profile.density == HudDensityClass.compact
+            ? 5
+            : 5)
+        : 4;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
