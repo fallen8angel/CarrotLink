@@ -6,6 +6,11 @@
 
 이 문서는 CarrotLink의 stock/live drive 화면에서, 기존 sidecar는 수정하지 않고 현재 앱이 받아서 표시하는 원격 주행카메라 영상 위에 YOLO26 기반 객체감지를 추가할 수 있는지 검토한 결과를 정리한다.
 
+같이 봐야 하는 문서:
+
+- `STOCK_MODE_YOLO26_INTEGRATION_PLAN_2026-03-10_KO.md`
+- `STOCK_MODE_YOLO26_PROGRESS_HANDOFF_2026-03-10_KO.md`
+
 전제:
 - sidecar Python은 수정하지 않는다.
 - sidecar는 지금처럼 주행정보와 카메라 스트림만 제공한다.
@@ -18,10 +23,17 @@
 - 구현 가능: `예`
 - sidecar 수정 필요: `아니오`
 - 앱 내부 신규 구현 필요: `예`
-- 1차 권장 경로: `Android native 디코드 경로에 on-device inference 추가`
+- 1차 권장 경로: `Android native 디코드 경로 + ExecuTorch + QNN backend`
 - 1차 권장 모델: `YOLO26n`
 - 2차 선택 모델: `YOLO26s`
 - 1차 목표: `실시간 30fps full inference`가 아니라 `5~10Hz 감지 + 부드러운 overlay`
+
+2026-03-10 현재 구현 스냅샷:
+
+- Flutter/Android 사이 YOLO config bridge는 이미 구현됨
+- native video path 안에 `frame sampling`, `yolo_state`, `stub runtime` 골격이 있음
+- `SurfaceView -> PixelCopy -> 저해상도 bitmap` POC 경로까지는 연결됨
+- 아직 실제 ExecuTorch/QNN session, output parsing, overlay draw는 미구현
 
 핵심 판단은 단순하다.
 
@@ -136,14 +148,20 @@ YOLO box overlay를 위해 새로 만들 필요가 없는 stock 모드 자산도
 - 별도 저해상도 inference용 디코더 경로
 - 또는 GPU texture / image reader 기반 inference 경로
 
+2026-03-10 현재 구현 메모:
+
+- 1차 POC용으로는 `SurfaceView -> PixelCopy -> 저해상도 bitmap` 샘플러를 붙였다.
+- 이 경로는 기존 `MediaCodec -> SurfaceView` 파이프라인을 유지한 채 pixel path를 여는 데 유리하다.
+- 다만 최종형으로 고정할지는 아직 미정이며, latency/thermal 측정 후 유지 여부를 결정한다.
+
 ### 4.2 inference runtime 추가
 
 현재 앱엔 YOLO를 실행할 엔진이 없다. 따라서 아래 중 하나를 Android native에 추가해야 한다.
 
+- ExecuTorch + Qualcomm backend
 - LiteRT / TensorFlow Lite
 - ONNX Runtime Mobile
 - NCNN
-- ExecuTorch
 
 ### 4.3 detection 결과 bridge 추가
 
@@ -251,17 +269,17 @@ YOLO box overlay를 위해 새로 만들 필요가 없는 stock 모드 자산도
 
 - Ultralytics export: `ONNX`, `TensorFlow Lite`, `NCNN`, `ExecuTorch`
 - Android inference runtime 후보:
+  - `ExecuTorch + Qualcomm backend`
   - `LiteRT / TensorFlow Lite`
   - `ONNX Runtime Mobile + QNN`
   - `NCNN`
-  - `ExecuTorch + Qualcomm backend`
 
 ### 8.1 비교 대상 중 이번 범위에서 중요한 둘
 
 이번 요구사항에서 핵심 비교 대상은 아래 둘이다.
 
-- `ONNX Runtime Mobile + QNN`
 - `ExecuTorch + Qualcomm backend`
+- `ONNX Runtime Mobile + QNN`
 
 이유:
 
@@ -269,48 +287,55 @@ YOLO box overlay를 위해 새로 만들 필요가 없는 stock 모드 자산도
 - 성능이 부족한 기기는 자동 비활성화해도 된다.
 - 따라서 범용 fallback보다 `Qualcomm 최적화 path`의 실효성이 크다.
 
-### 8.2 `ONNX Runtime Mobile + QNN`이 가지는 장점
+### 8.2 `ExecuTorch + Qualcomm backend`가 가지는 장점
 
-- YOLO26는 공식적으로 `ONNX` export를 지원한다.
-- ONNX Runtime은 Android/mobile 통합 문서와 패키징 문서가 비교적 명확하다.
-- QNN Execution Provider는 Qualcomm NPU/HTP 가속 경로에 맞는다.
-- 현재 앱 구조는 Kotlin/Java 기반 native plugin이므로 ORT Mobile AAR 통합이 상대적으로 직선적이다.
-- 이번 기능은 학습이 아니라 `inference-only 2D detection`이므로 ORT의 장점이 잘 맞는다.
+- ExecuTorch Android는 공식 AAR와 Maven Central 통합 경로를 제공한다.
+- Qualcomm backend는 Qualcomm AI Engine Direct를 사용하며, 문서상 QNN으로도 표기된다.
+- 문서상 이 backend는 Hexagon processor 쪽으로 AI computation을 delegate 할 수 있다.
+- Qualcomm backend 가이드는 `torch.export`, quantization, QNN delegate lowering, ExecuTorch `.pte` export 흐름을 명시한다.
+- 문서상 지원 SoC 목록에 `SM8750 (Snapdragon 8 Elite)`도 포함되어 있다.
+- 이번 타깃 기기군이 Snapdragon 상위기기 중심이므로 방향성이 잘 맞는다.
 
-### 8.3 `ExecuTorch + Qualcomm backend`가 가지는 장점과 보류 이유
+### 8.3 `ExecuTorch + Qualcomm backend`의 주의점
 
-- Ultralytics는 `ExecuTorch` export도 제공한다.
-- ExecuTorch Qualcomm backend는 Qualcomm AI Engine Direct 경로를 사용한다.
-- 다만 현재 앱은 PyTorch 기반 런타임/모델 파이프라인이 전혀 없다.
-- 이번 기능의 핵심은 PyTorch graph 생태계보다 `Android stock video pipeline에 inference를 안정적으로 끼워 넣는 것`이다.
-- 현재 요구 범위에선 ExecuTorch의 이점보다 통합 복잡도와 검증 비용이 먼저 커질 가능성이 높다.
+- backend별 `.pte` 산출과 QNN SDK 버전 정합을 신경 써야 한다.
+- 지원되지 않는 연산은 QNN으로 완전히 내려가지 않을 수 있다.
+- 따라서 `NPU가 직접 계산한다`는 방향은 맞지만, 실제 전체 graph가 얼마나 QNN에 내려가는지는 모델 변환 결과와 벤치로 확인해야 한다.
+- 즉 성능 향상 가능성은 매우 높지만, 이 문서 단계에서 `폭발적으로 빨라진다`를 확정 사실로 적지는 않는다.
 
-### 8.4 1차 선택
+### 8.4 `ONNX Runtime Mobile + QNN`은 어떻게 보나
+
+- ORT + QNN도 여전히 유효한 대안이다.
+- 다만 이번 범위에선 `PyTorch -> torch.export -> ExecuTorch -> QNN backend` 흐름이 더 직접적이고, Qualcomm 최적화 경로도 더 선명하다.
+- 따라서 ORT + QNN은 2차 fallback / 비교 benchmark 대상으로 내린다.
+
+### 8.5 1차 선택
 
 이 문서의 1차 선택은 아래로 고정한다.
 
-- primary runtime: `ONNX Runtime Mobile + QNN`
+- primary runtime: `ExecuTorch + QNN backend`
 - primary model: `YOLO26n`
 - optional high-end model: `YOLO26s`
 
 선정 이유:
 
-- YOLO26 -> ONNX 경로가 직접적이다.
-- Qualcomm 상위기기 최적화 목적과 맞다.
-- 현재 Android native plugin 구조와 붙이기 쉽다.
+- PyTorch 계열 모델을 `torch.export` 기반으로 내보내는 흐름과 맞다.
+- Qualcomm AI Engine Direct / QNN backend 경로가 문서상 명시되어 있다.
+- Android AAR 통합 경로가 공식 문서상 분명하다.
+- Snapdragon 상위기기 타깃과 잘 맞는다.
 - unsupported device는 자동 비활성화 정책으로 처리할 수 있다.
 
-### 8.5 보류 및 fallback
+### 8.6 보류 및 fallback
 
-- `ExecuTorch`는 1차 보류
-- `LiteRT` / `NCNN`은 2차 fallback 후보로 문서화만 유지
+- `ONNX Runtime Mobile + QNN`은 2차 fallback / 비교 benchmark 후보
+- `LiteRT` / `NCNN`은 3차 fallback 후보로 문서화만 유지
 
 아래 조건이 생기면 재검토한다.
 
 - `S22 Exynos`까지 적극 지원해야 할 때
 - Qualcomm 외 기기 지원 범위를 넓혀야 할 때
-- ORT + QNN 실제 latency가 기대에 못 미칠 때
-- Ultralytics `ExecuTorch` export 쪽이 실제 기기 benchmark에서 더 우세할 때
+- ExecuTorch + QNN에서 graph lowering 비율이 낮을 때
+- ExecuTorch + QNN 실제 latency/thermal/jank가 기대에 못 미칠 때
 
 ## 9. 현재 문서 기준 비범위
 
@@ -333,7 +358,11 @@ YOLO box overlay를 위해 새로 만들 필요가 없는 stock 모드 자산도
 
 ## 11. 다음 문서로 분리할 항목
 
-이 문서는 feasibility 초안이다. 이후 아래 문서를 별도로 분리하는 것이 맞다.
+이 문서는 feasibility 초안이다. 상세 통합 방향은 아래 문서로 분리한다.
+
+- `docs/architecture/yolo/STOCK_MODE_YOLO26_INTEGRATION_PLAN_2026-03-10_KO.md`
+
+추가로 아래 문서를 이후 별도로 분리하는 것이 맞다.
 
 - `YOLO26 Android native integration plan`
 - `YOLO26 detection overlay payload spec`
@@ -348,16 +377,16 @@ YOLO box overlay를 위해 새로 만들 필요가 없는 stock 모드 자산도
   https://docs.ultralytics.com/models/yolo26/
 - Ultralytics export 문서  
   https://docs.ultralytics.com/modes/export/
-- ONNX Runtime Mobile  
-  https://onnxruntime.ai/docs/get-started/with-mobile.html
+- ExecuTorch Android  
+  https://docs.pytorch.org/executorch/stable/using-executorch-android.html
+- ExecuTorch Qualcomm backend  
+  https://docs.pytorch.org/executorch/stable/backends-qualcomm.html
 - ONNX Runtime QNN Execution Provider  
   https://onnxruntime.ai/docs/execution-providers/QNN-ExecutionProvider.html
 - Google LiteRT Android  
   https://ai.google.dev/edge/litert/android
 - Google LiteRT NPU 개요  
   https://ai.google.dev/edge/litert/next/npu
-- ExecuTorch Qualcomm backend 문서  
-  https://github.com/pytorch/executorch/blob/main/docs/source/backends-qualcomm.md
 - Samsung Galaxy S22 Ultra spec sheet  
   https://image-us.samsung.com/SamsungUS/samsungbusiness/pdfs/datasheet/Galaxy_S22_Ultra_Spec_Sheet.pdf
 - Samsung Galaxy S23 Series 공식 소개  
@@ -371,5 +400,6 @@ YOLO box overlay를 위해 새로 만들 필요가 없는 stock 모드 자산도
 - sidecar를 건드리지 않는 조건은 오히려 좋다. 경계가 명확해진다.
 - 1차는 `road + YOLO26n + 320/416 + 5~10Hz`가 맞다.
 - `YOLO26s`는 상위기기용 선택 옵션으로 두되, 벤치 통과 후 노출이 안전하다.
-- runtime은 1차에 `ONNX Runtime Mobile + QNN`을 고정하고, `ExecuTorch`는 실제 benchmark 우위가 확인될 때만 재진입하는 게 맞다.
+- runtime은 1차에 `ExecuTorch + QNN backend`를 고정하는 게 맞다.
+- 다만 graph lowering 비율과 실제 실기기 benchmark를 반드시 같이 기록해야 한다.
 - 문서/코드 모두에서 "확인된 사실"과 "벤치 전 판단"을 계속 분리해서 관리해야 한다.

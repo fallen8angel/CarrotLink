@@ -1161,6 +1161,96 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                     padding: EdgeInsets.only(
                                                         top: 2, bottom: 4),
                                                     child: Text(
+                                                      'YOLO',
+                                                      style: TextStyle(
+                                                        color: Colors.white70,
+                                                        fontSize: 12,
+                                                        fontWeight:
+                                                            FontWeight.w700,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                                layerSwitch(
+                                                  'YOLO Enabled',
+                                                  _debugYoloEnabled,
+                                                  layerToggleEnabled
+                                                      ? (value) {
+                                                          _onLayerToggleChanged(
+                                                            setLocalState,
+                                                            () =>
+                                                                _debugYoloEnabled =
+                                                                    value,
+                                                          );
+                                                        }
+                                                      : null,
+                                                ),
+                                                layerSwitch(
+                                                  'YOLO Boxes',
+                                                  _debugYoloBoxes,
+                                                  layerToggleEnabled
+                                                      ? (value) {
+                                                          _onLayerToggleChanged(
+                                                            setLocalState,
+                                                            () =>
+                                                                _debugYoloBoxes =
+                                                                    value,
+                                                          );
+                                                        }
+                                                      : null,
+                                                ),
+                                                layerSwitch(
+                                                  'YOLO Labels',
+                                                  _debugYoloLabels,
+                                                  layerToggleEnabled
+                                                      ? (value) {
+                                                          _onLayerToggleChanged(
+                                                            setLocalState,
+                                                            () =>
+                                                                _debugYoloLabels =
+                                                                    value,
+                                                          );
+                                                        }
+                                                      : null,
+                                                ),
+                                                layerSwitch(
+                                                  'YOLO TrafficLight',
+                                                  _debugYoloTrafficLights,
+                                                  layerToggleEnabled
+                                                      ? (value) {
+                                                          _onLayerToggleChanged(
+                                                            setLocalState,
+                                                            () =>
+                                                                _debugYoloTrafficLights =
+                                                                    value,
+                                                          );
+                                                        }
+                                                      : null,
+                                                ),
+                                                layerSwitch(
+                                                  'YOLO Stats',
+                                                  _debugYoloStats,
+                                                  layerToggleEnabled
+                                                      ? (value) {
+                                                          _onLayerToggleChanged(
+                                                            setLocalState,
+                                                            () =>
+                                                                _debugYoloStats =
+                                                                    value,
+                                                          );
+                                                        }
+                                                      : null,
+                                                ),
+                                                const Divider(
+                                                    color: Colors.white12,
+                                                    height: 10),
+                                                const Align(
+                                                  alignment:
+                                                      Alignment.centerLeft,
+                                                  child: Padding(
+                                                    padding: EdgeInsets.only(
+                                                        top: 2, bottom: 4),
+                                                    child: Text(
                                                       '정합/검증',
                                                       style: TextStyle(
                                                         color: Colors.white70,

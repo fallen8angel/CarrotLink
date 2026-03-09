@@ -113,6 +113,27 @@ extension _LiveDriveCanvasDebugActionsComponents
         'stageChanges=$stageChanges advice=$advice';
   }
 
+  String _nativeYoloSummary(Map<String, dynamic>? debug) {
+    if (debug == null || debug.isEmpty) return '-';
+    final enabled = debug['enabled'] ?? '-';
+    final stage = debug['stage'] ?? '-';
+    final blocker = debug['blocker'] ?? '-';
+    final pixelReady = debug['pixelPathReady'] ?? '-';
+    final backend = debug['runtimeBackend'] ?? '-';
+    final model = debug['modelVariant'] ?? '-';
+    final seen = debug['framesSeen'] ?? '-';
+    final sampled = debug['framesSampled'] ?? '-';
+    final skipped = debug['framesSkipped'] ?? '-';
+    final copies = debug['copySuccesses'] ?? '-';
+    final copyFailures = debug['copyFailures'] ?? '-';
+    final lastSkip = debug['lastSkipReason'] ?? '-';
+    final requests = debug['inferenceRequests'] ?? '-';
+    return 'enabled=$enabled stage=$stage blocker=$blocker pixelReady=$pixelReady '
+        'backend=$backend model=$model seen=$seen sampled=$sampled '
+        'skipped=$skipped copies=$copies copyFail=$copyFailures '
+        'lastSkip=$lastSkip requests=$requests';
+  }
+
   Future<void> _debugActionHealthImpl() async {
     try {
       await _refreshSidecarProcessStatus();
@@ -380,7 +401,8 @@ extension _LiveDriveCanvasDebugActionsComponents
       'profile=${jsonEncode(profile)}',
       'camera_quality=${jsonEncode(cameraQuality)}',
       'lastFrame=${_fmtClock(_sidecarLastFrameAt)} fps=${_overlayDebugFps.toStringAsFixed(1)} gap=${_overlayModelCameraGap ?? '-'} drops=$_overlayDropCount',
-      'toggles=ar=$_debugShowArOverlay nativeArScene=$_debugPushNativeArScene path=$_debugShowPathFill lane=$_debugShowLaneLines edge=$_debugShowRoadEdge lead1=$_debugShowLead1 lead2=$_debugShowLead2 radarBadge=$_debugShowRadarBadge radarVector=$_debugShowRadarVector tf=$_debugShowStopDistanceTf state=$_debugShowStateText',
+      'toggles=ar=$_debugShowArOverlay nativeArScene=$_debugPushNativeArScene path=$_debugShowPathFill lane=$_debugShowLaneLines edge=$_debugShowRoadEdge lead1=$_debugShowLead1 lead2=$_debugShowLead2 radarBadge=$_debugShowRadarBadge radarVector=$_debugShowRadarVector tf=$_debugShowStopDistanceTf state=$_debugShowStateText yolo=$_debugYoloEnabled yoloBoxes=$_debugYoloBoxes yoloLabels=$_debugYoloLabels yoloTL=$_debugYoloTrafficLights yoloStats=$_debugYoloStats',
+      'yoloNative=${_nativeYoloSummary(_lastNativeYoloState)}',
       'replay=${_arReplayStatusLabel()}',
       'replayExportPath=${_lastArReplayExportPath ?? '-'}',
       'replaySessionDir=${_arReplaySessionDirPath ?? '-'}',
@@ -396,18 +418,26 @@ extension _LiveDriveCanvasDebugActionsComponents
     final base = _buildDebugSnapshotText();
     final viewId = _nativeCameraViewId;
     if (viewId == null) {
-      return '$base\nnativeRender=-';
+      return '$base\nnativeRender=-\nnativeYolo=-';
     }
     try {
-      final raw = await _LiveDriveCanvasScreenState._nativeCameraControlChannel
+      final rawAr = await _LiveDriveCanvasScreenState._nativeCameraControlChannel
           .invokeMethod<dynamic>(
         'getArRenderDebug',
         <String, dynamic>{'viewId': viewId},
       );
-      final debug = _coerceStringMap(raw);
-      return '$base\nnativeRender=${_nativeArRenderSummary(debug)}';
+      final rawYolo = await _LiveDriveCanvasScreenState._nativeCameraControlChannel
+          .invokeMethod<dynamic>(
+        'getYoloState',
+        <String, dynamic>{'viewId': viewId},
+      );
+      final arDebug = _coerceStringMap(rawAr);
+      final yoloDebug = _coerceStringMap(rawYolo);
+      return '$base\nnativeRender=${_nativeArRenderSummary(arDebug)}\n'
+          'nativeYolo=${_nativeYoloSummary(yoloDebug)}';
     } catch (e) {
-      return '$base\nnativeRender=error:${e.toString()}';
+      return '$base\nnativeRender=error:${e.toString()}\n'
+          'nativeYolo=error:${e.toString()}';
     }
   }
 

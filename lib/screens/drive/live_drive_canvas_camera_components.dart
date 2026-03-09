@@ -94,6 +94,17 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
         _cameraLoading = false;
         _cameraError = null;
       });
+      unawaited(_pushNativeYoloConfig(force: true));
+      return;
+    }
+    if (type == 'yolo_config') {
+      debugPrint(
+        '[DriveCanvas][native] yolo enabled=${map['yoloEnabled']} backend=${map['runtimeBackend']} model=${map['modelVariant']} source=${map['sourceWidth']}x${map['sourceHeight']}',
+      );
+      return;
+    }
+    if (type == 'yolo_state') {
+      _lastNativeYoloState = map;
       return;
     }
     if (type == 'camera_state') {

@@ -64,6 +64,7 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
               ),
             );
           }
+          unawaited(_pushNativeYoloConfig(force: true));
         },
       );
     }

@@ -150,6 +150,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       const _DriveOverlaySnapshot.empty(),
       forceNativePush: true,
     );
+    unawaited(_pushNativeYoloConfig(force: true));
     unawaited(_clearNativeOverlay());
     unawaited(_loadCameraSource(force: true));
   }
@@ -231,6 +232,11 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
         'radarVector': false,
         'stopDistanceTf': false,
         'stateText': false,
+        'yoloEnabled': false,
+        'yoloBoxes': false,
+        'yoloLabels': false,
+        'yoloTrafficLights': false,
+        'yoloStats': false,
       };
 
       bool readBool(Map<String, dynamic> source, String key, bool fallback) {
@@ -268,6 +274,19 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
               readBool(map, 'stopDistanceTf', defaults['stopDistanceTf']!);
           _debugShowStateText =
               readBool(map, 'stateText', defaults['stateText']!);
+          _debugYoloEnabled =
+              readBool(map, 'yoloEnabled', defaults['yoloEnabled']!);
+          _debugYoloBoxes =
+              readBool(map, 'yoloBoxes', defaults['yoloBoxes']!);
+          _debugYoloLabels =
+              readBool(map, 'yoloLabels', defaults['yoloLabels']!);
+          _debugYoloTrafficLights = readBool(
+            map,
+            'yoloTrafficLights',
+            defaults['yoloTrafficLights']!,
+          );
+          _debugYoloStats =
+              readBool(map, 'yoloStats', defaults['yoloStats']!);
           return;
         }
 
@@ -293,6 +312,19 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
               readBool(map, 'stopDistanceTf', defaults['stopDistanceTf']!);
           _debugShowStateText =
               readBool(map, 'stateText', defaults['stateText']!);
+          _debugYoloEnabled =
+              readBool(map, 'yoloEnabled', defaults['yoloEnabled']!);
+          _debugYoloBoxes =
+              readBool(map, 'yoloBoxes', defaults['yoloBoxes']!);
+          _debugYoloLabels =
+              readBool(map, 'yoloLabels', defaults['yoloLabels']!);
+          _debugYoloTrafficLights = readBool(
+            map,
+            'yoloTrafficLights',
+            defaults['yoloTrafficLights']!,
+          );
+          _debugYoloStats =
+              readBool(map, 'yoloStats', defaults['yoloStats']!);
         });
       }
 
@@ -302,6 +334,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
           false;
       if (!initialized) {
         applyMap(Map<String, dynamic>.from(defaults));
+        unawaited(_pushNativeYoloConfig(force: true));
         await prefs.setString(
           _LiveDriveCanvasScreenState._hudDebugLayerTogglesPrefKey,
           jsonEncode(defaults),
@@ -318,14 +351,17 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       );
       if (raw == null || raw.trim().isEmpty) {
         applyMap(Map<String, dynamic>.from(defaults));
+        unawaited(_pushNativeYoloConfig(force: true));
         return;
       }
       final decoded = jsonDecode(raw);
       if (decoded is! Map) {
         applyMap(Map<String, dynamic>.from(defaults));
+        unawaited(_pushNativeYoloConfig(force: true));
         return;
       }
       applyMap(Map<String, dynamic>.from(decoded));
+      unawaited(_pushNativeYoloConfig(force: true));
     } catch (_) {}
   }
 
@@ -345,6 +381,11 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
         'radarVector': _debugShowRadarVector,
         'stopDistanceTf': _debugShowStopDistanceTf,
         'stateText': _debugShowStateText,
+        'yoloEnabled': _debugYoloEnabled,
+        'yoloBoxes': _debugYoloBoxes,
+        'yoloLabels': _debugYoloLabels,
+        'yoloTrafficLights': _debugYoloTrafficLights,
+        'yoloStats': _debugYoloStats,
       };
       await prefs.setString(
         _LiveDriveCanvasScreenState._hudDebugLayerTogglesPrefKey,
@@ -364,6 +405,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     _safeSetState(update);
     setLocalState(() {});
     unawaited(_saveHudDebugLayerToggles());
+    unawaited(_pushNativeYoloConfig(force: true));
   }
 
   void _cacheOverlaySnapshot(_DriveOverlaySnapshot snapshot) {
@@ -509,6 +551,69 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     } catch (_) {
       return payload.toString().hashCode;
     }
+  }
+
+  YoloDebugSettings _currentYoloDebugSettings() {
+    return YoloDebugSettings(
+      enabled: _debugYoloEnabled,
+      showBoxes: _debugYoloBoxes,
+      showLabels: _debugYoloLabels,
+      showTrafficLights: _debugYoloTrafficLights,
+      showStats: _debugYoloStats,
+    );
+  }
+
+  Map<String, dynamic> _buildNativeYoloConfigPayload({
+    required YoloDebugSettings settings,
+  }) {
+    return <String, dynamic>{
+      ...settings.toJson(),
+      'runtimeBackend': 'executorch_qnn',
+      'modelVariant': 'yolo26n',
+      'camera': _liveCameraName,
+      'sourceWidth': _cameraSourceSize.width.round(),
+      'sourceHeight': _cameraSourceSize.height.round(),
+      'inputWidth': 416,
+      'inputHeight': 416,
+      'samplePeriodMs': 200,
+    };
+  }
+
+  int _buildYoloConfigSignature(Map<String, dynamic> payload) {
+    try {
+      return jsonEncode(payload).hashCode;
+    } catch (_) {
+      return payload.toString().hashCode;
+    }
+  }
+
+  Future<void> _pushNativeYoloConfig({bool force = false}) async {
+    final viewId = _nativeCameraViewId;
+    if (viewId == null) {
+      _lastNativeYoloConfigSignature = null;
+      return;
+    }
+    final settings = (_openpilotOverlayMode && _useNativeLiveCamera)
+        ? _currentYoloDebugSettings()
+        : YoloDebugSettings.empty;
+    final payload = _buildNativeYoloConfigPayload(settings: settings);
+    final signature = _buildYoloConfigSignature(payload);
+    if (!force && _lastNativeYoloConfigSignature == signature) {
+      return;
+    }
+    try {
+      final ok = await _LiveDriveCanvasScreenState._nativeCameraControlChannel
+          .invokeMethod<bool>(
+        'updateYoloConfig',
+        <String, dynamic>{
+          'viewId': viewId,
+          'yoloConfig': payload,
+        },
+      );
+      if (ok == true) {
+        _lastNativeYoloConfigSignature = signature;
+      }
+    } catch (_) {}
   }
 
   void _refreshOverlayVerify(

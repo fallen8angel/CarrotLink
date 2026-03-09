@@ -68,6 +68,11 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
       return view.updateOverlay(overlay)
     }
 
+    fun updateYoloConfig(viewId: Int, yoloConfig: Map<String, Any?>?): Boolean {
+      val view = views[viewId] ?: return false
+      return view.updateYoloConfig(yoloConfig)
+    }
+
     fun updateArScene(viewId: Int, arScene: Map<String, Any?>?): Boolean {
       val view = views[viewId] ?: return false
       return view.updateArScene(arScene)
@@ -81,6 +86,11 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
     fun getArRenderDebug(viewId: Int): Map<String, Any?>? {
       val view = views[viewId] ?: return null
       return view.getArRenderDebug()
+    }
+
+    fun getYoloState(viewId: Int): Map<String, Any?>? {
+      val view = views[viewId] ?: return null
+      return view.getYoloState()
     }
 
     fun clearOverlay(viewId: Int): Boolean {
@@ -112,6 +122,13 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
                 result.success(overlayOk && sceneOk)
               }
 
+              "updateYoloConfig" -> {
+                val viewId = (call.argument<Number>("viewId") ?: -1).toInt()
+                @Suppress("UNCHECKED_CAST")
+                val yoloConfig = call.argument<Map<String, Any?>>("yoloConfig")
+                result.success(updateYoloConfig(viewId, yoloConfig))
+              }
+
               "clearOverlay" -> {
                 val viewId = (call.argument<Number>("viewId") ?: -1).toInt()
                 result.success(clearOverlay(viewId))
@@ -125,6 +142,11 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
               "getArRenderDebug" -> {
                 val viewId = (call.argument<Number>("viewId") ?: -1).toInt()
                 result.success(getArRenderDebug(viewId))
+              }
+
+              "getYoloState" -> {
+                val viewId = (call.argument<Number>("viewId") ?: -1).toInt()
+                result.success(getYoloState(viewId))
               }
 
               else -> result.notImplemented()
@@ -165,6 +187,12 @@ class NativeDriveVideoView(
   private val rootView = FrameLayout(context)
   private val surfaceView: SurfaceView = SurfaceView(context)
   private val overlayView = NativeDriveOverlayView(context)
+  private val yoloController =
+      NativeDriveYoloController(
+          surfaceView = surfaceView,
+          onStateChanged = { payload ->
+            emitYoloState(payload)
+          })
   private val reconnectHandler = Handler(Looper.getMainLooper())
   private val decodeThread = HandlerThread("CarrotNativeDecode-$viewId").apply { start() }
   private val decodeHandler = Handler(decodeThread.looper)
@@ -237,6 +265,7 @@ class NativeDriveVideoView(
     clearSurfaceFrameRateHint()
     closePerformanceHintSession()
     releaseDecoder()
+    yoloController.release()
     clearOverlay()
     try {
       decodeThread.quitSafely()
@@ -427,6 +456,15 @@ class NativeDriveVideoView(
     return true
   }
 
+  fun updateYoloConfig(yoloConfig: Map<String, Any?>?): Boolean {
+    if (closed) return false
+    val parsed = NativeDriveYoloConfig.fromPayload(yoloConfig)
+    overlayView.updateYoloConfig(parsed)
+    yoloController.updateConfig(parsed)
+    emitYoloConfig(parsed)
+    return true
+  }
+
   fun updateArScene(arScene: Map<String, Any?>?): Boolean {
     if (closed) return false
     overlayView.updateArScene(NativeDriveArScene.fromPayload(arScene))
@@ -440,6 +478,10 @@ class NativeDriveVideoView(
 
   fun getArRenderDebug(): Map<String, Any?>? {
     return overlayView.getArRenderDebug()
+  }
+
+  fun getYoloState(): Map<String, Any?> {
+    return yoloController.snapshot(reason = "method_fetch")
   }
 
   fun clearOverlay(): Boolean {
@@ -600,6 +642,15 @@ class NativeDriveVideoView(
           val renderedFrameId = if (pendingFrameIds.isEmpty()) -1 else pendingFrameIds.removeFirst()
           if (renderedFrameId >= 0) {
             emitFrame(renderedFrameId)
+            yoloController.onFrameRendered(
+                NativeDriveYoloFrame(
+                    frameId = renderedFrameId,
+                    ptsUs = info.presentationTimeUs,
+                    camera = cameraName,
+                    sourceWidth = currentWidth,
+                    sourceHeight = currentHeight,
+                    fpsHint = hintedFrameRate,
+                ))
           }
           localCodec.releaseOutputBuffer(outIndex, true)
         }
@@ -763,6 +814,27 @@ class NativeDriveVideoView(
         ))
   }
 
+  private fun emitYoloConfig(config: NativeDriveYoloConfig) {
+    val payload = mutableMapOf<String, Any?>(
+        "viewId" to viewId,
+        "type" to "yolo_config",
+        "camera" to cameraName,
+    )
+    payload.putAll(config.toPayload())
+    NativeDriveVideoPlugin.emit(
+        payload)
+  }
+
+  private fun emitYoloState(state: Map<String, Any?>) {
+    val payload = mutableMapOf<String, Any?>(
+        "viewId" to viewId,
+        "type" to "yolo_state",
+        "camera" to cameraName,
+    )
+    payload.putAll(state)
+    NativeDriveVideoPlugin.emit(payload)
+  }
+
   private fun parseCameraName(url: String): String {
     val fallback = "road"
     return try {
@@ -903,6 +975,7 @@ private class NativeDriveOverlayView(context: Context) : View(context) {
   )
 
   @Volatile private var overlayPayload: NativeDriveOverlayPayload? = null
+  @Volatile private var yoloConfig: NativeDriveYoloConfig = NativeDriveYoloConfig.disabled
   private val overlayRenderer = NativeDriveOverlayCanvasRenderer()
   private val arSceneRenderer = NativeDriveArSceneOverlayRenderer()
   private val arRenderPipeline = NativeDriveArRenderStatePipeline()
@@ -922,6 +995,11 @@ private class NativeDriveOverlayView(context: Context) : View(context) {
 
   fun updateArScene(scene: NativeDriveArScene?) {
     arRenderPipeline.updateScene(scene)
+    postInvalidateOnAnimation()
+  }
+
+  fun updateYoloConfig(config: NativeDriveYoloConfig) {
+    yoloConfig = config
     postInvalidateOnAnimation()
   }
 

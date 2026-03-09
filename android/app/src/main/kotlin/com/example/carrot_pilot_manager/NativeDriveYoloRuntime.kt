@@ -1,0 +1,106 @@
+package com.example.carrot_pilot_manager
+
+import android.graphics.Bitmap
+
+data class NativeDriveYoloRuntimeSnapshot(
+    val runtimeReady: Boolean = false,
+    val pixelPathReady: Boolean = false,
+    val stage: String = "idle",
+    val blocker: String? = null,
+    val backend: String = NativeDriveYoloConfig.DEFAULT_RUNTIME_BACKEND,
+    val modelVariant: String = NativeDriveYoloConfig.DEFAULT_MODEL_VARIANT,
+    val inferenceRequests: Int = 0,
+    val lastRequestedFrameId: Int = -1,
+    val pixelFramesConsumed: Int = 0,
+) {
+  fun toPayload(): Map<String, Any?> {
+    return mapOf(
+        "runtimeReady" to runtimeReady,
+        "pixelPathReady" to pixelPathReady,
+        "stage" to stage,
+        "blocker" to blocker,
+        "runtimeBackend" to backend,
+        "modelVariant" to modelVariant,
+        "inferenceRequests" to inferenceRequests,
+        "lastRequestedFrameId" to lastRequestedFrameId,
+        "pixelFramesConsumed" to pixelFramesConsumed,
+    )
+  }
+}
+
+interface NativeDriveYoloRuntime {
+  fun updateConfig(config: NativeDriveYoloConfig)
+
+  fun onSampledFrame(frame: NativeDriveYoloFrame)
+
+  fun onPixelFrame(frame: NativeDriveYoloFrame, bitmap: Bitmap)
+
+  fun snapshot(): NativeDriveYoloRuntimeSnapshot
+
+  fun release()
+}
+
+class NativeDriveYoloStubRuntime : NativeDriveYoloRuntime {
+  private var config: NativeDriveYoloConfig = NativeDriveYoloConfig.disabled
+  private var inferenceRequests = 0
+  private var lastRequestedFrameId = -1
+  private var pixelFramesConsumed = 0
+
+  override fun updateConfig(config: NativeDriveYoloConfig) {
+    this.config = config
+    if (!config.enabled) {
+      inferenceRequests = 0
+      lastRequestedFrameId = -1
+      pixelFramesConsumed = 0
+    }
+  }
+
+  override fun onSampledFrame(frame: NativeDriveYoloFrame) {
+    if (!config.enabled) return
+    inferenceRequests += 1
+    lastRequestedFrameId = frame.frameId
+  }
+
+  override fun onPixelFrame(frame: NativeDriveYoloFrame, bitmap: Bitmap) {
+    if (!config.enabled) return
+    pixelFramesConsumed += 1
+    lastRequestedFrameId = frame.frameId
+  }
+
+  override fun snapshot(): NativeDriveYoloRuntimeSnapshot {
+    if (!config.enabled) {
+      return NativeDriveYoloRuntimeSnapshot(
+          runtimeReady = false,
+          pixelPathReady = false,
+          stage = "idle",
+          blocker = "disabled",
+          backend = config.runtimeBackend,
+          modelVariant = config.modelVariant,
+          inferenceRequests = inferenceRequests,
+          lastRequestedFrameId = lastRequestedFrameId,
+          pixelFramesConsumed = pixelFramesConsumed,
+      )
+    }
+    return NativeDriveYoloRuntimeSnapshot(
+        runtimeReady = false,
+        pixelPathReady = pixelFramesConsumed > 0,
+        stage =
+            if (pixelFramesConsumed > 0) "awaiting_executorch_session"
+            else "awaiting_pixel_frame_path",
+        blocker =
+            if (pixelFramesConsumed > 0) "executorch_session_missing"
+            else "pixel_frame_path_missing",
+        backend = config.runtimeBackend,
+        modelVariant = config.modelVariant,
+        inferenceRequests = inferenceRequests,
+        lastRequestedFrameId = lastRequestedFrameId,
+        pixelFramesConsumed = pixelFramesConsumed,
+    )
+  }
+
+  override fun release() {
+    config = NativeDriveYoloConfig.disabled
+    inferenceRequests = 0
+    lastRequestedFrameId = -1
+  }
+}

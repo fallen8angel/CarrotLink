@@ -47,6 +47,8 @@ stock mode remote AR 설계, 구현, 테스트, handoff 문서.
 
 ## yolo
 
-YOLO 기반 객체감지 설계, 타당성, 벤치마크 문서.
+YOLO 기반 객체감지 설계, 타당성, 통합 계획, 진행 handoff 문서.
 
 - `yolo/STOCK_MODE_YOLO26_OBJECT_DETECTION_FEASIBILITY_2026-03-10_KO.md`
+- `yolo/STOCK_MODE_YOLO26_INTEGRATION_PLAN_2026-03-10_KO.md`
+- `yolo/STOCK_MODE_YOLO26_PROGRESS_HANDOFF_2026-03-10_KO.md`

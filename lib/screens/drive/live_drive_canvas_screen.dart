@@ -18,6 +18,7 @@ import '../../services/hud_drive_settings_service.dart';
 import '../../services/sidecar_service.dart';
 import '../../services/ssh_service.dart';
 import '../../services/storage_layout_service.dart';
+import '../../features/yolo/yolo.dart';
 import '../../ui/adaptive/display_feature_utils.dart';
 import '../../ui/adaptive/layout_tokens.dart';
 import '../../ui/adaptive/window_class.dart';
@@ -250,6 +251,8 @@ fi
   bool _lastNativeOverlayHadPayload = false;
   int? _lastNativeArSceneSignature;
   bool _lastNativeArSceneHadPayload = false;
+  int? _lastNativeYoloConfigSignature;
+  Map<String, dynamic>? _lastNativeYoloState;
   bool _overlayVerifyMode = false;
   String _overlayVerifyText = '';
   int _lastOverlayVerifyUpdateUs = 0;
@@ -271,6 +274,11 @@ fi
   bool _debugShowRadarVector = false;
   bool _debugShowStopDistanceTf = false;
   bool _debugShowStateText = false;
+  bool _debugYoloEnabled = false;
+  bool _debugYoloBoxes = false;
+  bool _debugYoloLabels = false;
+  bool _debugYoloTrafficLights = false;
+  bool _debugYoloStats = false;
   bool _debugPushNativeArScene = false;
   bool _debugArCaptureEnabled = false;
   bool _debugArAutoPersistEnabled = false;
