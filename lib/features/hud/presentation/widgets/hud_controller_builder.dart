@@ -37,7 +37,10 @@ class _HudControllerBuilderState extends State<HudControllerBuilder> {
   static final LinkHudService _linkHudService = LinkHudService();
   HudRepositoryLease? _repositoryLease;
   HudController? _controller;
+  SSHService? _observedSshService;
   bool _buildScheduled = false;
+  bool _lastObservedSshConnected = false;
+  String? _lastObservedSshEndpoint;
 
   @override
   void initState() {
@@ -63,6 +66,7 @@ class _HudControllerBuilderState extends State<HudControllerBuilder> {
 
   @override
   void dispose() {
+    _detachSshListener();
     final controller = _controller;
     final repositoryLease = _repositoryLease;
     _controller = null;
@@ -79,6 +83,7 @@ class _HudControllerBuilderState extends State<HudControllerBuilder> {
   }
 
   void _createBinding() {
+    _attachSshListener();
     final repositoryLease = HudModule.acquireSharedRepository(
       sshService: widget.sshService,
     );
@@ -92,6 +97,7 @@ class _HudControllerBuilderState extends State<HudControllerBuilder> {
   }
 
   void _recreateBinding() {
+    _detachSshListener();
     final oldController = _controller;
     final oldRepositoryLease = _repositoryLease;
     _controller = null;
@@ -105,6 +111,59 @@ class _HudControllerBuilderState extends State<HudControllerBuilder> {
       unawaited(oldRepositoryLease.release());
     }
     _createBinding();
+  }
+
+  void _attachSshListener() {
+    final ssh = widget.sshService;
+    if (identical(_observedSshService, ssh)) {
+      return;
+    }
+    _detachSshListener();
+    _observedSshService = ssh;
+    if (ssh == null) {
+      _lastObservedSshConnected = false;
+      _lastObservedSshEndpoint = null;
+      return;
+    }
+    _lastObservedSshConnected = ssh.isConnected;
+    _lastObservedSshEndpoint = _currentSshEndpoint(ssh);
+    ssh.addListener(_handleSshChanged);
+  }
+
+  void _detachSshListener() {
+    final ssh = _observedSshService;
+    if (ssh != null) {
+      ssh.removeListener(_handleSshChanged);
+    }
+    _observedSshService = null;
+  }
+
+  String? _currentSshEndpoint(SSHService ssh) {
+    final endpoint = (ssh.connectedIp ?? ssh.targetIp)?.trim();
+    if (endpoint == null || endpoint.isEmpty) {
+      return null;
+    }
+    return endpoint;
+  }
+
+  void _handleSshChanged() {
+    final ssh = _observedSshService;
+    if (ssh == null || widget.preview) {
+      return;
+    }
+    final connected = ssh.isConnected;
+    final endpoint = _currentSshEndpoint(ssh);
+    final connectedChanged = connected != _lastObservedSshConnected;
+    final endpointChanged = endpoint != _lastObservedSshEndpoint;
+    _lastObservedSshConnected = connected;
+    _lastObservedSshEndpoint = endpoint;
+
+    if (widget.host == null || widget.host!.trim().isEmpty) {
+      return;
+    }
+    if ((connectedChanged && connected) || (connected && endpointChanged)) {
+      unawaited(_bindCurrent());
+    }
   }
 
   Future<void> _bindCurrent() async {

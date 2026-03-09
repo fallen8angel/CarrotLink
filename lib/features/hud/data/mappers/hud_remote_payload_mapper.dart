@@ -48,9 +48,11 @@ class HudRemotePayloadMapper {
 
   OriginalHudSnapshot _mapSemantic(
     Map<String, dynamic> raw,
-    String host,
-    {int? endpointPort, String? endpointPath, int? receivedAtMs,}
-  ) {
+    String host, {
+    int? endpointPort,
+    String? endpointPath,
+    int? receivedAtMs,
+  }) {
     final source = _asMap(raw['source']);
     final vehicle = _asMap(raw['vehicle']);
     final tempControl = _asMap(raw['tempControl']);
@@ -135,11 +137,11 @@ class HudRemotePayloadMapper {
         diskUsedPct: _asDouble(device?['diskUsedPct']),
         freeSpacePct: _asDouble(device?['freeSpacePct']),
         voltV: _asDouble(device?['voltV']),
-        metricPrimaryMode:
-            _asString(device?['metricPrimaryMode']) ?? 'disk',
+        metricPrimaryMode: _asString(device?['metricPrimaryMode']) ?? 'disk',
       ),
       visibility: HudVisibilityState(
-        showDeviceState: _asBool(visibility?['showDeviceState'], fallback: true),
+        showDeviceState:
+            _asBool(visibility?['showDeviceState'], fallback: true),
         showDateTimeMode: _asInt(visibility?['showDateTimeMode']),
       ),
       meta: HudMetaState(
@@ -153,9 +155,11 @@ class HudRemotePayloadMapper {
 
   OriginalHudSnapshot _mapLegacy(
     Map<String, dynamic> raw,
-    String host,
-    {int? endpointPort, String? endpointPath, int? receivedAtMs,}
-  ) {
+    String host, {
+    int? endpointPort,
+    String? endpointPath,
+    int? receivedAtMs,
+  }) {
     final missingFields = <String>{
       'connectivity.activeCarrot',
       'gps.hasFix',
@@ -168,14 +172,15 @@ class HudRemotePayloadMapper {
     };
 
     final rawVego = _asDouble(raw['vEgo']);
-    final speedClusterKph = _asDouble(raw['vEgoKph']) ?? rawVego;
+    final rawVegoKph = rawVego == null ? null : rawVego * 3.6;
+    final speedClusterKph = _asDouble(raw['vEgoKph']) ?? rawVegoKph;
     final setSpeedClusterKph =
         _asDouble(raw['vSetKph']) ?? _asDouble(raw['setSpeedClusterKph']);
     final diskLabel = (_asString(raw['diskLabel']) ?? 'DISK').toUpperCase();
     final diskOrVolt = _asDouble(raw['diskPct']);
     final rawTemp = _asMap(raw['temp']);
-    final tempSourceRaw =
-        _asNullableString(rawTemp?['source']) ?? _asNullableString(raw['tempSource']);
+    final tempSourceRaw = _asNullableString(rawTemp?['source']) ??
+        _asNullableString(raw['tempSource']);
     final applySpeedKph =
         _asDouble(rawTemp?['speed']) ?? _asDouble(raw['applySpeedKph']);
     final cruiseTargetKph = _asDouble(raw['cruiseTargetKph']);
@@ -220,8 +225,8 @@ class HudRemotePayloadMapper {
       limits: _buildLimits(
         mode: _asString(raw['limitMode']),
         label: _asString(raw['limitLabel']),
-        displaySpeedKph:
-            _asDouble(raw['speedLimitKph']) ?? _asDouble(raw['displaySpeedKph']),
+        displaySpeedKph: _asDouble(raw['speedLimitKph']) ??
+            _asDouble(raw['displaySpeedKph']),
         roadLimitSpeedKph: _asDouble(raw['roadLimitSpeedKph']) ??
             _asDouble(raw['speedLimitKph']),
         cameraLimitSpeedKph: _asDouble(raw['cameraLimitSpeedKph']),
@@ -254,7 +259,8 @@ class HudRemotePayloadMapper {
         memUsagePct: _asDouble(raw['memPct']) ??
             _asDouble(raw['mem']) ??
             _asDouble(raw['memoryUsagePercent']),
-        diskUsedPct: diskLabel == 'DISK' ? diskOrVolt : _asDouble(raw['diskUsedPct']),
+        diskUsedPct:
+            diskLabel == 'DISK' ? diskOrVolt : _asDouble(raw['diskUsedPct']),
         freeSpacePct: _asDouble(raw['freeSpacePct']),
         voltV: diskLabel == 'VOLT' ? diskOrVolt : _asDouble(raw['voltV']),
         metricPrimaryMode: diskLabel == 'VOLT' ? 'volt' : 'disk',

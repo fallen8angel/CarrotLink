@@ -751,10 +751,12 @@ class AdaptiveHudBottomStrip extends StatelessWidget {
               width: profile.chipFontSize + 12,
               child: Align(
                 alignment: Alignment.centerLeft,
-                child: AdaptiveHudStatusDot(
-                  color: _statusColor(),
-                  size: profile.chipFontSize + 2,
-                ),
+                child: model.showSignalState
+                    ? AdaptiveHudSignalIndicator(
+                        signalState: model.signalState,
+                        profile: profile,
+                      )
+                    : const SizedBox.shrink(),
               ),
             ),
             if (segments.isNotEmpty) ...<Widget>[
@@ -813,24 +815,6 @@ class AdaptiveHudBottomStrip extends StatelessWidget {
             : Colors.transparent,
       ),
     ];
-  }
-
-  Color _statusColor() {
-    if (model.isPreview) {
-      return Colors.white38;
-    }
-    if (model.sourceText == 'STBY' || model.tsMonoMs <= 0) {
-      return Colors.white24;
-    }
-    if (model.isDegradedMeta ||
-        model.sourceText == 'COMPAT' ||
-        model.sourceText == 'FALLBACK') {
-      return _hudAccentAmber;
-    }
-    if (model.sourceText == 'HUD' || model.sourceText == 'LIVE') {
-      return _hudAccentGreen;
-    }
-    return Colors.white54;
   }
 }
 

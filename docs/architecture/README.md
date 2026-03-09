@@ -44,3 +44,9 @@ stock mode remote AR 설계, 구현, 테스트, handoff 문서.
 - `remote_ar/STOCK_MODE_REMOTE_AR_MVP_EXECUTION_PLAN_2026-03-06_KO.md`
 - `remote_ar/STOCK_MODE_REMOTE_AR_ON_DEVICE_TEST_2026-03-07_KO.md`
 - `remote_ar/STOCK_MODE_REMOTE_AR_HANDOFF_2026-03-07_KO.md`
+
+## yolo
+
+YOLO 기반 객체감지 설계, 타당성, 벤치마크 문서.
+
+- `yolo/STOCK_MODE_YOLO26_OBJECT_DETECTION_FEASIBILITY_2026-03-10_KO.md`

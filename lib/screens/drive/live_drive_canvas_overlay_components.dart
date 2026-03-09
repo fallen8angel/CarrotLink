@@ -142,14 +142,9 @@ class _DriveOverlayPainter extends CustomPainter {
     required Size source,
     required Size canvas,
   }) {
-    final wideCam = cameraKind == _DriveCameraKind.wideRoad;
-    final intrinsic = _intrinsicForSource(source, wideCam);
-    final calibTransform = _calibTransformForSource(source);
-    return _sourceToCanvasPlacement(
+    return _sourceToPlacedCanvasPlacement(
       source: source,
       canvas: canvas,
-      intrinsic: intrinsic,
-      calibTransform: calibTransform,
     );
   }
 
@@ -217,7 +212,7 @@ class _DriveOverlayPainter extends CustomPainter {
   // This block is the source-of-truth for camera->overlay geometric alignment.
   // Keep these equations and transform order stable unless doing explicit
   // projection-engine work with field validation:
-  // - _sourceToCanvasPlacement
+  // - _sourceToPlacedCanvasPlacement
   // - _sourceToCanvasPlacementFromDisplayTransform
   // - _buildTransform
   // - _mapToScreen
@@ -225,48 +220,18 @@ class _DriveOverlayPainter extends CustomPainter {
   // Adaptive/responsive changes must be limited to surrounding UI shells
   // (dock/panel/popup/safe-area spacing), not these math paths.
   // -------------------------------------------------------------------------
-  _SourceCanvasPlacement _sourceToCanvasPlacement({
+  _SourceCanvasPlacement _sourceToPlacedCanvasPlacement({
     required Size source,
     required Size canvas,
-    required _M3 intrinsic,
-    required _M3 calibTransform,
   }) {
     final sx = canvas.width / source.width;
     final sy = canvas.height / source.height;
     final fitScale = coverViewport ? math.max(sx, sy) : math.min(sx, sy);
-    final resolvedViewportZoom =
-        (viewportZoom.isFinite && viewportZoom > 0.1) ? viewportZoom : 1.0;
-    final scale = fitScale * resolvedViewportZoom;
+    final scale = fitScale;
     final drawW = source.width * scale;
     final drawH = source.height * scale;
-    var dx = (canvas.width - drawW) * 0.5;
-    var dy = (canvas.height - drawH) * 0.5;
-    var xOffset = 0.0;
-    var yOffset = 0.0;
-
-    // openpilot annotated_camera::calcFrameMatrix style:
-    // use the projected point at "infinity" to compute x/y screen offset.
-    final inf = calibTransform.transform(const _V3(1000.0, 0.0, 0.0));
-    if (inf.z.isFinite && inf.z.abs() > 1e-6) {
-      final centerX = intrinsic.m02;
-      final centerY = intrinsic.m12;
-      final maxXOffset =
-          math.max(0.0, centerX * scale - canvas.width * 0.5 - 5.0);
-      final maxYOffset =
-          math.max(0.0, centerY * scale - canvas.height * 0.5 - 5.0);
-      xOffset = _clampDouble(
-        ((inf.x / inf.z) - centerX) * scale,
-        -maxXOffset,
-        maxXOffset,
-      );
-      yOffset = _clampDouble(
-        ((inf.y / inf.z) - centerY) * scale,
-        -maxYOffset,
-        maxYOffset,
-      );
-      dx = (canvas.width * 0.5 - xOffset) - (centerX * scale);
-      dy = (canvas.height * 0.5 - yOffset) - (centerY * scale);
-    }
+    final dx = (canvas.width - drawW) * 0.5;
+    final dy = (canvas.height - drawH) * 0.5;
 
     return _SourceCanvasPlacement(
       transform: _M3(
@@ -281,8 +246,11 @@ class _DriveOverlayPainter extends CustomPainter {
         1.0,
       ),
       scale: scale,
-      xOffset: xOffset,
-      yOffset: yOffset,
+      // The outer layout already applies annotated-camera pan/zoom by placing
+      // the video surface at the resolved global rect. Reapplying x/y shift
+      // inside this local canvas would move every overlay element twice.
+      xOffset: 0.0,
+      yOffset: 0.0,
     );
   }
 
@@ -291,57 +259,13 @@ class _DriveOverlayPainter extends CustomPainter {
     required Size canvas,
     required Map<String, dynamic>? displayTransform,
   }) {
-    final sx = canvas.width / source.width;
-    final sy = canvas.height / source.height;
-    final fitScale = coverViewport ? math.max(sx, sy) : math.min(sx, sy);
-    final resolvedViewportZoom =
-        (viewportZoom.isFinite && viewportZoom > 0.1) ? viewportZoom : 1.0;
-    final scaledFit = fitScale * resolvedViewportZoom;
-    final baseDrawW = source.width * scaledFit;
-    final baseDrawH = source.height * scaledFit;
-    final baseDx = (canvas.width - baseDrawW) * 0.5;
-    final baseDy = (canvas.height - baseDrawH) * 0.5;
-
-    final zoomRaw = displayTransform == null
-        ? null
-        : _DriveOverlaySnapshot._asDouble(displayTransform['zoom']);
-    final txRaw = displayTransform == null
-        ? null
-        : _DriveOverlaySnapshot._asDouble(displayTransform['tx']);
-    final tyRaw = displayTransform == null
-        ? null
-        : _DriveOverlaySnapshot._asDouble(displayTransform['ty']);
-    final xOffsetRaw = displayTransform == null
-        ? null
-        : _DriveOverlaySnapshot._asDouble(displayTransform['xOffset']);
-    final yOffsetRaw = displayTransform == null
-        ? null
-        : _DriveOverlaySnapshot._asDouble(displayTransform['yOffset']);
-
-    final zoom =
-        (zoomRaw != null && zoomRaw.isFinite && zoomRaw > 0.1) ? zoomRaw : 1.0;
-    final tx = (txRaw != null && txRaw.isFinite)
-        ? txRaw
-        : ((source.width - (source.width * zoom)) * 0.5);
-    final ty = (tyRaw != null && tyRaw.isFinite)
-        ? tyRaw
-        : ((source.height - (source.height * zoom)) * 0.5);
-
-    return _SourceCanvasPlacement(
-      transform: _M3(
-        scaledFit * zoom,
-        0.0,
-        (scaledFit * tx) + baseDx,
-        0.0,
-        scaledFit * zoom,
-        (scaledFit * ty) + baseDy,
-        0.0,
-        0.0,
-        1.0,
-      ),
-      scale: scaledFit * zoom,
-      xOffset: (xOffsetRaw != null && xOffsetRaw.isFinite) ? xOffsetRaw : 0.0,
-      yOffset: (yOffsetRaw != null && yOffsetRaw.isFinite) ? yOffsetRaw : 0.0,
+    // `displayTransform` describes the original full-screen annotated-camera
+    // placement. By the time overlay painting happens, the video surface is
+    // already positioned into that resolved global rect by the outer layout,
+    // so the local child canvas must only scale/crop source pixels.
+    return _sourceToPlacedCanvasPlacement(
+      source: source,
+      canvas: canvas,
     );
   }
 
@@ -1104,7 +1028,8 @@ class _DriveOverlayPainter extends CustomPainter {
         : 'center ref: ${refLines.join(' | ')}';
     final gapText = gap == null ? 'n/a' : '$gap';
     final placementText =
-        'video shift x=${transform.xOffset.toStringAsFixed(1)} y=${transform.yOffset.toStringAsFixed(1)} scale=${transform.sourceScale.toStringAsFixed(3)}';
+        'local canvas scale=${transform.sourceScale.toStringAsFixed(3)} '
+        '(global annotated-camera pan is applied by outer video placement)';
     final frameText =
         'frame model=${modelFrameId ?? '-'} cam=${cameraFrameId ?? '-'} gap=$gapText';
     final modeText =
@@ -2008,6 +1933,8 @@ class _DriveOverlayPainter extends CustomPainter {
     double fontSize = 22.0,
     double minWidth = 56.0,
     double height = 42.0,
+    double radius = 15.0,
+    double strokeWidth = 2.0,
   }) {
     final content = text.trim();
     if (content.isEmpty || !center.dx.isFinite || !center.dy.isFinite) return;
@@ -2022,12 +1949,12 @@ class _DriveOverlayPainter extends CustomPainter {
       _encodePolygon(
         _roundedRectVertices(
           Rect.fromLTRB(left, top, right, bottom),
-          radius: 15.0,
+          radius: radius,
           segmentsPerCorner: 5,
         ),
         fillColor,
         strokeColor: strokeColor,
-        strokeWidth: strokeColor == null ? 0.0 : 2.0,
+        strokeWidth: strokeColor == null ? 0.0 : strokeWidth,
       ),
     );
     _appendOverlayLabel(
@@ -2039,6 +1966,249 @@ class _DriveOverlayPainter extends CustomPainter {
       strokeWidth: textStrokeWidth,
       size: fontSize,
       centered: true,
+    );
+  }
+
+  double _leadBoxCornerRadius(double sourceScale) {
+    return _clampDouble(11.0 * sourceScale, 8.0, 12.0);
+  }
+
+  double _leadBoxStrokeWidth(double sourceScale) {
+    return _clampDouble(2.0 * sourceScale, 1.6, 2.4);
+  }
+
+  double _leadBadgeRadius(double sourceScale) {
+    return _clampDouble(18.0 * sourceScale, 14.0, 20.0);
+  }
+
+  double _leadBadgeStrokeWidth(double sourceScale) {
+    return _clampDouble(2.2 * sourceScale, 1.8, 2.8);
+  }
+
+  _LeadDistanceBadgeLayout _leadDistanceBadgeLayout(
+    Rect rect,
+    double sourceScale,
+  ) {
+    final height = _clampDouble(46.0 * sourceScale, 40.0, 52.0);
+    final fontSize = _clampDouble(28.0 * sourceScale, 24.0, 32.0);
+    final minWidth = _clampDouble(84.0 * sourceScale, 72.0, 98.0);
+    final attachOverlap = _clampDouble(6.0 * sourceScale, 5.0, 8.0);
+    return _LeadDistanceBadgeLayout(
+      center: Offset(
+        rect.center.dx,
+        rect.bottom + (height * 0.5) - attachOverlap,
+      ),
+      fontSize: fontSize,
+      minWidth: minWidth,
+      height: height,
+    );
+  }
+
+  _LeadDistanceBadgeLayout _leadStateBadgeLayout(
+    Rect rect,
+    double sourceScale,
+  ) {
+    final height = _clampDouble(44.0 * sourceScale, 38.0, 50.0);
+    final fontSize = _clampDouble(25.0 * sourceScale, 21.0, 30.0);
+    final minWidth = _clampDouble(132.0 * sourceScale, 108.0, 176.0);
+    final attachOverlap = _clampDouble(5.0 * sourceScale, 4.0, 7.0);
+    return _LeadDistanceBadgeLayout(
+      center: Offset(
+        rect.center.dx,
+        rect.bottom + (height * 0.5) - attachOverlap,
+      ),
+      fontSize: fontSize,
+      minWidth: minWidth,
+      height: height,
+    );
+  }
+
+  Color _leadCardFillColor(
+    Color accent,
+    Color baseFill, {
+    required bool primary,
+  }) {
+    final darkBase =
+        primary ? const Color(0xA60A1118) : const Color(0x960A1118);
+    final tintedBase = Color.alphaBlend(
+      accent.withValues(alpha: primary ? 0.14 : 0.09),
+      darkBase,
+    );
+    return Color.alphaBlend(baseFill, tintedBase);
+  }
+
+  void _appendLeadBoxCard(
+    List<Map<String, dynamic>> polygons, {
+    required Rect rect,
+    required double sourceScale,
+    required Color strokeColor,
+    required Color fillColor,
+    required bool primary,
+  }) {
+    final cornerRadius = _leadBoxCornerRadius(sourceScale);
+    final shadowShiftY = _clampDouble(5.0 * sourceScale, 3.0, 7.0);
+    final shadowInflate = _clampDouble(2.5 * sourceScale, 1.5, 3.5);
+    final glowInflate = _clampDouble(8.0 * sourceScale, 5.0, 10.0);
+    final innerInset = _clampDouble(4.0 * sourceScale, 2.5, 5.5);
+
+    polygons.add(
+      _encodePolygon(
+        _roundedRectVertices(
+          rect.shift(Offset(0.0, shadowShiftY)).inflate(shadowInflate),
+          radius: cornerRadius + shadowShiftY,
+          segmentsPerCorner: 4,
+        ),
+        const Color(0x22000000),
+      ),
+    );
+    polygons.add(
+      _encodePolygon(
+        _roundedRectVertices(
+          rect.inflate(glowInflate),
+          radius: cornerRadius + glowInflate,
+          segmentsPerCorner: 4,
+        ),
+        strokeColor.withValues(alpha: primary ? 0.13 : 0.09),
+      ),
+    );
+    polygons.add(
+      _encodePolygon(
+        _roundedRectVertices(
+          rect,
+          radius: cornerRadius,
+          segmentsPerCorner: 4,
+        ),
+        _leadCardFillColor(
+          strokeColor,
+          fillColor,
+          primary: primary,
+        ),
+        strokeColor: strokeColor,
+        strokeWidth: _leadBoxStrokeWidth(sourceScale),
+      ),
+    );
+
+    final innerRect = rect.deflate(innerInset);
+    if (innerRect.width > 18.0 && innerRect.height > 18.0) {
+      polygons.add(
+        _encodePolygon(
+          _roundedRectVertices(
+            innerRect,
+            radius: math.max(2.0, cornerRadius - innerInset),
+            segmentsPerCorner: 4,
+          ),
+          Colors.white.withValues(alpha: primary ? 0.035 : 0.022),
+          strokeColor: Colors.white.withValues(alpha: primary ? 0.18 : 0.10),
+          strokeWidth: _clampDouble(1.0 * sourceScale, 0.8, 1.2),
+        ),
+      );
+    }
+  }
+
+  void _appendLeadDistanceBadge(
+    List<Map<String, dynamic>> polygons,
+    List<Map<String, dynamic>> labels, {
+    required _LeadDistanceBadgeLayout layout,
+    required double sourceScale,
+    required String text,
+    required Color accentColor,
+    required Color textColor,
+  }) {
+    final fillColor = Color.alphaBlend(
+      accentColor.withValues(alpha: 0.80),
+      const Color(0xFF0F141B),
+    );
+    _appendBadge(
+      polygons,
+      labels,
+      center: layout.center,
+      text: text,
+      fillColor: fillColor,
+      textColor: textColor,
+      strokeColor: Colors.white.withValues(alpha: 0.34),
+      textStrokeColor: Colors.black,
+      textStrokeWidth: 2.0,
+      fontSize: layout.fontSize,
+      minWidth: layout.minWidth,
+      height: layout.height,
+      radius: _leadBadgeRadius(sourceScale),
+      strokeWidth: _leadBadgeStrokeWidth(sourceScale),
+    );
+  }
+
+  Color _leadStateAccentColor(int xState) {
+    switch (xState) {
+      case 3:
+      case 5:
+        return const Color(0xFFFFA726);
+      case 4:
+        return const Color(0xFF23D55D);
+      case 1:
+        return const Color(0xFF91A4BF);
+      default:
+        return Colors.white;
+    }
+  }
+
+  void _appendLeadStateBadge(
+    List<Map<String, dynamic>> polygons,
+    List<Map<String, dynamic>> labels, {
+    required Rect rect,
+    required double sourceScale,
+    required int xState,
+    required String text,
+  }) {
+    final layout = _leadStateBadgeLayout(rect, sourceScale);
+    final accentColor = _leadStateAccentColor(xState);
+    final fillColor = Color.alphaBlend(
+      accentColor.withValues(alpha: 0.18),
+      const Color(0xE610151C),
+    );
+    _appendBadge(
+      polygons,
+      labels,
+      center: layout.center,
+      text: text,
+      fillColor: fillColor,
+      textColor: Colors.white,
+      strokeColor: accentColor.withValues(alpha: 0.82),
+      textStrokeColor: Colors.black,
+      textStrokeWidth: 1.9,
+      fontSize: layout.fontSize,
+      minWidth: layout.minWidth,
+      height: layout.height,
+      radius: _leadBadgeRadius(sourceScale),
+      strokeWidth: _clampDouble(2.0 * sourceScale, 1.6, 2.4),
+    );
+  }
+
+  void _appendRadarSpeedBadge(
+    List<Map<String, dynamic>> polygons,
+    List<Map<String, dynamic>> labels, {
+    required Offset center,
+    required double sourceScale,
+    required String text,
+    required Color accentColor,
+  }) {
+    final fillColor = Color.alphaBlend(
+      accentColor.withValues(alpha: 0.76),
+      const Color(0xFF10161E),
+    );
+    _appendBadge(
+      polygons,
+      labels,
+      center: center,
+      text: text,
+      fillColor: fillColor,
+      textColor: Colors.white,
+      strokeColor: Colors.white.withValues(alpha: 0.24),
+      textStrokeColor: Colors.black,
+      textStrokeWidth: 1.8,
+      fontSize: _clampDouble(24.0 * sourceScale, 21.0, 28.0),
+      minWidth: _clampDouble(62.0 * sourceScale, 54.0, 72.0),
+      height: _clampDouble(42.0 * sourceScale, 36.0, 46.0),
+      radius: _clampDouble(16.0 * sourceScale, 13.0, 18.0),
+      strokeWidth: _clampDouble(1.8 * sourceScale, 1.3, 2.2),
     );
   }
 
@@ -2517,6 +2687,11 @@ class _DriveOverlayPainter extends CustomPainter {
     final badgeTextColor = xState == 0
         ? Colors.white
         : (xState == 1 ? const Color(0xFFB0B0B0) : const Color(0xFF23D55D));
+    final sourceScale = _sourceToCanvasPlacementFromDisplayTransform(
+      source: Size(sourceWidth, sourceHeight),
+      canvas: canvasSize,
+      displayTransform: displayTransform,
+    ).scale;
 
     Offset? mapSingleSourcePoint(dynamic raw) {
       if (raw is! List || raw.length < 2) return null;
@@ -2590,13 +2765,13 @@ class _DriveOverlayPainter extends CustomPainter {
                 isLeadScc ? const Color(0xFFFF3B30) : const Color(0xFFFFA726);
           }
         }
-        polygons.add(
-          _encodePolygon(
-            _roundedRectVertices(bounds, radius: 15.0, segmentsPerCorner: 4),
-            fillColor,
-            strokeColor: strokeColor,
-            strokeWidth: 3.0,
-          ),
+        _appendLeadBoxCard(
+          polygons,
+          rect: bounds,
+          sourceScale: sourceScale,
+          strokeColor: strokeColor,
+          fillColor: fillColor,
+          primary: kind == 'leadOne',
         );
 
         if (kind == 'leadOne') {
@@ -2604,52 +2779,34 @@ class _DriveOverlayPainter extends CustomPainter {
               _DriveOverlaySnapshot._asDouble(lead['radarDistance']) ?? 0.0;
           final visionDist =
               _DriveOverlaySnapshot._asDouble(lead['visionDistance']) ?? 0.0;
-          final radarBadgeCenter =
-              mapSingleSourcePoint(lead['radarBadgeCenter']);
-          final visionBadgeCenter =
-              mapSingleSourcePoint(lead['visionBadgeCenter']);
           final radarBadgeColorArgb =
               _DriveOverlaySnapshot._asInt(lead['radarBadgeColorArgb']);
           final visionBadgeColorArgb =
               _DriveOverlaySnapshot._asInt(lead['visionBadgeColorArgb']);
-          // Stock parity mode: badges should use the source-space anchors
-          // emitted by sidecar. Do not re-synthesize positions from bounds.
-          if (drawDistanceBadges &&
-              showRadarBadge &&
-              radarDist > 0.0 &&
-              radarBadgeCenter != null) {
-            _appendBadge(
-              polygons,
-              labels,
-              center: radarBadgeCenter,
-              text: radarDist.toStringAsFixed(1),
-              fillColor: radarBadgeColorArgb != null
+          final badgeLayout = _leadDistanceBadgeLayout(bounds, sourceScale);
+          final hasRadarDistance = radarDist > 0.0;
+          final hasVisionDistance = visionDist > 0.0;
+          final primaryDistance = hasRadarDistance
+              ? radarDist
+              : (hasVisionDistance ? visionDist : 0.0);
+          final primaryBadgeColor = hasRadarDistance
+              ? (radarBadgeColorArgb != null
                   ? Color(radarBadgeColorArgb)
                   : (isLeadScc
                       ? const Color(0xFFFF3B30)
-                      : const Color(0xFFFFA726)),
-              textColor: badgeTextColor,
-              textStrokeColor: Colors.black,
-              textStrokeWidth: 1.6,
-              fontSize: 24.0,
-            );
-          }
-          if (drawDistanceBadges &&
-              showRadarBadge &&
-              visionDist > 0.0 &&
-              visionBadgeCenter != null) {
-            _appendBadge(
+                      : const Color(0xFFFFA726)))
+              : (visionBadgeColorArgb != null
+                  ? Color(visionBadgeColorArgb)
+                  : const Color(0xFF3D7BFF));
+          if (drawDistanceBadges && showRadarBadge && primaryDistance > 0.0) {
+            _appendLeadDistanceBadge(
               polygons,
               labels,
-              center: visionBadgeCenter,
-              text: visionDist.toStringAsFixed(1),
-              fillColor: visionBadgeColorArgb != null
-                  ? Color(visionBadgeColorArgb)
-                  : const Color(0xFF3D7BFF),
+              layout: badgeLayout,
+              sourceScale: sourceScale,
+              text: primaryDistance.toStringAsFixed(1),
+              accentColor: primaryBadgeColor,
               textColor: badgeTextColor,
-              textStrokeColor: Colors.black,
-              textStrokeWidth: 1.6,
-              fontSize: 24.0,
             );
           }
         }
@@ -2701,23 +2858,25 @@ class _DriveOverlayPainter extends CustomPainter {
           }
         }
       }
-      Offset? stateAnchor;
       if (leadOneAnchorRaw is Map) {
-        final stateCenterRaw = leadOneAnchorRaw['stateTextCenter'];
-        stateAnchor = mapSingleSourcePoint(stateCenterRaw);
-      }
-      // Stock parity mode: state text should use the sidecar-provided anchor only.
-      if (stateAnchor != null) {
-        _appendOverlayLabel(
-          labels,
-          anchor: stateAnchor,
-          text: stateText,
-          color: Colors.white,
-          strokeColor: Colors.black,
-          strokeWidth: 1.8,
-          size: 40.0,
-          centered: true,
+        final mapped = _mapSourcePointsToCanvas(
+          _decodeOverlayPoints(leadOneAnchorRaw['points']),
+          canvasSize: canvasSize,
+          sourceWidth: sourceWidth,
+          sourceHeight: sourceHeight,
+          displayTransform: displayTransform,
         );
+        final bounds = mapped.length >= 3 ? _verticesBounds(mapped) : null;
+        if (bounds != null) {
+          _appendLeadStateBadge(
+            polygons,
+            labels,
+            rect: bounds,
+            sourceScale: sourceScale,
+            xState: xState,
+            text: stateText,
+          );
+        }
       }
     }
 
@@ -2775,29 +2934,33 @@ class _DriveOverlayPainter extends CustomPainter {
         } else {
           badgeColor = const Color(0xFFFF3B30);
         }
-        _appendBadge(
+        _appendRadarSpeedBadge(
           polygons,
           labels,
-          center: Offset(center.dx, center.dy - 14.0),
+          center: Offset(center.dx, center.dy - (18.0 * sourceScale)),
+          sourceScale: sourceScale,
           text: speedKph.toStringAsFixed(0),
-          fillColor: badgeColor,
-          textColor: Colors.white,
+          accentColor: badgeColor,
         );
         if (showRadarInfo >= 2) {
           _appendOverlayLabel(
             labels,
-            anchor: Offset(center.dx, center.dy - 44.0),
+            anchor: Offset(center.dx, center.dy - (48.0 * sourceScale)),
             text: yRel.toStringAsFixed(1),
             color: Colors.white,
-            size: 18.0,
+            strokeColor: Colors.black,
+            strokeWidth: 1.4,
+            size: _clampDouble(18.0 * sourceScale, 16.0, 21.0),
             centered: true,
           );
           _appendOverlayLabel(
             labels,
-            anchor: Offset(center.dx, center.dy + 28.0),
+            anchor: Offset(center.dx, center.dy + (30.0 * sourceScale)),
             text: dRel.toStringAsFixed(1),
             color: Colors.white,
-            size: 18.0,
+            strokeColor: Colors.black,
+            strokeWidth: 1.4,
+            size: _clampDouble(18.0 * sourceScale, 16.0, 21.0),
             centered: true,
           );
         }
@@ -2969,9 +3132,6 @@ class _DriveOverlayPainter extends CustomPainter {
         transform.sourceScale.isFinite && transform.sourceScale > 0.0
             ? transform.sourceScale
             : 1.0;
-    final badgeDx = 80.0 * sourceScale;
-    final badgeDy = 195.0 * sourceScale;
-
     int leadTwoStatus = 1;
     final leadAreaBoxes = cam?['leadAreaBoxes'];
     if (leadAreaBoxes is List) {
@@ -2992,14 +3152,13 @@ class _DriveOverlayPainter extends CustomPainter {
       final strokeColor = !leadOneBox.radarDetected
           ? const Color(0xFF3D7BFF)
           : (isLeadScc ? const Color(0xFFFF3B30) : const Color(0xFFFFA726));
-      polygons.add(
-        _encodePolygon(
-          _roundedRectVertices(leadOneBox.rect,
-              radius: 15.0, segmentsPerCorner: 4),
-          const Color(0x33000000),
-          strokeColor: strokeColor,
-          strokeWidth: 3.0,
-        ),
+      _appendLeadBoxCard(
+        polygons,
+        rect: leadOneBox.rect,
+        sourceScale: sourceScale,
+        strokeColor: strokeColor,
+        fillColor: const Color(0x33000000),
+        primary: true,
       );
 
       final radarDist =
@@ -3007,45 +3166,34 @@ class _DriveOverlayPainter extends CustomPainter {
       final visionDist = leadOne != null && leadOne.modelProb > 0.5
           ? math.max(0.0, leadOne.dRel - 1.52)
           : 0.0;
-      if (drawDistanceBadges && showRadarBadge && radarDist > 0.0) {
-        _appendBadge(
+      final badgeLayout =
+          _leadDistanceBadgeLayout(leadOneBox.rect, sourceScale);
+      final hasRadarDistance = radarDist > 0.0;
+      final hasVisionDistance = visionDist > 0.0;
+      final primaryDistance =
+          hasRadarDistance ? radarDist : (hasVisionDistance ? visionDist : 0.0);
+      final primaryBadgeColor = hasRadarDistance
+          ? (isLeadScc ? const Color(0xFFFF3B30) : const Color(0xFFFFA726))
+          : const Color(0xFF3D7BFF);
+      if (drawDistanceBadges && showRadarBadge && primaryDistance > 0.0) {
+        _appendLeadDistanceBadge(
           polygons,
           labels,
-          center: Offset(
-              leadOneBox.center.dx - badgeDx, leadOneBox.center.dy + badgeDy),
-          text: radarDist.toStringAsFixed(1),
-          fillColor:
-              isLeadScc ? const Color(0xFFFF3B30) : const Color(0xFFFFA726),
+          layout: badgeLayout,
+          sourceScale: sourceScale,
+          text: primaryDistance.toStringAsFixed(1),
+          accentColor: primaryBadgeColor,
           textColor: badgeTextColor,
-          textStrokeColor: Colors.black,
-          textStrokeWidth: 1.6,
-          fontSize: 24.0,
-        );
-      }
-      if (drawDistanceBadges && showRadarBadge && visionDist > 0.0) {
-        _appendBadge(
-          polygons,
-          labels,
-          center: Offset(
-              leadOneBox.center.dx + badgeDx, leadOneBox.center.dy + badgeDy),
-          text: visionDist.toStringAsFixed(1),
-          fillColor: const Color(0xFF3D7BFF),
-          textColor: badgeTextColor,
-          textStrokeColor: Colors.black,
-          textStrokeWidth: 1.6,
-          fontSize: 24.0,
         );
       }
       if (showStateText && stateText != null) {
-        _appendOverlayLabel(
+        _appendLeadStateBadge(
+          polygons,
           labels,
-          anchor: Offset(leadOneBox.center.dx, leadOneBox.center.dy + badgeDy),
+          rect: leadOneBox.rect,
+          sourceScale: sourceScale,
+          xState: xState,
           text: stateText,
-          color: Colors.white,
-          strokeColor: Colors.black,
-          strokeWidth: 1.8,
-          size: 40.0,
-          centered: true,
         );
       }
     }
@@ -3061,16 +3209,15 @@ class _DriveOverlayPainter extends CustomPainter {
         ? _projectLeadBox(transform, canvasSize, leadTwoSample)
         : null;
     if (leadTwoBox != null && showLead2) {
-      polygons.add(
-        _encodePolygon(
-          _roundedRectVertices(leadTwoBox.rect,
-              radius: 15.0, segmentsPerCorner: 4),
-          leadTwoStatus >= 2
-              ? const Color(0x66FF3B30)
-              : const Color(0x33000000),
-          strokeColor: const Color(0xFFB68A3A),
-          strokeWidth: 3.0,
-        ),
+      _appendLeadBoxCard(
+        polygons,
+        rect: leadTwoBox.rect,
+        sourceScale: sourceScale,
+        strokeColor: const Color(0xFFB68A3A),
+        fillColor: leadTwoStatus >= 2
+            ? const Color(0x66FF3B30)
+            : const Color(0x33000000),
+        primary: false,
       );
     }
 
@@ -3149,29 +3296,42 @@ class _DriveOverlayPainter extends CustomPainter {
         } else {
           badgeColor = const Color(0xFFFF3B30);
         }
-        _appendBadge(
+        _appendRadarSpeedBadge(
           polygons,
           labels,
-          center: Offset(centerPoint.dx, centerPoint.dy - 14.0),
+          center: Offset(
+            centerPoint.dx,
+            centerPoint.dy - (18.0 * sourceScale),
+          ),
+          sourceScale: sourceScale,
           text: speedKph.toStringAsFixed(0),
-          fillColor: badgeColor,
-          textColor: Colors.white,
+          accentColor: badgeColor,
         );
         if (showRadarInfo >= 2) {
           _appendOverlayLabel(
             labels,
-            anchor: Offset(centerPoint.dx, centerPoint.dy - 44.0),
+            anchor: Offset(
+              centerPoint.dx,
+              centerPoint.dy - (48.0 * sourceScale),
+            ),
             text: radar.yRel.toStringAsFixed(1),
             color: Colors.white,
-            size: 18.0,
+            strokeColor: Colors.black,
+            strokeWidth: 1.4,
+            size: _clampDouble(18.0 * sourceScale, 16.0, 21.0),
             centered: true,
           );
           _appendOverlayLabel(
             labels,
-            anchor: Offset(centerPoint.dx, centerPoint.dy + 28.0),
+            anchor: Offset(
+              centerPoint.dx,
+              centerPoint.dy + (30.0 * sourceScale),
+            ),
             text: radar.dRel.toStringAsFixed(1),
             color: Colors.white,
-            size: 18.0,
+            strokeColor: Colors.black,
+            strokeWidth: 1.4,
+            size: _clampDouble(18.0 * sourceScale, 16.0, 21.0),
             centered: true,
           );
         }
@@ -3842,5 +4002,19 @@ class _ProjectedLeadBox {
     required this.yCenter,
     required this.radarDetected,
     required this.radarTrackId,
+  });
+}
+
+class _LeadDistanceBadgeLayout {
+  final Offset center;
+  final double fontSize;
+  final double minWidth;
+  final double height;
+
+  const _LeadDistanceBadgeLayout({
+    required this.center,
+    required this.fontSize,
+    required this.minWidth,
+    required this.height,
   });
 }

@@ -17,6 +17,8 @@
   carrotpilot/onroad/TMAP 입력 구조 분석
 - `architecture/remote_ar/`
   stock mode remote AR 설계, 구현, 테스트, handoff
+- `architecture/yolo/`
+  YOLO 기반 객체감지 설계, 타당성, 벤치마크
 - `operations/`
   운영/배포/빌드/터미널 사용 문서
 - `_analysis/`
