@@ -25,6 +25,7 @@ class StorageLayoutService {
   static String get fleetPath => folderPath('fleet');
   static String get appPath => folderPath('app');
   static String get backupsPath => folderPath('backups');
+  static String get profilesPath => '$appPath/profiles';
   static String get tmpPath => folderPath('tmp');
 
   Future<bool> ensureBaseFolders() async {

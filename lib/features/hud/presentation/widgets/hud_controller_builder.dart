@@ -1,7 +1,9 @@
 import 'dart:async';
 
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
+import '../../../../services/link_hud_service.dart';
 import '../../../../services/ssh_service.dart';
 import '../../application/hud_controller.dart';
 import '../../application/hud_controller_state.dart';
@@ -32,8 +34,10 @@ class HudControllerBuilder extends StatefulWidget {
 }
 
 class _HudControllerBuilderState extends State<HudControllerBuilder> {
+  static final LinkHudService _linkHudService = LinkHudService();
   HudRepositoryLease? _repositoryLease;
   HudController? _controller;
+  bool _buildScheduled = false;
 
   @override
   void initState() {
@@ -117,6 +121,12 @@ class _HudControllerBuilderState extends State<HudControllerBuilder> {
       await controller.clear();
       return;
     }
+    final ssh = widget.sshService;
+    if (ssh != null && ssh.isConnected) {
+      try {
+        await _linkHudService.ensureRunning(ssh);
+      } catch (_) {}
+    }
     await controller.bindLive(host);
   }
 
@@ -124,7 +134,23 @@ class _HudControllerBuilderState extends State<HudControllerBuilder> {
     if (!mounted) {
       return;
     }
-    setState(() {});
+    final phase = SchedulerBinding.instance.schedulerPhase;
+    if (phase == SchedulerPhase.idle ||
+        phase == SchedulerPhase.postFrameCallbacks) {
+      setState(() {});
+      return;
+    }
+    if (_buildScheduled) {
+      return;
+    }
+    _buildScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _buildScheduled = false;
+      if (!mounted) {
+        return;
+      }
+      setState(() {});
+    });
   }
 
   @override

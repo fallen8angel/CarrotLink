@@ -141,8 +141,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     _suppressCameraErrors = false;
     _setSidecarPhase(
       _SidecarPhase.idle,
-      message:
-          '사이드카 그래픽 모드를 종료했습니다. 잠시 후 유휴 정리합니다.',
+      message: '사이드카 그래픽 모드를 종료했습니다. 잠시 후 유휴 정리합니다.',
     );
     _stopAdaptiveCameraQualityLoop(resetMode: true);
     _stopSidecarLoop();
@@ -218,17 +217,20 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     try {
       final prefs = await SharedPreferences.getInstance();
       const defaults = <String, bool>{
-        'arOverlay': true,
+        // Default policy: keep only path fill + lane lines enabled.
+        // Everything else stays disabled until explicitly requested.
+        'arOverlay': false,
         'nativeArScene': false,
+        'arAutoSave': false,
         'pathFill': true,
         'laneLines': true,
-        'roadEdge': true,
+        'roadEdge': false,
         'lead1': false,
         'lead2': false,
         'radarBadge': false,
         'radarVector': false,
-        'stopDistanceTf': true,
-        'stateText': true,
+        'stopDistanceTf': false,
+        'stateText': false,
       };
 
       bool readBool(Map<String, dynamic> source, String key, bool fallback) {
@@ -249,6 +251,9 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
               readBool(map, 'arOverlay', defaults['arOverlay']!);
           _debugPushNativeArScene =
               readBool(map, 'nativeArScene', defaults['nativeArScene']!);
+          final autoSave = readBool(map, 'arAutoSave', defaults['arAutoSave']!);
+          _debugArCaptureEnabled = autoSave;
+          _debugArAutoPersistEnabled = autoSave;
           _debugShowPathFill = readBool(map, 'pathFill', defaults['pathFill']!);
           _debugShowLaneLines =
               readBool(map, 'laneLines', defaults['laneLines']!);
@@ -271,6 +276,9 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
               readBool(map, 'arOverlay', defaults['arOverlay']!);
           _debugPushNativeArScene =
               readBool(map, 'nativeArScene', defaults['nativeArScene']!);
+          final autoSave = readBool(map, 'arAutoSave', defaults['arAutoSave']!);
+          _debugArCaptureEnabled = autoSave;
+          _debugArAutoPersistEnabled = autoSave;
           _debugShowPathFill = readBool(map, 'pathFill', defaults['pathFill']!);
           _debugShowLaneLines =
               readBool(map, 'laneLines', defaults['laneLines']!);
@@ -288,8 +296,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
         });
       }
 
-      final initialized =
-          prefs.getBool(
+      final initialized = prefs.getBool(
             _LiveDriveCanvasScreenState._hudDebugLayerTogglesInitPrefKey,
           ) ??
           false;
@@ -328,6 +335,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       final payload = <String, bool>{
         'arOverlay': _debugShowArOverlay,
         'nativeArScene': _debugPushNativeArScene,
+        'arAutoSave': _debugArCaptureEnabled && _debugArAutoPersistEnabled,
         'pathFill': _debugShowPathFill,
         'laneLines': _debugShowLaneLines,
         'roadEdge': _debugShowRoadEdge,
@@ -366,7 +374,8 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       _overlayFrameOrder.addLast(modelFrameId);
     }
     _overlayByModelFrame[modelFrameId] = snapshot;
-    while (_overlayFrameOrder.length > _LiveDriveCanvasScreenState._overlayFrameBufferSize) {
+    while (_overlayFrameOrder.length >
+        _LiveDriveCanvasScreenState._overlayFrameBufferSize) {
       final drop = _overlayFrameOrder.removeFirst();
       _overlayByModelFrame.remove(drop);
     }
@@ -446,7 +455,8 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     final viewId = _nativeCameraViewId;
     if (viewId == null) return;
     try {
-      await _LiveDriveCanvasScreenState._nativeCameraControlChannel.invokeMethod<bool>(
+      await _LiveDriveCanvasScreenState._nativeCameraControlChannel
+          .invokeMethod<bool>(
         'clearOverlay',
         <String, dynamic>{'viewId': viewId},
       );
@@ -508,7 +518,8 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     if (!_overlayVerifyMode || !_debugShowVerifyPanel || !mounted) return;
     final nowUs = _renderClock.elapsedMicroseconds;
     if (!force &&
-        (nowUs - _lastOverlayVerifyUpdateUs) < _LiveDriveCanvasScreenState._overlayVerifyIntervalUs) {
+        (nowUs - _lastOverlayVerifyUpdateUs) <
+            _LiveDriveCanvasScreenState._overlayVerifyIntervalUs) {
       return;
     }
     _lastOverlayVerifyUpdateUs = nowUs;
@@ -559,7 +570,8 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     if (_nativeOverlaySize.width <= 1 || _nativeOverlaySize.height <= 1) return;
     final nowUs = _renderClock.elapsedMicroseconds;
     if (!force &&
-        (nowUs - _lastNativeOverlayPushUs) < _LiveDriveCanvasScreenState._nativeOverlayPushIntervalUs) {
+        (nowUs - _lastNativeOverlayPushUs) <
+            _LiveDriveCanvasScreenState._nativeOverlayPushIntervalUs) {
       return;
     }
     final signature = _buildOverlaySignature(snapshot);
@@ -618,12 +630,14 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     _lastNativeOverlayPushUs = nowUs;
     try {
       if (payload == null) {
-        await _LiveDriveCanvasScreenState._nativeCameraControlChannel.invokeMethod<bool>(
+        await _LiveDriveCanvasScreenState._nativeCameraControlChannel
+            .invokeMethod<bool>(
           'clearOverlay',
           <String, dynamic>{'viewId': viewId},
         );
       } else {
-        await _LiveDriveCanvasScreenState._nativeCameraControlChannel.invokeMethod<bool>(
+        await _LiveDriveCanvasScreenState._nativeCameraControlChannel
+            .invokeMethod<bool>(
           'updateOverlay',
           <String, dynamic>{
             'viewId': viewId,
@@ -654,7 +668,8 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     if (cameraFrameId == null) {
       if (_LiveDriveCanvasScreenState._strictFrameLock) {
         if (_lastPublishedModelFrameId != null &&
-            (nowUs - _lastSyncHitUs) > _LiveDriveCanvasScreenState._strictFrameHoldUs) {
+            (nowUs - _lastSyncHitUs) >
+                _LiveDriveCanvasScreenState._strictFrameHoldUs) {
           _renderInterpActive = false;
           _applyOverlaySnapshot(
             const _DriveOverlaySnapshot.empty(),
@@ -687,7 +702,8 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       }
       if (_LiveDriveCanvasScreenState._strictFrameLock &&
           _lastPublishedModelFrameId != null &&
-          (nowUs - _lastSyncHitUs) > _LiveDriveCanvasScreenState._strictFrameHoldUs) {
+          (nowUs - _lastSyncHitUs) >
+              _LiveDriveCanvasScreenState._strictFrameHoldUs) {
         _renderInterpActive = false;
         _applyOverlaySnapshot(
           const _DriveOverlaySnapshot.empty(),
@@ -725,9 +741,9 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     _renderFromSnapshot = _overlayNotifier.value;
     _renderToSnapshot = next;
     _renderInterpStartUs = nowUs;
-    _renderInterpDurationUs = (_smoothedSyncIntervalUs * 0.8)
-        .round()
-        .clamp(_LiveDriveCanvasScreenState._interpMinUs, _LiveDriveCanvasScreenState._interpMaxUs);
+    _renderInterpDurationUs = (_smoothedSyncIntervalUs * 0.8).round().clamp(
+        _LiveDriveCanvasScreenState._interpMinUs,
+        _LiveDriveCanvasScreenState._interpMaxUs);
     _renderInterpActive = true;
     _renderTicker ??= createTicker(_onRenderTick)..start();
   }

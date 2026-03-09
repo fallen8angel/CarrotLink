@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
@@ -47,9 +47,6 @@ part 'live_drive_canvas_sidecar_runtime_components.dart';
 part 'live_drive_canvas_lifecycle_components.dart';
 part 'live_drive_canvas_layout_components.dart';
 
-
-
-
 enum _DriveCameraKind { road, wideRoad }
 
 enum _SidecarPhase {
@@ -77,38 +74,32 @@ enum _DriveViewportZoomPreset {
   zoomOut,
   fit,
   crop,
-  zoomIn,
 }
 
 extension _DriveViewportZoomPresetX on _DriveViewportZoomPreset {
   bool get coverPreferred => switch (this) {
-        _DriveViewportZoomPreset.zoomOut || _DriveViewportZoomPreset.fit =>
+        _DriveViewportZoomPreset.zoomOut ||
+        _DriveViewportZoomPreset.fit =>
           false,
-        _DriveViewportZoomPreset.crop || _DriveViewportZoomPreset.zoomIn =>
-          true,
+        _DriveViewportZoomPreset.crop => true,
       };
 
   double get zoomFactor => switch (this) {
         _DriveViewportZoomPreset.zoomOut => 0.92,
         _DriveViewportZoomPreset.fit => 1.0,
         _DriveViewportZoomPreset.crop => 1.0,
-        // The aggressive extra crop on this preset drifts lane/path alignment
-        // more than the other viewports. Keep it only slightly tighter.
-        _DriveViewportZoomPreset.zoomIn => 1.06,
       };
 
   IconData get icon => switch (this) {
         _DriveViewportZoomPreset.zoomOut => Icons.zoom_out_map_rounded,
         _DriveViewportZoomPreset.fit => Icons.fit_screen_rounded,
         _DriveViewportZoomPreset.crop => Icons.crop_free_rounded,
-        _DriveViewportZoomPreset.zoomIn => Icons.zoom_in_map_rounded,
       };
 
   String get tooltip => switch (this) {
         _DriveViewportZoomPreset.zoomOut => '축소',
         _DriveViewportZoomPreset.fit => '정사이즈',
         _DriveViewportZoomPreset.crop => '크롭',
-        _DriveViewportZoomPreset.zoomIn => '확대',
       };
 }
 
@@ -144,9 +135,9 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const String _sidecarRevisionNotifiedPrefKey =
       'sidecar_revision_notified_v1';
   static const String _hudDebugLayerTogglesPrefKey =
-      'hud_debug_layer_toggles_v3';
+      'hud_debug_layer_toggles_v4';
   static const String _hudDebugLayerTogglesInitPrefKey =
-      'hud_debug_layer_toggles_init_v3';
+      'hud_debug_layer_toggles_init_v4';
   static const _M3 _viewFromDevice = _M3(
     0.0,
     1.0,
@@ -174,6 +165,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   StreamSubscription<dynamic>? _nativeCameraEventSub;
   int? _nativeCameraViewId;
   bool _nativeCameraUnsupported = false;
+  bool _isDisposing = false;
   final bool _nativeOverlayEnabled = true;
   Size _nativeOverlaySize = Size.zero;
   Rect _nativeOverlayVisibleViewportRect = Rect.zero;
@@ -262,24 +254,26 @@ fi
   String _overlayVerifyText = '';
   int _lastOverlayVerifyUpdateUs = 0;
   static const int _overlayVerifyIntervalUs = 200000;
-  _DriveViewportZoomPreset _viewportZoomPreset =
-      _DriveViewportZoomPreset.crop;
+  _DriveViewportZoomPreset _viewportZoomPreset = _DriveViewportZoomPreset.crop;
   bool _debugShowGuides = false;
   bool _debugShowVerifyPanel = false;
   bool _debugShowViewportFrame = false;
-  bool _debugShowArOverlay = true;
+  // AR debug overlay defaults:
+  // - Keep only path fill + lane lines enabled by default.
+  // - All other overlay layers/transports stay off unless explicitly enabled.
+  bool _debugShowArOverlay = false;
   bool _debugShowPathFill = true;
   bool _debugShowLaneLines = true;
-  bool _debugShowRoadEdge = true;
+  bool _debugShowRoadEdge = false;
   bool _debugShowLead1 = false;
   bool _debugShowLead2 = false;
   bool _debugShowRadarBadge = false;
   bool _debugShowRadarVector = false;
-  bool _debugShowStopDistanceTf = true;
-  bool _debugShowStateText = true;
+  bool _debugShowStopDistanceTf = false;
+  bool _debugShowStateText = false;
   bool _debugPushNativeArScene = false;
-  final bool _debugArCaptureEnabled = true;
-  final bool _debugArAutoPersistEnabled = true;
+  bool _debugArCaptureEnabled = false;
+  bool _debugArAutoPersistEnabled = false;
   bool _debugArReplayMode = false;
   _DriveArReplayFrame? _activeArReplayFrame;
   final ListQueue<_DriveArReplayFrame> _arReplayFrames =
@@ -387,9 +381,7 @@ fi
   bool get _canUseNativeCamera => !kIsWeb && Platform.isAndroid;
 
   bool get _useNativeLiveCamera =>
-      _openpilotOverlayMode &&
-      _canUseNativeCamera &&
-      !_nativeCameraUnsupported;
+      _openpilotOverlayMode && _canUseNativeCamera && !_nativeCameraUnsupported;
 
   bool get _useNativeOverlayRenderer =>
       _openpilotOverlayMode && _useNativeLiveCamera && _nativeOverlayEnabled;
@@ -429,21 +421,18 @@ fi
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageStarted: (_) {
-            if (!mounted) return;
-            setState(() {
+            _safeSetState(() {
               _cameraLoading = true;
               _cameraError = null;
             });
           },
           onPageFinished: (_) {
-            if (!mounted) return;
-            setState(() {
+            _safeSetState(() {
               _cameraLoading = false;
             });
           },
           onWebResourceError: (error) {
-            if (!mounted) return;
-            setState(() {
+            _safeSetState(() {
               _cameraLoading = false;
               _cameraError = '카메라 로드 실패: ${error.description}';
             });
@@ -476,7 +465,7 @@ fi
         const _DriveOverlaySnapshot.empty(),
         forceNativePush: true,
       );
-      setState(() {
+      _safeSetState(() {
         _cameraSourceKey = null;
         _nativeCameraViewId = null;
         _nativeCameraUnsupported = false;
@@ -519,17 +508,14 @@ fi
 
   void _setDebugGuides(bool enabled) => _setDebugGuidesImpl(enabled);
 
-  void _setDebugVerifyPanel(bool enabled) =>
-      _setDebugVerifyPanelImpl(enabled);
+  void _setDebugVerifyPanel(bool enabled) => _setDebugVerifyPanelImpl(enabled);
 
   void _setDebugViewportFrame(bool enabled) =>
       _setDebugViewportFrameImpl(enabled);
 
-  Future<void> _loadHudDebugLayerToggles() =>
-      _loadHudDebugLayerTogglesImpl();
+  Future<void> _loadHudDebugLayerToggles() => _loadHudDebugLayerTogglesImpl();
 
-  Future<void> _saveHudDebugLayerToggles() =>
-      _saveHudDebugLayerTogglesImpl();
+  Future<void> _saveHudDebugLayerToggles() => _saveHudDebugLayerTogglesImpl();
 
   void _onLayerToggleChanged(StateSetter setLocalState, VoidCallback update) =>
       _onLayerToggleChangedImpl(setLocalState, update);
@@ -558,7 +544,8 @@ fi
     required double t,
     required double speedKph,
     required double leadDist,
-  }) => _buildOverlayPreviewDebugPlotImpl(
+  }) =>
+      _buildOverlayPreviewDebugPlotImpl(
         seq: seq,
         t: t,
         speedKph: speedKph,
@@ -578,11 +565,12 @@ fi
     required int sourceWidth,
     required int sourceHeight,
     required double t,
-  }) => _previewRoadPathVerticesImpl(
-    sourceWidth: sourceWidth,
-    sourceHeight: sourceHeight,
-    t: t,
-  );
+  }) =>
+      _previewRoadPathVerticesImpl(
+        sourceWidth: sourceWidth,
+        sourceHeight: sourceHeight,
+        t: t,
+      );
 
   List<List<double>> _previewLanePolygon({
     required int sourceWidth,
@@ -590,13 +578,14 @@ fi
     required double t,
     required double laneFactor,
     required double thickness,
-  }) => _previewLanePolygonImpl(
-    sourceWidth: sourceWidth,
-    sourceHeight: sourceHeight,
-    t: t,
-    laneFactor: laneFactor,
-    thickness: thickness,
-  );
+  }) =>
+      _previewLanePolygonImpl(
+        sourceWidth: sourceWidth,
+        sourceHeight: sourceHeight,
+        t: t,
+        laneFactor: laneFactor,
+        thickness: thickness,
+      );
 
   _DriveOverlaySnapshot _buildOverlayPreviewSnapshot({required int seq}) =>
       _buildOverlayPreviewSnapshotImpl(seq: seq);
@@ -609,7 +598,8 @@ fi
   Future<void> _setDisplayHighRefreshPreference(
     bool enabled, {
     required String reason,
-  }) => _setDisplayHighRefreshPreferenceImpl(enabled, reason: reason);
+  }) =>
+      _setDisplayHighRefreshPreferenceImpl(enabled, reason: reason);
 
   Future<void> _enableScreenAwake() => _enableScreenAwakeImpl();
 
@@ -638,15 +628,16 @@ fi
   Future<bool> _tryAutoBootstrapSidecar(
     SSHService ssh, {
     required Object startError,
-  }) => _tryAutoBootstrapSidecarImpl(ssh, startError: startError);
+  }) =>
+      _tryAutoBootstrapSidecarImpl(ssh, startError: startError);
 
-  Future<void> _lockLandscapeOrientations() =>
-      _lockLandscapeOrientationsImpl();
+  Future<void> _lockLandscapeOrientations() => _lockLandscapeOrientationsImpl();
 
   Future<void> _exitScreen() => _exitScreenImpl();
 
   @override
   void dispose() {
+    _isDisposing = true;
     WidgetsBinding.instance.removeObserver(this);
     unawaited(
       _persistArReplaySessionIfNeeded(force: true, reason: 'dispose'),
@@ -750,23 +741,17 @@ fi
   Future<void> _showDebugTextDialog(String title, String content) =>
       _showDebugTextDialogImpl(title, content);
 
-
   Future<void> _debugActionHealth() => _debugActionHealthImpl();
-
 
   Future<void> _debugActionWsProbe() => _debugActionWsProbeImpl();
 
-
   Future<void> _debugActionTailLog() => _debugActionTailLogImpl();
-
 
   Future<void> _debugActionRedeploy() => _debugActionRedeployImpl();
 
-
   Future<void> _debugActionRestart() => _debugActionRestartImpl();
 
-  Future<void> _debugActionInspectArScene() =>
-      _debugActionInspectArSceneImpl();
+  Future<void> _debugActionInspectArScene() => _debugActionInspectArSceneImpl();
 
   Future<void> _debugActionCaptureArReplay() =>
       _debugActionCaptureArReplayImpl();
@@ -774,11 +759,9 @@ fi
   Future<void> _debugActionUseLatestArReplay() =>
       _debugActionUseLatestArReplayImpl();
 
-  Future<void> _debugActionStopArReplay() =>
-      _debugActionStopArReplayImpl();
+  Future<void> _debugActionStopArReplay() => _debugActionStopArReplayImpl();
 
-  Future<void> _debugActionExportArReplay() =>
-      _debugActionExportArReplayImpl();
+  Future<void> _debugActionExportArReplay() => _debugActionExportArReplayImpl();
 
   String _arReplayStatusLabel() => _arReplayStatusLabelImpl();
 
@@ -804,7 +787,8 @@ fi
   Future<void> _persistArReplaySessionIfNeeded({
     bool force = false,
     String? reason,
-  }) => _persistArReplaySessionIfNeededImpl(force: force, reason: reason);
+  }) =>
+      _persistArReplaySessionIfNeededImpl(force: force, reason: reason);
 
   void _setArReplayMode(
     bool enabled, {
@@ -812,24 +796,20 @@ fi
   }) =>
       _setArReplayModeImpl(enabled, frame: frame);
 
-
   Future<bool> _confirmDebugAction({
     required String title,
     required String message,
     String confirmText = '?ㅽ뻾',
-  }) => _confirmDebugActionImpl(
+  }) =>
+      _confirmDebugActionImpl(
         title: title,
         message: message,
         confirmText: confirmText,
       );
 
-
-  Future<void> _debugActionResetSidecar() =>
-      _debugActionResetSidecarImpl();
-
+  Future<void> _debugActionResetSidecar() => _debugActionResetSidecarImpl();
 
   String _buildDebugSnapshotText() => _buildDebugSnapshotTextImpl();
-
 
   Future<void> _copyDebugSnapshot() => _copyDebugSnapshotImpl();
 
@@ -838,15 +818,13 @@ fi
     bool isError = false,
     Duration duration = const Duration(seconds: 2),
   }) {
-    if (!mounted) return;
     _hudNoticeTimer?.cancel();
-    setState(() {
+    _safeSetState(() {
       _hudNoticeMessage = message;
       _hudNoticeIsError = isError;
     });
     _hudNoticeTimer = Timer(duration, () {
-      if (!mounted) return;
-      setState(() {
+      _safeSetState(() {
         _hudNoticeMessage = null;
         _hudNoticeIsError = false;
       });
@@ -854,19 +832,15 @@ fi
   }
 
   void _safeSetState(VoidCallback fn) {
-    if (!mounted) return;
+    if (!mounted || _isDisposing) return;
     setState(fn);
   }
 
-
   Future<void> _openDebugOptionsPopup() => _openDebugOptionsPopupImpl();
-
 
   Widget _buildDriveCameraSurface() => _buildDriveCameraSurfaceImpl();
 
-
   String? _cameraCenterNoticeMessage() => _cameraCenterNoticeMessageImpl();
-
 
   Widget _buildDriveModeTag(UiWindowInfo window) =>
       _buildDriveModeTagImpl(window);
@@ -877,24 +851,24 @@ fi
   double _hudPreferredAspectRatioForWindow(
     UiWindowInfo window, {
     required bool wide,
-  }) => _hudPreferredAspectRatioForWindowImpl(window, wide: wide);
-
+  }) =>
+      _hudPreferredAspectRatioForWindowImpl(window, wide: wide);
 
   double _computePortraitHudHeight(
     UiWindowInfo window,
     BoxConstraints constraints,
-  ) => _computePortraitHudHeightImpl(window, constraints);
-
+  ) =>
+      _computePortraitHudHeightImpl(window, constraints);
 
   Widget _buildPortraitHudPanel(UiWindowInfo window) =>
       _buildPortraitHudPanelImpl(window);
-
 
   bool _shouldHideHudForTinyViewport(
     UiWindowInfo window,
     BoxConstraints constraints, {
     required bool isLandscape,
-  }) => _shouldHideHudForTinyViewportImpl(
+  }) =>
+      _shouldHideHudForTinyViewportImpl(
         window,
         constraints,
         isLandscape: isLandscape,
@@ -903,29 +877,30 @@ fi
   double _computeLandscapeHudOverlayHeight(
     UiWindowInfo window,
     Size drawSize,
-  ) => _computeLandscapeHudOverlayHeightImpl(window, drawSize);
+  ) =>
+      _computeLandscapeHudOverlayHeightImpl(window, drawSize);
 
   double _computeLandscapeHudOverlayWidth(
     UiWindowInfo window,
     double overlayHeight,
-  ) => _computeLandscapeHudOverlayWidthImpl(window, overlayHeight);
-
+  ) =>
+      _computeLandscapeHudOverlayWidthImpl(window, overlayHeight);
 
   Widget _buildLandscapeHudOverlay(
     UiWindowInfo window,
     Size drawSize, {
     double? overlayHeight,
     double? overlayWidth,
-  }) => _buildLandscapeHudOverlayImpl(
-      window,
-      drawSize,
-      overlayHeight: overlayHeight,
-      overlayWidth: overlayWidth,
-    );
+  }) =>
+      _buildLandscapeHudOverlayImpl(
+        window,
+        drawSize,
+        overlayHeight: overlayHeight,
+        overlayWidth: overlayWidth,
+      );
 
   Widget _buildDriveScaffoldBody(UiWindowInfo window) =>
       _buildDriveScaffoldBodyImpl(window);
-
 
   @override
   Widget build(BuildContext context) {
@@ -943,5 +918,4 @@ fi
       ),
     );
   }
-
 }

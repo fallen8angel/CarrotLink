@@ -24,50 +24,46 @@ class AdaptiveHudDriveInlinePrimarySection extends StatelessWidget {
   }
 
   Widget _buildSpeedCluster() {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: const Color(0xD9114A31),
-        borderRadius: BorderRadius.circular(profile.borderRadius - 8),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.24)),
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        profile.padding.left * 0.22,
+        profile.padding.top * 0.12,
+        profile.padding.right * 0.18,
+        profile.padding.bottom * 0.10,
       ),
-      child: Padding(
-        padding: EdgeInsets.all(profile.padding.left * 0.74),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text(
-              '현재속도',
-              style: TextStyle(
-                color: Colors.white70,
-                fontSize: profile.chipFontSize + 1.4,
-                fontWeight: FontWeight.w900,
-                letterSpacing: 0.3,
-                shadows: hudStrongTextShadows,
-              ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            '현재속도',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.54),
+              fontSize: profile.chipFontSize + 1.4,
+              fontWeight: FontWeight.w900,
+              letterSpacing: 0.3,
             ),
-            SizedBox(height: profile.metricGap * 0.12),
-            Expanded(
-              child: Align(
+          ),
+          SizedBox(height: profile.metricGap * 0.08),
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
                 alignment: Alignment.centerLeft,
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    model.speedText,
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: profile.speedFontSize + 10,
-                      height: 0.84,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: -1.4,
-                      shadows: hudStrongTextShadows,
-                    ),
+                child: Text(
+                  model.speedText,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: profile.speedFontSize + 14,
+                    height: 0.84,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: -1.8,
                   ),
                 ),
               ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -113,6 +109,9 @@ class AdaptiveHudDriveInlineFooter extends StatelessWidget {
     return AdaptiveHudBottomStrip(
       model: model,
       profile: profile,
+      qualityLabel: qualityLabel,
+      compatibilityLabel: compatibilityLabel,
+      showHost: showHost,
     );
   }
 }

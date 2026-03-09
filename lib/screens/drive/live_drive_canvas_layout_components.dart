@@ -205,6 +205,26 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
     );
   }
 
+  Widget _buildViewportEdgeGradientOverlay() {
+    return const IgnorePointer(
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            stops: [0.0, 0.14, 0.86, 1.0],
+            colors: [
+              Color(0x5C000000),
+              Color(0x00000000),
+              Color(0x00000000),
+              Color(0x42000000),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildDriveDockImpl(double dockWidth) {
     return Container(
       width: dockWidth,
@@ -296,6 +316,9 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
         final drawH = placement.height;
         final left = placement.left;
         final top = placement.top;
+        final showViewportEdgeGradient = !_debugOverlayPreviewMode &&
+            (_hudDefaultMode == HudDriveSettingsService.modeWebrtc ||
+                _openpilotOverlayMode);
         final fullSurfaceRect = Rect.fromLTWH(0.0, 0.0, drawW, drawH);
         final visibleViewportRect =
             Rect.fromLTWH(-left, -top, vw, vh).intersect(fullSurfaceRect);
@@ -315,14 +338,16 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
           UiWindowClass.compact => math.min(vw - (overlayInset * 2), 520.0),
           UiWindowClass.medium => math.min(vw * 0.72, 620.0),
           UiWindowClass.expanded => math.min(vw * 0.62, 700.0),
-          UiWindowClass.large || UiWindowClass.extraLarge =>
+          UiWindowClass.large ||
+          UiWindowClass.extraLarge =>
             math.min(vw * 0.52, 760.0),
         };
         final verifyPanelWidth = switch (window.windowClass) {
           UiWindowClass.compact => math.min(vw * 0.58, 420.0),
           UiWindowClass.medium => math.min(vw * 0.52, 470.0),
           UiWindowClass.expanded => math.min(vw * 0.45, 520.0),
-          UiWindowClass.large || UiWindowClass.extraLarge =>
+          UiWindowClass.large ||
+          UiWindowClass.extraLarge =>
             math.min(vw * 0.38, 580.0),
         };
         final statusBannerPaddingH = switch (window.windowClass) {
@@ -405,14 +430,16 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
             (top + drawH - landscapeHudHeight - overlayInset)
                 .clamp(overlayInset, landscapeHudTopBound)
                 .toDouble();
-        final nativeViewportRectChanged =
-            (_nativeOverlayVisibleViewportRect.left - visibleViewportRect.left)
+        final nativeViewportRectChanged = (_nativeOverlayVisibleViewportRect
+                            .left -
+                        visibleViewportRect.left)
                     .abs() >
                 0.5 ||
             (_nativeOverlayVisibleViewportRect.top - visibleViewportRect.top)
                     .abs() >
                 0.5 ||
-            (_nativeOverlayVisibleViewportRect.width - visibleViewportRect.width)
+            (_nativeOverlayVisibleViewportRect.width -
+                        visibleViewportRect.width)
                     .abs() >
                 0.5 ||
             (_nativeOverlayVisibleViewportRect.height -
@@ -453,6 +480,10 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                     Positioned.fill(
                       child: _buildDriveCameraSurface(),
                     ),
+                    if (showViewportEdgeGradient)
+                      Positioned.fill(
+                        child: _buildViewportEdgeGradientOverlay(),
+                      ),
                     if (_debugShowArOverlay &&
                         ((_openpilotOverlayMode &&
                                 !_useNativeOverlayRenderer) ||
@@ -600,8 +631,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                                 Icon(
                                   _sidecarPhase == _SidecarPhase.failed
                                       ? Icons.error_outline
-                                      : (_sidecarPhase ==
-                                              _SidecarPhase.stopping
+                                      : (_sidecarPhase == _SidecarPhase.stopping
                                           ? Icons.stop_circle_outlined
                                           : (_sidecarPhase ==
                                                   _SidecarPhase.running

@@ -26,6 +26,8 @@ class AdaptiveHudHomePreviewSurface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final integratedHomePreview =
+        profile.surface == HudSurfaceVariant.homePreview;
     final leftFlex = profile.wide
         ? (profile.density == HudDensityClass.micro ||
                 profile.density == HudDensityClass.compact
@@ -43,7 +45,9 @@ class AdaptiveHudHomePreviewSurface extends StatelessWidget {
       children: <Widget>[
         if (profile.showTopStatusRow) ...<Widget>[
           topStatusRow,
-          SizedBox(height: profile.sectionGap * 0.46),
+          SizedBox(
+            height: profile.sectionGap * (integratedHomePreview ? 0.28 : 0.46),
+          ),
         ],
         if (showMetrics && showDeviceMetrics) ...<Widget>[
           metricRow,
@@ -54,13 +58,28 @@ class AdaptiveHudHomePreviewSurface extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
               Expanded(flex: leftFlex, child: primaryColumn),
-              SizedBox(width: profile.sectionGap * 0.38),
+              SizedBox(
+                width:
+                    profile.sectionGap * (integratedHomePreview ? 0.18 : 0.38),
+              ),
+              if (integratedHomePreview)
+                Container(
+                  width: 1,
+                  margin: EdgeInsets.symmetric(
+                    vertical: profile.metricGap * 0.12,
+                  ),
+                  color: const Color(0xFFFFFFFF).withValues(alpha: 0.12),
+                ),
+              if (integratedHomePreview)
+                SizedBox(width: profile.sectionGap * 0.18),
               Expanded(flex: rightFlex, child: supportColumn),
             ],
           ),
         ),
         if (profile.showFooterDetails) ...<Widget>[
-          SizedBox(height: profile.sectionGap * 0.42),
+          SizedBox(
+            height: profile.sectionGap * (integratedHomePreview ? 0.26 : 0.42),
+          ),
           footer,
         ],
       ],

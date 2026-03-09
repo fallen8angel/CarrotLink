@@ -21,7 +21,7 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
           builder: (context, setLocalState) {
             final debugEnabled =
                 !_LiveDriveCanvasScreenState._temporaryLimitedHudControls &&
-                _overlayVerifyMode;
+                    _overlayVerifyMode;
             final process = _sidecarProcessSnapshot;
             final health = _sidecarHealthSnapshot;
             final method = (process['method'] ?? '-').trim().isEmpty
@@ -75,22 +75,26 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
             final scheduledStopSummary = _sidecarScheduledStopSummary;
             final remotePyName = _sidecarRemotePyName;
             final remoteUpdated = _sidecarRemoteUpdatedLabel;
-            final profileEndpoint = (_sidecarProfileSnapshot['profile']?.toString() ?? '-')
-                .trim();
+            final profileEndpoint =
+                (_sidecarProfileSnapshot['profile']?.toString() ?? '-').trim();
             final profileModesRaw = _sidecarProfileSnapshot['profiles'];
-            final profileModeCount = profileModesRaw is List ? profileModesRaw.length : 0;
+            final profileModeCount =
+                profileModesRaw is List ? profileModesRaw.length : 0;
             final profileEndpointSummary = profileEndpoint.isEmpty
                 ? '-'
                 : '$profileEndpoint (${profileModeCount > 0 ? 'modes $profileModeCount' : 'modes -'})';
-            final qualityEndpoint = (_sidecarCameraQualitySnapshot['mode']?.toString() ?? '-')
-                .trim();
+            final qualityEndpoint =
+                (_sidecarCameraQualitySnapshot['mode']?.toString() ?? '-')
+                    .trim();
             final qualityModesRaw = _sidecarCameraQualitySnapshot['modes'];
-            final qualityModeCount = qualityModesRaw is List ? qualityModesRaw.length : 0;
+            final qualityModeCount =
+                qualityModesRaw is List ? qualityModesRaw.length : 0;
             final qualityEndpointSummary = qualityEndpoint.isEmpty
                 ? '-'
                 : '$qualityEndpoint (${qualityModeCount > 0 ? 'modes $qualityModeCount' : 'modes -'})';
-            final healthEndpointSummary =
-                health.isEmpty ? '-' : 'ok:$healthOk profile:$healthProfile clients:$healthClients';
+            final healthEndpointSummary = health.isEmpty
+                ? '-'
+                : 'ok:$healthOk profile:$healthProfile clients:$healthClients';
 
             String criticalValue(String name) {
               final value = (_sidecarCriticalProcSnapshot[name] ?? '-').trim();
@@ -524,8 +528,7 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                     ),
                                                     (
                                                       label: '카메라 릴레이',
-                                                      value:
-                                                          cameraRelaySummary,
+                                                      value: cameraRelaySummary,
                                                       color: null
                                                     ),
                                                     (
@@ -797,23 +800,26 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                       label: 'GET /profile',
                                                       value:
                                                           profileEndpointSummary,
-                                                      color: profileEndpointSummary ==
-                                                              '-'
-                                                          ? const Color(
-                                                              0xFFFF8A8A)
-                                                          : const Color(
-                                                              0xFF73E07C)
+                                                      color:
+                                                          profileEndpointSummary ==
+                                                                  '-'
+                                                              ? const Color(
+                                                                  0xFFFF8A8A)
+                                                              : const Color(
+                                                                  0xFF73E07C)
                                                     ),
                                                     (
-                                                      label: 'GET /camera_quality',
+                                                      label:
+                                                          'GET /camera_quality',
                                                       value:
                                                           qualityEndpointSummary,
-                                                      color: qualityEndpointSummary ==
-                                                              '-'
-                                                          ? const Color(
-                                                              0xFFFF8A8A)
-                                                          : const Color(
-                                                              0xFF73E07C)
+                                                      color:
+                                                          qualityEndpointSummary ==
+                                                                  '-'
+                                                              ? const Color(
+                                                                  0xFFFF8A8A)
+                                                              : const Color(
+                                                                  0xFF73E07C)
                                                     ),
                                                     (
                                                       label: '프로세스 점검',
@@ -958,6 +964,24 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                               ),
                                                             );
                                                           }
+                                                        }
+                                                      : null,
+                                                ),
+                                                layerSwitch(
+                                                  'AR 자동 저장',
+                                                  _debugArCaptureEnabled &&
+                                                      _debugArAutoPersistEnabled,
+                                                  layerToggleEnabled
+                                                      ? (value) {
+                                                          _onLayerToggleChanged(
+                                                            setLocalState,
+                                                            () {
+                                                              _debugArCaptureEnabled =
+                                                                  value;
+                                                              _debugArAutoPersistEnabled =
+                                                                  value;
+                                                            },
+                                                          );
                                                         }
                                                       : null,
                                                 ),
@@ -1297,8 +1321,8 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                         ? null
                                                         : () => runAction(
                                                             _debugActionInspectArScene),
-                                                    icon: const Icon(
-                                                        Icons.view_in_ar_outlined),
+                                                    icon: const Icon(Icons
+                                                        .view_in_ar_outlined),
                                                     label: const Text(
                                                         'AR scene 보기'),
                                                   ),
@@ -1311,8 +1335,10 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                         ? null
                                                         : () => runAction(
                                                             _debugActionCaptureArReplay),
-                                                    icon: const Icon(Icons.save_alt_rounded),
-                                                    label: const Text('AR 캡처 저장'),
+                                                    icon: const Icon(
+                                                        Icons.save_alt_rounded),
+                                                    label:
+                                                        const Text('AR 캡처 저장'),
                                                   ),
                                                 ),
                                                 const SizedBox(height: 8),
@@ -1323,8 +1349,10 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                         ? null
                                                         : () => runAction(
                                                             _debugActionExportArReplay),
-                                                    icon: const Icon(Icons.file_download_outlined),
-                                                    label: const Text('AR 파일 저장'),
+                                                    icon: const Icon(Icons
+                                                        .file_download_outlined),
+                                                    label:
+                                                        const Text('AR 파일 저장'),
                                                   ),
                                                 ),
                                                 const SizedBox(height: 8),
@@ -1335,8 +1363,10 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                         ? null
                                                         : () => runAction(
                                                             _debugActionUseLatestArReplay),
-                                                    icon: const Icon(Icons.play_circle_outline_rounded),
-                                                    label: const Text('마지막 캡처 재생'),
+                                                    icon: const Icon(Icons
+                                                        .play_circle_outline_rounded),
+                                                    label:
+                                                        const Text('마지막 캡처 재생'),
                                                   ),
                                                 ),
                                                 const SizedBox(height: 8),
@@ -1347,8 +1377,10 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                         ? null
                                                         : () => runAction(
                                                             _debugActionStopArReplay),
-                                                    icon: const Icon(Icons.stop_circle_outlined),
-                                                    label: const Text('AR 재생 종료'),
+                                                    icon: const Icon(Icons
+                                                        .stop_circle_outlined),
+                                                    label:
+                                                        const Text('AR 재생 종료'),
                                                   ),
                                                 ),
                                                 const SizedBox(height: 8),
@@ -1468,8 +1500,7 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                       _debugOverlayPreviewPlotMode,
                                                   decoration:
                                                       const InputDecoration(
-                                                    labelText:
-                                                        'Plot 미리보기 모드',
+                                                    labelText: 'Plot 미리보기 모드',
                                                     border:
                                                         OutlineInputBorder(),
                                                     isDense: true,

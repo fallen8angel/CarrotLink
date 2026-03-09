@@ -14,7 +14,9 @@ class HudStreamLogWriter {
 
   IOSink? _sink;
   Future<void>? _openingFuture;
+  Future<void> _writeQueue = Future<void>.value();
   bool _disabled = false;
+  bool _disposed = false;
   int _writeCount = 0;
 
   Future<void> logSessionStart() async {
@@ -54,6 +56,10 @@ class HudStreamLogWriter {
       'speedClusterKph': snapshot.vehicle.speedClusterKph,
       'setSpeedClusterKph': snapshot.vehicle.setSpeedClusterKph,
       'gearText': snapshot.vehicle.gearText,
+      'longActive': snapshot.vehicle.longActive,
+      'latActive': snapshot.vehicle.latActive,
+      'driveModeName': snapshot.driveMode.nameOriginal,
+      'driveModeKind': snapshot.driveMode.kind,
       'tempMode': snapshot.tempControl.mode,
       'tempLabel': snapshot.tempControl.label,
       'tempSpeedKph': snapshot.tempControl.speedKph,
@@ -84,6 +90,16 @@ class HudStreamLogWriter {
   }
 
   Future<void> dispose() async {
+    _disposed = true;
+    try {
+      await _writeQueue;
+    } catch (_) {}
+    final openingFuture = _openingFuture;
+    if (openingFuture != null) {
+      try {
+        await openingFuture;
+      } catch (_) {}
+    }
     final sink = _sink;
     _sink = null;
     if (sink == null) return;
@@ -96,7 +112,14 @@ class HudStreamLogWriter {
   }
 
   Future<void> _write(Map<String, dynamic> entry) async {
-    if (_disabled) return;
+    if (_disabled || _disposed) return;
+    final queued = _writeQueue.then((_) => _writeSerialized(entry));
+    _writeQueue = queued.catchError((_) {});
+    await queued;
+  }
+
+  Future<void> _writeSerialized(Map<String, dynamic> entry) async {
+    if (_disabled || _disposed) return;
     final sink = await _ensureSink();
     if (sink == null) return;
     sink.writeln(jsonEncode(entry));
@@ -109,7 +132,7 @@ class HudStreamLogWriter {
   }
 
   Future<IOSink?> _ensureSink() async {
-    if (_disabled) return null;
+    if (_disabled || _disposed) return null;
     final current = _sink;
     if (current != null) return current;
     if (_openingFuture != null) {

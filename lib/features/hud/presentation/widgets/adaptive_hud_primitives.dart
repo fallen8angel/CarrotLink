@@ -21,7 +21,8 @@ const List<Shadow> hudStrongTextShadows = <Shadow>[
   ),
 ];
 
-double adaptiveHudBandHeight(HudLayoutProfile profile) => switch (profile.density) {
+double adaptiveHudBandHeight(HudLayoutProfile profile) =>
+    switch (profile.density) {
       HudDensityClass.micro => 30.0,
       HudDensityClass.compact => 34.0,
       HudDensityClass.regular => 38.0,
@@ -279,9 +280,7 @@ class AdaptiveHudGapBars extends StatelessWidget {
       return Expanded(
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 160),
-          height: active
-              ? (compact ? 12 : 16)
-              : (compact ? 6 : 8),
+          height: active ? (compact ? 12 : 16) : (compact ? 6 : 8),
           margin: EdgeInsets.symmetric(horizontal: profile.metricGap * 0.18),
           decoration: BoxDecoration(
             color: active ? Colors.white : Colors.white24,
@@ -355,6 +354,63 @@ class AdaptiveHudGapValueChip extends StatelessWidget {
   }
 }
 
+class AdaptiveHudSpeedClusterPanel extends StatelessWidget {
+  final HudAdaptiveDisplayModel model;
+  final HudLayoutProfile profile;
+
+  const AdaptiveHudSpeedClusterPanel({
+    super.key,
+    required this.model,
+    required this.profile,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        profile.padding.left * 0.22,
+        profile.padding.top * 0.12,
+        profile.padding.right * 0.18,
+        profile.padding.bottom * 0.10,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            '?꾩옱?띾룄',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.54),
+              fontSize: profile.chipFontSize + 1.4,
+              fontWeight: FontWeight.w900,
+              letterSpacing: 0.3,
+            ),
+          ),
+          SizedBox(height: profile.metricGap * 0.08),
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  model.speedText,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: profile.speedFontSize + 14,
+                    height: 0.84,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: -1.8,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class AdaptiveHudSetSpeedPanel extends StatelessWidget {
   final HudAdaptiveDisplayModel model;
   final HudLayoutProfile profile;
@@ -367,111 +423,110 @@ class AdaptiveHudSetSpeedPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // The lower support lines in this panel intentionally mirror c3 semantics:
+    // - TEMP label area is the apply-source/apply-speed slot (eco/cam/section/road/vturn/model)
+    // - the last row is gap + gear
+    // Do not replace these with debug/meta labels.
     final hasGear = model.gearText.trim().toUpperCase() != 'U';
     return LayoutBuilder(
       builder: (context, constraints) {
-        final width = constraints.maxWidth.isFinite
-            ? constraints.maxWidth
-            : 220.0;
-        final height = constraints.maxHeight.isFinite
-            ? constraints.maxHeight
-            : 180.0;
+        final width =
+            constraints.maxWidth.isFinite ? constraints.maxWidth : 220.0;
+        final height =
+            constraints.maxHeight.isFinite ? constraints.maxHeight : 180.0;
         final tight = height < 240 || width < 238;
         final veryTight = height < 214 || width < 214;
         final veryCompact = height < 286 || width < 244;
         final supportCompact = veryTight || veryCompact || width < 252;
-        final blockPadding = EdgeInsets.all(
-          (profile.padding.left *
-                  (veryCompact
-                      ? 0.46
-                      : (tight ? 0.52 : 0.66)))
-              .clamp(8.0, 16.0),
+        final blockPadding = EdgeInsets.fromLTRB(
+          (profile.padding.left * (veryCompact ? 0.12 : (tight ? 0.16 : 0.20)))
+              .clamp(2.0, 6.0),
+          (profile.padding.top * (veryCompact ? 0.10 : (tight ? 0.14 : 0.18)))
+              .clamp(2.0, 6.0),
+          (profile.padding.right * (veryCompact ? 0.12 : (tight ? 0.16 : 0.20)))
+              .clamp(2.0, 6.0),
+          (profile.padding.bottom *
+                  (veryCompact ? 0.10 : (tight ? 0.14 : 0.18)))
+              .clamp(2.0, 6.0),
         );
-        final tempLabelText =
-            model.showTempControl ? model.tempLabel : 'TEMP';
+        final tempLabelText = model.showTempControl ? model.tempLabel : 'TEMP';
         final tempSpeedText =
             model.showTempControl ? model.tempSpeedText : '--';
-        return DecoratedBox(
-          decoration: BoxDecoration(
-            color: _hudSurfaceGreenSoft,
-            borderRadius: BorderRadius.circular(profile.borderRadius - 8),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.24)),
-          ),
-          child: Padding(
-            padding: blockPadding,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Text(
-                  '설정속도',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: Colors.white70,
-                    fontSize: profile.chipFontSize + 1.8,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 0.3,
-                    shadows: hudStrongTextShadows,
-                  ),
+        final content = Padding(
+          padding: blockPadding,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                '설정속도',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.68),
+                  fontSize: profile.chipFontSize + 1.8,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 0.3,
+                  shadows: hudStrongTextShadows,
                 ),
-                SizedBox(height: profile.metricGap * 0.16),
-                Expanded(
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: SizedBox(
-                      height: tight
-                          ? (profile.primaryValueFontSize + 2)
-                          : (profile.primaryValueFontSize + 8)
-                                .clamp(28, 60)
-                                .toDouble(),
-                      child: Align(
+              ),
+              SizedBox(height: profile.metricGap * 0.10),
+              Expanded(
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: SizedBox(
+                    height: tight
+                        ? (profile.primaryValueFontSize + 2)
+                        : (profile.primaryValueFontSize + 8)
+                            .clamp(28, 60)
+                            .toDouble(),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
                         alignment: Alignment.centerLeft,
-                        child: FittedBox(
-                          fit: BoxFit.scaleDown,
-                          alignment: Alignment.centerLeft,
-                          child: Text(
-                            model.setSpeedText,
-                            style: TextStyle(
-                              color: const Color(0xFFF4F7FB),
-                              fontSize: profile.primaryValueFontSize +
-                                  (tight ? 4 : 8),
-                              fontWeight: FontWeight.w900,
-                              height: 0.92,
-                              letterSpacing: -0.8,
-                              shadows: hudStrongTextShadows,
-                            ),
+                        child: Text(
+                          model.setSpeedText,
+                          style: TextStyle(
+                            color: const Color(0xFFF4F7FB),
+                            fontSize:
+                                profile.primaryValueFontSize + (tight ? 4 : 8),
+                            fontWeight: FontWeight.w900,
+                            height: 0.92,
+                            letterSpacing: -0.8,
+                            shadows: hudStrongTextShadows,
                           ),
                         ),
                       ),
                     ),
                   ),
                 ),
-                SizedBox(height: profile.metricGap * 0.24),
-                _AdaptiveHudSupportLine(
-                  leftText: tempLabelText,
-                  rightText: tempSpeedText,
-                  profile: profile,
-                  compact: supportCompact,
-                  veryCompact: veryCompact,
-                ),
-                SizedBox(
-                  height: profile.metricGap *
-                      (veryCompact
-                          ? 0.10
-                          : (supportCompact ? 0.18 : 0.26)),
-                ),
-                _AdaptiveHudSupportDetailArea(
-                  count: model.showGap ? model.gapBarCount : 0,
-                  gapLabel: model.showGap ? model.gapText : '--',
-                  gearText: hasGear ? model.gearText : '',
-                  profile: profile,
-                  compact: supportCompact,
-                  veryCompact: veryCompact,
-                ),
-              ],
-            ),
+              ),
+              _AdaptiveHudInlineSectionDivider(profile: profile),
+              SizedBox(height: profile.metricGap * 0.16),
+              _AdaptiveHudSupportLine(
+                leftText: tempLabelText,
+                rightText: tempSpeedText,
+                profile: profile,
+                compact: supportCompact,
+                veryCompact: veryCompact,
+              ),
+              SizedBox(
+                height: profile.metricGap * (veryCompact ? 0.14 : 0.20),
+              ),
+              _AdaptiveHudInlineSectionDivider(profile: profile),
+              SizedBox(height: profile.metricGap * 0.18),
+              _AdaptiveHudSupportDetailArea(
+                count: model.showGap ? model.gapBarCount : 0,
+                gapLabel: model.showGap ? model.gapText : '--',
+                gearText: hasGear ? model.gearText : '',
+                profile: profile,
+                compact: supportCompact,
+                veryCompact: veryCompact,
+              ),
+            ],
           ),
         );
+        return content;
       },
     );
   }
@@ -508,7 +563,8 @@ class AdaptiveHudGearChip extends StatelessWidget {
           displayText,
           textAlign: TextAlign.center,
           style: TextStyle(
-            color: unknown ? Colors.white38 : Colors.white.withValues(alpha: 0.92),
+            color:
+                unknown ? Colors.white38 : Colors.white.withValues(alpha: 0.92),
             fontSize: unknown
                 ? profile.secondaryValueFontSize - 2
                 : profile.gearFontSize * 0.46,
@@ -577,12 +633,8 @@ class AdaptiveHudTopMetricBar extends StatelessWidget {
     final barHeight = adaptiveHudBandHeight(profile);
     return SizedBox(
       height: barHeight,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: _hudSurfaceGreen,
-          borderRadius: BorderRadius.circular(profile.borderRadius - 10),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.26)),
-        ),
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: profile.sectionGap * 0.08),
         child: Row(
           children: <Widget>[
             Expanded(
@@ -641,9 +693,7 @@ class AdaptiveHudInfoRow extends StatelessWidget {
       children: <Widget>[
         AdaptiveHudInfoPill(
           label: model.limitDisplayText,
-          color: model.limitCritical
-              ? const Color(0xFFFF6357)
-              : Colors.white,
+          color: model.limitCritical ? const Color(0xFFFF6357) : Colors.white,
           profile: profile,
           blinking: model.limitBlink,
           dense: dense,
@@ -659,38 +709,41 @@ class AdaptiveHudInfoRow extends StatelessWidget {
   }
 }
 
+// Canonical semantic slots for the original c3 lower-left HUD footer:
+// 1. drive mode
+// 2. LIMIT / CAM / section
+// 3. APN / APM
+//
+// This footer must not fall back to transport/debug labels such as
+// semantic/live, compatibility, or host IP on the home semantic HUD.
+// TBT/navigation strings also do not belong here.
 class AdaptiveHudBottomStrip extends StatelessWidget {
   final HudAdaptiveDisplayModel model;
   final HudLayoutProfile profile;
+  final String? qualityLabel;
+  final String? compatibilityLabel;
+  final bool showHost;
 
   const AdaptiveHudBottomStrip({
     super.key,
     required this.model,
     required this.profile,
+    this.qualityLabel,
+    this.compatibilityLabel,
+    this.showHost = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    final signalActive = model.showSignalState;
-    final signalText = signalActive ? model.signalDisplayText : '--';
     final barHeight = adaptiveHudBandHeight(profile);
-    final signalWidth = switch (profile.density) {
-      HudDensityClass.micro => 34.0,
-      HudDensityClass.compact => 40.0,
-      HudDensityClass.regular => 46.0,
-      HudDensityClass.spacious => 52.0,
-    };
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: _hudSurfaceGreen,
-        borderRadius: BorderRadius.circular(profile.borderRadius - 10),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.26)),
-      ),
+    final segments = _buildSemanticFooterSegments();
+    return SizedBox(
+      height: barHeight,
       child: Padding(
         padding: EdgeInsets.symmetric(
-          horizontal: profile.sectionGap * 0.72,
-          vertical: ((barHeight - (profile.chipFontSize + 4)) / 2)
-              .clamp(2.0, 4.0),
+          horizontal: profile.sectionGap * 0.12,
+          vertical:
+              ((barHeight - (profile.chipFontSize + 4)) / 2).clamp(2.0, 4.0),
         ),
         child: Row(
           children: <Widget>[
@@ -699,67 +752,85 @@ class AdaptiveHudBottomStrip extends StatelessWidget {
               child: Align(
                 alignment: Alignment.centerLeft,
                 child: AdaptiveHudStatusDot(
-                  color: model.redDot
-                      ? const Color(0xFFFF5C5C)
-                      : Colors.white24,
+                  color: _statusColor(),
                   size: profile.chipFontSize + 2,
                 ),
               ),
             ),
-            _AdaptiveHudMetricDivider(profile: profile),
-            Expanded(
-              child: Row(
-                children: <Widget>[
-                  Expanded(
-                    child: _AdaptiveHudBottomStripTextSegment(
-                      text: model.driveModeText,
-                      profile: profile,
-                      color: Colors.white.withValues(alpha: 0.96),
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                  _AdaptiveHudMetricDivider(profile: profile),
-                  Expanded(
-                    child: _AdaptiveHudBottomStripTextSegment(
-                      text: model.showLimit ? model.limitDisplayText : '',
-                      profile: profile,
-                      color: Colors.white,
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                  _AdaptiveHudMetricDivider(profile: profile),
-                  Expanded(
-                    child: _AdaptiveHudBottomStripTextSegment(
-                      text: model.showConnectivity
-                          ? model.connectivityDisplayText
-                          : '',
-                      profile: profile,
-                      color: Colors.white,
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            _AdaptiveHudMetricDivider(profile: profile),
-            SizedBox(
-              width: signalWidth,
-              child: Align(
-                alignment: Alignment.centerRight,
-                child: _AdaptiveHudBottomStripTextSegment(
-                  text: signalText,
-                  profile: profile,
-                  color: signalActive
-                      ? Colors.white
-                      : Colors.white.withValues(alpha: 0.34),
-                  textAlign: TextAlign.right,
+            if (segments.isNotEmpty) ...<Widget>[
+              _AdaptiveHudMetricDivider(profile: profile),
+              Expanded(
+                child: Row(
+                  children: <Widget>[
+                    for (var index = 0;
+                        index < segments.length;
+                        index++) ...<Widget>[
+                      Expanded(
+                        child: _AdaptiveHudBottomStripTextSegment(
+                          text: segments[index].text,
+                          profile: profile,
+                          color: segments[index].color,
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                      if (index != segments.length - 1)
+                        _AdaptiveHudMetricDivider(profile: profile),
+                    ],
+                  ],
                 ),
               ),
-            ),
+            ] else
+              const Spacer(),
           ],
         ),
       ),
     );
+  }
+
+  List<({String text, Color color})> _buildSemanticFooterSegments() {
+    return <({String text, Color color})>[
+      (
+        text: model.showDriveMode ? model.driveModeText.trim() : '',
+        color: model.showDriveMode
+            ? Colors.white.withValues(alpha: 0.96)
+            : Colors.transparent,
+      ),
+      (
+        text: model.showLimit ? model.limitDisplayText.trim() : '',
+        color: model.showLimit
+            ? (model.isCameraLimit
+                ? (model.cameraAlertBlinkOn
+                    ? const Color(0xFFFF6961)
+                    : const Color(0xFFFFD25E))
+                : Colors.white)
+            : Colors.transparent,
+      ),
+      (
+        text:
+            model.showConnectivity ? model.connectivityDisplayText.trim() : '',
+        color: model.showConnectivity
+            ? Colors.white.withValues(alpha: 0.92)
+            : Colors.transparent,
+      ),
+    ];
+  }
+
+  Color _statusColor() {
+    if (model.isPreview) {
+      return Colors.white38;
+    }
+    if (model.sourceText == 'STBY' || model.tsMonoMs <= 0) {
+      return Colors.white24;
+    }
+    if (model.isDegradedMeta ||
+        model.sourceText == 'COMPAT' ||
+        model.sourceText == 'FALLBACK') {
+      return _hudAccentAmber;
+    }
+    if (model.sourceText == 'HUD' || model.sourceText == 'LIVE') {
+      return _hudAccentGreen;
+    }
+    return Colors.white54;
   }
 }
 
@@ -1171,8 +1242,9 @@ class _AdaptiveHudMiniGearStatus extends StatelessWidget {
             textAlign: TextAlign.right,
             style: TextStyle(
               color: Colors.white.withValues(alpha: 0.58),
-              fontSize:
-                  compact ? profile.chipFontSize - 1.8 : profile.chipFontSize - 0.8,
+              fontSize: compact
+                  ? profile.chipFontSize - 1.8
+                  : profile.chipFontSize - 0.8,
               fontWeight: FontWeight.w800,
               letterSpacing: 0.26,
               shadows: hudStrongTextShadows,
@@ -1194,6 +1266,25 @@ class _AdaptiveHudMiniGearStatus extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _AdaptiveHudInlineSectionDivider extends StatelessWidget {
+  final HudLayoutProfile profile;
+
+  const _AdaptiveHudInlineSectionDivider({
+    required this.profile,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 1,
+      margin: EdgeInsets.symmetric(
+        vertical: profile.metricGap * 0.04,
+      ),
+      color: Colors.white.withValues(alpha: 0.10),
     );
   }
 }

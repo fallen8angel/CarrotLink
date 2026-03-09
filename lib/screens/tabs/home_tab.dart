@@ -304,7 +304,8 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
           UiWindowClass.expanded => viewportAwareHudCap.clamp(260.0, 420.0),
           UiWindowClass.large => viewportAwareHudCap.clamp(280.0, 450.0),
           UiWindowClass.extraLarge => viewportAwareHudCap.clamp(300.0, 480.0),
-        }.toDouble();
+        }
+            .toDouble();
         final homePreviewProfile = HudLayoutProfile.fromConstraints(
           BoxConstraints(
             maxWidth: clampedHomeContentMaxWidth.isFinite
@@ -332,96 +333,31 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
           UiWindowClass.large || UiWindowClass.extraLarge => 12.5,
         };
 
-        return ListView(
-          padding: EdgeInsets.all(tokens.screenPadding),
-          children: [
-            // Header Card
-            Center(
-              child: ConstrainedBox(
-                constraints:
-                    BoxConstraints(maxWidth: clampedHomeContentMaxWidth),
-                child: Container(
-                  padding: EdgeInsets.all(cardPadding),
-                  decoration: BoxDecoration(
-                    color: Theme.of(context)
-                        .colorScheme
-                        .surfaceContainer
-                        .withValues(alpha: 0.84),
-                    borderRadius: BorderRadius.circular(18),
-                    border: Border.all(
-                      color: Theme.of(context)
-                          .colorScheme
-                          .outlineVariant
-                          .withValues(alpha: 0.36),
-                    ),
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (compactStatusStack)
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              crossAxisAlignment: CrossAxisAlignment.center,
-                              children: [
-                                Container(
-                                  width: 10,
-                                  height: 10,
-                                  decoration: BoxDecoration(
-                                    color: _statusColor(context, ssh),
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: Text(
-                                    _statusHeadline(ssh),
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .titleLarge
-                                        ?.copyWith(
-                                          fontWeight: FontWeight.w900,
-                                          color: _statusColor(context, ssh),
-                                          fontSize: statusFontSize,
-                                          height: 1.0,
-                                        ),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                                if (ssh.isConnected ||
-                                    ssh.connectionStatus
-                                        .startsWith("Connecting"))
-                                  SizedBox(
-                                    width: compactActionSize * 0.88,
-                                    height: compactActionSize * 0.88,
-                                    child: IconButton(
-                                      padding: EdgeInsets.zero,
-                                      tooltip: '연결 해제',
-                                      iconSize: compactActionSize * 0.52,
-                                      color: Colors.white70,
-                                      onPressed: () {
-                                        ssh.disconnect();
-                                        CustomToast.show(
-                                            context, "연결이 해제되었습니다.");
-                                      },
-                                      icon: const Icon(Icons.link_off_rounded),
-                                    ),
-                                  ),
-                              ],
-                            ),
-                            SizedBox(height: blockGap),
-                            _buildIpField(
-                              context: context,
-                              blockGap: blockGap,
-                              ipChipLabelSize: ipChipLabelSize,
-                              ipFieldText: ipFieldText,
-                              ipFontSize: ipFontSize,
-                            ),
-                          ],
-                        )
-                      else
+        final statusCard = Center(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: clampedHomeContentMaxWidth),
+            child: Container(
+              padding: EdgeInsets.all(cardPadding),
+              decoration: BoxDecoration(
+                color: Theme.of(context)
+                    .colorScheme
+                    .surfaceContainer
+                    .withValues(alpha: 0.84),
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(
+                  color: Theme.of(context)
+                      .colorScheme
+                      .outlineVariant
+                      .withValues(alpha: 0.36),
+                ),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (compactStatusStack)
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
                         Row(
                           crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
@@ -450,21 +386,8 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
-                            const SizedBox(width: 10),
-                            Flexible(
-                              flex: 5,
-                              child: _buildIpField(
-                                context: context,
-                                blockGap: blockGap,
-                                ipChipLabelSize: ipChipLabelSize,
-                                ipFieldText: ipFieldText,
-                                ipFontSize: ipFontSize,
-                              ),
-                            ),
                             if (ssh.isConnected ||
-                                ssh.connectionStatus
-                                    .startsWith("Connecting")) ...[
-                              SizedBox(width: blockGap * 0.6),
+                                ssh.connectionStatus.startsWith("Connecting"))
                               SizedBox(
                                 width: compactActionSize * 0.88,
                                 height: compactActionSize * 0.88,
@@ -475,93 +398,259 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                                   color: Colors.white70,
                                   onPressed: () {
                                     ssh.disconnect();
-                                    CustomToast.show(context, "연결이 해제되었습니다.");
+                                    CustomToast.show(
+                                      context,
+                                      "연결이 해제되었습니다.",
+                                    );
                                   },
                                   icon: const Icon(Icons.link_off_rounded),
                                 ),
                               ),
-                            ],
                           ],
                         ),
-                      SizedBox(height: blockGap),
-                      Divider(
-                        height: 1,
-                        thickness: 1,
-                        color: Colors.white.withValues(alpha: 0.08),
-                      ),
-                      SizedBox(height: blockGap),
-                      LayoutBuilder(
-                        builder: (context, infoConstraints) {
-                          final itemSpacing = switch (window.windowClass) {
-                            UiWindowClass.compact => 8.0,
-                            UiWindowClass.medium => 9.0,
-                            UiWindowClass.expanded => 10.0,
-                            UiWindowClass.large ||
-                            UiWindowClass.extraLarge =>
-                              11.0,
-                          };
-                          final columns = switch (window.windowClass) {
-                            UiWindowClass.compact || UiWindowClass.medium => 2,
-                            UiWindowClass.expanded => 3,
-                            UiWindowClass.large || UiWindowClass.extraLarge => 4,
-                          };
-                          final itemWidth = (infoConstraints.maxWidth -
-                                  (itemSpacing * (columns - 1))) /
-                              columns;
-                          final itemValues = <MapEntry<String, String>>[
-                            MapEntry(
-                                "브랜치", ssh.isConnected ? _branch : "연결 안 됨"),
-                            MapEntry(
-                                "커밋", ssh.isConnected ? _commit : "연결 안 됨"),
-                            MapEntry("Dongle ID",
-                                ssh.isConnected ? _dongleId : "연결 안 됨"),
-                            MapEntry(
-                                "Serial", ssh.isConnected ? _serial : "연결 안 됨"),
-                          ];
-                          return Wrap(
-                            spacing: itemSpacing,
-                            runSpacing: itemSpacing,
-                            children: itemValues
-                                .map(
-                                  (entry) => SizedBox(
-                                    width: itemWidth,
-                                    child:
-                                        _buildInfoItem(entry.key, entry.value),
-                                  ),
-                                )
-                                .toList(),
-                          );
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            SizedBox(height: tokens.sectionGap),
-            Center(
-              child: ConstrainedBox(
-                constraints: BoxConstraints(maxWidth: hudPreviewMaxWidth),
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () => _openWebRtcView(ssh),
-                  child: SizedBox(
-                    width: hudPreviewMaxWidth,
-                    child: AdaptiveHudHost(
-                      enabled: _realtimeWorkEnabled,
-                      deviceIp: ssh.connectedIp ?? ssh.targetIp,
-                      surface: HudSurfaceVariant.homePreview,
-                      matchParentWidth: true,
-                      syncNativeOverlay: false,
+                        SizedBox(height: blockGap),
+                        _buildIpField(
+                          context: context,
+                          blockGap: blockGap,
+                          ipChipLabelSize: ipChipLabelSize,
+                          ipFieldText: ipFieldText,
+                          ipFontSize: ipFontSize,
+                        ),
+                      ],
+                    )
+                  else
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Container(
+                          width: 10,
+                          height: 10,
+                          decoration: BoxDecoration(
+                            color: _statusColor(context, ssh),
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            _statusHeadline(ssh),
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleLarge
+                                ?.copyWith(
+                                  fontWeight: FontWeight.w900,
+                                  color: _statusColor(context, ssh),
+                                  fontSize: statusFontSize,
+                                  height: 1.0,
+                                ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Flexible(
+                          flex: 5,
+                          child: _buildIpField(
+                            context: context,
+                            blockGap: blockGap,
+                            ipChipLabelSize: ipChipLabelSize,
+                            ipFieldText: ipFieldText,
+                            ipFontSize: ipFontSize,
+                          ),
+                        ),
+                        if (ssh.isConnected ||
+                            ssh.connectionStatus.startsWith("Connecting")) ...[
+                          SizedBox(width: blockGap * 0.6),
+                          SizedBox(
+                            width: compactActionSize * 0.88,
+                            height: compactActionSize * 0.88,
+                            child: IconButton(
+                              padding: EdgeInsets.zero,
+                              tooltip: '연결 해제',
+                              iconSize: compactActionSize * 0.52,
+                              color: Colors.white70,
+                              onPressed: () {
+                                ssh.disconnect();
+                                CustomToast.show(
+                                  context,
+                                  "연결이 해제되었습니다.",
+                                );
+                              },
+                              icon: const Icon(Icons.link_off_rounded),
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
+                  SizedBox(height: blockGap),
+                  Divider(
+                    height: 1,
+                    thickness: 1,
+                    color: Colors.white.withValues(alpha: 0.08),
+                  ),
+                  SizedBox(height: blockGap),
+                  LayoutBuilder(
+                    builder: (context, infoConstraints) {
+                      final itemSpacing = switch (window.windowClass) {
+                        UiWindowClass.compact => 8.0,
+                        UiWindowClass.medium => 9.0,
+                        UiWindowClass.expanded => 10.0,
+                        UiWindowClass.large || UiWindowClass.extraLarge => 11.0,
+                      };
+                      final columns = switch (window.windowClass) {
+                        UiWindowClass.compact || UiWindowClass.medium => 2,
+                        UiWindowClass.expanded => 3,
+                        UiWindowClass.large || UiWindowClass.extraLarge => 4,
+                      };
+                      final itemWidth = (infoConstraints.maxWidth -
+                              (itemSpacing * (columns - 1))) /
+                          columns;
+                      final itemValues = <MapEntry<String, String>>[
+                        MapEntry(
+                          "브랜치",
+                          ssh.isConnected ? _branch : "연결 안 됨",
+                        ),
+                        MapEntry(
+                          "커밋",
+                          ssh.isConnected ? _commit : "연결 안 됨",
+                        ),
+                        MapEntry(
+                          "Dongle ID",
+                          ssh.isConnected ? _dongleId : "연결 안 됨",
+                        ),
+                        MapEntry(
+                          "Serial",
+                          ssh.isConnected ? _serial : "연결 안 됨",
+                        ),
+                      ];
+                      return Wrap(
+                        spacing: itemSpacing,
+                        runSpacing: itemSpacing,
+                        children: itemValues
+                            .map(
+                              (entry) => SizedBox(
+                                width: itemWidth,
+                                child: _buildInfoItem(entry.key, entry.value),
+                              ),
+                            )
+                            .toList(),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+
+        Widget buildScrollableHudPreview() {
+          return Center(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: hudPreviewMaxWidth),
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => _openWebRtcView(ssh),
+                child: SizedBox(
+                  width: hudPreviewMaxWidth,
+                  child: AdaptiveHudHost(
+                    enabled: _realtimeWorkEnabled,
+                    deviceIp: ssh.connectedIp ?? ssh.targetIp,
+                    surface: HudSurfaceVariant.homePreview,
+                    matchParentWidth: true,
+                    syncNativeOverlay: false,
                   ),
                 ),
               ),
             ),
+          );
+        }
 
-            // Quick Actions Grid Removed
-            SizedBox(height: tokens.footerSpacer),
-          ],
+        final minPinnedHudHeight = switch (window.windowClass) {
+          UiWindowClass.compact => 250.0,
+          UiWindowClass.medium => 270.0,
+          UiWindowClass.expanded => 290.0,
+          UiWindowClass.large => 310.0,
+          UiWindowClass.extraLarge => 330.0,
+        };
+
+        return LayoutBuilder(
+          builder: (context, viewportConstraints) {
+            final viewportHeight = viewportConstraints.maxHeight.isFinite
+                ? viewportConstraints.maxHeight
+                : media.size.height;
+            final minPinnedViewportHeight = estimatedHeaderHeight +
+                minPinnedHudHeight +
+                (tokens.screenPadding * 2) +
+                tokens.sectionGap +
+                bottomDockGap;
+            final canUsePinnedHudLayout =
+                viewportHeight >= minPinnedViewportHeight;
+
+            if (canUsePinnedHudLayout) {
+              return Padding(
+                padding: EdgeInsets.all(tokens.screenPadding),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    statusCard,
+                    SizedBox(height: tokens.sectionGap),
+                    Expanded(
+                      child: Padding(
+                        padding: EdgeInsets.only(bottom: bottomDockGap),
+                        child: LayoutBuilder(
+                          builder: (context, hudConstraints) {
+                            final availableWidth = hudConstraints
+                                    .maxWidth.isFinite
+                                ? hudConstraints.maxWidth
+                                : media.size.width - (tokens.screenPadding * 2);
+                            final pinnedWidth =
+                                clampedHomeContentMaxWidth.isFinite
+                                    ? math.min(
+                                        clampedHomeContentMaxWidth,
+                                        availableWidth,
+                                      )
+                                    : availableWidth;
+                            final pinnedHeight =
+                                hudConstraints.maxHeight.isFinite
+                                    ? hudConstraints.maxHeight
+                                    : homeHudHeightCap;
+                            return Align(
+                              alignment: Alignment.bottomCenter,
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onTap: () => _openWebRtcView(ssh),
+                                child: SizedBox(
+                                  width: pinnedWidth,
+                                  height: math.max(220.0, pinnedHeight),
+                                  child: AdaptiveHudHost(
+                                    enabled: _realtimeWorkEnabled,
+                                    deviceIp: ssh.connectedIp ?? ssh.targetIp,
+                                    surface: HudSurfaceVariant.homePreview,
+                                    fillParent: true,
+                                    syncNativeOverlay: false,
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }
+
+            return ListView(
+              padding: EdgeInsets.all(tokens.screenPadding),
+              children: [
+                statusCard,
+                SizedBox(height: tokens.sectionGap),
+                buildScrollableHudPreview(),
+                SizedBox(height: bottomDockGap),
+              ],
+            );
+          },
         );
       },
     );

@@ -4,6 +4,7 @@ const Color _drivePlotTraceYellow = Color(0xFFFFD95E);
 const Color _drivePlotTraceGreen = Color(0xFF23D55D);
 const Color _drivePlotTraceOrange = Color(0xFFFF9F1C);
 const Color _drivePlotLabelMuted = Color(0xB3D6DEE8);
+const Color _drivePlotLabelOutline = Color(0xD9000000);
 
 extension _LiveDriveCanvasPlotComponents on _LiveDriveCanvasScreenState {
   void _recordDebugPlotSample(_DriveOverlaySnapshot snapshot) {
@@ -73,19 +74,19 @@ extension _DriveDebugPlotPainterComponents on _DriveOverlayPainter {
     final availableHeight = math.max(96.0, visible.height - (margin * 2));
     final gap = minSide < 360.0 ? 8.0 : 10.0;
     final titleSize = switch (minSide) {
+      < 360.0 => 11.0,
+      < 720.0 => 12.0,
+      _ => 13.0,
+    };
+    final valueSize = switch (minSide) {
+      < 360.0 => 12.0,
+      < 720.0 => 13.5,
+      _ => 15.0,
+    };
+    final metaSize = switch (minSide) {
       < 360.0 => 10.0,
       < 720.0 => 11.0,
       _ => 12.0,
-    };
-    final valueSize = switch (minSide) {
-      < 360.0 => 11.0,
-      < 720.0 => 12.5,
-      _ => 14.0,
-    };
-    final metaSize = switch (minSide) {
-      < 360.0 => 9.0,
-      < 720.0 => 10.0,
-      _ => 11.0,
     };
     var clusterWidth = availableWidth;
     var valueColumnWidth = (clusterWidth * (isLandscape ? 0.16 : 0.18))
@@ -95,9 +96,8 @@ extension _DriveDebugPlotPainterComponents on _DriveOverlayPainter {
       valueColumnWidth,
       math.max(76.0, availableWidth * 0.24),
     );
-    var chartWidth = (clusterWidth - valueColumnWidth - gap)
-        .clamp(152.0, 428.0)
-        .toDouble();
+    var chartWidth =
+        (clusterWidth - valueColumnWidth - gap).clamp(152.0, 428.0).toDouble();
     if ((chartWidth + valueColumnWidth + gap) > availableWidth) {
       chartWidth = math.max(96.0, availableWidth - valueColumnWidth - gap);
       clusterWidth = chartWidth + valueColumnWidth + gap;
@@ -110,7 +110,8 @@ extension _DriveDebugPlotPainterComponents on _DriveOverlayPainter {
       math.max(72.0, availableHeight - titleSize - 14.0),
     );
     final clusterMaxWidth = chartWidth + gap + valueColumnWidth;
-    final maxLeft = math.max(visible.left + 8.0, visible.right - clusterMaxWidth);
+    final maxLeft =
+        math.max(visible.left + 8.0, visible.right - clusterMaxWidth);
     final maxTop = math.max(
       visible.top + 8.0,
       visible.bottom - (titleSize + 8.0 + resolvedChartHeight),
@@ -118,7 +119,8 @@ extension _DriveDebugPlotPainterComponents on _DriveOverlayPainter {
     final left = math.min(visible.left + margin, maxLeft).toDouble();
     final top = math.min(visible.top + margin, maxTop).toDouble();
     final chartTop = top + titleSize + 8.0;
-    final chartRect = Rect.fromLTWH(left, chartTop, chartWidth, resolvedChartHeight);
+    final chartRect =
+        Rect.fromLTWH(left, chartTop, chartWidth, resolvedChartHeight);
     final valueBaseY = chartRect.top + (valueSize * 0.9);
     final valueGap = switch (chartHeight) {
       < 84.0 => 18.0,
@@ -135,23 +137,25 @@ extension _DriveDebugPlotPainterComponents on _DriveOverlayPainter {
       titleSize: titleSize,
       valueSize: valueSize,
       metaSize: metaSize,
-      lineThickness: minSide < 360.0 ? 2.0 : 2.6,
-      glowThickness: minSide < 360.0 ? 5.0 : 7.0,
-      outerDotRadius: minSide < 360.0 ? 4.0 : 5.0,
-      innerDotRadius: minSide < 360.0 ? 2.0 : 2.5,
+      lineThickness: minSide < 360.0 ? 2.2 : 2.9,
+      glowThickness: minSide < 360.0 ? 5.8 : 8.0,
+      outerDotRadius: minSide < 360.0 ? 4.5 : 5.6,
+      innerDotRadius: minSide < 360.0 ? 2.4 : 2.9,
     );
   }
 
-  double _plotYForValue(Rect chartRect, double value, double minValue, double maxValue) {
-    final span = (maxValue - minValue).abs() < 1e-6 ? 1.0 : (maxValue - minValue);
+  double _plotYForValue(
+      Rect chartRect, double value, double minValue, double maxValue) {
+    final span =
+        (maxValue - minValue).abs() < 1e-6 ? 1.0 : (maxValue - minValue);
     final t = ((value - minValue) / span).clamp(0.0, 1.0).toDouble();
-    final verticalInset =
-        (chartRect.height * 0.08).clamp(4.0, 10.0).toDouble();
+    final verticalInset = (chartRect.height * 0.08).clamp(4.0, 10.0).toDouble();
     final usableHeight = math.max(8.0, chartRect.height - (verticalInset * 2));
     return chartRect.bottom - verticalInset - (usableHeight * t);
   }
 
-  List<Offset> _plotPoints(List<double> series, Rect chartRect, double minValue, double maxValue) {
+  List<Offset> _plotPoints(
+      List<double> series, Rect chartRect, double minValue, double maxValue) {
     if (series.isEmpty) return const <Offset>[];
     if (series.length == 1) {
       return <Offset>[
@@ -281,22 +285,39 @@ extension _DriveDebugPlotPainterComponents on _DriveOverlayPainter {
       anchor: layout.titleAnchor,
       text: title,
       color: _drivePlotLabelMuted,
+      strokeColor: _drivePlotLabelOutline,
+      strokeWidth: 1.8,
       size: layout.titleSize,
       centered: false,
     );
 
     final valueRows = <({String key, double value, Color color})>[
-      (key: 'Y', value: debugPlotState.latestYellow, color: _drivePlotTraceYellow),
-      (key: 'G', value: debugPlotState.latestGreen, color: _drivePlotTraceGreen),
-      (key: 'O', value: debugPlotState.latestOrange, color: _drivePlotTraceOrange),
+      (
+        key: 'Y',
+        value: debugPlotState.latestYellow,
+        color: _drivePlotTraceYellow
+      ),
+      (
+        key: 'G',
+        value: debugPlotState.latestGreen,
+        color: _drivePlotTraceGreen
+      ),
+      (
+        key: 'O',
+        value: debugPlotState.latestOrange,
+        color: _drivePlotTraceOrange
+      ),
     ];
     for (var i = 0; i < valueRows.length; i++) {
       final row = valueRows[i];
       _appendOverlayLabel(
         labels,
-        anchor: Offset(layout.valueX, layout.valueBaseY + (i * layout.valueGap)),
+        anchor:
+            Offset(layout.valueX, layout.valueBaseY + (i * layout.valueGap)),
         text: '${row.key} ${_formatPlotValue(row.value)}',
         color: row.color,
+        strokeColor: _drivePlotLabelOutline,
+        strokeWidth: 1.8,
         size: layout.valueSize,
         centered: false,
       );
@@ -306,6 +327,8 @@ extension _DriveDebugPlotPainterComponents on _DriveOverlayPainter {
       anchor: layout.countAnchor,
       text: 'n ${debugPlotState.sampleCount}',
       color: _drivePlotLabelMuted,
+      strokeColor: _drivePlotLabelOutline,
+      strokeWidth: 1.6,
       size: layout.metaSize,
       centered: false,
     );

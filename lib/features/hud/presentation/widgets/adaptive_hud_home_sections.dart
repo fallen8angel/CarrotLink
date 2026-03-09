@@ -66,6 +66,9 @@ class AdaptiveHudHomeFooter extends StatelessWidget {
     return AdaptiveHudBottomStrip(
       model: model,
       profile: profile,
+      qualityLabel: qualityLabel,
+      compatibilityLabel: compatibilityLabel,
+      showHost: showHost,
     );
   }
 }

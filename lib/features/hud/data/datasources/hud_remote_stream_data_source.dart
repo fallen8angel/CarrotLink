@@ -13,6 +13,7 @@ class HudRemoteStreamDataSource {
 
   const HudRemoteStreamDataSource({
     this.candidates = const <({int port, String path})>[
+      (port: 7767, path: '/ws/hud'),
       (port: 7766, path: '/ws/hud'),
       (port: 7000, path: '/ws/carstate'),
     ],
@@ -42,15 +43,17 @@ class HudRemoteStreamDataSource {
       while (!disposed) {
         Object? lastError;
         StackTrace? lastStackTrace;
-        final activeCandidates =
-            primaryDeliveredOnce && primaryCandidate != null && stickToPrimaryAfterSuccess
-                ? <({int port, String path})>[primaryCandidate]
-                : candidates;
+        final activeCandidates = primaryDeliveredOnce &&
+                primaryCandidate != null &&
+                stickToPrimaryAfterSuccess
+            ? <({int port, String path})>[primaryCandidate]
+            : candidates;
         for (final candidate in activeCandidates) {
           if (disposed) break;
           var deliveredPayload = false;
           try {
-            final uri = Uri.parse('ws://$host:${candidate.port}${candidate.path}');
+            final uri =
+                Uri.parse('ws://$host:${candidate.port}${candidate.path}');
             channel = WebSocketChannel.connect(uri);
             await for (final event in channel!.stream.timeout(idleTimeout)) {
               if (disposed) {

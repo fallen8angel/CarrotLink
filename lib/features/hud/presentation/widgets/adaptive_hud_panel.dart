@@ -100,9 +100,11 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
     const backgroundTop = Color(0xFF0D3826);
     const backgroundBottom = Color(0xFF081F15);
     final isOverlay = profile.surface == HudSurfaceVariant.driveOverlay;
-    final borderColor = Colors.white.withValues(
-      alpha: isOverlay ? 0.12 : 0.18,
-    );
+    final borderColor = model.cameraAlertBlinkOn
+        ? const Color(0xFFFF6961).withValues(alpha: isOverlay ? 0.46 : 0.58)
+        : Colors.white.withValues(
+            alpha: isOverlay ? 0.12 : 0.18,
+          );
     final decoration = BoxDecoration(
       gradient: LinearGradient(
         begin: Alignment.topLeft,
@@ -151,37 +153,31 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
                 ),
               ),
             ),
-            AnimatedSwitcher(
-              duration: const Duration(milliseconds: 220),
-              switchInCurve: Curves.easeOutCubic,
-              switchOutCurve: Curves.easeInCubic,
-              transitionBuilder: (child, animation) {
-                final fade = CurvedAnimation(
-                  parent: animation,
-                  curve: Curves.easeOutCubic,
-                  reverseCurve: Curves.easeInCubic,
-                );
-                final scale = Tween<double>(
-                  begin: 0.985,
-                  end: 1.0,
-                ).animate(fade);
-                return FadeTransition(
-                  opacity: fade,
-                  child: ScaleTransition(scale: scale, child: child),
-                );
-              },
-              child: KeyedSubtree(
-                key: ValueKey<String>(
-                  showStateShell
-                      ? 'hud-state-${profile.surface.name}'
-                      : 'hud-live-${profile.surface.name}-${model.sourceText}-${model.qualityText}-${model.tsMonoMs > 0}',
-                ),
-                child: Padding(
-                  padding: profile.padding,
-                  child:
-                      showStateShell ? _buildStateLayout() : _buildSurfaceLayout(),
+            Positioned.fill(
+              child: IgnorePointer(
+                child: AnimatedOpacity(
+                  duration: const Duration(milliseconds: 140),
+                  opacity: model.cameraAlertBlinkOn ? 1.0 : 0.0,
+                  child: const DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: <Color>[
+                          Color(0xC8A81919),
+                          Color(0x8EFF5C57),
+                          Color(0x660A0404),
+                        ],
+                      ),
+                    ),
+                  ),
                 ),
               ),
+            ),
+            Padding(
+              padding: profile.padding,
+              child:
+                  showStateShell ? _buildStateLayout() : _buildSurfaceLayout(),
             ),
           ],
         ),
@@ -202,7 +198,8 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
   }
 
   Widget _buildStateLayout() {
-    final title = (stateTitle ?? '').trim().isEmpty ? 'HUD 대기' : stateTitle!.trim();
+    final title =
+        (stateTitle ?? '').trim().isEmpty ? 'HUD 대기' : stateTitle!.trim();
     final message = (stateMessage ?? '').trim().isEmpty
         ? '의미 데이터 수신 전입니다.'
         : stateMessage!.trim();
@@ -348,49 +345,69 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
   }
 
   Widget _buildSpeedCluster() {
+    final integratedHomePreview =
+        profile.surface == HudSurfaceVariant.homePreview;
+    final content = Padding(
+      padding: integratedHomePreview
+          ? EdgeInsets.fromLTRB(
+              profile.padding.left * 0.22,
+              profile.padding.top * 0.12,
+              profile.padding.right * 0.18,
+              profile.padding.bottom * 0.10,
+            )
+          : EdgeInsets.all(profile.padding.left * 0.72),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            '현재속도',
+            style: TextStyle(
+              color: integratedHomePreview
+                  ? Colors.white.withValues(alpha: 0.54)
+                  : Colors.white38,
+              fontSize: profile.chipFontSize + 1.4,
+              fontWeight: FontWeight.w900,
+              letterSpacing: 0.3,
+            ),
+          ),
+          SizedBox(
+              height:
+                  profile.metricGap * (integratedHomePreview ? 0.08 : 0.12)),
+          Expanded(
+            child: Align(
+              alignment: integratedHomePreview
+                  ? Alignment.centerLeft
+                  : Alignment.centerLeft,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  model.speedText,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: profile.speedFontSize +
+                        (integratedHomePreview ? 14 : 10),
+                    height: 0.84,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: integratedHomePreview ? -1.8 : -1.4,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (integratedHomePreview) {
+      return content;
+    }
     return DecoratedBox(
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.035),
         borderRadius: BorderRadius.circular(profile.borderRadius - 8),
         border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
       ),
-      child: Padding(
-        padding: EdgeInsets.all(profile.padding.left * 0.72),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text(
-              '현재속도',
-              style: TextStyle(
-                color: Colors.white38,
-                fontSize: profile.chipFontSize + 1.4,
-                fontWeight: FontWeight.w900,
-                letterSpacing: 0.3,
-              ),
-            ),
-            SizedBox(height: profile.metricGap * 0.12),
-            Expanded(
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    model.speedText,
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: profile.speedFontSize + 10,
-                      height: 0.84,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: -1.4,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
+      child: content,
     );
   }
 
@@ -422,7 +439,8 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
   String? _qualityMetaLabel() {
     final quality = model.qualityText.trim().toLowerCase();
     if (model.isPreview) return 'preview';
-    if (!model.isDegradedMeta && quality == 'live') {
+    if (!model.isDegradedMeta &&
+        (quality.isEmpty || quality == 'live' || quality == 'semantic')) {
       return null;
     }
     if (quality.isEmpty || quality == 'live') {

@@ -799,6 +799,41 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
     lead_area_boxes: list[dict[str, Any]] = []
     anchor_state = _LEAD_ANCHOR_STATE.setdefault(camera_name, {})
 
+    def _reset_lead_anchor_state(reason: str) -> None:
+      anchor_state.clear()
+      anchor_state["resetReason"] = reason
+
+    prev_camera_frame_id = _safe_int(anchor_state.get("lastCameraFrameId"))
+    prev_model_frame_id = _safe_int(anchor_state.get("lastModelFrameId"))
+    prev_source_w = _safe_float(anchor_state.get("lastSourceWidth"))
+    prev_source_h = _safe_float(anchor_state.get("lastSourceHeight"))
+    frame_gap = (
+      abs(model_frame_id - camera_frame_id)
+      if model_frame_id is not None and camera_frame_id is not None
+      else None
+    )
+    if prev_source_w is not None and prev_source_h is not None:
+      if abs(prev_source_w - source_w) > 0.5 or abs(prev_source_h - source_h) > 0.5:
+        _reset_lead_anchor_state("source_changed")
+    if (
+      prev_camera_frame_id is not None
+      and camera_frame_id is not None
+      and camera_frame_id < prev_camera_frame_id
+    ):
+      _reset_lead_anchor_state("camera_frame_rewind")
+    if (
+      prev_model_frame_id is not None
+      and model_frame_id is not None
+      and model_frame_id < prev_model_frame_id
+    ):
+      _reset_lead_anchor_state("model_frame_rewind")
+    if frame_gap is not None and frame_gap > 6:
+      _reset_lead_anchor_state("frame_gap")
+    anchor_state["lastCameraFrameId"] = float(camera_frame_id) if camera_frame_id is not None else -1.0
+    anchor_state["lastModelFrameId"] = float(model_frame_id) if model_frame_id is not None else -1.0
+    anchor_state["lastSourceWidth"] = float(source_w)
+    anchor_state["lastSourceHeight"] = float(source_h)
+
     def _build_box_from_anchor(
       anchor_x: float,
       anchor_y: float,
@@ -808,14 +843,9 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
       x_left = anchor_x - (anchor_w / 2.0) - 10.0
       x_right = anchor_x + (anchor_w / 2.0) + 10.0
       y_base = anchor_y
-      y_top_fallback = anchor_y - max(anchor_w * 0.86, 12.0)
-      if top_y is not None and math.isfinite(top_y):
-        # Respect projected roof point if it is above base enough.
-        y_top = min(float(top_y), y_base - 4.0)
-      else:
-        y_top = y_top_fallback
-      if y_top >= y_base - 2.0:
-        y_top = y_top_fallback
+      # c3-v10 carrot.cc parity:
+      # use a simple box height based on path width instead of a projected roof point.
+      y_top = anchor_y - max(anchor_w * 0.80, 12.0)
       return [
         (x_left, y_top),
         (x_right, y_top),
@@ -885,12 +915,18 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
         or (not math.isfinite(path_y_raw))
       ):
         return
-      # Do not over-clamp to center area; keep near-full source domain for parity.
-      path_x_clamped = _clamp(path_x_raw, -_CLIP_MARGIN, source_w + _CLIP_MARGIN)
-      path_y_clamped = _clamp(path_y_raw, -_CLIP_MARGIN, source_h + _CLIP_MARGIN)
-      path_width_clamped = _clamp(abs(path_width_raw), 40.0, 900.0)
-      # Lower inertia to follow lead movement faster.
-      alpha = 0.65
+      # c3-v10 carrot.cc parity:
+      # clamp near the same visible region and use the same smoothing factor.
+      if source_w > 700.0:
+        path_x_clamped = _clamp(path_x_raw, 350.0, source_w - 350.0)
+      else:
+        path_x_clamped = _clamp(path_x_raw, -_CLIP_MARGIN, source_w + _CLIP_MARGIN)
+      if source_h > 280.0:
+        path_y_clamped = _clamp(path_y_raw, 200.0, source_h - 80.0)
+      else:
+        path_y_clamped = _clamp(path_y_raw, -_CLIP_MARGIN, source_h + _CLIP_MARGIN)
+      path_width_clamped = _clamp(abs(path_width_raw), 120.0, 800.0)
+      alpha = 0.85
       keep = alpha
       mix = 1.0 - alpha
       fx_old = _safe_float(anchor_state.get("path_fx"))
@@ -916,37 +952,41 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
         return None
       return (float(fx), float(fy), float(fw))
 
-    def _lead_badge_offsets(anchor_w: float) -> tuple[float, float]:
-      dx = _clamp(anchor_w * 0.45, 56.0, 120.0)
-      dy = _clamp(anchor_w * 0.32, 40.0, 96.0)
+    def _lead_badge_offsets() -> tuple[float, float]:
+      # c3-v10 carrot.cc parity:
+      # radar/vision badges are not derived from box width; they sit at a
+      # near-fixed offset from the primary lead anchor (x +/- 80, y + 195)
+      # in the reference 1928x1208 source space.
+      scale_x = source_w / _BASE_SOURCE_W if _BASE_SOURCE_W > 0.0 else 1.0
+      scale_y = source_h / _BASE_SOURCE_H if _BASE_SOURCE_H > 0.0 else 1.0
+      dx = 80.0 * scale_x
+      dy = 195.0 * scale_y
       return float(dx), float(dy)
 
-    def _lead_state_offset_y(anchor_w: float) -> float:
-      return float(_clamp(anchor_w * 0.52, 52.0, 140.0))
+    def _lead_state_offset_y() -> float:
+      # c3-v10 carrot.cc parity:
+      # state text shares the same vertical anchor line as the distance badges.
+      scale_y = source_h / _BASE_SOURCE_H if _BASE_SOURCE_H > 0.0 else 1.0
+      return float(195.0 * scale_y)
 
     lead_one_status = _as_bool(lead_one.get("status"))
     lead_one_d_rel = _safe_float(lead_one.get("dRel")) or 0.0
     lead_one_y_rel = _safe_float(lead_one.get("yRel")) or 0.0
-    lead_one_d_path = _safe_float(lead_one.get("dPath"))
     lead_one_radar = _as_bool(lead_one.get("radar"))
     lead_one_track_id = _safe_int(lead_one.get("radarTrackId"))
     anchor_one: tuple[float, float, float] | None = None
     if lead_one_status:
       lead_distance = lead_one_d_rel
-      if (
-        lead_one_d_path is not None
-        and math.isfinite(lead_one_d_path)
-        and abs(lead_one_d_path) <= 4.0
-      ):
-        lead_y_center = -lead_one_d_path
-      else:
-        lead_y_center = -lead_one_y_rel
+      # c3-v10 carrot.cc parity:
+      # lead center follows the actual lead lateral position, not planned path offset.
+      lead_y_center = -lead_one_y_rel
       lead_z_center = _z_at_distance(lead_distance, 0.0)
       pair_one = _project_lead_pair_from_car_space(
         lead_distance,
         lead_y_center,
         lead_z_center,
-        half_width=1.0,
+        # c3-v10 carrot.cc uses y +/- 1.2 for the primary lead box.
+        half_width=1.2,
       )
       if pair_one is not None:
         _update_primary_anchor(pair_one[0], pair_one[1])
@@ -965,19 +1005,9 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
 
     if lead_one_status and anchor_one is not None:
       anchor_x, anchor_y, anchor_w = anchor_one
-      lead_top_point = _project_lead_top_from_car_space(
-        lead_one_d_rel,
-        lead_y_center,
-        _z_at_distance(lead_one_d_rel, 0.0),
-      )
-      lead_one_box = _build_box_from_anchor(
-        anchor_x,
-        anchor_y,
-        anchor_w,
-        top_y=lead_top_point[1] if lead_top_point is not None else None,
-      )
-      badge_dx, badge_dy = _lead_badge_offsets(anchor_w)
-      state_dy = _lead_state_offset_y(anchor_w)
+      lead_one_box = _build_box_from_anchor(anchor_x, anchor_y, anchor_w)
+      badge_dx, badge_dy = _lead_badge_offsets()
+      state_dy = _lead_state_offset_y()
       vision_prob = _safe_float(lead_vision.get("prob")) or 0.0
       vision_x0 = _safe_float(lead_vision.get("x0")) or 0.0
       vision_dist = vision_x0 - 1.52 if vision_prob > 0.5 else 0.0
@@ -1000,6 +1030,9 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
           "visionDistance": vision_dist,
           "anchorCenter": [anchor_x, anchor_y],
           "anchorWidth": anchor_w,
+          "boxTopY": lead_one_box[0][1],
+          "boxBottomY": anchor_y,
+          "lateralSource": "yRel",
           "radarBadgeCenter": [anchor_x - badge_dx, anchor_y + badge_dy],
           "visionBadgeCenter": [anchor_x + badge_dx, anchor_y + badge_dy],
           "stateTextCenter": [anchor_x, anchor_y + state_dy],
@@ -1013,7 +1046,6 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
     lead_two_status_flag = _as_bool(lead_two.get("status"))
     lead_two_d_rel = _safe_float(lead_two.get("dRel")) or 0.0
     lead_two_y_rel = _safe_float(lead_two.get("yRel")) or 0.0
-    lead_two_d_path = _safe_float(lead_two.get("dPath"))
     lead_two_radar = _as_bool(lead_two.get("radar"))
     lead_two_track_id = _safe_int(lead_two.get("radarTrackId"))
     lead_two_prev_status = int(_safe_int(anchor_state.get("lead_two_status")) or 0)
@@ -1022,25 +1054,23 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
       and lead_two_track_id is not None
       and lead_two_track_id == lead_one_track_id
     )
-    # Keep leadTwo gate close to radarState semantics:
-    # - status/radar must be valid
-    # - positive distance
+    # c3-v10 carrot.cc parity:
+    # - radar-only secondary lead
+    # - must be meaningfully farther than leadOne
     # - do not duplicate leadOne when both point to same radar track
-    if lead_two_status_flag and lead_two_radar and lead_two_d_rel > 0.5 and not same_track_as_primary:
+    if (
+      lead_two_status_flag
+      and lead_two_radar
+      and lead_two_d_rel > (lead_one_d_rel + 3.0)
+      and not same_track_as_primary
+    ):
       z2 = _z_at_distance(lead_two_d_rel, 0.0)
-      if (
-        lead_two_d_path is not None
-        and math.isfinite(lead_two_d_path)
-        and abs(lead_two_d_path) <= 4.0
-      ):
-        lead_two_y_center = -lead_two_d_path
-      else:
-        lead_two_y_center = -lead_two_y_rel
+      lead_two_y_center = -lead_two_y_rel
       pair = _project_lead_pair_from_car_space(
         lead_two_d_rel,
         lead_two_y_center,
         z2,
-        half_width=0.95,
+        half_width=1.2,
       )
       if pair is not None:
         left, right = pair
@@ -1055,18 +1085,7 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
         anchor_state["lead_two_xr"] = x_right
         anchor_state["lead_two_y"] = y_base
         width2 = abs(x_right - x_left)
-        lead_two_top_point = _project_lead_top_from_car_space(
-          lead_two_d_rel,
-          lead_two_y_center,
-          z2,
-        )
-        y_top_fallback = y_base - max(width2 * 0.86, 12.0)
-        if lead_two_top_point is not None and math.isfinite(lead_two_top_point[1]):
-          y_top = min(float(lead_two_top_point[1]), y_base - 4.0)
-        else:
-          y_top = y_top_fallback
-        if y_top >= y_base - 2.0:
-          y_top = y_top_fallback
+        y_top = y_base - max(width2 * 0.80, 12.0)
         lead_two_box = [
           (x_left - 10.0, y_top),
           (x_right + 10.0, y_top),
@@ -1085,6 +1104,9 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
             "radarDistance": lead_two_d_rel,
             "anchorCenter": [((x_left + x_right) * 0.5), y_base],
             "anchorWidth": width2,
+            "boxTopY": y_top,
+            "boxBottomY": y_base,
+            "lateralSource": "yRel",
             "strokeColorArgb": int(0xFFB68A3A),
             "fillColorArgb": int(0x66FF3B30 if lead_two_status >= 2 else 0x33000000),
           }
@@ -1178,6 +1200,8 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
       "radarTargets": radar_targets,
       "tfMarker": tf_marker,
       "meta": {
+        "cameraName": camera_name,
+        "cameraMode": camera_mode,
         "usingLateralPath": using_lateral_path,
         "modelPathXMax": model_path_x_max,
         "lateralPathXMax": lateral_path_x_max,
@@ -1190,6 +1214,8 @@ def _build_overlay2d(payload: dict[str, Any]) -> dict[str, Any] | None:
         "vEgoMps": speed_mps,
         "tFollow": t_follow,
         "desiredDistance": desired_distance,
+        "leadAnchorResetReason": anchor_state.get("resetReason"),
+        "leadFrameGap": frame_gap,
       },
     }
 

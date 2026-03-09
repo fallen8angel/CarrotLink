@@ -1,6 +1,7 @@
 part of 'live_drive_canvas_screen.dart';
 
-extension _LiveDriveCanvasOverlayPreviewComponents on _LiveDriveCanvasScreenState {
+extension _LiveDriveCanvasOverlayPreviewComponents
+    on _LiveDriveCanvasScreenState {
   String _overlayPreviewScenarioLabelImpl(_OverlayPreviewScenario scenario) {
     switch (scenario) {
       case _OverlayPreviewScenario.highwayStraight:
@@ -521,12 +522,15 @@ extension _LiveDriveCanvasOverlayPreviewComponents on _LiveDriveCanvasScreenStat
     sidecarOverlay2d['cameras']['wideRoad'] =
         sidecarOverlay2d['cameras']['road'];
 
+    const previewModelPath = _XyzSeries(
+      x: <double>[0, 5, 10, 15, 20, 30, 40, 60, 80],
+      y: <double>[0, 0, 0, 0, 0, 0, 0, 0, 0],
+      z: <double>[1.22, 1.22, 1.22, 1.22, 1.22, 1.22, 1.22, 1.22, 1.22],
+    );
+
     return _DriveOverlaySnapshot(
-      path: const _XyzSeries(
-        x: <double>[0, 5, 10, 15, 20, 30, 40, 60, 80],
-        y: <double>[0, 0, 0, 0, 0, 0, 0, 0, 0],
-        z: <double>[1.22, 1.22, 1.22, 1.22, 1.22, 1.22, 1.22, 1.22, 1.22],
-      ),
+      modelPath: previewModelPath,
+      path: previewModelPath,
       laneLines: const <_LaneLineSeries>[],
       roadEdges: const <_RoadEdgeSeries>[],
       active: true,
@@ -534,6 +538,37 @@ extension _LiveDriveCanvasOverlayPreviewComponents on _LiveDriveCanvasScreenStat
       carrotExperimentalMode: false,
       brakeLights: false,
       leadDetected: true,
+      leadOne: _RadarLeadSample(
+        dRel: leadDist,
+        yRel: 0.0,
+        vRel: -1.2,
+        vLeadK: (speedKph / 3.6) - 1.2,
+        vLat: 0.0,
+        aRel: 0.0,
+        aLeadK: 0.0,
+        status: true,
+        radar: true,
+        radarTrackId: 0,
+        modelProb: 0.92,
+        score: 0.92,
+      ),
+      leadTwo: _RadarLeadSample(
+        dRel: leadDist + 3.4,
+        yRel: 2.2,
+        vRel: -0.6,
+        vLeadK: (speedKph / 3.6) - 0.6,
+        vLat: 0.0,
+        aRel: 0.0,
+        aLeadK: 0.0,
+        status: true,
+        radar: true,
+        radarTrackId: 12,
+        modelProb: 0.68,
+        score: 0.68,
+      ),
+      leadsLeft: const <_RadarTrackSample>[],
+      leadsRight: const <_RadarTrackSample>[],
+      leadsCenter: const <_RadarTrackSample>[],
       pathMode: 0,
       pathColor: 3,
       accel0: 0.0,

@@ -31,7 +31,12 @@ class CarrotSettingsBundle {
             .whereType<Map>()
             .map((e) =>
                 CarrotSettingItemMeta.fromJson(Map<String, dynamic>.from(e)))
-            .toList();
+            .toList()
+          ..sort((a, b) {
+            final byTitle = _naturalMenuCompare(a.displayTitle, b.displayTitle);
+            if (byTitle != 0) return byTitle;
+            return _naturalMenuCompare(a.name, b.name);
+          });
       }
     }
 
@@ -50,6 +55,19 @@ class CarrotSettingsBundle {
       itemsByGroup: itemsByGroup,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'path': path,
+        'apilot': apilot,
+        'unit_cycle': unitCycle,
+        'groups': groups.map((e) => e.toJson()).toList(),
+        'items_by_group': itemsByGroup.map(
+          (key, value) => MapEntry(
+            key,
+            value.map((e) => e.toJson()).toList(),
+          ),
+        ),
+      };
 }
 
 class CarrotSettingsGroupMeta {
@@ -73,6 +91,13 @@ class CarrotSettingsGroupMeta {
       count: _asInt(json['count']) ?? 0,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'group': group,
+        'egroup': egroup,
+        'cgroup': cgroup,
+        'count': count,
+      };
 
   String get displayName => group.isNotEmpty ? group : '-';
 
@@ -126,6 +151,21 @@ class CarrotSettingItemMeta {
       unit: _asInt(json['unit']),
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'group': group,
+        'name': name,
+        'title': title,
+        'descr': descr,
+        'etitle': etitle,
+        'edescr': edescr,
+        'ctitle': ctitle,
+        'cdescr': cdescr,
+        'min': min,
+        'max': max,
+        'default': defaultValue,
+        'unit': unit,
+      };
 
   bool get hasNumericRange => min != null && max != null;
   bool get isIntegerRange =>
@@ -234,4 +274,67 @@ int? _asInt(dynamic value) {
   if (value is num) return value.toInt();
   if (value is String) return int.tryParse(value);
   return null;
+}
+
+int _naturalMenuCompare(String a, String b) {
+  final left = a.trim();
+  final right = b.trim();
+  if (left == right) return 0;
+
+  final leftCategory = _menuSortCategory(left);
+  final rightCategory = _menuSortCategory(right);
+  if (leftCategory != rightCategory) {
+    return leftCategory.compareTo(rightCategory);
+  }
+
+  final tokenPattern = RegExp(r'\d+|[^\d]+');
+  final leftTokens =
+      tokenPattern.allMatches(left).map((m) => m.group(0)!).toList();
+  final rightTokens =
+      tokenPattern.allMatches(right).map((m) => m.group(0)!).toList();
+  final tokenCount = leftTokens.length < rightTokens.length
+      ? leftTokens.length
+      : rightTokens.length;
+
+  for (var i = 0; i < tokenCount; i++) {
+    final leftToken = leftTokens[i];
+    final rightToken = rightTokens[i];
+    final leftNumber = int.tryParse(leftToken);
+    final rightNumber = int.tryParse(rightToken);
+    if (leftNumber != null && rightNumber != null) {
+      final byNumber = leftNumber.compareTo(rightNumber);
+      if (byNumber != 0) return byNumber;
+      continue;
+    }
+    final byToken = leftToken.toLowerCase().compareTo(rightToken.toLowerCase());
+    if (byToken != 0) return byToken;
+  }
+
+  final byLength = leftTokens.length.compareTo(rightTokens.length);
+  if (byLength != 0) return byLength;
+
+  return left.toLowerCase().compareTo(right.toLowerCase());
+}
+
+int _menuSortCategory(String value) {
+  if (value.isEmpty) return 4;
+  final first = value.runes.first;
+  if (_isAsciiLetter(first)) return 0;
+  if (_isHangul(first)) return 1;
+  if (_isDigit(first)) return 2;
+  return 3;
+}
+
+bool _isHangul(int rune) {
+  return (rune >= 0x1100 && rune <= 0x11FF) ||
+      (rune >= 0x3130 && rune <= 0x318F) ||
+      (rune >= 0xAC00 && rune <= 0xD7AF);
+}
+
+bool _isAsciiLetter(int rune) {
+  return (rune >= 0x41 && rune <= 0x5A) || (rune >= 0x61 && rune <= 0x7A);
+}
+
+bool _isDigit(int rune) {
+  return rune >= 0x30 && rune <= 0x39;
 }

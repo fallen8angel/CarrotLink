@@ -10,7 +10,9 @@ import 'package:intl/intl.dart';
 import 'package:path/path.dart' as path;
 import 'package:provider/provider.dart';
 
+import '../../models/carrot_profile_models.dart';
 import '../../services/backup_service.dart';
+import '../../services/carrot_profile_service.dart';
 import '../../services/carrot_server_settings_service.dart';
 import '../../services/google_drive_service.dart';
 import '../../services/ssh_service.dart';
@@ -18,8 +20,9 @@ import '../../services/storage_layout_service.dart';
 import '../../ui/adaptive/layout_tokens.dart';
 import '../../ui/adaptive/window_class.dart';
 import '../../widgets/custom_toast.dart';
+import 'carrot_profile_editor_screen.dart';
 
-enum _BackupSource { local, cloud }
+enum _BackupSource { local, cloud, profile }
 
 enum _BackupDialogAction { copy, apply, delete }
 
@@ -30,35 +33,48 @@ class CarrotBackupTab extends StatefulWidget {
   State<CarrotBackupTab> createState() => _CarrotBackupTabState();
 }
 
-class _CarrotBackupTabState extends State<CarrotBackupTab> {
+class _CarrotBackupTabState extends State<CarrotBackupTab>
+    with WidgetsBindingObserver {
   static const String _allDates = '전체 날짜';
   static const String _allBranches = '전체 브랜치';
+  static const Duration _autoRefreshInterval = Duration(minutes: 1);
 
   final CarrotServerSettingsService _carrotServer =
       CarrotServerSettingsService();
+  final CarrotProfileService _profileService = CarrotProfileService();
 
   _BackupSource _source = _BackupSource.local;
   List<_BackupListItem> _localItems = <_BackupListItem>[];
   List<_BackupListItem> _cloudItems = <_BackupListItem>[];
+  List<_BackupListItem> _profileItems = <_BackupListItem>[];
 
   String _selectedDate = _allDates;
   String _selectedBranch = _allBranches;
 
   bool _isLoadingLocal = false;
   bool _isLoadingCloud = false;
+  bool _isLoadingProfile = false;
   bool _isApplying = false;
   String? _applyingId;
   bool _isDriveAuthBusy = false;
 
   StreamSubscription<void>? _backupSubscription;
+  Timer? _autoRefreshTimer;
 
-  List<_BackupListItem> get _activeItems =>
-      _source == _BackupSource.local ? _localItems : _cloudItems;
+  List<_BackupListItem> get _activeItems => switch (_source) {
+        _BackupSource.local => _localItems,
+        _BackupSource.cloud => _cloudItems,
+        _BackupSource.profile => _profileItems,
+      };
 
-  bool get _isLoading =>
-      _source == _BackupSource.local ? _isLoadingLocal : _isLoadingCloud;
+  bool get _isLoading => switch (_source) {
+        _BackupSource.local => _isLoadingLocal,
+        _BackupSource.cloud => _isLoadingCloud,
+        _BackupSource.profile => _isLoadingProfile,
+      };
 
   bool get _isCloudMode => _source == _BackupSource.cloud;
+  bool get _isProfileMode => _source == _BackupSource.profile;
 
   List<String> get _dateOptions {
     final values = _activeItems.map((e) => e.dateLabel).toSet().toList()
@@ -141,20 +157,32 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final backupService = Provider.of<BackupService>(context, listen: false);
       _backupSubscription = backupService.onBackupComplete.listen((_) {
-        unawaited(_loadLocalBackups());
+        unawaited(_handleBackupChanged());
       });
+      _startAutoRefreshLoop();
       unawaited(_loadLocalBackups());
+      unawaited(_loadProfiles(silent: true));
     });
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _backupSubscription?.cancel();
+    _autoRefreshTimer?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_refreshActive(silent: true));
+    }
   }
 
   void _normalizeFilters() {
@@ -168,9 +196,29 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
     }
   }
 
-  Future<void> _loadLocalBackups() async {
+  void _startAutoRefreshLoop() {
+    _autoRefreshTimer?.cancel();
+    _autoRefreshTimer = Timer.periodic(_autoRefreshInterval, (_) {
+      unawaited(_refreshActive(silent: true));
+    });
+  }
+
+  Future<void> _handleBackupChanged() async {
+    final driveService =
+        Provider.of<GoogleDriveService>(context, listen: false);
+    await _loadLocalBackups(silent: true);
     if (!mounted) return;
-    setState(() => _isLoadingLocal = true);
+    if (driveService.currentUser != null) {
+      await _loadCloudBackups(silent: true);
+    }
+  }
+
+  Future<void> _loadLocalBackups({bool silent = false}) async {
+    if (!mounted) return;
+    final showLoading = !silent || _localItems.isEmpty;
+    if (showLoading) {
+      setState(() => _isLoadingLocal = true);
+    }
     try {
       final backupService = Provider.of<BackupService>(context, listen: false);
       final files = await backupService.listLocalBackupFiles();
@@ -180,12 +228,15 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
           source: _BackupSource.local,
           id: file.path,
           fileName: path.basename(file.path),
+          title: meta.branch,
+          subtitle: meta.timeLabel,
           branch: meta.branch,
           dateLabel: meta.dateLabel,
           timeLabel: meta.timeLabel,
           sortEpoch: meta.sortEpoch,
           localFile: file,
           cloudFile: null,
+          profileHeader: null,
         );
       }).toList()
         ..sort((a, b) => b.sortEpoch.compareTo(a.sortEpoch));
@@ -199,13 +250,15 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
       });
     } catch (e) {
       if (!mounted) return;
-      CustomToast.show(context, '로컬 백업 목록 로드 실패: $e', isError: true);
+      if (!silent) {
+        CustomToast.show(context, '로컬 백업 목록 로드 실패: $e', isError: true);
+      }
     } finally {
-      if (mounted) setState(() => _isLoadingLocal = false);
+      if (mounted && showLoading) setState(() => _isLoadingLocal = false);
     }
   }
 
-  Future<void> _loadCloudBackups() async {
+  Future<void> _loadCloudBackups({bool silent = false}) async {
     if (!mounted) return;
     final driveService =
         Provider.of<GoogleDriveService>(context, listen: false);
@@ -219,7 +272,10 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
       return;
     }
 
-    setState(() => _isLoadingCloud = true);
+    final showLoading = !silent || _cloudItems.isEmpty;
+    if (showLoading) {
+      setState(() => _isLoadingCloud = true);
+    }
     try {
       final files = await driveService.listFiles();
       final loaded = files
@@ -233,12 +289,15 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
           source: _BackupSource.cloud,
           id: f.id!,
           fileName: name,
+          title: meta.branch,
+          subtitle: meta.timeLabel,
           branch: meta.branch,
           dateLabel: meta.dateLabel,
           timeLabel: meta.timeLabel,
           sortEpoch: meta.sortEpoch,
           localFile: null,
           cloudFile: f,
+          profileHeader: null,
         );
       }).toList()
         ..sort((a, b) => b.sortEpoch.compareTo(a.sortEpoch));
@@ -252,18 +311,79 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
       });
     } catch (e) {
       if (!mounted) return;
-      CustomToast.show(context, '클라우드 백업 목록 로드 실패: $e', isError: true);
+      if (!silent) {
+        CustomToast.show(context, '클라우드 백업 목록 로드 실패: $e', isError: true);
+      }
     } finally {
-      if (mounted) setState(() => _isLoadingCloud = false);
+      if (mounted && showLoading) setState(() => _isLoadingCloud = false);
     }
   }
 
-  Future<void> _refreshActive() async {
-    if (_source == _BackupSource.local) {
-      await _loadLocalBackups();
+  Future<void> _loadProfiles({bool silent = false}) async {
+    if (!mounted) return;
+    final showLoading = !silent || _profileItems.isEmpty;
+    if (showLoading) {
+      setState(() => _isLoadingProfile = true);
+    }
+    try {
+      final profiles = await _profileService.listProfiles();
+      final loaded = profiles.map((header) {
+        final updatedAt = DateTime.fromMillisecondsSinceEpoch(
+          header.updatedAtMs > 0 ? header.updatedAtMs : header.createdAtMs,
+        );
+        return _BackupListItem(
+          source: _BackupSource.profile,
+          id: header.id,
+          fileName: '${header.id}.json',
+          title: header.name,
+          subtitle:
+              '${DateFormat('yyyy-MM-dd HH:mm').format(updatedAt)} · ${header.sourceBranch} · ${header.paramCount}개',
+          branch: header.sourceBranch,
+          dateLabel: DateFormat('yyyy-MM-dd').format(updatedAt),
+          timeLabel: DateFormat('yyyy-MM-dd HH:mm').format(updatedAt),
+          sortEpoch: updatedAt.millisecondsSinceEpoch,
+          localFile: null,
+          cloudFile: null,
+          profileHeader: header,
+        );
+      }).toList()
+        ..sort((a, b) => b.sortEpoch.compareTo(a.sortEpoch));
+
+      if (!mounted) return;
+      setState(() {
+        _profileItems = loaded;
+        if (_source == _BackupSource.profile) {
+          _normalizeFilters();
+        }
+      });
+    } catch (e) {
+      if (!mounted) return;
+      if (!silent) {
+        CustomToast.show(context, '프로필 목록 로드 실패: $e', isError: true);
+      }
+    } finally {
+      if (mounted && showLoading) setState(() => _isLoadingProfile = false);
+    }
+  }
+
+  Future<void> _refreshActive({bool silent = false}) async {
+    if (!mounted || _isApplying || _isDriveAuthBusy) return;
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (silent && lifecycle != null && lifecycle != AppLifecycleState.resumed) {
       return;
     }
-    await _loadCloudBackups();
+    if (_source == _BackupSource.local) {
+      await _loadLocalBackups(silent: silent);
+      return;
+    }
+    if (_source == _BackupSource.profile) {
+      await _loadProfiles(silent: silent);
+      return;
+    }
+    final driveService =
+        Provider.of<GoogleDriveService>(context, listen: false);
+    if (driveService.currentUser == null) return;
+    await _loadCloudBackups(silent: silent);
   }
 
   Future<void> _switchSource(_BackupSource next) async {
@@ -275,6 +395,8 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
     });
     if (next == _BackupSource.cloud) {
       await _loadCloudBackups();
+    } else if (next == _BackupSource.profile) {
+      await _loadProfiles();
     } else {
       await _loadLocalBackups();
     }
@@ -511,6 +633,100 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
     }
   }
 
+  Future<String?> _promptProfileName({
+    required String title,
+    String? initialValue,
+  }) async {
+    final controller = TextEditingController(text: initialValue ?? '');
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: '프로필 이름',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (value) => Navigator.of(context).pop(value.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text.trim()),
+            child: const Text('저장'),
+          ),
+        ],
+      ),
+    );
+    final trimmed = result?.trim();
+    if (trimmed == null || trimmed.isEmpty) return null;
+    return trimmed;
+  }
+
+  Future<void> _createProfileFromCurrentDevice() async {
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    if (!ssh.isConnected) {
+      CustomToast.show(context, '기기 연결 후 프로필을 저장하세요.', isError: true);
+      return;
+    }
+    final host = _resolveTargetHost(ssh);
+    if (host == null) {
+      CustomToast.show(context, '대상 IP를 확인할 수 없습니다.', isError: true);
+      return;
+    }
+    final name = await _promptProfileName(title: '새 프로필 저장');
+    if (name == null) return;
+
+    try {
+      await _profileService.createProfileFromDevice(
+        name: name,
+        host: host,
+        ssh: ssh,
+      );
+      await _loadProfiles(silent: true);
+      if (!mounted) return;
+      setState(() {
+        _source = _BackupSource.profile;
+        _selectedDate = _allDates;
+        _selectedBranch = _allBranches;
+      });
+      CustomToast.show(context, '프로필 저장 완료');
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, '프로필 저장 실패: $e', isError: true);
+    }
+  }
+
+  Future<void> _openProfileEditor(CarrotProfileDocument document) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => CarrotProfileEditorScreen(
+          document: document,
+          service: _profileService,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    await _loadProfiles(silent: true);
+  }
+
+  Future<void> _openProfileFromItem(_BackupListItem item) async {
+    final document = await _profileService.readProfile(item.id);
+    if (document == null) {
+      if (!mounted) return;
+      CustomToast.show(context, '프로필을 찾을 수 없습니다.', isError: true);
+      await _loadProfiles(silent: true);
+      return;
+    }
+    if (!mounted) return;
+    await _openProfileEditor(document);
+  }
+
   Future<void> _showBackupDetails(_BackupListItem item) async {
     FocusManager.instance.primaryFocus?.unfocus();
     Map<String, dynamic> values;
@@ -523,106 +739,62 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
     }
     if (!mounted) return;
 
-    final keys = values.keys.map((e) => e.toString()).toList()..sort();
-    final action = await showDialog<_BackupDialogAction>(
+    final action = await showModalBottomSheet<_BackupDialogAction>(
       context: context,
+      showDragHandle: true,
+      useSafeArea: true,
       builder: (context) {
-        final media = MediaQuery.of(context);
-        final dialogHeight = (media.size.height *
-                (media.size.width > media.size.height ? 0.72 : 0.58))
-            .clamp(300.0, 620.0)
-            .toDouble();
-        return AlertDialog(
-          title: Text(item.branch),
-          content: SizedBox(
-            width: double.maxFinite,
-            height: dialogHeight,
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 4, 18, 18),
             child: Column(
+              mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '${item.timeLabel} · ${keys.length}개 키',
+                  item.title,
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  item.subtitle,
                   style: TextStyle(
-                    fontSize: 12,
                     color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
                 ),
-                const SizedBox(height: 8),
-                const Divider(height: 1),
-                const SizedBox(height: 8),
-                Expanded(
-                  child: ListView.separated(
-                    itemCount: keys.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 8),
-                    itemBuilder: (context, index) {
-                      final key = keys[index];
-                      final value = values[key];
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            key,
-                            style: const TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            value?.toString() ?? '(없음)',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .onSurfaceVariant,
-                            ),
-                          ),
-                        ],
-                      );
-                    },
-                  ),
+                const SizedBox(height: 14),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.playlist_add_check_circle_outlined),
+                  title: const Text('적용'),
+                  subtitle: const Text('이 백업 값을 현재 기기에 적용'),
+                  onTap: () =>
+                      Navigator.pop(context, _BackupDialogAction.apply),
                 ),
-                const SizedBox(height: 10),
-                const Divider(height: 1),
-                const SizedBox(height: 8),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: Wrap(
-                    spacing: 6,
-                    runSpacing: 6,
-                    alignment: WrapAlignment.end,
-                    children: [
-                      TextButton(
-                        onPressed: () {
-                          FocusScope.of(context).unfocus();
-                          Navigator.pop(context);
-                        },
-                        child: const Text('닫기'),
-                      ),
-                      TextButton(
-                        onPressed: () {
-                          FocusScope.of(context).unfocus();
-                          Navigator.pop(context, _BackupDialogAction.copy);
-                        },
-                        child: const Text('복사'),
-                      ),
-                      TextButton(
-                        onPressed: () {
-                          FocusScope.of(context).unfocus();
-                          Navigator.pop(context, _BackupDialogAction.delete);
-                        },
-                        child: const Text('삭제',
-                            style: TextStyle(color: Colors.red)),
-                      ),
-                      FilledButton(
-                        onPressed: () {
-                          FocusScope.of(context).unfocus();
-                          Navigator.pop(context, _BackupDialogAction.apply);
-                        },
-                        child: const Text('적용'),
-                      ),
-                    ],
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.copy_all_outlined),
+                  title: const Text('복사'),
+                  subtitle: const Text('백업 JSON을 클립보드에 복사'),
+                  onTap: () => Navigator.pop(context, _BackupDialogAction.copy),
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(
+                    Icons.delete_outline,
+                    color: Theme.of(context).colorScheme.error,
                   ),
+                  title: Text(
+                    '삭제',
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                  subtitle: const Text('이 백업 항목 삭제'),
+                  onTap: () =>
+                      Navigator.pop(context, _BackupDialogAction.delete),
                 ),
               ],
             ),
@@ -649,12 +821,17 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
       return;
     }
     if (action == _BackupDialogAction.apply) {
-      await _applyBackupValues(item, values);
+      await _applyValueMap(
+        applyId: item.id,
+        values: values,
+      );
     }
   }
 
-  Future<void> _applyBackupValues(
-      _BackupListItem item, Map<String, dynamic> values) async {
+  Future<void> _applyValueMap({
+    required String applyId,
+    required Map<String, dynamic> values,
+  }) async {
     if (_isApplying) return;
     if (values.isEmpty) {
       if (!mounted) return;
@@ -677,7 +854,7 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
 
     setState(() {
       _isApplying = true;
-      _applyingId = item.id;
+      _applyingId = applyId;
     });
 
     var success = 0;
@@ -716,7 +893,7 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
           await local.delete();
         }
         await _loadLocalBackups();
-      } else {
+      } else if (item.source == _BackupSource.cloud) {
         final cloud = item.cloudFile;
         if (cloud != null && cloud.id != null) {
           final driveService =
@@ -724,10 +901,16 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
           await driveService.deleteFile(cloud.id!);
         }
         await _loadCloudBackups();
+      } else {
+        await _profileService.deleteProfile(item.id);
+        await _loadProfiles(silent: true);
       }
 
       if (!mounted) return;
-      CustomToast.show(context, '백업이 삭제되었습니다.');
+      CustomToast.show(
+        context,
+        item.source == _BackupSource.profile ? '프로필이 삭제되었습니다.' : '백업이 삭제되었습니다.',
+      );
     } catch (e) {
       if (!mounted) return;
       CustomToast.show(context, '삭제 실패: $e', isError: true);
@@ -789,6 +972,20 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
     await _deleteCloudAllInternal(showToast: false, requireSignedIn: false);
     if (!mounted) return;
     CustomToast.show(context, '로컬 + 클라우드 전체 삭제 완료');
+  }
+
+  Future<void> _deleteAllProfiles() async {
+    final ok = await _confirmDialog('프로필 전체 삭제', '저장된 프로필을 모두 삭제합니다.');
+    if (!ok) return;
+    try {
+      await _profileService.deleteAllProfiles();
+      await _loadProfiles(silent: true);
+      if (!mounted) return;
+      CustomToast.show(context, '프로필 전체 삭제 완료');
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, '프로필 전체 삭제 실패: $e', isError: true);
+    }
   }
 
   Future<void> _deleteLocalAllInternal({required bool showToast}) async {
@@ -955,6 +1152,11 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
             selected: _source == _BackupSource.cloud,
             onTap: () => unawaited(_switchSource(_BackupSource.cloud)),
           ),
+          segment(
+            text: '프로필',
+            selected: _source == _BackupSource.profile,
+            onTap: () => unawaited(_switchSource(_BackupSource.profile)),
+          ),
         ],
       ),
     );
@@ -1011,18 +1213,25 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
                 onSelected: (value) {
                   if (value == 'sync') {
                     unawaited(_syncNow());
+                  } else if (value == 'save_profile') {
+                    unawaited(_createProfileFromCurrentDevice());
                   } else if (value == 'local') {
                     unawaited(_deleteAllLocalBackups());
                   } else if (value == 'cloud') {
                     unawaited(_deleteAllCloudBackups());
+                  } else if (value == 'profile') {
+                    unawaited(_deleteAllProfiles());
                   } else if (value == 'both') {
                     unawaited(_deleteAllBoth());
                   }
                 },
                 itemBuilder: (context) => const [
                   PopupMenuItem(value: 'sync', child: Text('동기화')),
+                  PopupMenuItem(
+                      value: 'save_profile', child: Text('현재 기기로 프로필 저장')),
                   PopupMenuItem(value: 'local', child: Text('로컬 전체 삭제')),
                   PopupMenuItem(value: 'cloud', child: Text('클라우드 전체 삭제')),
+                  PopupMenuItem(value: 'profile', child: Text('프로필 전체 삭제')),
                   PopupMenuItem(value: 'both', child: Text('로컬+클라우드 전체 삭제')),
                 ],
               );
@@ -1102,38 +1311,11 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
                 options: _branchOptions,
                 onChanged: (value) => setState(() => _selectedBranch = value),
               );
-              final refreshButton = IconButton(
-                onPressed: _isLoading ? null : _refreshActive,
-                icon: const Icon(Icons.refresh),
-                tooltip: '새로고침',
-              );
-              final branchWithRefresh = Row(
+              return Row(
                 children: [
+                  Expanded(child: dateFilter),
+                  SizedBox(width: compactFilters ? 6 : filterGap),
                   Expanded(child: branchFilter),
-                  SizedBox(width: filterGap),
-                  SizedBox(
-                    width: ui.filterMinHeight + 4,
-                    height: ui.filterMinHeight + 4,
-                    child: refreshButton,
-                  ),
-                ],
-              );
-
-              if (!compactFilters) {
-                return Row(
-                  children: [
-                    Expanded(flex: 5, child: dateFilter),
-                    SizedBox(width: filterGap),
-                    Expanded(flex: 6, child: branchWithRefresh),
-                  ],
-                );
-              }
-
-              return Column(
-                children: [
-                  dateFilter,
-                  SizedBox(height: filterGap),
-                  branchWithRefresh,
                 ],
               );
             },
@@ -1176,8 +1358,12 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
           bottom: fabBottomInset,
           child: FloatingActionButton(
             heroTag: 'carrot_backup_create_fab',
-            onPressed: backupService.isBackingUp ? null : _backupNow,
-            child: const Icon(Icons.add),
+            onPressed: backupService.isBackingUp
+                ? null
+                : (_isProfileMode
+                    ? _createProfileFromCurrentDevice
+                    : _backupNow),
+            child: Icon(_isProfileMode ? Icons.bookmark_add : Icons.add),
           ),
         ),
       ],
@@ -1211,7 +1397,7 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
     if (list.isEmpty) {
       return Center(
         child: Text(
-          '조건에 맞는 백업이 없습니다.',
+          _isProfileMode ? '조건에 맞는 프로필이 없습니다.' : '조건에 맞는 백업이 없습니다.',
           style:
               TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant),
         ),
@@ -1239,12 +1425,14 @@ class _CarrotBackupTabState extends State<CarrotBackupTab> {
             dense: true,
             onTap: (_isApplying && !isApplying)
                 ? null
-                : () => _showBackupDetails(item),
+                : () => item.source == _BackupSource.profile
+                    ? _openProfileFromItem(item)
+                    : _showBackupDetails(item),
             title: Text(
-              item.branch,
+              item.title,
               style: const TextStyle(fontWeight: FontWeight.w700),
             ),
-            subtitle: Text(item.timeLabel),
+            subtitle: Text(item.subtitle),
             trailing: isApplying
                 ? const SizedBox(
                     width: 18,
@@ -1277,22 +1465,28 @@ class _BackupListItem {
   final _BackupSource source;
   final String id;
   final String fileName;
+  final String title;
+  final String subtitle;
   final String branch;
   final String dateLabel;
   final String timeLabel;
   final int sortEpoch;
   final File? localFile;
   final drive.File? cloudFile;
+  final CarrotProfileHeader? profileHeader;
 
   const _BackupListItem({
     required this.source,
     required this.id,
     required this.fileName,
+    required this.title,
+    required this.subtitle,
     required this.branch,
     required this.dateLabel,
     required this.timeLabel,
     required this.sortEpoch,
     required this.localFile,
     required this.cloudFile,
+    required this.profileHeader,
   });
 }

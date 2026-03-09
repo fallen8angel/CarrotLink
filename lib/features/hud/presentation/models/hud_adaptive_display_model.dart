@@ -7,6 +7,7 @@ class HudAdaptiveDisplayModel {
   final String setSpeedText;
   final String gearText;
   final String driveModeText;
+  final bool showDriveMode;
   final String driveModeKind;
   final String tempLabel;
   final String tempSpeedText;
@@ -18,6 +19,8 @@ class HudAdaptiveDisplayModel {
   final bool showLimit;
   final bool limitCritical;
   final bool limitBlink;
+  final bool isCameraLimit;
+  final bool cameraAlertBlinkOn;
   final String connectivityText;
   final String connectivityDisplayText;
   final bool showConnectivity;
@@ -53,6 +56,7 @@ class HudAdaptiveDisplayModel {
     required this.setSpeedText,
     required this.gearText,
     required this.driveModeText,
+    required this.showDriveMode,
     required this.driveModeKind,
     required this.tempLabel,
     required this.tempSpeedText,
@@ -64,6 +68,8 @@ class HudAdaptiveDisplayModel {
     required this.showLimit,
     required this.limitCritical,
     required this.limitBlink,
+    required this.isCameraLimit,
+    required this.cameraAlertBlinkOn,
     required this.connectivityText,
     required this.connectivityDisplayText,
     required this.showConnectivity,
@@ -96,29 +102,31 @@ class HudAdaptiveDisplayModel {
   });
 
   factory HudAdaptiveDisplayModel.fromSnapshot(OriginalHudSnapshot snapshot) {
+    // Canonical c3 lower-left HUD mapping for CarrotLink:
+    // - temp/apply slot is apply source + apply speed, not free-form debug text
+    // - bottom strip is drive mode | LIMIT/CAM/section | APN/APM
+    // - transport/debug metadata must not occupy semantic HUD slots
+    // - if semantic live values are not present, footer slots must stay blank
+    // - TBT/navigation overlay is out of scope for this display model
     final assistContext = _shouldShowAssistContext(snapshot);
     final semanticLive = _isSemanticLive(snapshot);
     final auxIsVolt = snapshot.device.metricPrimaryMode == 'volt';
     final tempLabel = (snapshot.tempControl.label ?? snapshot.tempControl.mode)
         .trim()
         .toLowerCase();
-    final limitLabel = (snapshot.limits.label ?? snapshot.limits.mode)
-        .trim()
-        .toUpperCase();
+    final limitLabel =
+        (snapshot.limits.label ?? snapshot.limits.mode).trim().toUpperCase();
     final showTempControl = semanticLive &&
         assistContext &&
         snapshot.tempControl.mode != 'hidden' &&
         ((_safeHasText(snapshot.tempControl.label)) ||
             snapshot.tempControl.speedKph != null);
-    final showLimit = semanticLive &&
-        assistContext &&
-        snapshot.limits.mode != 'hidden' &&
-        snapshot.limits.displaySpeedKph != null;
+    final showLimit = semanticLive && _hasMeaningfulLimit(snapshot);
     final showGpsBadge = snapshot.gps.hasFix;
-    final gapValue = snapshot.gap.displayValue > 0
-        ? '${snapshot.gap.displayValue}'
-        : '--';
-    final showGap = semanticLive && assistContext && snapshot.gap.displayValue > 0;
+    final gapValue =
+        snapshot.gap.displayValue > 0 ? '${snapshot.gap.displayValue}' : '--';
+    final showGap =
+        semanticLive && assistContext && snapshot.gap.displayValue > 0;
     final normalizedSignalState =
         snapshot.signals.visualState.trim().toLowerCase();
     final showSignalState = semanticLive &&
@@ -131,8 +139,12 @@ class HudAdaptiveDisplayModel {
     final compatibilityHint = _buildCompatibilityHint(snapshot);
     final compatibilityBadgeText = _buildCompatibilityBadgeText(snapshot);
     final connectivityText = _buildConnectivityText(snapshot);
-    final showConnectivity =
-        semanticLive && assistContext && connectivityText.isNotEmpty;
+    final isCameraLimit = snapshot.limits.mode == 'camera';
+    final cameraAlertBlinkOn = semanticLive &&
+        isCameraLimit &&
+        _isCameraAlertBlinkOn(snapshot.tsMonoMs);
+    final showDriveMode = semanticLive && _hasMeaningfulDriveMode(snapshot);
+    final showConnectivity = semanticLive && connectivityText.isNotEmpty;
     final limitDisplayText = _buildLimitDisplayText(snapshot);
     final signalDisplayText = _buildSignalDisplayText(snapshot);
     return HudAdaptiveDisplayModel(
@@ -142,19 +154,21 @@ class HudAdaptiveDisplayModel {
           ? 'U'
           : snapshot.vehicle.gearText.trim(),
       driveModeText: _buildDriveModeText(snapshot),
+      showDriveMode: showDriveMode,
       driveModeKind: snapshot.driveMode.kind,
-      tempLabel: showTempControl ? (tempLabel.isEmpty ? 'apply' : tempLabel) : '',
+      tempLabel:
+          showTempControl ? (tempLabel.isEmpty ? 'apply' : tempLabel) : '',
       tempSpeedText: _formatInt(snapshot.tempControl.speedKph),
       showTempControl: showTempControl,
       tempIsDecel: snapshot.tempControl.isDecel,
-      limitLabel: showLimit
-          ? (limitLabel.isEmpty ? 'LIMIT' : limitLabel)
-          : '',
+      limitLabel: showLimit ? (limitLabel.isEmpty ? 'LIMIT' : limitLabel) : '',
       limitValueText: _formatInt(snapshot.limits.displaySpeedKph),
       limitDisplayText: limitDisplayText,
       showLimit: showLimit,
       limitCritical: snapshot.limits.isOverLimit,
       limitBlink: snapshot.limits.shouldBlink,
+      isCameraLimit: isCameraLimit,
+      cameraAlertBlinkOn: cameraAlertBlinkOn,
       connectivityText: connectivityText,
       connectivityDisplayText: connectivityText,
       showConnectivity: showConnectivity,
@@ -195,6 +209,7 @@ class HudAdaptiveDisplayModel {
     }
     if (snapshot.meta.isPreview) return 'PREVIEW';
     switch (snapshot.source.transport.trim().toLowerCase()) {
+      case 'carrot_linkhud':
       case 'sidecar_hud':
         return 'HUD';
       case 'legacy_ws_carstate':
@@ -237,6 +252,13 @@ class HudAdaptiveDisplayModel {
     };
   }
 
+  static bool _isCameraAlertBlinkOn(int tsMonoMs) {
+    if (tsMonoMs <= 0) return false;
+    const fullCycleMs = 1600;
+    const activeStartMs = 800;
+    return tsMonoMs % fullCycleMs >= activeStartMs;
+  }
+
   static bool _shouldShowAssistContext(OriginalHudSnapshot snapshot) {
     if (snapshot.meta.isPreview) return true;
     final nowMs = DateTime.now().millisecondsSinceEpoch;
@@ -246,19 +268,59 @@ class HudAdaptiveDisplayModel {
     final speedClusterKph = snapshot.vehicle.speedClusterKph ?? 0.0;
     final hasMotionContext = speedClusterKph > 1.0;
     return isFresh &&
-        (snapshot.vehicle.longActive || snapshot.vehicle.latActive || hasMotionContext);
+        (snapshot.vehicle.longActive ||
+            snapshot.vehicle.latActive ||
+            hasMotionContext);
   }
 
   static bool _isSemanticLive(OriginalHudSnapshot snapshot) {
     if (snapshot.meta.isPreview) return false;
     final transport = snapshot.source.transport.trim().toLowerCase();
-    if (transport != 'sidecar_hud') return false;
+    if (transport != 'sidecar_hud' && transport != 'carrot_linkhud') {
+      return false;
+    }
     final quality = snapshot.meta.quality.trim().toLowerCase();
-    if (quality.isNotEmpty && quality != 'live') return false;
+    if (quality.isNotEmpty && quality != 'live' && quality != 'semantic') {
+      return false;
+    }
     final receivedAtMs = snapshot.source.receivedAtMs;
     if (receivedAtMs == null) return false;
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     return (nowMs - receivedAtMs).abs() <= _assistFreshnessMs;
+  }
+
+  static bool _hasMeaningfulDriveMode(OriginalHudSnapshot snapshot) {
+    if (!_shouldShowAssistContext(snapshot)) return false;
+    final driveModeKind = snapshot.driveMode.kind.trim().toLowerCase();
+    if (driveModeKind.isEmpty || driveModeKind == 'hidden') {
+      return false;
+    }
+    final driveModeName = snapshot.driveMode.nameOriginal.trim().toUpperCase();
+    final isDefaultPlaceholder = snapshot.driveMode.code == null &&
+        driveModeKind == 'normal' &&
+        driveModeName == 'NORM';
+    if (isDefaultPlaceholder &&
+        !snapshot.vehicle.longActive &&
+        !snapshot.vehicle.latActive) {
+      return false;
+    }
+    return true;
+  }
+
+  static bool _hasMeaningfulLimit(OriginalHudSnapshot snapshot) {
+    if (!_shouldShowAssistContext(snapshot)) return false;
+    if (snapshot.limits.mode == 'hidden' ||
+        snapshot.limits.displaySpeedKph == null) {
+      return false;
+    }
+    final speedClusterKph = snapshot.vehicle.speedClusterKph ?? 0.0;
+    final hasActiveAssist =
+        snapshot.vehicle.longActive || snapshot.vehicle.latActive;
+    final hasMotionContext = speedClusterKph > 1.0;
+    final urgentLimitContext = snapshot.limits.isOverLimit ||
+        snapshot.limits.shouldBlink ||
+        snapshot.limits.mode == 'camera';
+    return hasActiveAssist || hasMotionContext || urgentLimitContext;
   }
 
   static String _buildLimitDisplayText(OriginalHudSnapshot snapshot) {
