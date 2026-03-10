@@ -20,7 +20,14 @@ class GithubLoginScreen extends StatefulWidget {
   State<GithubLoginScreen> createState() => _GithubLoginScreenState();
 }
 
-class _GithubLoginScreenState extends State<GithubLoginScreen> {
+enum _ExternalBrowserLaunchResult {
+  launched,
+  permissionRequested,
+  failed,
+}
+
+class _GithubLoginScreenState extends State<GithubLoginScreen>
+    with WidgetsBindingObserver {
   String? _userCode;
   String? _verificationUri;
   String? _verificationUriComplete;
@@ -37,21 +44,42 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
   DateTime? _pollDeadline;
   DateTime? _nextPollAllowedAt;
   Timer? _uiTicker;
+  bool _awaitingOverlayPermission = false;
+  bool _reopenBrowserAfterOverlayPermission = false;
   final DiagnosticsService _diag = DiagnosticsService.instance;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initiateDeviceFlow();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _isPolling = false;
     _uiTicker?.cancel();
     unawaited(GitHubOAuthUiService.cancelCodeNotification());
     unawaited(GitHubOAuthUiService.hideCodeHud());
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed ||
+        !_awaitingOverlayPermission ||
+        _flowCompleted) {
+      return;
+    }
+    _awaitingOverlayPermission = false;
+    final reopen = _reopenBrowserAfterOverlayPermission;
+    _reopenBrowserAfterOverlayPermission = false;
+    unawaited(
+      _handleOverlayPermissionResumed(
+        reopenBrowser: reopen,
+      ),
+    );
   }
 
   String _targetUri() {
@@ -111,19 +139,52 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
     );
   }
 
-  Future<void> _showMiniHudIfPossible() async {
+  Future<bool> _showMiniHudIfPossible() async {
     final code = _userCode?.trim() ?? '';
-    if (code.isEmpty) return;
-    final shown = await GitHubOAuthUiService.showCodeHud(code);
-    if (shown) return;
+    if (code.isEmpty) return false;
     final hasPermission = await GitHubOAuthUiService.hasOverlayPermission();
     if (!hasPermission) {
       _diag.warn(
           'github_oauth', 'Mini HUD skipped: overlay permission missing');
+      return false;
+    }
+    final shown = await GitHubOAuthUiService.showCodeHud(code);
+    if (!shown) {
+      _diag.warn('github_oauth', 'Mini HUD show failed despite permission');
+    }
+    return shown;
+  }
+
+  Future<void> _handleOverlayPermissionResumed({
+    required bool reopenBrowser,
+  }) async {
+    final hasPermission = await GitHubOAuthUiService.hasOverlayPermission();
+    if (!mounted || _flowCompleted) return;
+    if (!hasPermission) {
+      CustomToast.show(
+        context,
+        '오버레이 권한이 없어 코드 HUD는 표시되지 않습니다.',
+        isError: true,
+      );
+      return;
+    }
+    final shown = await _showMiniHudIfPossible();
+    if (!mounted || _flowCompleted) return;
+    if (shown) {
+      CustomToast.show(context, '인증 코드 HUD를 표시했습니다.');
+    }
+    if (reopenBrowser) {
+      await _openInExternalBrowser(
+        showFailureToast: true,
+        allowPermissionPrompt: false,
+      );
     }
   }
 
-  Future<bool> _openInExternalBrowser({bool showFailureToast = true}) async {
+  Future<_ExternalBrowserLaunchResult> _openInExternalBrowser({
+    bool showFailureToast = true,
+    bool allowPermissionPrompt = true,
+  }) async {
     final raw = _targetUri();
     Uri uri;
     try {
@@ -132,12 +193,27 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
       if (showFailureToast && mounted) {
         CustomToast.show(context, '브라우저 URL이 올바르지 않습니다.', isError: true);
       }
-      return false;
+      return _ExternalBrowserLaunchResult.failed;
     }
 
     await _copyUserCode();
     await _showCodeNotification();
-    await _showMiniHudIfPossible();
+    final hasPermission = await GitHubOAuthUiService.hasOverlayPermission();
+    if (!hasPermission && allowPermissionPrompt) {
+      _awaitingOverlayPermission = true;
+      _reopenBrowserAfterOverlayPermission = true;
+      if (mounted) {
+        CustomToast.show(
+          context,
+          '코드 HUD를 표시하려면 "다른 앱 위에 표시" 권한을 허용해주세요.',
+        );
+      }
+      await GitHubOAuthUiService.requestOverlayPermission();
+      return _ExternalBrowserLaunchResult.permissionRequested;
+    }
+    if (hasPermission) {
+      await _showMiniHudIfPossible();
+    }
 
     try {
       final launched = await launchUrl(
@@ -147,12 +223,14 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
       if (!launched && showFailureToast && mounted) {
         CustomToast.show(context, '브라우저를 열 수 없습니다.', isError: true);
       }
-      return launched;
+      return launched
+          ? _ExternalBrowserLaunchResult.launched
+          : _ExternalBrowserLaunchResult.failed;
     } catch (e) {
       if (showFailureToast && mounted) {
         CustomToast.show(context, '브라우저 실행 실패: $e', isError: true);
       }
-      return false;
+      return _ExternalBrowserLaunchResult.failed;
     }
   }
 
@@ -196,8 +274,9 @@ class _GithubLoginScreenState extends State<GithubLoginScreen> {
       _startUiTicker();
       unawaited(_startPolling());
 
-      final launched = await _openInExternalBrowser(showFailureToast: false);
-      if (!launched && mounted) {
+      final launchResult =
+          await _openInExternalBrowser(showFailureToast: false);
+      if (launchResult == _ExternalBrowserLaunchResult.failed && mounted) {
         CustomToast.show(
           context,
           "자동으로 브라우저를 열지 못했습니다. '브라우저 열기'를 눌러 진행하세요.",

@@ -17,6 +17,8 @@ class UpdateService extends ChangeNotifier {
   String _currentVersionFull = ""; // 비교용 (예: 1.1007.2+19)
   String _statusMessage = "";
   String _channel = "stable"; // stable or dev
+  late final Future<void> _versionLoadFuture;
+  late final Future<void> _channelLoadFuture;
 
   bool get isChecking => _isChecking;
   bool get isDownloading => _isDownloading;
@@ -29,8 +31,15 @@ class UpdateService extends ChangeNotifier {
   String get channel => _channel;
 
   UpdateService() {
-    _loadVersion();
-    _loadChannel();
+    _versionLoadFuture = _loadVersion();
+    _channelLoadFuture = _loadChannel();
+  }
+
+  Future<void> _ensureReady() async {
+    await Future.wait<void>([
+      _versionLoadFuture,
+      _channelLoadFuture,
+    ]);
   }
 
   Future<void> _loadVersion() async {
@@ -55,14 +64,21 @@ class UpdateService extends ChangeNotifier {
     _channel = newChannel;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('update_channel', _channel);
+    _latestRelease = null;
+    _downloadedFilePath = null;
+    _downloadProgress = 0.0;
+    _statusMessage = "";
     notifyListeners();
-    // Optionally check for update immediately when channel changes
-    // checkForUpdate();
+    await checkForUpdate();
   }
 
   Future<bool> checkForUpdate({bool silent = false}) async {
     if (_isChecking) return false;
+    await _ensureReady();
     _isChecking = true;
+    if (!silent) {
+      _statusMessage = "";
+    }
     notifyListeners();
 
     try {
@@ -88,6 +104,8 @@ class UpdateService extends ChangeNotifier {
         final response = await http.get(url);
         if (response.statusCode == 200) {
           releaseData = jsonDecode(response.body);
+        } else if (!silent) {
+          _statusMessage = "업데이트 확인 실패: HTTP ${response.statusCode}";
         }
       } else {
         // Dev channel: Get list of releases and pick the first one (latest by date)
@@ -99,6 +117,8 @@ class UpdateService extends ChangeNotifier {
           if (list.isNotEmpty) {
             releaseData = list.first;
           }
+        } else if (!silent) {
+          _statusMessage = "업데이트 확인 실패: HTTP ${response.statusCode}";
         }
       }
 
@@ -113,6 +133,9 @@ class UpdateService extends ChangeNotifier {
 
           // Check if file already exists
           await _checkExistingFile(releaseData);
+          if (_downloadedFilePath == null && !silent) {
+            _statusMessage = "새 업데이트가 있습니다.";
+          }
 
           _isChecking = false;
           notifyListeners();
@@ -121,8 +144,19 @@ class UpdateService extends ChangeNotifier {
       }
     } catch (e) {
       debugPrint("Update check failed: $e");
+      if (!silent) {
+        _statusMessage = "업데이트 확인 실패: $e";
+      }
     }
 
+    _latestRelease = null;
+    _downloadedFilePath = null;
+    _downloadProgress = 0.0;
+    if (!silent && _statusMessage.isEmpty) {
+      _statusMessage = "최신 버전입니다.";
+    } else if (silent) {
+      _statusMessage = "";
+    }
     _isChecking = false;
     notifyListeners();
     return false;
@@ -179,11 +213,17 @@ class UpdateService extends ChangeNotifier {
     } else {
       _downloadedFilePath = null;
       _downloadProgress = 0.0;
+      _statusMessage = "";
     }
   }
 
   Future<void> downloadUpdate() async {
-    if (_latestRelease == null || _isDownloading) return;
+    if (_isDownloading) return;
+    if (_latestRelease == null) {
+      _statusMessage = "다운로드할 업데이트가 없습니다.";
+      notifyListeners();
+      return;
+    }
 
     final List assets = _latestRelease!['assets'] ?? [];
     String? downloadUrl;
@@ -194,66 +234,89 @@ class UpdateService extends ChangeNotifier {
       }
     }
 
-    if (downloadUrl == null) return;
+    if (downloadUrl == null) {
+      _statusMessage = "릴리즈에 APK 자산이 없습니다.";
+      notifyListeners();
+      return;
+    }
 
     _isDownloading = true;
+    _downloadedFilePath = null;
+    _downloadProgress = 0.0;
     _statusMessage = "다운로드 중...";
     notifyListeners();
 
+    http.Client? client;
+    IOSink? sink;
     try {
       final tagName = _latestRelease!['tag_name'];
       final dir = await getExternalStorageDirectory() ??
           await getApplicationDocumentsDirectory();
+      await dir.create(recursive: true);
       final filePath = "${dir.path}/update_$tagName.apk";
       final file = File(filePath);
+      if (await file.exists()) {
+        await file.delete();
+      }
 
+      client = http.Client();
       final request = http.Request('GET', Uri.parse(downloadUrl));
-      final response = await http.Client().send(request);
+      final response = await client.send(request);
+      if (response.statusCode != 200) {
+        _isDownloading = false;
+        _statusMessage = "다운로드 실패: HTTP ${response.statusCode}";
+        notifyListeners();
+        return;
+      }
       final total = response.contentLength ?? 0;
       int received = 0;
+      sink = file.openWrite();
 
-      final List<int> bytes = [];
+      await for (final chunk in response.stream) {
+        sink.add(chunk);
+        received += chunk.length;
+        if (total > 0) {
+          _downloadProgress = received / total;
+          notifyListeners();
+        }
+      }
+      await sink.flush();
+      await sink.close();
+      sink = null;
 
-      response.stream.listen(
-        (value) {
-          bytes.addAll(value);
-          received += value.length;
-          if (total > 0) {
-            _downloadProgress = received / total;
-            notifyListeners();
-          }
-        },
-        onDone: () async {
-          await file.writeAsBytes(bytes);
-          _downloadedFilePath = filePath;
-          _isDownloading = false;
-          _statusMessage = "설치 준비 완료";
-          _downloadProgress = 1.0;
-          notifyListeners();
-          installUpdate();
-        },
-        onError: (e) {
-          _isDownloading = false;
-          _statusMessage = "다운로드 실패: $e";
-          notifyListeners();
-        },
-        cancelOnError: true,
-      );
-    } catch (e) {
+      _downloadedFilePath = filePath;
       _isDownloading = false;
-      _statusMessage = "오류: $e";
+      _statusMessage = "다운로드 완료. 설치 버튼을 누르세요.";
+      _downloadProgress = 1.0;
       notifyListeners();
+    } catch (e) {
+      if (sink != null) {
+        try {
+          await sink.close();
+        } catch (_) {}
+      }
+      _isDownloading = false;
+      _statusMessage = "다운로드 실패: $e";
+      notifyListeners();
+    } finally {
+      client?.close();
     }
   }
 
   Future<void> installUpdate() async {
-    if (_downloadedFilePath != null) {
-      final result = await OpenFilex.open(_downloadedFilePath!);
-      if (result.type != ResultType.done) {
-        _statusMessage = "설치 실행 실패: ${result.message}";
-        notifyListeners();
-      }
+    final path = _downloadedFilePath;
+    if (path == null || path.trim().isEmpty) {
+      _statusMessage = "설치 파일이 없습니다.";
+      notifyListeners();
+      return;
     }
+    final result = await OpenFilex.open(path);
+    if (result.type == ResultType.done) {
+      _statusMessage = "설치 화면을 열었습니다.";
+    } else {
+      _statusMessage = "설치 실행 실패: ${result.message}";
+    }
+    notifyListeners();
   }
 
   Future<void> ignoreUpdateFor3Days() async {

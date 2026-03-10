@@ -39,7 +39,6 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     } catch (_) {}
   }
 
-
   void _handleNativeCameraEventImpl(dynamic event) {
     if (!_canUseNativeCamera) return;
     if (event is! Map) return;
@@ -155,7 +154,6 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     }
   }
 
-
   void _handleCameraJsMessageImpl(String raw) {
     dynamic decoded;
     try {
@@ -238,10 +236,10 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
           _cameraError = null;
         });
       }
-      _cameraSourceKey = 'native-live:${widget.hostIp}:$_liveCameraName';
+      _cameraSourceKey = 'native-live:$_hostIp:$_liveCameraName';
       return;
     }
-    final key = 'live:${widget.hostIp}:$_liveCameraName';
+    final key = 'live:$_hostIp:$_liveCameraName';
     if (!force && _cameraSourceKey == key) return;
     _cameraSourceKey = key;
 
@@ -326,5 +324,4 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
       unawaited(_loadCameraSource(force: true));
     }
   }
-
 }

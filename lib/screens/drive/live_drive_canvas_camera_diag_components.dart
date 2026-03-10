@@ -48,7 +48,7 @@ extension _LiveDriveCanvasCameraDiagComponents on _LiveDriveCanvasScreenState {
           (mounted ? Provider.of<SSHService>(context, listen: false) : null);
       final report = <String, dynamic>{
         'timestamp': now.toIso8601String(),
-        'hostIp': widget.hostIp,
+        'hostIp': _hostIp,
         'source': source,
         'reason': reason,
         'modeTag': _modeTagLabel,

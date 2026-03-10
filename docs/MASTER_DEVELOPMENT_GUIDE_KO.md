@@ -228,3 +228,17 @@ lib/
 - 변경 보고서는 `docs/architecture/<category>/`에 누적
 - 운영 명령/스크립트 변경은 `docs/operations/` 갱신
 
+## 12.1 AI/신규 작업자 우선 문서
+
+stock 주행그래픽/HUD 관련 요청을 받으면 아래 문서를 먼저 본다.
+
+- `docs/architecture/carrotpilot/C3_STOCK_ONROAD_GRAPHICS_HUD_REFERENCE_2026-03-10_KO.md`
+- `docs/architecture/carrotpilot/CARROTPILOT_ORIGINAL_ONROAD_HUD_ANALYSIS_2026-03-07_KO.md`
+- `docs/architecture/carrotpilot/CARROTPILOT_ONROAD_ELEMENT_MATRIX_2026-03-02_KO.md`
+- `docs/architecture/remote_ar/STOCK_MODE_LEAD_RADAR_ALIGNMENT_CHECKLIST_2026-03-09_KO.md`
+
+기준:
+
+- 원본 c3-v10에서 실제 onroad draw 기준은 `selfdrive/ui/carrot.cc`
+- `qt/onroad/hud.cc`, `qt/onroad/model.cc`는 참고용 원형 코드로 본다
+

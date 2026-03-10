@@ -139,7 +139,7 @@ class _HudControllerBuilderState extends State<HudControllerBuilder> {
   }
 
   String? _currentSshEndpoint(SSHService ssh) {
-    final endpoint = (ssh.connectedIp ?? ssh.targetIp)?.trim();
+    final endpoint = ssh.connectedIp?.trim();
     if (endpoint == null || endpoint.isEmpty) {
       return null;
     }
@@ -181,12 +181,25 @@ class _HudControllerBuilderState extends State<HudControllerBuilder> {
       return;
     }
     final ssh = widget.sshService;
+    Object? ensureError;
+    StackTrace? ensureStackTrace;
     if (ssh != null && ssh.isConnected) {
       try {
         await _linkHudService.ensureRunning(ssh);
-      } catch (_) {}
+      } catch (error, stackTrace) {
+        ensureError = error;
+        ensureStackTrace = stackTrace;
+      }
     }
     await controller.bindLive(host);
+    if (ensureError != null && controller.state.snapshot.tsMonoMs <= 0) {
+      controller.reportBindingError(
+        host: host,
+        isPreview: false,
+        error: ensureError,
+        stackTrace: ensureStackTrace,
+      );
+    }
   }
 
   void _handleControllerChanged() {

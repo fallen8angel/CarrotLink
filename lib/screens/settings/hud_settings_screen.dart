@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../services/hud_drive_settings_service.dart';
-import '../../services/native_overlay_hud_service.dart';
 import '../../ui/adaptive/layout_tokens.dart';
 import '../../ui/adaptive/window_class.dart';
 import '../../widgets/custom_toast.dart';
@@ -17,9 +16,6 @@ class HudSettingsScreen extends StatefulWidget {
 
 class _HudSettingsScreenState extends State<HudSettingsScreen> {
   bool _loading = true;
-  bool _enabled = true;
-  bool _running = false;
-  bool _hasPermission = false;
   String _defaultDriveMode = HudDriveSettingsService.modeWebrtc;
 
   @override
@@ -29,40 +25,12 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
   }
 
   Future<void> _load() async {
-    final enabled = await NativeOverlayHudService.isEnabled();
-    final running = await NativeOverlayHudService.isRunning();
-    final hasPermission = await NativeOverlayHudService.hasPermission();
     final defaultDriveMode = await HudDriveSettingsService.getDefaultMode();
     if (!mounted) return;
     setState(() {
-      _enabled = enabled;
-      _running = running;
-      _hasPermission = hasPermission;
       _defaultDriveMode = defaultDriveMode;
       _loading = false;
     });
-  }
-
-  Future<void> _toggle(bool next) async {
-    setState(() => _enabled = next);
-    await NativeOverlayHudService.setEnabled(next);
-    if (!next) {
-      await NativeOverlayHudService.stop();
-      if (mounted) {
-        CustomToast.show(context, 'HUD 오버레이를 비활성화했습니다.');
-      }
-    } else {
-      if (mounted) {
-        CustomToast.show(context, 'HUD 오버레이를 활성화했습니다.');
-      }
-    }
-    await _load();
-  }
-
-  Future<void> _requestPermission() async {
-    await NativeOverlayHudService.requestPermission();
-    await Future<void>.delayed(const Duration(milliseconds: 250));
-    await _load();
   }
 
   Future<void> _changeDefaultMode(String value) async {
@@ -140,43 +108,10 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
               padding: EdgeInsets.only(
                 left: tokens.screenPadding.clamp(12.0, 24.0).toDouble(),
                 right: tokens.screenPadding.clamp(12.0, 24.0).toDouble(),
+                top: 14.0,
                 bottom: tokens.footerSpacer,
               ),
               children: [
-                SwitchListTile.adaptive(
-                  value: _enabled,
-                  onChanged: _toggle,
-                  title: const Text('HUD 오버레이 사용'),
-                  subtitle: const Text('앱이 백그라운드일 때 HUD 오버레이 표시'),
-                ),
-                const Divider(height: 1),
-                ListTile(
-                  leading: Icon(
-                    _hasPermission ? Icons.check_circle : Icons.warning_amber,
-                    color: _hasPermission ? Colors.green : Colors.orange,
-                  ),
-                  title: const Text('다른 앱 위에 표시 권한'),
-                  subtitle: Text(_hasPermission ? '허용됨' : '권한 필요'),
-                  trailing: TextButton(
-                    onPressed: _requestPermission,
-                    child: const Text('권한 설정'),
-                  ),
-                ),
-                const Divider(height: 1),
-                ListTile(
-                  leading: Icon(
-                    _running ? Icons.visibility : Icons.visibility_off,
-                    color: _running ? Colors.green : scheme.onSurfaceVariant,
-                  ),
-                  title: const Text('현재 오버레이 상태'),
-                  subtitle: Text(_running ? '실행 중' : '중지됨'),
-                  trailing: IconButton(
-                    tooltip: '새로고침',
-                    onPressed: _load,
-                    icon: const Icon(Icons.refresh),
-                  ),
-                ),
-                const Divider(height: 1),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(4, 14, 4, 6),
                   child: Row(

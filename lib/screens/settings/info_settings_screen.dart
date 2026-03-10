@@ -94,12 +94,20 @@ class _InfoSettingsScreenState extends State<InfoSettingsScreen> {
           ),
           ListTile(
             title: const Text('업데이트 확인'),
-            subtitle: updateService.latestRelease != null
-                ? Text('새 버전: ${updateService.latestRelease!['tag_name']}')
-                : const Text('최신 버전입니다'),
-            trailing: updateService.latestRelease != null
-                ? Icon(Icons.system_update, color: scheme.tertiary)
-                : const Icon(Icons.check_circle, color: Colors.green),
+            subtitle: updateService.isChecking
+                ? const Text('확인 중...')
+                : updateService.latestRelease != null
+                    ? Text('새 버전: ${updateService.latestRelease!['tag_name']}')
+                    : const Text('최신 버전입니다'),
+            trailing: updateService.isChecking
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : updateService.latestRelease != null
+                    ? Icon(Icons.system_update, color: scheme.tertiary)
+                    : const Icon(Icons.check_circle, color: Colors.green),
             onTap: () => _showUpdateDialog(context),
           ),
           const Divider(),
@@ -134,8 +142,8 @@ class _InfoSettingsScreenState extends State<InfoSettingsScreen> {
                     ButtonSegment(value: 'dev', label: Text('Dev')),
                   ],
                   selected: {updateService.channel},
-                  onSelectionChanged: (Set<String> selection) {
-                    updateService.setChannel(selection.first);
+                  onSelectionChanged: (Set<String> selection) async {
+                    await updateService.setChannel(selection.first);
                   },
                   style: const ButtonStyle(
                     visualDensity: VisualDensity.compact,

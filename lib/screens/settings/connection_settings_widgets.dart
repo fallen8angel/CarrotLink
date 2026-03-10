@@ -319,6 +319,14 @@ extension _ConnectionSettingsWidgets on _ConnectionSettingsScreenState {
               ),
             ),
           ),
+          SizedBox(height: metrics.gapSm),
+          Text(
+            "접속 계정과 포트는 comma / 22로 고정됩니다.",
+            style: TextStyle(
+              fontSize: metrics.textCaption,
+              color: Colors.grey[600],
+            ),
+          ),
           SizedBox(height: metrics.gapMd),
           Row(
             children: [

@@ -5,7 +5,7 @@ extension _LiveDriveCanvasSidecarTransportComponents
   Uri _sidecarHttpUriImpl(String path, [Map<String, String>? query]) {
     return Uri(
       scheme: 'http',
-      host: widget.hostIp,
+      host: _hostIp,
       port: 7766,
       path: path,
       queryParameters: query,

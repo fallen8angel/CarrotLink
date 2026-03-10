@@ -26,6 +26,13 @@ Adaptive HUD 재구성, semantic snapshot, layout, handoff 문서.
 
 carrotpilot/onroad/TMAP 입력 구조와 HUD 원본 분석 문서.
 
+AI나 신규 작업자가 stock onroad parity를 볼 때는 아래 순서를 권장한다.
+
+1. `carrotpilot/C3_STOCK_ONROAD_GRAPHICS_HUD_REFERENCE_2026-03-10_KO.md`
+2. `carrotpilot/CARROTPILOT_ORIGINAL_ONROAD_HUD_ANALYSIS_2026-03-07_KO.md`
+3. `carrotpilot/CARROTPILOT_ONROAD_ELEMENT_MATRIX_2026-03-02_KO.md`
+
+- `carrotpilot/C3_STOCK_ONROAD_GRAPHICS_HUD_REFERENCE_2026-03-10_KO.md`
 - `carrotpilot/CARROTPILOT_DATACHANNEL_PERF_PLAN_2026-03-02_KO.md`
 - `carrotpilot/CARROTPILOT_ONROAD_ELEMENT_MATRIX_2026-03-02_KO.md`
 - `carrotpilot/CARROTPILOT_ONROAD_FULL_CHECKLIST_2026-03-02_KO.md`

@@ -15,7 +15,6 @@ class HudRemoteStreamDataSource {
     this.candidates = const <({int port, String path})>[
       (port: 7767, path: '/ws/hud'),
       (port: 7766, path: '/ws/hud'),
-      (port: 7000, path: '/ws/carstate'),
     ],
     this.reconnectDelay = const Duration(seconds: 2),
     this.idleTimeout = const Duration(seconds: 4),

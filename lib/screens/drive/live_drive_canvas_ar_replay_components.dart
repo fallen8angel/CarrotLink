@@ -16,13 +16,15 @@ class _DriveArReplayFrame {
   });
 
   String get label {
-    final summary = (arScenePayload['summary'] as Map?)?.cast<String, dynamic>();
+    final summary =
+        (arScenePayload['summary'] as Map?)?.cast<String, dynamic>();
     final presentation =
         (arScenePayload['presentation'] as Map?)?.cast<String, dynamic>();
     final turnLabel = (summary?['turnLabel'] ?? '').toString().trim();
     final mode = (presentation?['mode'] ?? '-').toString();
     final routeCount = (summary?['routePointCount'] ?? '-').toString();
-    final suffix = turnLabel.isEmpty ? 'mode=$mode route=$routeCount' : turnLabel;
+    final suffix =
+        turnLabel.isEmpty ? 'mode=$mode route=$routeCount' : turnLabel;
     return '#$seq ${capturedAt.toIso8601String()} $cameraKind $suffix';
   }
 }
@@ -65,7 +67,8 @@ extension _LiveDriveCanvasArReplayComponents on _LiveDriveCanvasScreenState {
     return Map<String, dynamic>.from(value);
   }
 
-  Future<Map<String, dynamic>?> _fetchNativeArRenderDebugImpl(int viewId) async {
+  Future<Map<String, dynamic>?> _fetchNativeArRenderDebugImpl(
+      int viewId) async {
     try {
       final raw = await _LiveDriveCanvasScreenState._nativeCameraControlChannel
           .invokeMethod<dynamic>(
@@ -95,10 +98,9 @@ extension _LiveDriveCanvasArReplayComponents on _LiveDriveCanvasScreenState {
     }
     final resolvedNow = now ?? DateTime.now();
     final dir = await _resolveArSceneLogDirImpl();
-    final hostTag = widget.hostIp.replaceAll(RegExp(r'[^0-9A-Za-z._-]'), '_');
+    final hostTag = _hostIp.replaceAll(RegExp(r'[^0-9A-Za-z._-]'), '_');
     final sessionId = _arReplayTimestampForFileNameImpl(resolvedNow);
-    final sessionDir =
-        Directory('${dir.path}/session_${sessionId}_$hostTag');
+    final sessionDir = Directory('${dir.path}/session_${sessionId}_$hostTag');
     if (!await sessionDir.exists()) {
       await sessionDir.create(recursive: true);
     }
@@ -117,7 +119,8 @@ extension _LiveDriveCanvasArReplayComponents on _LiveDriveCanvasScreenState {
       }
       return preferred;
     } catch (_) {
-      final fallback = Directory('${Directory.systemTemp.path}/carrotlink_ar_scene');
+      final fallback =
+          Directory('${Directory.systemTemp.path}/carrotlink_ar_scene');
       if (!await fallback.exists()) {
         await fallback.create(recursive: true);
       }
@@ -134,7 +137,7 @@ extension _LiveDriveCanvasArReplayComponents on _LiveDriveCanvasScreenState {
       'timestamp': now.toIso8601String(),
       'reason': reason,
       'sessionId': _arReplaySessionId,
-      'hostIp': widget.hostIp,
+      'hostIp': _hostIp,
       'cameraKind': frame.cameraKind,
       'nativeViewId': _nativeCameraViewId,
       'bridgeEnabled': _debugPushNativeArScene,
@@ -153,8 +156,7 @@ extension _LiveDriveCanvasArReplayComponents on _LiveDriveCanvasScreenState {
         'sourceHeight': _cameraSourceSize.height,
         'overlayWidth': _nativeOverlaySize.width,
         'overlayHeight': _nativeOverlaySize.height,
-        'nativeVisibleViewport':
-            _nativeOverlayVisibleViewportRect.toString(),
+        'nativeVisibleViewport': _nativeOverlayVisibleViewportRect.toString(),
       },
       'runtimeSummary': <String, dynamic>{
         'overlayFps': _overlayDebugFps,
@@ -176,7 +178,7 @@ extension _LiveDriveCanvasArReplayComponents on _LiveDriveCanvasScreenState {
     return <String, dynamic>{
       'timestamp': now.toIso8601String(),
       'reason': reason,
-      'hostIp': widget.hostIp,
+      'hostIp': _hostIp,
       'cameraKind': _liveCameraKind.name,
       'nativeViewId': _nativeCameraViewId,
       'bridgeEnabled': _debugPushNativeArScene,
@@ -205,19 +207,18 @@ extension _LiveDriveCanvasArReplayComponents on _LiveDriveCanvasScreenState {
         'frameGap': localScene.health.frameGap,
         'frameGapOk': localScene.health.frameGapOk,
       },
-      'captures':
-          _arReplayFrames
-              .map(
-                (frame) => <String, dynamic>{
-                  'seq': frame.seq,
-                  'capturedAt': frame.capturedAt.toIso8601String(),
-                  'label': frame.label,
-                  'cameraKind': frame.cameraKind,
-                  'arScenePayload': frame.arScenePayload,
-                  'nativeRenderDebug': frame.nativeRenderDebug,
-                },
-              )
-              .toList(growable: false),
+      'captures': _arReplayFrames
+          .map(
+            (frame) => <String, dynamic>{
+              'seq': frame.seq,
+              'capturedAt': frame.capturedAt.toIso8601String(),
+              'label': frame.label,
+              'cameraKind': frame.cameraKind,
+              'arScenePayload': frame.arScenePayload,
+              'nativeRenderDebug': frame.nativeRenderDebug,
+            },
+          )
+          .toList(growable: false),
       'history': _sidecarHistory.toList(growable: false),
       'processSnapshot': _sidecarProcessSnapshot,
       'healthSnapshot': _sidecarHealthSnapshot,
@@ -346,7 +347,8 @@ extension _LiveDriveCanvasArReplayComponents on _LiveDriveCanvasScreenState {
       arScenePayload: clonedPayload,
       nativeRenderDebug: _deepCloneStringMapImpl(debugPayload),
     );
-    if (_arReplayFrames.length >= _LiveDriveCanvasScreenState._arReplayMaxFrames) {
+    if (_arReplayFrames.length >=
+        _LiveDriveCanvasScreenState._arReplayMaxFrames) {
       final removed = _arReplayFrames.removeFirst();
       if (identical(_activeArReplayFrame, removed)) {
         _activeArReplayFrame = null;

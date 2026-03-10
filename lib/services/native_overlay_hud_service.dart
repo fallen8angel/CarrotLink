@@ -1,6 +1,5 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../features/hud/hud.dart';
 
@@ -9,114 +8,26 @@ class NativeOverlayHudService {
 
   static const MethodChannel _channel = MethodChannel('carrotlink/overlay_hud');
   static final RegExp _ipv4Regex = RegExp(r'^(\d{1,3}\.){3}\d{1,3}$');
-  static const String _enabledPrefKey = 'hud_overlay_enabled';
-  static bool? _enabledCache;
-  static String? _lastSemanticSnapshotJson;
-  static String? _lastSemanticSnapshotHost;
 
   static bool get _isAndroid =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
-  static bool get isSupported => _isAndroid;
+  static bool get isSupported => false;
 
-  static Future<bool> isEnabled() async {
-    final cached = _enabledCache;
-    if (cached != null) return cached;
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final enabled = prefs.getBool(_enabledPrefKey) ?? false;
-      _enabledCache = enabled;
-      return enabled;
-    } catch (_) {
-      return false;
-    }
-  }
+  static Future<bool> isEnabled() async => true;
 
-  static Future<void> setEnabled(bool enabled) async {
-    _enabledCache = enabled;
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool(_enabledPrefKey, enabled);
-    } catch (_) {}
-  }
+  static Future<void> setEnabled(bool enabled) async {}
 
-  static Future<bool> hasPermission() async {
-    if (!_isAndroid) return false;
-    try {
-      return await _channel.invokeMethod<bool>('hasPermission') ?? false;
-    } catch (_) {
-      return false;
-    }
-  }
+  static Future<bool> hasPermission() async => false;
 
-  static Future<void> requestPermission() async {
-    if (!_isAndroid) return;
-    try {
-      await _channel.invokeMethod('requestPermission');
-    } catch (_) {}
-  }
+  static Future<void> requestPermission() async {}
 
-  static Future<bool> start(String host) async {
-    if (!_isAndroid) return false;
-    final enabled = await isEnabled();
-    if (!enabled) return false;
-    final normalizedHost = normalizeHost(host);
-    if (normalizedHost == null) return false;
-    try {
-      final cachedSnapshotJson = _cachedSnapshotJsonForHost(normalizedHost);
-      return await _channel.invokeMethod<bool>(
-            'start',
-            {
-              'host': normalizedHost,
-              if (cachedSnapshotJson != null &&
-                  cachedSnapshotJson.isNotEmpty)
-                'snapshotJson': cachedSnapshotJson,
-            },
-          ) ??
-          false;
-    } catch (_) {
-      return false;
-    }
-  }
+  static Future<bool> start(String host) async => false;
 
-  static Future<void> updateEndpoint(String host) async {
-    if (!_isAndroid) return;
-    final enabled = await isEnabled();
-    if (!enabled) return;
-    final normalizedHost = normalizeHost(host);
-    if (normalizedHost == null) return;
-    try {
-      final cachedSnapshotJson = _cachedSnapshotJsonForHost(normalizedHost);
-      await _channel.invokeMethod(
-        'updateEndpoint',
-        {
-          'host': normalizedHost,
-          if (cachedSnapshotJson != null && cachedSnapshotJson.isNotEmpty)
-            'snapshotJson': cachedSnapshotJson,
-        },
-      );
-    } catch (_) {}
-  }
+  static Future<void> updateEndpoint(String host) async {}
 
   static Future<void> updateSemanticSnapshot(
     OriginalHudSnapshot snapshot,
-  ) async {
-    if (!_isAndroid) return;
-    final snapshotJson = HudSnapshotJsonSerializer.encode(snapshot);
-    _lastSemanticSnapshotJson = snapshotJson;
-    _lastSemanticSnapshotHost = normalizeHost(snapshot.source.deviceHost);
-    final enabled = await isEnabled();
-    if (!enabled) return;
-    final running = await isRunning();
-    if (!running) return;
-    try {
-      await _channel.invokeMethod(
-        'updateSemanticSnapshot',
-        {
-          'snapshotJson': snapshotJson,
-        },
-      );
-    } catch (_) {}
-  }
+  ) async {}
 
   static Future<void> stop() async {
     if (!_isAndroid) return;
@@ -125,33 +36,16 @@ class NativeOverlayHudService {
     } catch (_) {}
   }
 
-  static Future<void> resetPosition() async {
+  static Future<void> resetPosition() async {}
+
+  static Future<void> shutdownLegacyOverlay() async {
     if (!_isAndroid) return;
     try {
-      await _channel.invokeMethod('resetPosition');
+      await _channel.invokeMethod('stop');
     } catch (_) {}
   }
 
-  static Future<bool> isRunning() async {
-    if (!_isAndroid) return false;
-    try {
-      return await _channel.invokeMethod<bool>('isRunning') ?? false;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  static String? _cachedSnapshotJsonForHost(String normalizedHost) {
-    final cachedSnapshotJson = _lastSemanticSnapshotJson;
-    if (cachedSnapshotJson == null || cachedSnapshotJson.isEmpty) {
-      return null;
-    }
-    final cachedHost = _lastSemanticSnapshotHost;
-    if (cachedHost == null || cachedHost == normalizedHost) {
-      return cachedSnapshotJson;
-    }
-    return null;
-  }
+  static Future<bool> isRunning() async => false;
 
   static String? normalizeHost(String? raw) {
     if (raw == null) return null;

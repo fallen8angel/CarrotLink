@@ -1364,12 +1364,19 @@ class _DriveOverlayPainter extends CustomPainter {
         );
       }
 
-      _appendProjectedLeadAndRadarPolygons(
-        transform: transform,
+      final usedSidecarLeadRadar = _appendPreferredLeadAndRadarPolygons(
         canvasSize: size,
         polygons: polygons,
         labels: labels ??= <Map<String, dynamic>>[],
       );
+      if (!usedSidecarLeadRadar) {
+        _appendProjectedLeadAndRadarPolygons(
+          transform: transform,
+          canvasSize: size,
+          polygons: polygons,
+          labels: labels,
+        );
+      }
     }
     labels ??= <Map<String, dynamic>>[];
     if (_driveEnableExperimentalSidecarDecorations && sidecarPayload != null) {
@@ -1904,6 +1911,7 @@ class _DriveOverlayPainter extends CustomPainter {
     double strokeWidth = 0.0,
     double size = 20.0,
     bool centered = true,
+    int fontWeight = 700,
   }) {
     final content = text.trim();
     if (content.isEmpty || !anchor.dx.isFinite || !anchor.dy.isFinite) return;
@@ -1917,6 +1925,7 @@ class _DriveOverlayPainter extends CustomPainter {
       if (strokeColor != null) 'strokeColor': strokeColor.toARGB32(),
       if (strokeColor != null && strokeWidth > 0.0) 'strokeWidth': strokeWidth,
       'size': size,
+      'fontWeight': fontWeight,
     });
   }
 
@@ -1935,11 +1944,13 @@ class _DriveOverlayPainter extends CustomPainter {
     double height = 42.0,
     double radius = 15.0,
     double strokeWidth = 2.0,
+    double horizontalPadding = 18.0,
+    int fontWeight = 700,
   }) {
     final content = text.trim();
     if (content.isEmpty || !center.dx.isFinite || !center.dy.isFinite) return;
     final width = math
-        .max(minWidth, (content.length * fontSize * 0.62) + 18.0)
+        .max(minWidth, (content.length * fontSize * 0.60) + horizontalPadding)
         .toDouble();
     final left = center.dx - (width * 0.5);
     final top = center.dy - (height * 0.5);
@@ -1966,6 +1977,7 @@ class _DriveOverlayPainter extends CustomPainter {
       strokeWidth: textStrokeWidth,
       size: fontSize,
       centered: true,
+      fontWeight: fontWeight,
     );
   }
 
@@ -1989,10 +2001,10 @@ class _DriveOverlayPainter extends CustomPainter {
     Rect rect,
     double sourceScale,
   ) {
-    final height = _clampDouble(46.0 * sourceScale, 40.0, 52.0);
-    final fontSize = _clampDouble(28.0 * sourceScale, 24.0, 32.0);
-    final minWidth = _clampDouble(84.0 * sourceScale, 72.0, 98.0);
-    final attachOverlap = _clampDouble(6.0 * sourceScale, 5.0, 8.0);
+    final height = _clampDouble(26.0 * sourceScale, 22.0, 30.0);
+    final fontSize = _clampDouble(21.0 * sourceScale, 18.0, 24.0);
+    final minWidth = _clampDouble(46.0 * sourceScale, 40.0, 56.0);
+    final attachOverlap = _clampDouble(4.0 * sourceScale, 3.0, 5.0);
     return _LeadDistanceBadgeLayout(
       center: Offset(
         rect.center.dx,
@@ -2028,13 +2040,15 @@ class _DriveOverlayPainter extends CustomPainter {
     Color baseFill, {
     required bool primary,
   }) {
-    final darkBase =
-        primary ? const Color(0xA60A1118) : const Color(0x960A1118);
+    final darkBase = Colors.black.withValues(alpha: primary ? 0.055 : 0.045);
     final tintedBase = Color.alphaBlend(
-      accent.withValues(alpha: primary ? 0.14 : 0.09),
+      accent.withValues(alpha: primary ? 0.028 : 0.022),
       darkBase,
     );
-    return Color.alphaBlend(baseFill, tintedBase);
+    return Color.alphaBlend(
+      baseFill.withValues(alpha: primary ? 0.022 : 0.018),
+      tintedBase,
+    );
   }
 
   void _appendLeadBoxCard(
@@ -2097,8 +2111,8 @@ class _DriveOverlayPainter extends CustomPainter {
             radius: math.max(2.0, cornerRadius - innerInset),
             segmentsPerCorner: 4,
           ),
-          Colors.white.withValues(alpha: primary ? 0.035 : 0.022),
-          strokeColor: Colors.white.withValues(alpha: primary ? 0.18 : 0.10),
+          Colors.white.withValues(alpha: primary ? 0.012 : 0.008),
+          strokeColor: Colors.white.withValues(alpha: primary ? 0.08 : 0.05),
           strokeWidth: _clampDouble(1.0 * sourceScale, 0.8, 1.2),
         ),
       );
@@ -2115,7 +2129,7 @@ class _DriveOverlayPainter extends CustomPainter {
     required Color textColor,
   }) {
     final fillColor = Color.alphaBlend(
-      accentColor.withValues(alpha: 0.80),
+      accentColor.withValues(alpha: 0.92),
       const Color(0xFF0F141B),
     );
     _appendBadge(
@@ -2125,14 +2139,16 @@ class _DriveOverlayPainter extends CustomPainter {
       text: text,
       fillColor: fillColor,
       textColor: textColor,
-      strokeColor: Colors.white.withValues(alpha: 0.34),
+      strokeColor: Colors.black.withValues(alpha: 0.96),
       textStrokeColor: Colors.black,
-      textStrokeWidth: 2.0,
+      textStrokeWidth: 2.6,
       fontSize: layout.fontSize,
       minWidth: layout.minWidth,
       height: layout.height,
       radius: _leadBadgeRadius(sourceScale),
-      strokeWidth: _leadBadgeStrokeWidth(sourceScale),
+      strokeWidth: _clampDouble(2.8 * sourceScale, 2.2, 3.4),
+      horizontalPadding: _clampDouble(10.0 * sourceScale, 8.0, 12.0),
+      fontWeight: 900,
     );
   }
 
@@ -2178,7 +2194,7 @@ class _DriveOverlayPainter extends CustomPainter {
       minWidth: layout.minWidth,
       height: layout.height,
       radius: _leadBadgeRadius(sourceScale),
-      strokeWidth: _clampDouble(2.0 * sourceScale, 1.6, 2.4),
+      strokeWidth: _leadBadgeStrokeWidth(sourceScale),
     );
   }
 
@@ -2208,7 +2224,7 @@ class _DriveOverlayPainter extends CustomPainter {
       minWidth: _clampDouble(62.0 * sourceScale, 54.0, 72.0),
       height: _clampDouble(42.0 * sourceScale, 36.0, 46.0),
       radius: _clampDouble(16.0 * sourceScale, 13.0, 18.0),
-      strokeWidth: _clampDouble(1.8 * sourceScale, 1.3, 2.2),
+      strokeWidth: _leadBadgeStrokeWidth(sourceScale),
     );
   }
 
@@ -2994,13 +3010,76 @@ class _DriveOverlayPainter extends CustomPainter {
     return _interp1D(idx, idxs, zs);
   }
 
+  double _sampleRadarZAtDistance(double distance) {
+    if (snapshot.laneLines.length >= 3) {
+      final lane = snapshot.laneLines[2].line;
+      if (lane.length >= 2) {
+        final xs = _monotonicX(lane.x.take(lane.length).toList(growable: false));
+        if (xs.isNotEmpty) {
+          final zs = lane.z.take(lane.length).toList(growable: false);
+          final idxs = List<double>.generate(
+            lane.length,
+            (i) => i.toDouble(),
+            growable: false,
+          );
+          final idx = _interp1D(distance, xs, idxs);
+          return _interp1D(idx, idxs, zs);
+        }
+      }
+    }
+    return _sampleModelZAtDistance(distance);
+  }
+
+  bool _appendPreferredLeadAndRadarPolygons({
+    required Size canvasSize,
+    required List<Map<String, dynamic>> polygons,
+    required List<Map<String, dynamic>> labels,
+  }) {
+    final cam = _currentCameraOverlay2d();
+    if (cam == null) return false;
+    final hasLeadBoxes = cam['leadAreaBoxes'] is List;
+    final hasRadarTargets = cam['radarTargets'] is List;
+    final hasTfMarker = cam['tfMarker'] is Map;
+    if (!hasLeadBoxes && !hasRadarTargets && !hasTfMarker) {
+      return false;
+    }
+    final sourceWidth =
+        _DriveOverlaySnapshot._asDouble(cam['sourceWidth']) ?? _baseSourceWidth;
+    final sourceHeight = _DriveOverlaySnapshot._asDouble(cam['sourceHeight']) ??
+        _baseSourceHeight;
+    final displayTransformRaw = cam['displayTransform'];
+    final displayTransform = displayTransformRaw is Map
+        ? Map<String, dynamic>.from(displayTransformRaw)
+        : null;
+
+    // Prefer the sidecar's projected lead/radar overlays when available.
+    // The sidecar already mirrors carrot.cc anchor smoothing/clamping and
+    // fixed-Z lead box policy, which is more stable in close stop-and-go scenes.
+    _appendSidecarLeadAndRadarPolygons(
+      cam: cam,
+      canvasSize: canvasSize,
+      sourceWidth: sourceWidth,
+      sourceHeight: sourceHeight,
+      displayTransform: displayTransform,
+      polygons: polygons,
+      labels: labels,
+      showLead1: showLead1,
+      showLead2: showLead2,
+      showRadarBadge: showRadarBadge,
+      showRadarVector: showRadarVector,
+      showStopDistanceTf: showStopDistanceTf,
+      showStateText: showStateText,
+    );
+    return true;
+  }
+
   _ProjectedLeadBox? _projectLeadBox(
     _ProjectionTransform transform,
     Size canvasSize,
     _RadarLeadSample lead,
   ) {
     if (!lead.status || !lead.dRel.isFinite || lead.dRel <= 0.0) return null;
-    final zBase = snapshot.pathOffsetZ.isFinite ? snapshot.pathOffsetZ : 1.22;
+    const zBase = 1.22;
     final z = _sampleModelZAtDistance(lead.dRel);
     final yCenter = -lead.yRel;
 
@@ -3231,13 +3310,13 @@ class _DriveOverlayPainter extends CustomPainter {
     ];
     for (final radar in radarTracks) {
       if (!radar.dRel.isFinite || radar.dRel <= 2.5) continue;
-      final z = _sampleModelZAtDistance(radar.dRel);
+      final z = _sampleRadarZAtDistance(radar.dRel) - 0.61;
       Offset? center;
       final okCenter = _mapToScreen(
         transform,
         radar.dRel,
         -radar.yRel,
-        z + (snapshot.pathOffsetZ.isFinite ? snapshot.pathOffsetZ : 1.22),
+        z,
         (p) => center = p,
       );
       if (!okCenter || center == null) continue;
@@ -3249,14 +3328,12 @@ class _DriveOverlayPainter extends CustomPainter {
       if (showRadarVector && vAbs > 3.0 && radarLatFactor > 0.0) {
         final futureDRel = math.max(2.0, radar.dRel + (vLead * radarLatFactor));
         final futureYRel = radar.yRel + (radar.vLat * radarLatFactor);
-        final futureZ = _sampleModelZAtDistance(futureDRel);
         Offset? future;
         final okFuture = _mapToScreen(
           transform,
           futureDRel,
           -futureYRel,
-          futureZ +
-              (snapshot.pathOffsetZ.isFinite ? snapshot.pathOffsetZ : 1.22),
+          z,
           (p) => future = p,
         );
         if (okFuture && future != null) {
@@ -3748,13 +3825,27 @@ class _DriveOverlayPainter extends CustomPainter {
               .clamp(0.0, 8.0);
       final sizePx = (_DriveOverlaySnapshot._asDouble(item['size']) ?? 16.0)
           .clamp(8.0, 72.0);
+      final fontWeightRaw =
+          _DriveOverlaySnapshot._asInt(item['fontWeight']) ?? 700;
+      final fontWeight = switch (fontWeightRaw) {
+        >= 900 => FontWeight.w900,
+        >= 800 => FontWeight.w800,
+        >= 700 => FontWeight.w700,
+        >= 600 => FontWeight.w600,
+        >= 500 => FontWeight.w500,
+        >= 400 => FontWeight.w400,
+        >= 300 => FontWeight.w300,
+        >= 200 => FontWeight.w200,
+        >= 100 => FontWeight.w100,
+        _ => FontWeight.w700,
+      };
       final centered = _boolFromDynamic(item['centered']);
       tp.text = TextSpan(
         text: text,
         style: TextStyle(
           color: Color(colorInt),
           fontSize: sizePx,
-          fontWeight: FontWeight.w700,
+          fontWeight: fontWeight,
         ),
       );
       final labelMaxWidth = (canvasSize.width * 0.42).clamp(140.0, 760.0);
@@ -3770,7 +3861,7 @@ class _DriveOverlayPainter extends CustomPainter {
             text: text,
             style: TextStyle(
               fontSize: sizePx,
-              fontWeight: FontWeight.w700,
+              fontWeight: fontWeight,
               foreground: Paint()
                 ..style = PaintingStyle.stroke
                 ..strokeJoin = StrokeJoin.round

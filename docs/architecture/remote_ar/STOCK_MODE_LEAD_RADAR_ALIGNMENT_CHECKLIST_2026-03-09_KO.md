@@ -1,5 +1,10 @@
 # STOCK MODE LEAD/RADAR ALIGNMENT CHECKLIST 2026-03-09
 
+먼저 볼 문서:
+
+- `../carrotpilot/C3_STOCK_ONROAD_GRAPHICS_HUD_REFERENCE_2026-03-10_KO.md`
+  - 원본 c3-v10에서 실제 활성 onroad renderer와 draw order 기준 문서
+
 ## 0. 범위
 
 이 문서는 `stock 모드`의 리드/레이더 박스 정합만 다룬다.

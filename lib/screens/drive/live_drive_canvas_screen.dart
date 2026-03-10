@@ -136,9 +136,13 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const String _sidecarRevisionNotifiedPrefKey =
       'sidecar_revision_notified_v1';
   static const String _hudDebugLayerTogglesPrefKey =
-      'hud_debug_layer_toggles_v4';
+      'hud_debug_layer_toggles_v5';
   static const String _hudDebugLayerTogglesInitPrefKey =
-      'hud_debug_layer_toggles_init_v4';
+      'hud_debug_layer_toggles_init_v5';
+  static const String _viewportZoomPresetPortraitPrefKey =
+      'drive_viewport_zoom_preset_portrait_v1';
+  static const String _viewportZoomPresetLandscapePrefKey =
+      'drive_viewport_zoom_preset_landscape_v1';
   static const _M3 _viewFromDevice = _M3(
     0.0,
     1.0,
@@ -154,6 +158,10 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   late final WebViewController _cameraController;
   final SidecarService _sidecarService = SidecarService();
   SSHService? _sshService;
+  SSHService? _observedSshService;
+  late String _activeHostIp;
+  bool _lastObservedSshConnected = false;
+  String? _lastObservedConnectedHost;
   bool _cameraLoading = true;
   String? _cameraError;
   String? _cameraSourceKey;
@@ -258,22 +266,23 @@ fi
   int _lastOverlayVerifyUpdateUs = 0;
   static const int _overlayVerifyIntervalUs = 200000;
   _DriveViewportZoomPreset _viewportZoomPreset = _DriveViewportZoomPreset.crop;
+  bool? _lastViewportZoomOrientationLandscape;
   bool _debugShowGuides = false;
   bool _debugShowVerifyPanel = false;
   bool _debugShowViewportFrame = false;
   // AR debug overlay defaults:
-  // - Keep only path fill + lane lines enabled by default.
-  // - All other overlay layers/transports stay off unless explicitly enabled.
-  bool _debugShowArOverlay = false;
+  // - Core AR/lead/radar layers stay enabled by default.
+  // - Native AR scene, autosave, and YOLO overlays stay off by default.
+  bool _debugShowArOverlay = true;
   bool _debugShowPathFill = true;
   bool _debugShowLaneLines = true;
-  bool _debugShowRoadEdge = false;
-  bool _debugShowLead1 = false;
-  bool _debugShowLead2 = false;
-  bool _debugShowRadarBadge = false;
-  bool _debugShowRadarVector = false;
-  bool _debugShowStopDistanceTf = false;
-  bool _debugShowStateText = false;
+  bool _debugShowRoadEdge = true;
+  bool _debugShowLead1 = true;
+  bool _debugShowLead2 = true;
+  bool _debugShowRadarBadge = true;
+  bool _debugShowRadarVector = true;
+  bool _debugShowStopDistanceTf = true;
+  bool _debugShowStateText = true;
   bool _debugYoloEnabled = false;
   bool _debugYoloBoxes = false;
   bool _debugYoloLabels = false;
@@ -357,29 +366,39 @@ fi
     const _DriveOverlaySnapshot.empty(),
   );
 
+  String get _hostIp => _activeHostIp;
+
+  String? _normalizeDriveHost(String? raw) {
+    final host = raw?.trim();
+    if (host == null || host.isEmpty) {
+      return null;
+    }
+    return host;
+  }
+
   Uri get _cameraBaseUri => Uri(
         scheme: 'http',
-        host: widget.hostIp,
+        host: _hostIp,
         port: 5001,
       );
 
   List<Uri> get _streamEndpointCandidates => <Uri>[
         Uri(
           scheme: 'http',
-          host: widget.hostIp,
+          host: _hostIp,
           port: 5001,
           path: '/stream',
         ),
         Uri(
           scheme: 'http',
-          host: widget.hostIp,
+          host: _hostIp,
           port: 7000,
           path: '/stream',
         ),
       ];
 
   String get _sidecarWsUrl =>
-      'ws://${widget.hostIp}:7766/ws/live?encoding=zlib-json&camera=$_liveCameraName';
+      'ws://$_hostIp:7766/ws/live?encoding=zlib-json&camera=$_liveCameraName';
 
   bool get _openpilotOverlayMode =>
       HudDriveSettingsService.isOpenpilotOverlay(_hudDefaultMode);
@@ -401,7 +420,7 @@ fi
       _sourceSizeByKind[kind] ?? const Size(1928, 1208);
 
   String get _liveCameraWsUrl =>
-      'ws://${widget.hostIp}:7766/ws/camera/$_liveCameraName';
+      'ws://$_hostIp:7766/ws/camera/$_liveCameraName';
 
   bool get _coverViewport =>
       _overlayVerifyMode ? false : _viewportZoomPreset.coverPreferred;
@@ -416,6 +435,7 @@ fi
   @override
   void initState() {
     super.initState();
+    _activeHostIp = widget.hostIp.trim();
     _renderClock = Stopwatch()..start();
     _renderTicker = createTicker(_onRenderTick)..start();
     WidgetsBinding.instance.addObserver(this);
@@ -462,17 +482,101 @@ fi
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    _sshService ??= Provider.of<SSHService>(context, listen: false);
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    if (!identical(_sshService, ssh)) {
+      _sshService = ssh;
+    }
+    _attachSshListener(ssh);
+    unawaited(_syncViewportZoomPresetForOrientation());
   }
 
   @override
   void didUpdateWidget(covariant LiveDriveCanvasScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.hostIp != widget.hostIp) {
-      _applyOverlaySnapshot(
-        const _DriveOverlaySnapshot.empty(),
-        forceNativePush: true,
+      unawaited(
+        _handleDriveHostTransition(
+          widget.hostIp,
+          reason: 'route_host_changed',
+          forceRestart: true,
+        ),
       );
+    }
+  }
+
+  void _attachSshListener(SSHService ssh) {
+    if (identical(_observedSshService, ssh)) {
+      return;
+    }
+    _detachSshListener();
+    _observedSshService = ssh;
+    _lastObservedSshConnected = ssh.isConnected;
+    _lastObservedConnectedHost = _normalizeDriveHost(ssh.connectedIp);
+    ssh.addListener(_handleObservedSshChanged);
+    final currentHost = _lastObservedConnectedHost;
+    if (_lastObservedSshConnected &&
+        currentHost != null &&
+        currentHost != _hostIp) {
+      unawaited(
+        _handleDriveHostTransition(
+          currentHost,
+          reason: 'attach_sync',
+          forceRestart: true,
+        ),
+      );
+    }
+  }
+
+  void _detachSshListener() {
+    final ssh = _observedSshService;
+    if (ssh != null) {
+      ssh.removeListener(_handleObservedSshChanged);
+    }
+    _observedSshService = null;
+  }
+
+  void _handleObservedSshChanged() {
+    final ssh = _observedSshService;
+    if (ssh == null || !mounted) {
+      return;
+    }
+    final connected = ssh.isConnected;
+    final host = _normalizeDriveHost(ssh.connectedIp);
+    final connectedChanged = connected != _lastObservedSshConnected;
+    final hostChanged = host != _lastObservedConnectedHost;
+    _lastObservedSshConnected = connected;
+    _lastObservedConnectedHost = host;
+
+    if (!connected) {
+      if (connectedChanged) {
+        unawaited(
+          _handleDriveConnectionLost(reason: 'ssh_disconnected'),
+        );
+      }
+      return;
+    }
+
+    final nextHost = host ?? _hostIp;
+    if (connectedChanged || hostChanged || nextHost != _hostIp) {
+      unawaited(
+        _handleDriveHostTransition(
+          nextHost,
+          reason: connectedChanged ? 'ssh_reconnected' : 'ssh_host_changed',
+          forceRestart: true,
+        ),
+      );
+    }
+  }
+
+  void _resetDriveRuntimeState({
+    required bool cameraLoading,
+    String? cameraError,
+  }) {
+    _applyOverlaySnapshot(
+      const _DriveOverlaySnapshot.empty(),
+      forceNativePush: true,
+    );
+    if (mounted) {
       _safeSetState(() {
         _cameraSourceKey = null;
         _nativeCameraViewId = null;
@@ -480,22 +584,82 @@ fi
         _liveCameraKind = _DriveCameraKind.road;
         _cameraSourceSize = const Size(1928, 1208);
         _wideCamRequested = false;
+        _cameraLoading = cameraLoading;
+        _cameraError = cameraError;
       });
-      _sourceSizeByKind[_DriveCameraKind.road] = const Size(1928, 1208);
-      _sourceSizeByKind[_DriveCameraKind.wideRoad] = const Size(1928, 1208);
-      _overlayByModelFrame.clear();
-      _overlayFrameOrder.clear();
-      _latestOverlaySnapshot = const _DriveOverlaySnapshot.empty();
-      _pathAnimationPhase = 0.0;
-      _pathAnimationSeq2 = -1;
-      _pathAnimationForward = true;
-      _lastPathAnimationTickUs = 0;
-      _lastCameraFrameId = null;
-      _lastCameraFrameEventUs = 0;
-      _lastPublishedModelFrameId = null;
-      _stopAdaptiveCameraQualityLoop(resetMode: true);
-      _applyHudModeRuntime();
+    } else {
+      _cameraSourceKey = null;
+      _nativeCameraViewId = null;
+      _nativeCameraUnsupported = false;
+      _liveCameraKind = _DriveCameraKind.road;
+      _cameraSourceSize = const Size(1928, 1208);
+      _wideCamRequested = false;
+      _cameraLoading = cameraLoading;
+      _cameraError = cameraError;
     }
+    _sourceSizeByKind[_DriveCameraKind.road] = const Size(1928, 1208);
+    _sourceSizeByKind[_DriveCameraKind.wideRoad] = const Size(1928, 1208);
+    _overlayByModelFrame.clear();
+    _overlayFrameOrder.clear();
+    _latestOverlaySnapshot = const _DriveOverlaySnapshot.empty();
+    _pathAnimationPhase = 0.0;
+    _pathAnimationSeq2 = -1;
+    _pathAnimationForward = true;
+    _lastPathAnimationTickUs = 0;
+    _lastCameraFrameId = null;
+    _lastCameraFrameEventUs = 0;
+    _lastPublishedModelFrameId = null;
+  }
+
+  Future<void> _handleDriveHostTransition(
+    String nextHost, {
+    required String reason,
+    bool forceRestart = false,
+  }) async {
+    final normalizedHost = _normalizeDriveHost(nextHost);
+    if (normalizedHost == null) {
+      return;
+    }
+    if (!forceRestart && normalizedHost == _hostIp) {
+      return;
+    }
+    final previousHost = _hostIp;
+    _activeHostIp = normalizedHost;
+    _pushSidecarHistory(
+      'HOST_CHANGE',
+      '$previousHost -> $normalizedHost reason=$reason',
+    );
+    _clearSidecarRecoverySchedule();
+    _cancelDelayedSidecarStop();
+    _stopAdaptiveCameraQualityLoop(resetMode: true);
+    _stopSidecarLoop();
+    _resetDriveRuntimeState(cameraLoading: true);
+    await _clearNativeOverlay();
+    await _unloadWebCameraSurface();
+    if (_cameraSuspendedByLifecycle) {
+      return;
+    }
+    _applyHudModeRuntime();
+  }
+
+  Future<void> _handleDriveConnectionLost({
+    required String reason,
+  }) async {
+    _pushSidecarHistory('SSH_LOST', reason);
+    _clearSidecarRecoverySchedule();
+    _cancelDelayedSidecarStop();
+    _stopAdaptiveCameraQualityLoop(resetMode: true);
+    _stopSidecarLoop();
+    _setSidecarPhase(
+      _SidecarPhase.idle,
+      message: 'SSH 연결을 기다리는 중입니다.',
+    );
+    _resetDriveRuntimeState(
+      cameraLoading: false,
+      cameraError: '기기 연결이 끊어졌습니다.',
+    );
+    await _clearNativeOverlay();
+    await _unloadWebCameraSurface();
   }
 
   Future<void> _loadHudDefaultMode() => _loadHudDefaultModeImpl();
@@ -513,6 +677,9 @@ fi
 
   void _setViewportZoomPreset(_DriveViewportZoomPreset preset) =>
       _setViewportZoomPresetImpl(preset);
+
+  Future<void> _syncViewportZoomPresetForOrientation() =>
+      _syncViewportZoomPresetForOrientationImpl();
 
   void _setDebugGuides(bool enabled) => _setDebugGuidesImpl(enabled);
 
@@ -646,6 +813,7 @@ fi
   @override
   void dispose() {
     _isDisposing = true;
+    _detachSshListener();
     WidgetsBinding.instance.removeObserver(this);
     unawaited(
       _persistArReplaySessionIfNeeded(force: true, reason: 'dispose'),

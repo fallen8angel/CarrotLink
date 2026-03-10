@@ -178,10 +178,60 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     );
   }
 
+  String _viewportZoomPresetPrefKey(bool isLandscape) {
+    return isLandscape
+        ? _LiveDriveCanvasScreenState._viewportZoomPresetLandscapePrefKey
+        : _LiveDriveCanvasScreenState._viewportZoomPresetPortraitPrefKey;
+  }
+
+  _DriveViewportZoomPreset _parseViewportZoomPreset(String? raw) {
+    for (final preset in _DriveViewportZoomPreset.values) {
+      if (preset.name == raw) {
+        return preset;
+      }
+    }
+    return _DriveViewportZoomPreset.crop;
+  }
+
+  Future<void> _syncViewportZoomPresetForOrientationImpl() async {
+    if (!mounted) return;
+    final isLandscape =
+        MediaQuery.orientationOf(context) == Orientation.landscape;
+    if (_lastViewportZoomOrientationLandscape == isLandscape) {
+      return;
+    }
+    _lastViewportZoomOrientationLandscape = isLandscape;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_viewportZoomPresetPrefKey(isLandscape));
+      final preset = _parseViewportZoomPreset(raw);
+      if (!mounted || _lastViewportZoomOrientationLandscape != isLandscape) {
+        return;
+      }
+      if (_viewportZoomPreset == preset) return;
+      _safeSetState(() => _viewportZoomPreset = preset);
+    } catch (_) {}
+  }
+
+  Future<void> _saveViewportZoomPresetForOrientationImpl(
+    _DriveViewportZoomPreset preset,
+  ) async {
+    final isLandscape = mounted
+        ? MediaQuery.orientationOf(context) == Orientation.landscape
+        : (_lastViewportZoomOrientationLandscape ?? false);
+    _lastViewportZoomOrientationLandscape = isLandscape;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+          _viewportZoomPresetPrefKey(isLandscape), preset.name);
+    } catch (_) {}
+  }
+
   void _setViewportZoomPresetImpl(_DriveViewportZoomPreset preset) {
     if (!mounted) return;
     if (_viewportZoomPreset == preset) return;
     _safeSetState(() => _viewportZoomPreset = preset);
+    unawaited(_saveViewportZoomPresetForOrientationImpl(preset));
     _toast('${preset.tooltip} 적용');
   }
 
@@ -218,20 +268,20 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     try {
       final prefs = await SharedPreferences.getInstance();
       const defaults = <String, bool>{
-        // Default policy: keep only path fill + lane lines enabled.
-        // Everything else stays disabled until explicitly requested.
-        'arOverlay': false,
+        // Default policy: keep the core AR/lead/radar overlays visible.
+        // Native AR transport and YOLO diagnostics stay off until requested.
+        'arOverlay': true,
         'nativeArScene': false,
         'arAutoSave': false,
         'pathFill': true,
         'laneLines': true,
-        'roadEdge': false,
-        'lead1': false,
-        'lead2': false,
-        'radarBadge': false,
-        'radarVector': false,
-        'stopDistanceTf': false,
-        'stateText': false,
+        'roadEdge': true,
+        'lead1': true,
+        'lead2': true,
+        'radarBadge': true,
+        'radarVector': true,
+        'stopDistanceTf': true,
+        'stateText': true,
         'yoloEnabled': false,
         'yoloBoxes': false,
         'yoloLabels': false,
@@ -276,8 +326,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
               readBool(map, 'stateText', defaults['stateText']!);
           _debugYoloEnabled =
               readBool(map, 'yoloEnabled', defaults['yoloEnabled']!);
-          _debugYoloBoxes =
-              readBool(map, 'yoloBoxes', defaults['yoloBoxes']!);
+          _debugYoloBoxes = readBool(map, 'yoloBoxes', defaults['yoloBoxes']!);
           _debugYoloLabels =
               readBool(map, 'yoloLabels', defaults['yoloLabels']!);
           _debugYoloTrafficLights = readBool(
@@ -285,8 +334,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
             'yoloTrafficLights',
             defaults['yoloTrafficLights']!,
           );
-          _debugYoloStats =
-              readBool(map, 'yoloStats', defaults['yoloStats']!);
+          _debugYoloStats = readBool(map, 'yoloStats', defaults['yoloStats']!);
           return;
         }
 
@@ -314,8 +362,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
               readBool(map, 'stateText', defaults['stateText']!);
           _debugYoloEnabled =
               readBool(map, 'yoloEnabled', defaults['yoloEnabled']!);
-          _debugYoloBoxes =
-              readBool(map, 'yoloBoxes', defaults['yoloBoxes']!);
+          _debugYoloBoxes = readBool(map, 'yoloBoxes', defaults['yoloBoxes']!);
           _debugYoloLabels =
               readBool(map, 'yoloLabels', defaults['yoloLabels']!);
           _debugYoloTrafficLights = readBool(
@@ -323,8 +370,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
             'yoloTrafficLights',
             defaults['yoloTrafficLights']!,
           );
-          _debugYoloStats =
-              readBool(map, 'yoloStats', defaults['yoloStats']!);
+          _debugYoloStats = readBool(map, 'yoloStats', defaults['yoloStats']!);
         });
       }
 

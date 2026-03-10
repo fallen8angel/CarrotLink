@@ -296,43 +296,15 @@ class _DashboardScreenState extends State<DashboardScreen>
     required String reason,
   }) async {
     if (!mounted) return;
-    if (!NativeOverlayHudService.isSupported) return;
     if (_overlayLifecycleBusy) return;
     _overlayLifecycleBusy = true;
     try {
-      final overlayEnabled = await NativeOverlayHudService.isEnabled();
-      if (!overlayEnabled) {
-        final running = await NativeOverlayHudService.isRunning();
-        if (running) {
-          await NativeOverlayHudService.stop();
-        }
-        _diag.info('overlay', 'Disabled by settings. reason=$reason');
-        return;
-      }
-
-      if (appForeground) {
-        final running = await NativeOverlayHudService.isRunning();
-        if (running) {
-          await NativeOverlayHudService.stop();
-        }
-        return;
-      }
-
-      final hasPermission = await NativeOverlayHudService.hasPermission();
-      if (!hasPermission) return;
-
-      final ssh = Provider.of<SSHService>(context, listen: false);
-      final host = NativeOverlayHudService.normalizeHost(
-        ssh.connectedIp ?? ssh.targetIp,
+      await NativeOverlayHudService.shutdownLegacyOverlay();
+      _diag.info(
+        'overlay',
+        'Legacy background HUD overlay disabled. '
+            'foreground=$appForeground reason=$reason',
       );
-      if (host == null) return;
-
-      final running = await NativeOverlayHudService.isRunning();
-      if (running) {
-        await NativeOverlayHudService.updateEndpoint(host);
-      }
-      _diag.info('overlay',
-          'Lifecycle sync: foreground=$appForeground reason=$reason host=$host');
     } catch (e) {
       _diag.warn('overlay', 'Lifecycle sync failed reason=$reason error=$e');
     } finally {

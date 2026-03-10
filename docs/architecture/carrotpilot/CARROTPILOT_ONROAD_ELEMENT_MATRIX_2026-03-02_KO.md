@@ -10,6 +10,11 @@
 이 문서는 CarrotPilot 온로드(주행) 화면의 그래픽/텍스트 요소를 기준으로,
 CarrotLink 앱에서 어떤 항목을 "지금 바로", "필드 확장 후", "렌더 스트림 전환 시" 구현할 수 있는지 정밀 분류한다.
 
+## 먼저 같이 볼 문서
+
+- `C3_STOCK_ONROAD_GRAPHICS_HUD_REFERENCE_2026-03-10_KO.md`
+  - 원본 stock onroad 그래픽/HUD의 실제 활성 renderer와 데이터 경로 요약
+
 ## 2. 현재 렌더링 구조 요약
 
 ### 2.1 원본(CarrotPilot) 렌더링

@@ -35,5 +35,21 @@ void main() {
       expect(snapshot.vehicle.speedClusterKph, 88.0);
       expect(snapshot.vehicle.speedClusterMps, closeTo(88.0 / 3.6, 1e-9));
     });
+
+    test('prefers vEgoCluster over raw vEgo when both exist', () {
+      final mapper = HudRemotePayloadMapper();
+
+      final snapshot = mapper.map(
+        raw: <String, dynamic>{
+          'vEgo': 25.0,
+          'vEgoCluster': 23.5,
+          'vSetKph': 90.0,
+        },
+        host: '127.0.0.1',
+      );
+
+      expect(snapshot.vehicle.speedClusterKph, closeTo(84.6, 1e-9));
+      expect(snapshot.vehicle.speedClusterMps, closeTo(23.5, 1e-9));
+    });
   });
 }

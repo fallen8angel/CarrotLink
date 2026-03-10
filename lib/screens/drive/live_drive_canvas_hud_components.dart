@@ -40,7 +40,7 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
     if (_useNativeLiveCamera) {
       return AndroidView(
         key: ValueKey<String>(
-          'native-live-${widget.hostIp}-$_liveCameraName',
+          'native-live-$_hostIp-$_liveCameraName',
         ),
         viewType: 'carrotlink/native_drive_video',
         creationParams: <String, dynamic>{
@@ -114,8 +114,7 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
     };
     final label = _modeTagLabel;
     final isOpenpilot = _openpilotOverlayMode;
-    final tagBorderColor =
-        isOpenpilot ? _debugSelectedBorder : Colors.white12;
+    final tagBorderColor = isOpenpilot ? _debugSelectedBorder : Colors.white12;
     final tagFillColor = isOpenpilot ? _debugSelectedBg : _debugNavBg;
     const tagTextColor = Colors.white;
 
@@ -358,13 +357,13 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
         padding:
             EdgeInsets.fromLTRB(panelPadding, panelPadding, panelPadding, 0),
         child: AdaptiveHudHost(
-          deviceIp: widget.hostIp,
+          deviceIp: _hostIp,
           enabled: true,
           surface: HudSurfaceVariant.driveInline,
           fillParent: true,
           syncNativeOverlay: true,
           key: ValueKey<String>(
-              'drive_hud_panel_${window.windowClass.name}_${widget.hostIp}'),
+              'drive_hud_panel_${window.windowClass.name}_$_hostIp'),
         ),
       ),
     );
@@ -437,7 +436,8 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
     UiWindowInfo window,
     double overlayHeight,
   ) {
-    return overlayHeight * _hudPreferredAspectRatioForWindow(window, wide: true);
+    return overlayHeight *
+        _hudPreferredAspectRatioForWindow(window, wide: true);
   }
 
   Widget _buildLandscapeHudOverlayImpl(
@@ -456,17 +456,16 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
         width: width,
         height: height,
         child: AdaptiveHudHost(
-          deviceIp: widget.hostIp,
+          deviceIp: _hostIp,
           enabled: true,
           surface: HudSurfaceVariant.driveOverlay,
           fillParent: true,
           syncNativeOverlay: true,
           key: ValueKey<String>(
-            'drive_hud_overlay_${window.windowClass.name}_${widget.hostIp}',
+            'drive_hud_overlay_${window.windowClass.name}_$_hostIp',
           ),
         ),
       ),
     );
   }
-
 }

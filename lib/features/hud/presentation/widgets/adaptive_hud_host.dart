@@ -123,9 +123,7 @@ class _HudHostViewState {
       return _HudHostViewState(
         preferStateShell: false,
         title: preview ? 'HUD 미리보기' : 'HUD 연결 중',
-        message: preview
-            ? '미리보기 샘플을 준비하는 중입니다.'
-            : '콤마 HUD 의미 데이터를 수신하는 중입니다.',
+        message: preview ? '미리보기 샘플을 준비하는 중입니다.' : '콤마 HUD 의미 데이터를 수신하는 중입니다.',
       );
     }
     if (state.lastError != null) {
@@ -138,9 +136,7 @@ class _HudHostViewState {
     return _HudHostViewState(
       preferStateShell: false,
       title: preview ? 'HUD 미리보기' : 'HUD 대기',
-      message: preview
-          ? '미리보기 데이터 대기 중입니다.'
-          : 'HUD 의미 데이터가 아직 도착하지 않았습니다.',
+      message: preview ? '미리보기 데이터 대기 중입니다.' : 'HUD 의미 데이터가 아직 도착하지 않았습니다.',
     );
   }
 }
@@ -247,8 +243,6 @@ class _HudSnapshotCallbackBridgeState extends State<_HudSnapshotCallbackBridge>
           state != AppLifecycleState.inactive) {
         return;
       }
-      final enabled = await NativeOverlayHudService.isEnabled();
-      if (!enabled) return;
       final hasPermission = await NativeOverlayHudService.hasPermission();
       if (!hasPermission) return;
       final host = NativeOverlayHudService.normalizeHost(

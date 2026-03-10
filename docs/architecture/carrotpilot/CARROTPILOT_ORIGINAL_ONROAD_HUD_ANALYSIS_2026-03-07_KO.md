@@ -5,6 +5,11 @@
 - 우리 앱 HUD가 왜 원본과 다르게 보이거나 값이 어긋나는지 원인 정리
 - 이후 CarrotLink HUD를 원본 기준으로 다시 구현하거나 보강할 때 기준 문서로 사용
 
+## 먼저 같이 볼 문서
+
+- `C3_STOCK_ONROAD_GRAPHICS_HUD_REFERENCE_2026-03-10_KO.md`
+  - stock onroad 전체 렌더 구조와 실제 활성 renderer 기준 문서
+
 ## 분석 대상
 - 원본 HUD: `d:/CarrotLink/c3-v10-wip/selfdrive/ui/carrot.cc`
 - 원본 HUD 입력값: `carState`, `carControl`, `longitudinalPlan`, `carrotMan`, `deviceState`, `peripheralState`, `Params`

@@ -99,7 +99,7 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
           'wsUrl': _sidecarWsUrl,
           'sendPort': receivePort.sendPort,
         },
-        debugName: 'drive_sidecar_worker_${widget.hostIp}',
+        debugName: 'drive_sidecar_worker_$_hostIp',
       );
       if (!mounted || session != _sidecarSession) {
         isolate.kill(priority: Isolate.immediate);
@@ -239,7 +239,8 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
     final inferredCameraFrame = _cameraFrameIdFromSnapshot(next);
     final nowUs = _renderClock.elapsedMicroseconds;
     final cameraStale = _lastCameraFrameEventUs <= 0 ||
-        (nowUs - _lastCameraFrameEventUs) > _LiveDriveCanvasScreenState._cameraFrameStaleUs;
+        (nowUs - _lastCameraFrameEventUs) >
+            _LiveDriveCanvasScreenState._cameraFrameStaleUs;
     if (inferredCameraFrame != null &&
         (_lastCameraFrameId == null || cameraStale)) {
       _lastCameraFrameId = inferredCameraFrame;
@@ -252,5 +253,4 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
     }
     _publishOverlaySynced();
   }
-
 }

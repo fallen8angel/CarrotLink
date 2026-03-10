@@ -7,6 +7,17 @@
 - `architecture/README.md`
   아키텍처 문서 카테고리 인덱스
 
+## AI 빠른 참조
+
+- stock 주행그래픽/HUD 원본 기준:
+  - `architecture/carrotpilot/C3_STOCK_ONROAD_GRAPHICS_HUD_REFERENCE_2026-03-10_KO.md`
+- 원본 HUD 값 의미:
+  - `architecture/carrotpilot/CARROTPILOT_ORIGINAL_ONROAD_HUD_ANALYSIS_2026-03-07_KO.md`
+- 현재 앱 구현 수준/요소 매트릭스:
+  - `architecture/carrotpilot/CARROTPILOT_ONROAD_ELEMENT_MATRIX_2026-03-02_KO.md`
+- lead/radar 정합:
+  - `architecture/remote_ar/STOCK_MODE_LEAD_RADAR_ALIGNMENT_CHECKLIST_2026-03-09_KO.md`
+
 ## 문서 카테고리
 
 - `architecture/core/`
@@ -14,7 +25,7 @@
 - `architecture/hud/`
   Adaptive HUD 재구성, semantic snapshot, handoff
 - `architecture/carrotpilot/`
-  carrotpilot/onroad/TMAP 입력 구조 분석
+  carrotpilot/onroad/TMAP 입력 구조 분석, stock 원본 onroad 그래픽/HUD 기준 문서
 - `architecture/remote_ar/`
   stock mode remote AR 설계, 구현, 테스트, handoff
 - `architecture/yolo/`

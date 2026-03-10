@@ -17,6 +17,8 @@
 - HUD/AR 작업은 이후 추가 로컬 변경이 있을 수 있으므로, 실제 작업 전 `git status`를 다시 확인하는 편이 안전하다.
 
 ## 관련 문서
+- `../carrotpilot/C3_STOCK_ONROAD_GRAPHICS_HUD_REFERENCE_2026-03-10_KO.md`
+  - stock onroad 그래픽/HUD 전체 source of truth
 - [CARROTPILOT_ORIGINAL_ONROAD_HUD_ANALYSIS_2026-03-07_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/carrotpilot/CARROTPILOT_ORIGINAL_ONROAD_HUD_ANALYSIS_2026-03-07_KO.md)
 - [ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/hud/ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md)
 - [HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md](/e:/CarrotLink/CarrotLink/docs/architecture/hud/HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md)

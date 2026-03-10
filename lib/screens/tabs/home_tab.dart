@@ -177,8 +177,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   }
 
   String? _currentDeviceHost(SSHService ssh) {
-    return NativeOverlayHudService.normalizeHost(
-        ssh.connectedIp ?? ssh.targetIp);
+    return NativeOverlayHudService.normalizeHost(ssh.connectedIp);
   }
 
   Future<void> _syncOverlayEndpoint({bool forceProbe = false}) async {
@@ -211,9 +210,9 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   }
 
   Future<void> _openWebRtcView(SSHService ssh) async {
-    final host = (ssh.connectedIp ?? ssh.targetIp ?? '').trim();
+    final host = (ssh.connectedIp ?? '').trim();
     if (host.isEmpty) {
-      CustomToast.show(context, '연결 IP를 먼저 확인하세요.', isError: true);
+      CustomToast.show(context, 'SSH 연결이 완료된 뒤 열 수 있습니다.', isError: true);
       return;
     }
 
@@ -554,7 +553,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                   width: hudPreviewMaxWidth,
                   child: AdaptiveHudHost(
                     enabled: _realtimeWorkEnabled,
-                    deviceIp: ssh.connectedIp ?? ssh.targetIp,
+                    deviceIp: ssh.connectedIp,
                     surface: HudSurfaceVariant.homePreview,
                     matchParentWidth: true,
                     syncNativeOverlay: false,
@@ -624,7 +623,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                                   height: math.max(220.0, pinnedHeight),
                                   child: AdaptiveHudHost(
                                     enabled: _realtimeWorkEnabled,
-                                    deviceIp: ssh.connectedIp ?? ssh.targetIp,
+                                    deviceIp: ssh.connectedIp,
                                     surface: HudSurfaceVariant.homePreview,
                                     fillParent: true,
                                     syncNativeOverlay: false,

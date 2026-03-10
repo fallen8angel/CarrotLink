@@ -889,6 +889,8 @@ class SSHService extends ChangeNotifier {
     await _storage.write(key: 'ssh_port', value: port.toString());
     if (password != null) {
       await _storage.write(key: 'ssh_password', value: password);
+    } else {
+      await _storage.delete(key: 'ssh_password');
     }
     if (keyPath != null) {
       await _storage.write(key: 'ssh_key_path', value: keyPath);

@@ -173,7 +173,13 @@ class HudRemotePayloadMapper {
 
     final rawVego = _asDouble(raw['vEgo']);
     final rawVegoKph = rawVego == null ? null : rawVego * 3.6;
-    final speedClusterKph = _asDouble(raw['vEgoKph']) ?? rawVegoKph;
+    final rawVegoCluster = _asDouble(raw['vEgoCluster']);
+    final rawVegoClusterKph = _asDouble(raw['vEgoClusterKph']) ??
+        (rawVegoCluster == null ? null : rawVegoCluster * 3.6);
+    final speedClusterKph = _asDouble(raw['speedClusterKph']) ??
+        _asDouble(raw['vEgoKph']) ??
+        rawVegoClusterKph ??
+        rawVegoKph;
     final setSpeedClusterKph =
         _asDouble(raw['vSetKph']) ?? _asDouble(raw['setSpeedClusterKph']);
     final diskLabel = (_asString(raw['diskLabel']) ?? 'DISK').toUpperCase();

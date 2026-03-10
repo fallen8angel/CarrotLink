@@ -7,7 +7,7 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
     );
     final cameraName =
         cameraKind == _DriveCameraKind.wideRoad ? 'wideRoad' : 'road';
-    final directWsUrl = 'ws://${widget.hostIp}:7766/ws/camera/$cameraName';
+    final directWsUrl = 'ws://$_hostIp:7766/ws/camera/$cameraName';
     final modePolicy = _openpilotOverlayMode ? 'sidecar_only' : 'webrtc_only';
     return '''
 <!doctype html>

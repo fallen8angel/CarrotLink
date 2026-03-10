@@ -80,20 +80,13 @@ extension _ConnectionSettingsPersistence on _ConnectionSettingsScreenState {
 
   Future<void> _loadSettings() async {
     await _storage.delete(key: 'ssh_ip');
-    var username = await _storage.read(key: 'ssh_username');
-    final password = await _storage.read(key: 'ssh_password');
-    var port = await _storage.read(key: 'ssh_port');
+    const username = _ConnectionSettingsScreenState._fixedSshUsername;
+    const port = _ConnectionSettingsScreenState._fixedSshPort;
+    await _storage.write(key: 'ssh_username', value: username);
+    await _storage.write(key: 'ssh_port', value: port.toString());
+    await _storage.delete(key: 'ssh_password');
 
-    if (username == null || username.trim().isEmpty) {
-      username = _ConnectionSettingsScreenState._fixedSshUsername;
-      await _storage.write(key: 'ssh_username', value: username);
-    }
-    if (port == null || port.trim().isEmpty) {
-      port = _ConnectionSettingsScreenState._fixedSshPort.toString();
-      await _storage.write(key: 'ssh_port', value: port);
-    }
-
-    debugPrint('[Settings] Loaded Username: $username');
+    debugPrint('[Settings] Loaded fixed SSH endpoint: $username:$port');
 
     // 새 구조에서 키 로드
     final keyType = await _storage.read(key: 'current_key_type');
@@ -111,10 +104,6 @@ extension _ConnectionSettingsPersistence on _ConnectionSettingsScreenState {
         _ipController.clear();
         _lockDiscoveryIpOverwrite = false;
         _autoFilledIp = null;
-        if (username != null) _usernameController.text = username;
-        if (password != null) _passwordController.text = password;
-        if (port != null && port.isNotEmpty) _portController.text = port;
-
         _currentKeyType = keyType;
         _currentPrivateKey = privateKey;
         _activeGeneratedId = generatedId;

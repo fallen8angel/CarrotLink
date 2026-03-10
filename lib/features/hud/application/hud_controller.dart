@@ -67,6 +67,22 @@ class HudController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void reportBindingError({
+    required String? host,
+    required bool isPreview,
+    required Object error,
+    StackTrace? stackTrace,
+  }) {
+    _state = _state.copyWith(
+      isLoading: false,
+      isPreview: isPreview,
+      host: host,
+      lastError: error,
+      lastStackTrace: stackTrace,
+    );
+    notifyListeners();
+  }
+
   Future<void> _bind({
     required bool isPreview,
     required String? host,
