@@ -1600,13 +1600,13 @@ class SidecarApp:
             pos = getattr(mv2, "position", None)
             if pos is not None:
                 out["pathX"] = _downsample(
-                    [float(v) for v in list(getattr(pos, "x", []))], 17
+                    [float(v) for v in list(getattr(pos, "x", []))], 24
                 )
                 out["pathY"] = _downsample(
-                    [float(v) for v in list(getattr(pos, "y", []))], 17
+                    [float(v) for v in list(getattr(pos, "y", []))], 24
                 )
                 out["pathZ"] = _downsample(
-                    [float(v) for v in list(getattr(pos, "z", []))], 17
+                    [float(v) for v in list(getattr(pos, "z", []))], 24
                 )
         except Exception:
             pass
@@ -1642,13 +1642,13 @@ class SidecarApp:
                 packed.append(
                     {
                         "x": _downsample(
-                            [float(v) for v in list(getattr(ln, "x", []))], 17
+                            [float(v) for v in list(getattr(ln, "x", []))], 24
                         ),
                         "y": _downsample(
-                            [float(v) for v in list(getattr(ln, "y", []))], 17
+                            [float(v) for v in list(getattr(ln, "y", []))], 24
                         ),
                         "z": _downsample(
-                            [float(v) for v in list(getattr(ln, "z", []))], 17
+                            [float(v) for v in list(getattr(ln, "z", []))], 24
                         ),
                     }
                 )
@@ -1663,13 +1663,13 @@ class SidecarApp:
                 packed_edges.append(
                     {
                         "x": _downsample(
-                            [float(v) for v in list(getattr(edge, "x", []))], 17
+                            [float(v) for v in list(getattr(edge, "x", []))], 24
                         ),
                         "y": _downsample(
-                            [float(v) for v in list(getattr(edge, "y", []))], 17
+                            [float(v) for v in list(getattr(edge, "y", []))], 24
                         ),
                         "z": _downsample(
-                            [float(v) for v in list(getattr(edge, "z", []))], 17
+                            [float(v) for v in list(getattr(edge, "z", []))], 24
                         ),
                     }
                 )
@@ -2010,20 +2010,30 @@ class SidecarApp:
                         send_payload["_d"] = 0
                     else:
                         delta: dict[str, Any] = {}
+                        # Keys that always change (timestamps) – include in delta
+                        # but don't count them for the "nothing changed" decision.
+                        _always_keys = {"ts", "source", "profile", "repo"}
                         for k, v in live_payload.items():
+                            if k in _always_keys:
+                                delta[k] = v
+                                continue
                             prev_v = _prev_live.get(k)
                             if prev_v != v:
                                 delta[k] = v
                         # If delta is >= 90% of full, just send full.
-                        if len(delta) >= len(live_payload) * 0.9:
+                        data_keys_changed = len(delta) - len(_always_keys)
+                        data_keys_total = len(live_payload) - len(
+                            _always_keys & live_payload.keys()
+                        )
+                        if data_keys_total > 0 and data_keys_changed >= data_keys_total * 0.9:
                             send_payload = live_payload
                             send_payload["_d"] = 0
-                        elif delta:
+                        elif data_keys_changed > 0:
                             send_payload = delta
                             send_payload["_d"] = 1
                         else:
                             # Nothing changed: send heartbeat to keep connection alive.
-                            send_payload = {"_d": 1}
+                            send_payload = {"_d": 1, "ts": live_payload.get("ts")}
                     _prev_live = live_payload
                     message = json.dumps(
                         send_payload, separators=(",", ":"), ensure_ascii=False
