@@ -2,7 +2,7 @@
 
 최종 분석일: 2026-03-10  
 최종 업데이트: 2026-03-10  
-분석 대상 경로: `E:\CarrotLink\CarrotLink`
+분석 대상 경로: `D:\CarrotLink\CarrotLink-dev`
 
 이 문서는 CarrotLink의 stock/live drive 화면에서, 기존 sidecar는 수정하지 않고 현재 앱이 받아서 표시하는 원격 주행카메라 영상 위에 YOLO26 기반 객체감지를 추가할 수 있는지 검토한 결과를 정리한다.
 
@@ -33,7 +33,10 @@
 - Flutter/Android 사이 YOLO config bridge는 이미 구현됨
 - native video path 안에 `frame sampling`, `yolo_state`, `stub runtime` 골격이 있음
 - `SurfaceView -> PixelCopy -> 저해상도 bitmap` POC 경로까지는 연결됨
-- 아직 실제 ExecuTorch/QNN session, output parsing, overlay draw는 미구현
+- `ExecuTorch Module.load()` / 전처리 / 첫 `forward()`까지는 실제 기기에서 확인됨
+- 첫 output shape `[1,84,3549]` 진단까지는 확인됨
+- 1차 output parser 골격은 추가됨
+- 아직 실제 stock canvas box draw / tracking / QNN-lowered runtime은 미구현
 
 핵심 판단은 단순하다.
 
@@ -69,13 +72,14 @@
   - `lib/screens/drive/live_drive_canvas_overlay_sync_components.dart`
   - `android/app/src/main/kotlin/com/example/carrot_pilot_manager/NativeDriveVideoPlugin.kt`
 
-### 2.4 현재 앱에는 ML 추론 런타임이 없다
+### 2.4 현재 앱에는 generic ExecuTorch bring-up 런타임이 있다
 
-- Flutter 의존성에 `TFLite`, `ONNX Runtime`, `NCNN`, `PyTorch`, `ExecuTorch`가 없다.
-- Android gradle에도 inference runtime 의존성이 없다.
+- Flutter 의존성에 별도 ML runtime은 여전히 없고, Android native 쪽에 `org.pytorch:executorch-android`가 추가됐다.
+- 즉 YOLO는 Flutter pure Dart가 아니라 Android native side-channel에서만 돈다.
 - 관련 파일:
   - `pubspec.yaml`
   - `android/app/build.gradle.kts`
+  - `android/app/src/main/kotlin/com/example/carrot_pilot_manager/NativeDriveExecuTorchRuntime.kt`
 
 ### 2.5 stock 주행모드에서 그대로 재사용할 코드와 규칙
 
@@ -156,12 +160,12 @@ YOLO box overlay를 위해 새로 만들 필요가 없는 stock 모드 자산도
 
 ### 4.2 inference runtime 추가
 
-현재 앱엔 YOLO를 실행할 엔진이 없다. 따라서 아래 중 하나를 Android native에 추가해야 한다.
+현재 앱엔 generic ExecuTorch path가 이미 들어가 있고, 최종 목표 backend는 QNN이다.
+따라서 실제 남은 선택은 아래로 좁혀진다.
 
-- ExecuTorch + Qualcomm backend
-- LiteRT / TensorFlow Lite
-- ONNX Runtime Mobile
-- NCNN
+- generic ExecuTorch를 계속 쓸지
+- Qualcomm/QNN-lowered path를 별도로 둘지
+- 또는 둘 다 두고 기기/상태별 fallback을 둘지
 
 ### 4.3 detection 결과 bridge 추가
 
@@ -239,24 +243,34 @@ YOLO box overlay를 위해 새로 만들 필요가 없는 stock 모드 자산도
 - 실제 `S22 Ultra / S23 Ultra / S24 Ultra`에서의 FPS와 발열은 아직 이 코드베이스에서 측정하지 않았다.
 - 따라서 기기별 실사용 가능성은 아래 7장의 "운영 정책"처럼 `벤치 후 활성화`가 맞다.
 
-## 7. 기기 정책
+## 7. 현재 기술적 판단
+
+현재 코드와 실기기 검증 기준 판단은 아래로 정리한다.
+
+- stock/openpilot 그래픽 무결성은 절대 우선이다.
+- YOLO는 `fail-open side-channel`이어야 한다.
+- 현재 generic ExecuTorch path는 충분히 열렸고, 다음 blocker는 parser/payload/draw다.
+- QNN은 최종 목표가 맞지만, parser/draw가 없는 상태에서 먼저 QNN만 붙여도 사용자 체감은 완성되지 않는다.
+- 따라서 구현 순서는 `graphics guardrail 고정 -> parser/payload/draw -> tracking/stale gate -> QNN-lowered runtime`이 맞다.
+
+## 8. 기기 정책
 
 이 장은 코드 확인 결과가 아니라 2026-03-10 시점의 기기 스펙과 현재 앱 구조를 바탕으로 한 운영 판단이다.
 
-### 7.1 1차 지원 정책
+### 8.1 1차 지원 정책
 
 - `S22 Ultra`: `YOLO26n` 기본, `YOLO26s`는 벤치 통과 시만 허용
 - `S23 Ultra`: `YOLO26n` 기본, `YOLO26s` 선택 허용 후보
 - `S24 Ultra`: `YOLO26n`/`YOLO26s` 모두 후보
 
-### 7.2 기본 동작 정책
+### 8.2 기본 동작 정책
 
 - 최초 설치 후 첫 실행 또는 설정 진입 시 짧은 벤치마크 실행
 - 평균 inference 시간, frame drop, thermal signal, UI jank를 측정
 - 기준 미달이면 detection 기능 비활성화 또는 `n`으로 강등
 - 사용자에게는 `성능 우선` / `정확도 우선` 정도만 노출
 
-### 7.3 1차 성능 목표
+### 8.3 1차 성능 목표
 
 - input size: `320` 또는 `416`
 - detect rate: `5~10Hz`

@@ -14,6 +14,7 @@ import 'services/background_service.dart';
 import 'services/update_service.dart';
 import 'services/diagnostics_service.dart';
 import 'services/storage_layout_service.dart';
+import 'features/hud/hud.dart';
 import 'theme/app_theme.dart';
 
 void main() {
@@ -29,6 +30,14 @@ void main() {
     MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => SSHService()),
+        ChangeNotifierProxyProvider<SSHService, SharedRuntimeManager>(
+          create: (_) => SharedRuntimeManager(),
+          update: (_, ssh, manager) {
+            final runtime = manager ?? SharedRuntimeManager();
+            runtime.attachSshService(ssh);
+            return runtime;
+          },
+        ),
         ChangeNotifierProvider(create: (_) => MacroService()),
         ChangeNotifierProvider(create: (_) => GoogleDriveService()),
         ChangeNotifierProvider(create: (_) => BackupService()),

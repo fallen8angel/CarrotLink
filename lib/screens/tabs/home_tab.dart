@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import '../../services/ssh_service.dart';
 import '../../services/github_service.dart';
 import '../../services/native_overlay_hud_service.dart';
+import '../../services/sidecar_service.dart';
 import '../../widgets/custom_toast.dart';
 import '../../features/hud/hud.dart';
 import '../drive/live_drive_canvas_screen.dart';
@@ -22,6 +23,7 @@ class HomeTab extends StatefulWidget {
 }
 
 class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
+  static final SidecarService _sidecarService = SidecarService();
   String _branch = "--";
   String _commit = "--";
   String _dongleId = "--";
@@ -78,6 +80,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   }
 
   bool get _realtimeWorkEnabled => widget.isActive && _appForeground;
+  bool get _hudKeepAliveEnabled => _appForeground;
 
   void _applyRealtimeWorkState({bool forceRefresh = false}) {
     if (_realtimeWorkEnabled) {
@@ -112,6 +115,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
 
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (ssh.isConnected) {
+      unawaited(_sidecarService.ensureRunning(ssh));
       try {
         final results = await Future.wait([
           ssh.getBranch(),
@@ -209,12 +213,13 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _openWebRtcView(SSHService ssh) async {
+  Future<void> _openDriveView(SSHService ssh) async {
     final host = (ssh.connectedIp ?? '').trim();
     if (host.isEmpty) {
       CustomToast.show(context, 'SSH 연결이 완료된 뒤 열 수 있습니다.', isError: true);
       return;
     }
+    unawaited(_sidecarService.ensureRunning(ssh));
 
     if (!mounted) return;
     Navigator.of(context).push(
@@ -548,14 +553,14 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
               constraints: BoxConstraints(maxWidth: hudPreviewMaxWidth),
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: () => _openWebRtcView(ssh),
+                onTap: () => _openDriveView(ssh),
                 child: SizedBox(
                   width: hudPreviewMaxWidth,
-                  child: AdaptiveHudHost(
-                    enabled: _realtimeWorkEnabled,
-                    deviceIp: ssh.connectedIp,
-                    surface: HudSurfaceVariant.homePreview,
-                    matchParentWidth: true,
+                                  child: AdaptiveHudHost(
+                                    enabled: _hudKeepAliveEnabled,
+                                    deviceIp: ssh.connectedIp,
+                                    surface: HudSurfaceVariant.homePreview,
+                                    matchParentWidth: true,
                     syncNativeOverlay: false,
                   ),
                 ),
@@ -617,12 +622,12 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                               alignment: Alignment.bottomCenter,
                               child: GestureDetector(
                                 behavior: HitTestBehavior.opaque,
-                                onTap: () => _openWebRtcView(ssh),
+                                onTap: () => _openDriveView(ssh),
                                 child: SizedBox(
                                   width: pinnedWidth,
                                   height: math.max(220.0, pinnedHeight),
                                   child: AdaptiveHudHost(
-                                    enabled: _realtimeWorkEnabled,
+                                    enabled: _hudKeepAliveEnabled,
                                     deviceIp: ssh.connectedIp,
                                     surface: HudSurfaceVariant.homePreview,
                                     fillParent: true,

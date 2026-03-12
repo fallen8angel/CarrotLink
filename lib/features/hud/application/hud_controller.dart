@@ -54,6 +54,28 @@ class HudController extends ChangeNotifier {
     return _repository.getLatest(host: host ?? _state.host);
   }
 
+  void seedLiveSnapshot({
+    required String host,
+    required OriginalHudSnapshot snapshot,
+  }) {
+    final normalizedHost = host.trim();
+    if (normalizedHost.isEmpty || snapshot.tsMonoMs <= 0) {
+      return;
+    }
+    final sameHost = !_state.isPreview && _state.host == normalizedHost;
+    final sameSnapshotTs = _state.snapshot.tsMonoMs == snapshot.tsMonoMs;
+    if (sameHost && sameSnapshotTs) {
+      return;
+    }
+    _state = _state.copyWith(
+      snapshot: snapshot,
+      isPreview: false,
+      host: normalizedHost,
+      resetError: true,
+    );
+    notifyListeners();
+  }
+
   Future<void> clear({
     bool releaseHost = false,
   }) async {

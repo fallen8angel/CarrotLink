@@ -12,18 +12,30 @@ class SidecarService {
 
   final DiagnosticsService _diag;
   String? _cachedLocalRevision;
+  final Map<String, Future<void>> _inFlightEnsureByHost =
+      <String, Future<void>>{};
+  final Map<String, DateTime> _lastEnsureSucceededAtByHost =
+      <String, DateTime>{};
+  static final Map<String, DateTime> _lastLegacyCleanupAttemptAtByHost =
+      <String, DateTime>{};
 
   static const String _sessionName = 'carrotlink_view';
-  static const String _pythonFileName = 'carrot_linkview.py';
-  static const String _runScriptName = 'run_carrot_linkview.sh';
+  static const String _pythonFileName = 'sidecar.py';
+  static const String _runScriptName = 'sidecar.sh';
   static const String _pidFileName = 'sidecar.pid';
-  static const String _logFileName = 'carrot_linkview.log';
-  static const String _revisionFileName = '.carrot_linkview.rev';
-  static const String _legacyCleanupMarkerName =
-      '.carrot_linkview.legacy_cleanup_v1';
-  static const String _legacyPythonFileName = 'carrotlink_sidecar.py';
-  static const String _legacyRunScriptName = 'run_sidecar.sh';
-  static const String _sidecarBasePath = '/data/media/0/carrotlink_sidecar';
+  static const String _logFileName = 'sidecar.log';
+  static const String _revisionFileName = '.sidecar.rev';
+  static const String _legacyCleanupMarkerName = '.sidecar.legacy_cleanup_v2';
+  static const String _legacyPythonFileName = 'carrot_linkview.py';
+  static const String _legacyRunScriptName = 'run_carrot_linkview.sh';
+  static const String _olderLegacyPythonFileName = 'carrotlink_sidecar.py';
+  static const String _olderLegacyRunScriptName = 'run_sidecar.sh';
+  static const String _legacyLogFileName = 'carrot_linkview.log';
+  static const String _legacyRevisionFileName = '.carrot_linkview.rev';
+  static const String _managedFolderName = 'carrotlink';
+  static const String _legacyRepoFolderName = 'carrot';
+  static const String _legacySidecarBasePath =
+      '/data/media/0/carrotlink_sidecar';
   static const String _legacyManagedModule = 'selfdrive.carrot.carrot_linkview';
   static const String _defaultProfile = 'p2';
   static const Set<String> _supportedProfiles = <String>{
@@ -34,9 +46,40 @@ class SidecarService {
     'p4',
   };
   static const int defaultPort = 7766;
+  static const Duration _recentEnsureCooldown = Duration(seconds: 20);
+  static const Duration _legacyCleanupCooldown = Duration(seconds: 45);
+  static const bool _autoLegacyCleanupEnabled = false;
+
+  Future<bool> _isHealthy(SSHService ssh) async {
+    final result = await ssh.executeCommandResult(
+      _bash(
+        '''
+SIDE_PORT=${_q(defaultPort.toString())}
+check_sidecar() {
+  if ! command -v curl >/dev/null 2>&1; then
+    return 1
+  fi
+  curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' &&
+    curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null | grep -Fq '"kind":"carrotlink_sidecar_broker_v1"'
+}
+if check_sidecar; then
+  echo "SIDECAR_HEALTH_OK"
+else
+  echo "SIDECAR_HEALTH_BAD"
+fi
+''',
+      ),
+      timeout: const Duration(seconds: 6),
+    );
+    if (!result.isSuccess) {
+      return false;
+    }
+    return result.output.contains('SIDECAR_HEALTH_OK');
+  }
 
   String _bash(String script) {
-    final escaped = script.replaceAll("'", "'\"'\"'");
+    final normalized = _dedentShellScript(_toUnixText(script));
+    final escaped = normalized.replaceAll("'", "'\"'\"'");
     return "bash -lc '$escaped'";
   }
 
@@ -46,6 +89,29 @@ class SidecarService {
 
   String _toUnixText(String input) {
     return input.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+  }
+
+  String _dedentShellScript(String input) {
+    final lines = input.split('\n');
+    var minIndent = 1 << 30;
+    for (final line in lines) {
+      if (line.trim().isEmpty) {
+        continue;
+      }
+      final indent = line.length - line.trimLeft().length;
+      if (indent < minIndent) {
+        minIndent = indent;
+      }
+    }
+    if (minIndent == 1 << 30 || minIndent == 0) {
+      return input;
+    }
+    return lines.map((line) {
+      if (line.trim().isEmpty) {
+        return '';
+      }
+      return line.length >= minIndent ? line.substring(minIndent) : line;
+    }).join('\n');
   }
 
   String _sha256Hex(String input) {
@@ -64,8 +130,8 @@ class SidecarService {
   }) {
     final pyHash = _sha256Hex(sidecarPy);
     final shHash = _sha256Hex(runScript);
-    // Keep deterministic schema for future migrations.
-    final schema = 'carrotlink-sidecar-rev-v1\npy=$pyHash\nsh=$shHash\n';
+    final schema =
+        'carrotlink-sidecar-rev-v4\npy=$pyHash\nsh=$shHash\n';
     return _sha256Hex(schema);
   }
 
@@ -81,12 +147,15 @@ class SidecarService {
       return cached;
     }
     final py = _toUnixText(
-      await rootBundle.loadString('assets/sidecar/carrotlink_sidecar.py'),
+      await rootBundle.loadString('assets/sidecar/sidecar.py'),
     );
     final sh = _toUnixText(
-      await rootBundle.loadString('assets/sidecar/run_sidecar.sh'),
+      await rootBundle.loadString('assets/sidecar/sidecar.sh'),
     );
-    final revision = _buildRevisionFromTexts(sidecarPy: py, runScript: sh);
+    final revision = _buildRevisionFromTexts(
+      sidecarPy: py,
+      runScript: sh,
+    );
     _cachedLocalRevision = revision;
     return revision;
   }
@@ -95,7 +164,6 @@ class SidecarService {
     if (!ssh.isConnected) {
       throw Exception('기기와 연결되어 있지 않습니다.');
     }
-    await _maybeCleanupLegacyInstall(ssh);
     final remoteBase = await _resolveRemoteBase(ssh, strict: false);
     final result = await ssh.executeCommandResult(
       _bash(
@@ -117,15 +185,107 @@ fi
     return rev;
   }
 
+  Future<void> ensureRunning(SSHService ssh) {
+    if (!ssh.isConnected) {
+      return Future<void>.value();
+    }
+    final hostKey = (ssh.connectedIp ?? ssh.targetIp ?? 'connected').trim();
+    final inFlight = _inFlightEnsureByHost[hostKey];
+    if (inFlight != null) {
+      return inFlight;
+    }
+    final now = DateTime.now();
+    final lastOk = _lastEnsureSucceededAtByHost[hostKey];
+    if (lastOk != null && now.difference(lastOk) < _recentEnsureCooldown) {
+      final future = _isHealthy(ssh).then<Future<void>>((healthy) {
+        if (healthy) {
+          return Future<void>.value();
+        }
+        return _ensureRunningInternal(ssh, hostKey: hostKey);
+      }).then((_) {});
+      _inFlightEnsureByHost[hostKey] = future;
+      return future.whenComplete(() {
+        if (identical(_inFlightEnsureByHost[hostKey], future)) {
+          _inFlightEnsureByHost.remove(hostKey);
+        }
+      });
+    }
+    final future = _ensureRunningInternal(ssh, hostKey: hostKey);
+    _inFlightEnsureByHost[hostKey] = future;
+    return future.whenComplete(() {
+      if (identical(_inFlightEnsureByHost[hostKey], future)) {
+        _inFlightEnsureByHost.remove(hostKey);
+      }
+    });
+  }
+
+  Future<void> _ensureRunningInternal(
+    SSHService ssh, {
+    required String hostKey,
+  }) async {
+    // Always check revision even if healthy — a running old sidecar must be
+    // replaced when our bundled assets have changed.
+    final localRev = await localRevision();
+    final remoteRev = await remoteRevision(ssh).catchError((_) => null);
+    final revisionMatch = remoteRev != null && remoteRev == localRev;
+
+    if (revisionMatch && await _isHealthy(ssh)) {
+      _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
+      return;
+    }
+
+    if (!revisionMatch) {
+      _diag.info(
+        'sidecar',
+        'Revision mismatch local=${shortRevision(localRev)} '
+            'remote=${shortRevision(remoteRev ?? "-")} — stop+deploy+start',
+      );
+      try {
+        await stop(ssh);
+      } catch (_) {}
+      await deploy(ssh);
+      await start(ssh);
+      _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
+      return;
+    }
+
+    try {
+      await start(ssh);
+      _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
+      return;
+    } catch (e) {
+      final message = e.toString();
+      if (message.contains('SIDECAR_ARTIFACTS_NOT_DEPLOYED') ||
+          message.contains('SIDECAR_NOT_DEPLOYED')) {
+        await deploy(ssh);
+        await start(ssh);
+        _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
+        return;
+      }
+      rethrow;
+    }
+  }
+
   Future<void> _maybeCleanupLegacyInstall(
     SSHService ssh, {
     bool force = false,
   }) async {
+    if (!_autoLegacyCleanupEnabled && !force) {
+      return;
+    }
+    final hostKey = (ssh.connectedIp ?? ssh.targetIp ?? 'connected').trim();
+    if (!force) {
+      final lastAttempt = _lastLegacyCleanupAttemptAtByHost[hostKey];
+      if (lastAttempt != null &&
+          DateTime.now().difference(lastAttempt) < _legacyCleanupCooldown) {
+        return;
+      }
+    }
+    _lastLegacyCleanupAttemptAtByHost[hostKey] = DateTime.now();
     try {
       final output = await cleanupLegacyInstall(ssh, force: force);
       final trimmed = output.trim();
-      if (trimmed.isEmpty ||
-          trimmed.contains('LEGACY_CLEANUP_ALREADY_DONE')) {
+      if (trimmed.isEmpty || trimmed.contains('LEGACY_CLEANUP_ALREADY_DONE')) {
         return;
       }
       final summary = trimmed
@@ -134,6 +294,8 @@ fi
           .where((e) =>
               e.startsWith('LEGACY_CLEANUP_') ||
               e.startsWith('repo=') ||
+              e.startsWith('new_base=') ||
+              e.startsWith('legacy_base=') ||
               e.startsWith('cfg_removed=') ||
               e.startsWith('legacy_files_removed=') ||
               e.startsWith('legacy_runtime_killed='))
@@ -155,37 +317,83 @@ fi
     }
 
     final remoteBase = await _resolveRemoteBase(ssh, strict: false);
+    final repoRoot = _repoRootFromBase(remoteBase);
+    final probePaths = _sidecarLegacyProbePaths(repoRoot);
+    final removalPaths = _sidecarLegacyRemovalPaths(repoRoot);
+    final runtimePatterns = _sidecarLegacyRuntimePatterns(repoRoot);
+    final pathProbeExpr = probePaths.isEmpty
+        ? 'false'
+        : probePaths.map((path) => '[ -e ${_q(path)} ]').join(' || ');
+    final processProbeBlocks = runtimePatterns
+        .map(
+          (pattern) => '''
+if ps -eo pid=,args= 2>/dev/null | awk -v pat=${_q(pattern)} 'index(\$0, pat) { found=1 } END { exit(found ? 0 : 1) }'; then
+  NEED_CLEAN=1
+fi
+''',
+        )
+        .join('\n');
+    final removalBlocks = removalPaths
+        .map(
+          (path) => '''
+if [ -e ${_q(path)} ]; then
+  rm -rf -- ${_q(path)} 2>/dev/null || true
+  FILES_REMOVED=1
+fi
+''',
+        )
+        .join('\n');
+    final killPatternBlocks = runtimePatterns
+        .map((pattern) => 'kill_pattern ${_q(pattern)}')
+        .join('\n');
+    final configBlock = repoRoot == null
+        ? ''
+        : '''
+CFG=${_q('$repoRoot/system/manager/process_config.py')}
+if [ -f "\$CFG" ] && command -v python3 >/dev/null 2>&1; then
+  PY_OUT=\$(python3 -c ${_q(_sidecarProcessConfigCleanupPy())} "\$CFG" 2>&1 || true)
+  case "\$PY_OUT" in
+    *cfg_removed=1*) CFG_REMOVED=1 ;;
+  esac
+  if [ -n "\$PY_OUT" ]; then
+    echo "\$PY_OUT"
+  fi
+fi
+''';
     final result = await ssh.executeCommandResult(
       _bash(
         '''
 BASE=${_q(remoteBase)}
 MARKER="\$BASE/$_legacyCleanupMarkerName"
 FORCE=${force ? '1' : '0'}
-REPO=""
-
-for d in /data/openpilot /home/comma/openpilot /data/media/0/openpilot /data/openpilot_source/openpilot; do
-  if [ -d "\$d/selfdrive" ] && { [ -d "\$d/.git" ] || [ -f "\$d/launch_openpilot.sh" ] || [ -d "\$d/system" ]; }; then
-    REPO="\$d"
-    break
-  fi
-done
-
-if [ -z "\$REPO" ]; then
-  for root in /data /home/comma /data/media/0; do
-    if [ -d "\$root" ]; then
-      FOUND=\$(find "\$root" -maxdepth 3 -type d -name openpilot 2>/dev/null | head -n 1 || true)
-      if [ -n "\$FOUND" ] && [ -d "\$FOUND/selfdrive" ]; then
-        REPO="\$FOUND"
-        break
-      fi
-    fi
-  done
-fi
+LEGACY_BASE="$_legacySidecarBasePath"
+REPO=${_q(repoRoot ?? '')}
+NEW_BASE=${_q(remoteBase)}
 
 if [ "\$FORCE" != "1" ] && [ -f "\$MARKER" ]; then
-  echo "LEGACY_CLEANUP_ALREADY_DONE"
-  echo "repo=\$REPO"
-  exit 0
+  NEED_CLEAN=0
+  if $pathProbeExpr; then
+    NEED_CLEAN=1
+  fi
+
+  if [ "\$NEED_CLEAN" != "1" ] && [ -n "\$REPO" ]; then
+    CFG=${_q(repoRoot == null ? '' : '$repoRoot/system/manager/process_config.py')}
+    if [ -f "\$CFG" ] && grep -Fq ${_q(_legacyManagedModule)} "\$CFG" 2>/dev/null; then
+      NEED_CLEAN=1
+    fi
+  fi
+
+  if [ "\$NEED_CLEAN" != "1" ]; then
+    $processProbeBlocks
+  fi
+
+  if [ "\$NEED_CLEAN" != "1" ]; then
+    echo "LEGACY_CLEANUP_ALREADY_DONE"
+    echo "repo=\$REPO"
+    echo "new_base=\$NEW_BASE"
+    echo "legacy_base=\$LEGACY_BASE"
+    exit 0
+  fi
 fi
 
 CFG_REMOVED=0
@@ -204,76 +412,41 @@ kill_pid_if_alive() {
   fi
 }
 
-remove_if_exists() {
-  TARGET="\$1"
-  if [ -e "\$TARGET" ]; then
-    rm -rf "\$TARGET" 2>/dev/null || true
-    FILES_REMOVED=1
-  fi
+kill_pattern() {
+  PATTERN="\$1"
+  PIDS=\$(ps -eo pid=,args= 2>/dev/null | awk -v pat="\$PATTERN" 'index(\$0, pat) { print \$1 }' | sort -u || true)
+  for P in \$PIDS; do
+    kill_pid_if_alive "\$P"
+  done
 }
 
-if [ -n "\$REPO" ]; then
-  CFG="\$REPO/system/manager/process_config.py"
-  if [ -f "\$CFG" ] && command -v python3 >/dev/null 2>&1; then
-    PY_OUT=\$(python3 - "\$CFG" <<'PY'
-import pathlib, sys
+$configBlock
 
-cfg = pathlib.Path(sys.argv[1])
-text = cfg.read_text()
-lines = text.splitlines()
-needle_module = "$_legacyManagedModule"
-removed = 0
-out = []
-for line in lines:
-  if needle_module in line:
-    removed = 1
-    continue
-  out.append(line)
-if removed:
-  cfg.write_text("\\n".join(out) + "\\n")
-print(f"cfg_removed={removed}")
-PY
-)
-    case "\$PY_OUT" in
-      *cfg_removed=1*) CFG_REMOVED=1 ;;
-    esac
+$removalBlocks
+
+$killPatternBlocks
+
+# When openpilot repo exists and the managed install has moved to
+# selfdrive/carrotlink, remove the obsolete legacy base directory itself.
+if [ -n "\$REPO" ] && [ "\$NEW_BASE" != "\$LEGACY_BASE" ] && [ -d "\$LEGACY_BASE" ]; then
+  rm -rf "\$LEGACY_BASE" 2>/dev/null || true
+  if [ ! -d "\$LEGACY_BASE" ]; then
+    FILES_REMOVED=1
   fi
+fi
 
-  CARROT_DIR="\$REPO/selfdrive/carrot"
-  if [ -d "\$CARROT_DIR" ]; then
-    remove_if_exists "\$CARROT_DIR/$_pythonFileName"
-    remove_if_exists "\$CARROT_DIR/$_runScriptName"
-    remove_if_exists "\$CARROT_DIR/$_legacyPythonFileName"
-    remove_if_exists "\$CARROT_DIR/$_legacyRunScriptName"
-    remove_if_exists "\$CARROT_DIR/$_revisionFileName"
-    remove_if_exists "\$CARROT_DIR/$_pidFileName"
-    remove_if_exists "\$CARROT_DIR/logs/$_logFileName"
-    remove_if_exists "\$CARROT_DIR/logs/sidecar.log"
-  fi
-
-  for PATTERN in
-    "$_legacyManagedModule"
-    "\$REPO/selfdrive/carrot/$_pythonFileName"
-    "\$REPO/selfdrive/carrot/$_legacyPythonFileName"
-    "\$REPO/selfdrive/carrot/$_runScriptName"
-    "\$REPO/selfdrive/carrot/$_legacyRunScriptName"
-  do
-    [ -n "\$PATTERN" ] || continue
-    PIDS=\$(ps -eo pid=,args= 2>/dev/null | awk -v pat="\$PATTERN" '
-      index(\$0, pat) {
-        print \$1
-      }
-    ' | sort -u || true)
-    for P in \$PIDS; do
-      kill_pid_if_alive "\$P"
-    done
-  done
+if command -v tmux >/dev/null 2>&1; then
+  tmux has-session -t "$_sessionName" 2>/dev/null && tmux kill-session -t "$_sessionName" || true
+  tmux has-session -t "carrotlink_camera" 2>/dev/null && tmux kill-session -t "carrotlink_camera" || true
+  tmux has-session -t "carrotlink_diag" 2>/dev/null && tmux kill-session -t "carrotlink_diag" || true
 fi
 
 mkdir -p "\$BASE" >/dev/null 2>&1 || true
 date +%s > "\$MARKER" 2>/dev/null || true
 echo "LEGACY_CLEANUP_DONE"
 echo "repo=\$REPO"
+echo "new_base=\$NEW_BASE"
+echo "legacy_base=\$LEGACY_BASE"
 echo "cfg_removed=\$CFG_REMOVED"
 echo "legacy_files_removed=\$FILES_REMOVED"
 echo "legacy_runtime_killed=\$RUNTIME_KILLED"
@@ -282,9 +455,178 @@ echo "legacy_runtime_killed=\$RUNTIME_KILLED"
       timeout: const Duration(seconds: 45),
     );
     if (!result.isSuccess) {
-      throw Exception('legacy cleanup 실패: ${result.output}');
+      throw Exception(
+        'legacy cleanup 실패(exit=${result.exitCode} base=$remoteBase): ${result.output}',
+      );
     }
     return result.output;
+  }
+
+  String? _repoRootFromBase(String remoteBase) {
+    const suffix = '/selfdrive/$_managedFolderName';
+    if (!remoteBase.endsWith(suffix)) {
+      return null;
+    }
+    return remoteBase.substring(0, remoteBase.length - suffix.length);
+  }
+
+  List<String> _sidecarLegacyProbePaths(String? repoRoot) {
+    final paths = <String>[
+      '$_legacySidecarBasePath/$_pythonFileName',
+      '$_legacySidecarBasePath/$_runScriptName',
+      '$_legacySidecarBasePath/camera.py',
+      '$_legacySidecarBasePath/camera.sh',
+      '$_legacySidecarBasePath/diag.py',
+      '$_legacySidecarBasePath/diag.sh',
+      '$_legacySidecarBasePath/$_legacyPythonFileName',
+      '$_legacySidecarBasePath/$_legacyRunScriptName',
+      '$_legacySidecarBasePath/$_olderLegacyPythonFileName',
+      '$_legacySidecarBasePath/$_olderLegacyRunScriptName',
+      '$_legacySidecarBasePath/$_legacyRevisionFileName',
+      '$_legacySidecarBasePath/logs/$_legacyLogFileName',
+    ];
+    if (repoRoot != null) {
+      final legacyRepoBase = '$repoRoot/selfdrive/$_legacyRepoFolderName';
+      final managedBase = '$repoRoot/selfdrive/$_managedFolderName';
+      paths.addAll(<String>[
+        '$legacyRepoBase/$_pythonFileName',
+        '$legacyRepoBase/$_runScriptName',
+        '$legacyRepoBase/camera.py',
+        '$legacyRepoBase/camera.sh',
+        '$legacyRepoBase/diag.py',
+        '$legacyRepoBase/diag.sh',
+        '$legacyRepoBase/$_legacyPythonFileName',
+        '$legacyRepoBase/$_legacyRunScriptName',
+        '$legacyRepoBase/$_olderLegacyPythonFileName',
+        '$legacyRepoBase/$_olderLegacyRunScriptName',
+        '$managedBase/$_legacyPythonFileName',
+        '$managedBase/$_legacyRunScriptName',
+        '$managedBase/$_olderLegacyPythonFileName',
+        '$managedBase/$_olderLegacyRunScriptName',
+        '$managedBase/$_legacyRevisionFileName',
+        '$managedBase/logs/$_legacyLogFileName',
+      ]);
+    }
+    return paths;
+  }
+
+  List<String> _sidecarLegacyRemovalPaths(String? repoRoot) {
+    final paths = <String>[
+      '$_legacySidecarBasePath/$_pythonFileName',
+      '$_legacySidecarBasePath/$_runScriptName',
+      '$_legacySidecarBasePath/$_legacyPythonFileName',
+      '$_legacySidecarBasePath/$_legacyRunScriptName',
+      '$_legacySidecarBasePath/$_olderLegacyPythonFileName',
+      '$_legacySidecarBasePath/$_olderLegacyRunScriptName',
+      '$_legacySidecarBasePath/$_revisionFileName',
+      '$_legacySidecarBasePath/.camera.rev',
+      '$_legacySidecarBasePath/.diag.rev',
+      '$_legacySidecarBasePath/$_legacyRevisionFileName',
+      '$_legacySidecarBasePath/$_pidFileName',
+      '$_legacySidecarBasePath/camera.pid',
+      '$_legacySidecarBasePath/diag.pid',
+      '$_legacySidecarBasePath/logs/$_logFileName',
+      '$_legacySidecarBasePath/camera.py',
+      '$_legacySidecarBasePath/camera.sh',
+      '$_legacySidecarBasePath/diag.py',
+      '$_legacySidecarBasePath/diag.sh',
+      '$_legacySidecarBasePath/diag_snapshot.json',
+      '$_legacySidecarBasePath/logs/camera.log',
+      '$_legacySidecarBasePath/logs/diag.log',
+      '$_legacySidecarBasePath/logs/$_legacyLogFileName',
+    ];
+    if (repoRoot != null) {
+      final legacyRepoBase = '$repoRoot/selfdrive/$_legacyRepoFolderName';
+      final managedBase = '$repoRoot/selfdrive/$_managedFolderName';
+      paths.addAll(<String>[
+        '$legacyRepoBase/$_pythonFileName',
+        '$legacyRepoBase/$_runScriptName',
+        '$legacyRepoBase/$_revisionFileName',
+        '$legacyRepoBase/.camera.rev',
+        '$legacyRepoBase/.diag.rev',
+        '$legacyRepoBase/$_pidFileName',
+        '$legacyRepoBase/camera.pid',
+        '$legacyRepoBase/diag.pid',
+        '$legacyRepoBase/logs/$_logFileName',
+        '$legacyRepoBase/camera.py',
+        '$legacyRepoBase/camera.sh',
+        '$legacyRepoBase/diag.py',
+        '$legacyRepoBase/diag.sh',
+        '$legacyRepoBase/diag_snapshot.json',
+        '$legacyRepoBase/logs/camera.log',
+        '$legacyRepoBase/logs/diag.log',
+        '$legacyRepoBase/$_legacyPythonFileName',
+        '$legacyRepoBase/$_legacyRunScriptName',
+        '$legacyRepoBase/$_olderLegacyPythonFileName',
+        '$legacyRepoBase/$_olderLegacyRunScriptName',
+        '$legacyRepoBase/$_legacyRevisionFileName',
+        '$legacyRepoBase/logs/$_legacyLogFileName',
+        '$managedBase/$_legacyPythonFileName',
+        '$managedBase/$_legacyRunScriptName',
+        '$managedBase/$_olderLegacyPythonFileName',
+        '$managedBase/$_olderLegacyRunScriptName',
+        '$managedBase/$_legacyRevisionFileName',
+        '$managedBase/logs/$_legacyLogFileName',
+      ]);
+    }
+    return paths;
+  }
+
+  List<String> _sidecarLegacyRuntimePatterns(String? repoRoot) {
+    final patterns = <String>[
+      _legacyManagedModule,
+      '$_legacySidecarBasePath/$_legacyPythonFileName',
+      '$_legacySidecarBasePath/$_olderLegacyPythonFileName',
+      '$_legacySidecarBasePath/$_legacyRunScriptName',
+      '$_legacySidecarBasePath/$_olderLegacyRunScriptName',
+      '$_legacySidecarBasePath/$_pythonFileName',
+      '$_legacySidecarBasePath/camera.py',
+      '$_legacySidecarBasePath/diag.py',
+      '$_legacySidecarBasePath/$_runScriptName',
+      '$_legacySidecarBasePath/camera.sh',
+      '$_legacySidecarBasePath/diag.sh',
+    ];
+    if (repoRoot != null) {
+      final legacyRepoBase = '$repoRoot/selfdrive/$_legacyRepoFolderName';
+      final managedBase = '$repoRoot/selfdrive/$_managedFolderName';
+      patterns.addAll(<String>[
+        '$legacyRepoBase/$_pythonFileName',
+        '$legacyRepoBase/camera.py',
+        '$legacyRepoBase/diag.py',
+        '$legacyRepoBase/$_legacyPythonFileName',
+        '$legacyRepoBase/$_olderLegacyPythonFileName',
+        '$legacyRepoBase/$_runScriptName',
+        '$legacyRepoBase/camera.sh',
+        '$legacyRepoBase/diag.sh',
+        '$legacyRepoBase/$_legacyRunScriptName',
+        '$legacyRepoBase/$_olderLegacyRunScriptName',
+        '$managedBase/$_legacyPythonFileName',
+        '$managedBase/$_olderLegacyPythonFileName',
+        '$managedBase/$_legacyRunScriptName',
+        '$managedBase/$_olderLegacyRunScriptName',
+      ]);
+    }
+    return patterns;
+  }
+
+  String _sidecarProcessConfigCleanupPy() {
+    return '''
+import pathlib, sys
+cfg = pathlib.Path(sys.argv[1])
+text = cfg.read_text()
+lines = text.splitlines()
+needle_module = ${jsonEncode(_legacyManagedModule)}
+removed = 0
+out = []
+for line in lines:
+    if needle_module in line:
+        removed = 1
+        continue
+    out.append(line)
+if removed:
+    cfg.write_text("\\n".join(out) + "\\n")
+print(f"cfg_removed={removed}")
+''';
   }
 
   Future<String> _resolveRemoteBase(
@@ -320,15 +662,15 @@ if [ -z "\$REPO" ] && [ "${strict ? '1' : '0'}" = "1" ]; then
   exit 2
 fi
 
-BASE="$_sidecarBasePath"
+if [ -n "\$REPO" ]; then
+  BASE="\$REPO/selfdrive/$_managedFolderName"
+else
+  BASE="$_legacySidecarBasePath"
+fi
 mkdir -p "\$BASE" "\$BASE/logs" >/dev/null 2>&1 || true
 if [ ! -d "\$BASE" ]; then
   echo "SIDECAR_BASE_NOT_FOUND"
   exit 3
-fi
-if [ -n "\$REPO" ] && [ "${strict ? '1' : '0'}" = "1" ] && [ ! -f "\$REPO/selfdrive/carrot/carrot_server.py" ]; then
-  # carrotpilot 미탑재 기기라도 사이드카 배포는 허용하되, 진단에는 힌트를 남긴다.
-  echo "CARROT_SERVER_MISSING_WARN"
 fi
 echo "\$BASE"
 ''',
@@ -370,11 +712,14 @@ echo "\$BASE"
     await _maybeCleanupLegacyInstall(ssh);
     _diag.info('sidecar', 'Deploy start');
     final remoteBase = await _resolveRemoteBase(ssh);
-    final py = _toUnixText(
-        await rootBundle.loadString('assets/sidecar/carrotlink_sidecar.py'));
-    final sh = _toUnixText(
-        await rootBundle.loadString('assets/sidecar/run_sidecar.sh'));
-    final revision = _buildRevisionFromTexts(sidecarPy: py, runScript: sh);
+    final py =
+        _toUnixText(await rootBundle.loadString('assets/sidecar/sidecar.py'));
+    final sh =
+        _toUnixText(await rootBundle.loadString('assets/sidecar/sidecar.sh'));
+    final revision = _buildRevisionFromTexts(
+      sidecarPy: py,
+      runScript: sh,
+    );
 
     final mkdir = await ssh.executeCommandResult(
       _bash(
@@ -391,16 +736,13 @@ mkdir -p "\$BASE" "\$BASE/logs"
 
     await ssh.writeTextFile('$remoteBase/$_pythonFileName', py);
     await ssh.writeTextFile('$remoteBase/$_runScriptName', sh);
-    // Keep legacy names in sync for older branches/processes.
-    await ssh.writeTextFile('$remoteBase/$_legacyPythonFileName', py);
-    await ssh.writeTextFile('$remoteBase/$_legacyRunScriptName', sh);
     await ssh.writeTextFile('$remoteBase/$_revisionFileName', '$revision\n');
 
     final chmod = await ssh.executeCommandResult(
       _bash(
         '''
 BASE=${_q(remoteBase)}
-chmod 755 "\$BASE/$_runScriptName" "\$BASE/$_pythonFileName" "\$BASE/$_legacyRunScriptName" "\$BASE/$_legacyPythonFileName"
+chmod 755 "\$BASE/$_runScriptName" "\$BASE/$_pythonFileName"
 ''',
       ),
       timeout: const Duration(seconds: 20),
@@ -422,7 +764,6 @@ chmod 755 "\$BASE/$_runScriptName" "\$BASE/$_pythonFileName" "\$BASE/$_legacyRun
       throw Exception('기기와 연결되어 있지 않습니다.');
     }
 
-    await _maybeCleanupLegacyInstall(ssh);
     final remoteBase = await _resolveRemoteBase(ssh);
     final normalizedProfile =
         _supportedProfiles.contains(profile) ? profile : _defaultProfile;
@@ -438,19 +779,11 @@ BASE=${_q(remoteBase)}
 SESSION=${_q(_sessionName)}
 PROFILE=${_q(normalizedProfile)}
 PORT=${_q(port.toString())}
-PIDFILE="\$BASE/$_pidFileName"
-LOGFILE="\$BASE/logs/$_logFileName"
+SIDE_PIDFILE="\$BASE/$_pidFileName"
+SIDE_LOGFILE="\$BASE/logs/$_logFileName"
 if [ ! -f "\$BASE/$_runScriptName" ] || [ ! -f "\$BASE/$_pythonFileName" ]; then
-  echo "SIDECAR_NOT_DEPLOYED"
+  echo "SIDECAR_ARTIFACTS_NOT_DEPLOYED"
   exit 3
-fi
-
-# Idempotent start: if healthy sidecar is already up, reuse it.
-if command -v curl >/dev/null 2>&1; then
-  if curl -fsS --max-time 1 "http://127.0.0.1:\$PORT/health" 2>/dev/null | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then
-    echo "SIDECAR_ALREADY_RUNNING profile=\$PROFILE port=\$PORT base=\$BASE"
-    exit 0
-  fi
 fi
 
 kill_pid_if_alive() {
@@ -465,110 +798,128 @@ kill_pid_if_alive() {
 }
 
 port_open() {
+  PORT_TO_CHECK="\$1"
   if ! command -v ss >/dev/null 2>&1; then
     return 1
   fi
-  ss -ltn 2>/dev/null | awk -v p=":\$PORT" '\$4 ~ (p "\$") { found=1 } END { exit(found ? 0 : 1) }'
+  ss -ltn 2>/dev/null | awk -v p=":\$PORT_TO_CHECK" '\$4 ~ (p "\$") { found=1 } END { exit(found ? 0 : 1) }'
 }
 
-if command -v tmux >/dev/null 2>&1; then
-  tmux has-session -t "\$SESSION" 2>/dev/null && tmux kill-session -t "\$SESSION" || true
-fi
-
-if [ -f "\$PIDFILE" ]; then
-  OLD_PID=\$(cat "\$PIDFILE" 2>/dev/null || true)
-  kill_pid_if_alive "\$OLD_PID"
-  rm -f "\$PIDFILE" || true
-fi
-
-if command -v ss >/dev/null 2>&1; then
-  PORT_PIDS=\$(ss -ltnp 2>/dev/null | awk -v p=":\$PORT" '
+port_pids() {
+  PORT_TO_CHECK="\$1"
+  if ! command -v ss >/dev/null 2>&1; then
+    return 0
+  fi
+  ss -ltnp 2>/dev/null | awk -v p=":\$PORT_TO_CHECK" '
     \$4 ~ (p "\$") {
       if (match(\$0, /pid=[0-9]+/)) {
         print substr(\$0, RSTART + 4, RLENGTH - 4)
       }
-    }' | sort -u || true)
-  for P in \$PORT_PIDS; do
+    }' | sort -u || true
+}
+
+health_ok() {
+  PORT_TO_CHECK="\$1"
+  EXPECT_KIND="\$2"
+  if ! command -v curl >/dev/null 2>&1; then
+    return 1
+  fi
+  curl -fsS --max-time 1 "http://127.0.0.1:\$PORT_TO_CHECK/health" 2>/dev/null | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' &&
+  curl -fsS --max-time 1 "http://127.0.0.1:\$PORT_TO_CHECK/health" 2>/dev/null | grep -Fq '"kind":"'"\$EXPECT_KIND"'"'
+}
+
+start_service() {
+  KIND="\$1"
+  SESSION_NAME="\$2"
+  RUN_SCRIPT="\$3"
+  PID_FILE="\$4"
+  LOG_FILE="\$5"
+  TARGET_PORT="\$6"
+  EXPECT_KIND="\$7"
+  EXTRA_ENV="\$8"
+
+  if command -v tmux >/dev/null 2>&1; then
+    tmux has-session -t "\$SESSION_NAME" 2>/dev/null && tmux kill-session -t "\$SESSION_NAME" || true
+  fi
+
+  if [ -f "\$PID_FILE" ]; then
+    OLD_PID=\$(cat "\$PID_FILE" 2>/dev/null || true)
+    kill_pid_if_alive "\$OLD_PID"
+    rm -f "\$PID_FILE" || true
+  fi
+
+  for P in \$(port_pids "\$TARGET_PORT"); do
     kill_pid_if_alive "\$P"
   done
-fi
 
-for i in \$(seq 1 15); do
-  if ! port_open; then
-    break
-  fi
-  sleep 0.2
-done
-
-if port_open; then
-  echo "PORT_IN_USE_BEFORE_START=\$PORT"
-  ss -ltnp 2>/dev/null | awk -v p=":\$PORT" '\$4 ~ (p "\$") { print }' || true
-  exit 5
-fi
-
-if command -v tmux >/dev/null 2>&1; then
-  tmux new-session -d -s "\$SESSION" "env CARROTLINK_SIDECAR_BASE=\$BASE CARROTLINK_SIDECAR_PROFILE=\$PROFILE CARROTLINK_SIDECAR_PORT=\$PORT bash \$BASE/$_runScriptName >> \$LOGFILE 2>&1"
-  echo "start_method=tmux"
-else
-  nohup env CARROTLINK_SIDECAR_BASE="\$BASE" CARROTLINK_SIDECAR_PROFILE="\$PROFILE" CARROTLINK_SIDECAR_PORT="\$PORT" bash "\$BASE/$_runScriptName" >> "\$LOGFILE" 2>&1 &
-  NEW_PID=\$!
-  if [ -n "\$NEW_PID" ]; then
-    echo "\$NEW_PID" > "\$PIDFILE"
-  fi
-  echo "start_method=nohup"
-fi
-
-READY=0
-if command -v curl >/dev/null 2>&1; then
-  for i in \$(seq 1 40); do
-    if curl -fsS --max-time 1 "http://127.0.0.1:\$PORT/health" 2>/dev/null | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then
-      READY=1
+  for i in \$(seq 1 15); do
+    if ! port_open "\$TARGET_PORT"; then
       break
     fi
-    sleep 0.25
+    sleep 0.2
   done
-else
-  sleep 2
-  if tmux has-session -t "\$SESSION" 2>/dev/null; then
-    READY=1
-  elif [ -f "\$PIDFILE" ]; then
-    PID=\$(cat "\$PIDFILE" 2>/dev/null || true)
-    if [ -n "\$PID" ] && kill -0 "\$PID" 2>/dev/null; then
-      READY=1
-    fi
+
+  if port_open "\$TARGET_PORT"; then
+    echo "\${KIND}_PORT_IN_USE_BEFORE_START=\$TARGET_PORT"
+    exit 5
   fi
-fi
-if [ "\$READY" -ne 1 ] && port_open; then
-  READY=1
-fi
-if [ "\$READY" -eq 1 ]; then
-  echo "SIDECAR_STARTED profile=\$PROFILE port=\$PORT base=\$BASE"
-else
-  echo "SIDECAR_START_FAILED"
+
   if command -v tmux >/dev/null 2>&1; then
-    if tmux has-session -t "\$SESSION" 2>/dev/null; then
-      echo "tmux_running=1"
-      tmux capture-pane -t "\$SESSION" -p | tail -n 40
-    else
-      echo "tmux_running=0"
-    fi
-  fi
-  if [ -f "\$PIDFILE" ]; then
-    PID=\$(cat "\$PIDFILE" 2>/dev/null || true)
-    if [ -n "\$PID" ] && kill -0 "\$PID" 2>/dev/null; then
-      echo "nohup_pid_alive=1 pid=\$PID"
-    else
-      echo "nohup_pid_alive=0 pid=\$PID"
-    fi
-  fi
-  if [ -f "\$LOGFILE" ]; then
-    echo "--- $_logFileName tail ---"
-    tail -n 80 "\$LOGFILE"
+    tmux new-session -d -s "\$SESSION_NAME" "env CARROTLINK_SIDECAR_BASE=\$BASE CARROTLINK_SIDECAR_PROFILE=\$PROFILE CARROTLINK_SIDECAR_PORT=\$PORT CARROTLINK_CAMERA_PORT=\$CAMERA_PORT \$EXTRA_ENV bash \$BASE/\$RUN_SCRIPT >> \$LOG_FILE 2>&1"
+    echo "\${KIND}_start_method=tmux"
   else
-    echo "sidecar_log_missing=\$LOGFILE"
+    nohup env CARROTLINK_SIDECAR_BASE="\$BASE" CARROTLINK_SIDECAR_PROFILE="\$PROFILE" CARROTLINK_SIDECAR_PORT="\$PORT" CARROTLINK_CAMERA_PORT="\$CAMERA_PORT" \$EXTRA_ENV bash "\$BASE/\$RUN_SCRIPT" >> "\$LOG_FILE" 2>&1 &
+    NEW_PID=\$!
+    if [ -n "\$NEW_PID" ]; then
+      echo "\$NEW_PID" > "\$PID_FILE"
+    fi
+    echo "\${KIND}_start_method=nohup"
   fi
-  exit 4
+
+  READY=0
+  if command -v curl >/dev/null 2>&1; then
+    for i in \$(seq 1 40); do
+      if health_ok "\$TARGET_PORT" "\$EXPECT_KIND"; then
+        READY=1
+        break
+      fi
+      sleep 0.25
+    done
+  else
+    sleep 2
+    if command -v tmux >/dev/null 2>&1 && tmux has-session -t "\$SESSION_NAME" 2>/dev/null; then
+      READY=1
+    elif [ -f "\$PID_FILE" ]; then
+      PID=\$(cat "\$PID_FILE" 2>/dev/null || true)
+      if [ -n "\$PID" ] && kill -0 "\$PID" 2>/dev/null; then
+        READY=1
+      fi
+    fi
+  fi
+
+  if [ "\$READY" -ne 1 ] && port_open "\$TARGET_PORT"; then
+    READY=1
+  fi
+  if [ "\$READY" -ne 1 ]; then
+    echo "\${KIND}_START_FAILED"
+    if [ -f "\$LOG_FILE" ]; then
+      echo "--- \${KIND}_log tail ---"
+      tail -n 80 "\$LOG_FILE"
+    fi
+    exit 4
+  fi
+}
+
+if health_ok "\$PORT" "carrotlink_sidecar_broker_v1"; then
+  echo "SIDECAR_ALREADY_RUNNING profile=\$PROFILE port=\$PORT base=\$BASE"
+  exit 0
 fi
+
+start_service "SIDECAR" "\$SESSION" "$_runScriptName" "\$SIDE_PIDFILE" "\$SIDE_LOGFILE" "\$PORT" "carrotlink_sidecar_broker_v1" "CARROTLINK_SIDECAR_HOST=0.0.0.0"
+
+SIDE_PORT_PIDS=\$(port_pids "\$PORT" | tr '\n' ',' | sed 's/,\$//' || true)
+echo "SIDECAR_STARTED profile=\$PROFILE port=\$PORT base=\$BASE"
+echo "sidecar_port_pids=\$SIDE_PORT_PIDS"
 ''',
       ),
       timeout: const Duration(seconds: 60),
@@ -597,7 +948,7 @@ fi
 BASE=${_q(remoteBase)}
 SESSION=${_q(_sessionName)}
 PORT=${_q(port.toString())}
-PIDFILE="\$BASE/$_pidFileName"
+SIDE_PIDFILE="\$BASE/$_pidFileName"
 STOPPED=0
 
 kill_pid_if_alive() {
@@ -612,10 +963,11 @@ kill_pid_if_alive() {
 }
 
 port_open() {
+  PORT_TO_CHECK="\$1"
   if ! command -v ss >/dev/null 2>&1; then
     return 1
   fi
-  ss -ltn 2>/dev/null | awk -v p=":\$PORT" '\$4 ~ (p "\$") { found=1 } END { exit(found ? 0 : 1) }'
+  ss -ltn 2>/dev/null | awk -v p=":\$PORT_TO_CHECK" '\$4 ~ (p "\$") { found=1 } END { exit(found ? 0 : 1) }'
 }
 
 if command -v tmux >/dev/null 2>&1; then
@@ -624,22 +976,22 @@ if command -v tmux >/dev/null 2>&1; then
     STOPPED=1
   fi
 fi
-if [ -f "\$PIDFILE" ]; then
-  PID=\$(cat "\$PIDFILE" 2>/dev/null || true)
+if [ -f "\$SIDE_PIDFILE" ]; then
+  PID=\$(cat "\$SIDE_PIDFILE" 2>/dev/null || true)
   if [ -n "\$PID" ] && kill -0 "\$PID" 2>/dev/null; then
     kill_pid_if_alive "\$PID"
     STOPPED=1
   fi
-  rm -f "\$PIDFILE" || true
+  rm -f "\$SIDE_PIDFILE" || true
 fi
 
 if command -v ss >/dev/null 2>&1; then
-  PORT_PIDS=\$(ss -ltnp 2>/dev/null | awk -v p=":\$PORT" '
+  PORT_PIDS="\$(ss -ltnp 2>/dev/null | awk -v p=":\$PORT" '
     \$4 ~ (p "\$") {
       if (match(\$0, /pid=[0-9]+/)) {
         print substr(\$0, RSTART + 4, RLENGTH - 4)
       }
-    }' | sort -u || true)
+    }' | sort -u || true)"
   for P in \$PORT_PIDS; do
     kill_pid_if_alive "\$P"
     STOPPED=1
@@ -647,22 +999,18 @@ if command -v ss >/dev/null 2>&1; then
 fi
 
 for i in \$(seq 1 20); do
-  if ! port_open; then
+  if ! port_open "\$PORT"; then
     break
   fi
   sleep 0.2
 done
 
-LISTEN=0
-if port_open; then
-  LISTEN=1
-fi
 if [ "\$STOPPED" -eq 1 ]; then
   echo "SIDECAR_STOPPED"
 else
   echo "SIDECAR_NOT_RUNNING"
 fi
-echo "port_open=\$LISTEN"
+echo "port_open=\$(if port_open "\$PORT"; then echo 1; else echo 0; fi)"
 ''',
       ),
       timeout: const Duration(seconds: 15),
@@ -724,7 +1072,7 @@ if command -v ss >/dev/null 2>&1; then
       if (match(\$0, /pid=[0-9]+/)) {
         print substr(\$0, RSTART + 4, RLENGTH - 4)
       }
-    }' | sort -u | tr '\n' ',' | sed 's/,\$//' || true)
+    }' | sort -u | tr '\\n' ',' | sed 's/,\$//' || true)
 fi
 if [ "\$RUNNING" -eq 0 ] && [ "\$LISTEN" -eq 1 ]; then
   RUNNING=1
@@ -743,7 +1091,7 @@ else
   echo "py_updated_epoch="
 fi
 if [ -f "\$REVFILE" ]; then
-  echo "remote_revision=\$(tr -d '\r' < "\$REVFILE" | head -n 1)"
+  echo "remote_revision=\$(tr -d '\\r' < "\$REVFILE" | head -n 1)"
   echo "rev_updated_epoch=\$(file_mtime "\$REVFILE")"
 else
   echo "remote_revision="
@@ -867,16 +1215,16 @@ BASE=${_q(remoteBase)}
 PORT=${_q(port.toString())}
 
 # Remove current and legacy sidecar artifacts
-rm -f "\$BASE/$_pythonFileName" "\$BASE/$_runScriptName" "\$BASE/$_revisionFileName" "\$BASE/$_pidFileName" "\$BASE/logs/$_logFileName" "\$BASE/carrotlink_sidecar.py" "\$BASE/run_sidecar.sh" "\$BASE/logs/sidecar.log"
+rm -f "\$BASE/$_pythonFileName" "\$BASE/$_runScriptName" "\$BASE/$_revisionFileName" "\$BASE/$_pidFileName" "\$BASE/logs/$_logFileName" "\$BASE/$_legacyPythonFileName" "\$BASE/$_legacyRunScriptName" "\$BASE/$_olderLegacyPythonFileName" "\$BASE/$_olderLegacyRunScriptName" "\$BASE/$_legacyRevisionFileName" "\$BASE/logs/$_legacyLogFileName"
 
 # Cleanup any lingering listeners
 if command -v ss >/dev/null 2>&1; then
-  PORT_PIDS=\$(ss -ltnp 2>/dev/null | awk -v p=":\$PORT" '
+  PORT_PIDS="\$(ss -ltnp 2>/dev/null | awk -v p=":\$PORT" '
     \$4 ~ (p "\$") {
       if (match(\$0, /pid=[0-9]+/)) {
         print substr(\$0, RSTART + 4, RLENGTH - 4)
       }
-    }' | sort -u || true)
+    }' | sort -u || true)"
   for P in \$PORT_PIDS; do
     kill "\$P" 2>/dev/null || true
     sleep 0.1

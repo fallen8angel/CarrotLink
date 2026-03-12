@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import '../../../../services/native_overlay_hud_service.dart';
 import '../../../../services/ssh_service.dart';
 import '../../application/hud_controller_state.dart';
+import '../../application/hud_runtime_manager.dart';
 import '../../domain/entities/original_hud_snapshot.dart';
 import '../models/hud_layout_profile.dart';
 import 'adaptive_hud_panel.dart';
@@ -45,13 +46,55 @@ class AdaptiveHudHost extends StatelessWidget {
         fillParent: fillParent,
         matchParentWidth: matchParentWidth,
         preferStateShell: false,
-        stateTitle: 'HUD 대기',
-        stateMessage: preview ? '미리보기 준비 중입니다.' : '기기 연결 후 HUD를 표시합니다.',
+      );
+    }
+
+    final runtime = preview ? null : _resolveRuntimeManager(context);
+    if (runtime != null) {
+      return AnimatedBuilder(
+        animation: runtime,
+        builder: (context, _) {
+          final controller = runtime.controller;
+          if (controller == null) {
+            return AdaptiveHudPanel(
+              snapshot: OriginalHudSnapshot.empty,
+              surface: surface,
+              fillParent: fillParent,
+              matchParentWidth: matchParentWidth,
+              preferStateShell: false,
+            );
+          }
+          return AnimatedBuilder(
+            animation: controller,
+            builder: (context, __) {
+              final state = controller.state;
+              final snapshot = state.snapshot;
+              final viewState = _HudHostViewState.fromControllerState(
+                state,
+                preview: preview,
+              );
+              return _HudSnapshotCallbackBridge(
+                snapshot: snapshot,
+                fallbackHost: resolvedHost,
+                syncNativeOverlay: syncNativeOverlay,
+                onSnapshot: onSnapshot,
+                child: AdaptiveHudPanel(
+                  snapshot: snapshot,
+                  surface: surface,
+                  fillParent: fillParent,
+                  matchParentWidth: matchParentWidth,
+                  preferStateShell: viewState.preferStateShell,
+                ),
+              );
+            },
+          );
+        },
       );
     }
 
     return HudControllerBuilder(
       host: resolvedHost,
+      clientRole: _resolveClientRole(surface),
       preview: preview,
       sshService: _resolveSshService(context),
       builder: (context, controller, state) {
@@ -71,8 +114,6 @@ class AdaptiveHudHost extends StatelessWidget {
             fillParent: fillParent,
             matchParentWidth: matchParentWidth,
             preferStateShell: viewState.preferStateShell,
-            stateTitle: viewState.title,
-            stateMessage: viewState.message,
           ),
         );
       },
@@ -98,17 +139,28 @@ class AdaptiveHudHost extends StatelessWidget {
     if (!ipv4.hasMatch(ip)) return null;
     return ip;
   }
+
+  SharedRuntimeManager? _resolveRuntimeManager(BuildContext context) {
+    try {
+      return Provider.of<SharedRuntimeManager>(context, listen: false);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String _resolveClientRole(HudSurfaceVariant surface) {
+    // In-app HUD should share one transport session per host. Surface differences
+    // are purely presentational; splitting transport by home/drive made HUD feel
+    // like it was constantly reinitializing on tab/route changes.
+    return 'app_hud';
+  }
 }
 
 class _HudHostViewState {
   final bool preferStateShell;
-  final String? title;
-  final String? message;
 
   const _HudHostViewState({
     required this.preferStateShell,
-    this.title,
-    this.message,
   });
 
   factory _HudHostViewState.fromControllerState(
@@ -120,24 +172,12 @@ class _HudHostViewState {
       return const _HudHostViewState(preferStateShell: false);
     }
     if (state.isLoading == true) {
-      return _HudHostViewState(
-        preferStateShell: false,
-        title: preview ? 'HUD 미리보기' : 'HUD 연결 중',
-        message: preview ? '미리보기 샘플을 준비하는 중입니다.' : '콤마 HUD 의미 데이터를 수신하는 중입니다.',
-      );
+      return const _HudHostViewState(preferStateShell: false);
     }
     if (state.lastError != null) {
-      return _HudHostViewState(
-        preferStateShell: false,
-        title: 'HUD 연결 실패',
-        message: '${state.host ?? '기기'}에서 HUD 데이터를 불러오지 못했습니다.',
-      );
+      return const _HudHostViewState(preferStateShell: false);
     }
-    return _HudHostViewState(
-      preferStateShell: false,
-      title: preview ? 'HUD 미리보기' : 'HUD 대기',
-      message: preview ? '미리보기 데이터 대기 중입니다.' : 'HUD 의미 데이터가 아직 도착하지 않았습니다.',
-    );
+    return const _HudHostViewState(preferStateShell: false);
   }
 }
 

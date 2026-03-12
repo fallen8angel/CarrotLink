@@ -2,7 +2,7 @@
 
 최종 분석일: 2026-03-10  
 최종 업데이트: 2026-03-10  
-대상 경로: `E:\CarrotLink\CarrotLink`
+대상 경로: `D:\CarrotLink\CarrotLink-dev`
 
 이 문서는 `stock` 주행모드 원격 카메라 화면 위에 YOLO26 객체감지를 얹을 때의 1차 통합 계획을 정리한다.
 
@@ -17,6 +17,12 @@
 - 1차 목적은 사용자가 체감하는 `부드러움`, `가독성`, `좋은 그래픽 경험`이다.
 - 1차 모델은 `YOLO26n`이다.
 - `YOLO26s`는 벤치 통과 후 병행 옵션으로 확장한다.
+
+비가역 원칙:
+
+- 기존 stock/openpilot 그래픽의 무결성은 절대 깨지면 안 된다.
+- YOLO는 반드시 `fail-open side-channel`로 붙는다.
+- YOLO가 늦거나, stale하거나, parser가 실패하면 `YOLO box만 버리고` 기존 그래픽은 유지한다.
 
 ## 1. 1차 목표
 
@@ -96,6 +102,12 @@
 - `Kalman`은 box geometry용으로 쓰고, semantic state를 그대로 묶지 않는다.
 - 신호 상태는 geometry smoothing보다 더 보수적으로 설계한다.
 
+### 4.1 draw gating 원칙
+
+- detection은 `frameId` 또는 그에 준하는 rendered timestamp 기준으로 stale 판정을 둔다.
+- stale detection은 fade-out 또는 drop만 하고, 기존 overlay sync는 건드리지 않는다.
+- YOLO는 tracker가 있더라도 기존 `strictFrameLock` 경로를 우회/변경하지 않는다.
+
 ## 5. stock 좌표/맵핑 원칙
 
 YOLO 객체감지는 1차에서 `3D world projection`이 아니라 `2D source pixel -> placed canvas` 문제로 다룬다.
@@ -157,6 +169,8 @@ YOLO box는 세 경우 모두 아래 규칙을 따른다.
 - detection result는 반드시 `frameId`를 가진다.
 - draw 시 `camera_frame`과의 차이를 기록한다.
 - stale / frame gap이 크면 hide 또는 alpha down 한다.
+- YOLO sampling용 synthetic id는 내부 추론/샘플링 전용으로만 쓰고,
+- 기존 화면 sync용 `camera_frame` 이벤트에는 절대 섞지 않는다.
 
 ## 6. UI/토글 정책
 
@@ -206,6 +220,13 @@ YOLO box는 세 경우 모두 아래 규칙을 따른다.
 - runtime:
   - `ExecuTorch + QNN backend`
 
+현재 구현 상태 보정:
+
+- 현재 앱은 generic ExecuTorch bring-up까지는 성공했다.
+- 현재 `runtimeBackend=executorch_qnn`은 목표 문자열이며, 진짜 QNN-lowered runtime은 아직 다음 단계다.
+- 따라서 parser/draw 안정화 전까지는 generic ExecuTorch path를 기준으로 기능을 완성하고,
+- 그 뒤 QNN path를 병행/치환하는 순서가 맞다.
+
 2차 확장안:
 
 - `YOLO26s`
@@ -244,6 +265,12 @@ YOLO box는 세 경우 모두 아래 규칙을 따른다.
 - `YOLO26n + ExecuTorch + QNN backend`
 - 추후 benchmark 통과 기기에서 `YOLO26s` 병행
 - ORT + QNN은 fallback / 비교 benchmark 용도로만 유지
+
+현 시점 추가 원칙:
+
+- generic ExecuTorch path와 QNN path를 논리적으로 분리한다.
+- parser / projection / draw / tracking은 backend와 독립적으로 동작해야 한다.
+- backend 교체가 기존 overlay 정합에 영향을 주면 구조가 잘못된 것으로 본다.
 
 ## 9. 신호등 인식과 openpilot 활용 여지
 

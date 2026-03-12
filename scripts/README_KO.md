@@ -2,6 +2,8 @@
 
 `scripts/build_dev_apk.ps1`와 `scripts/apk_menu.ps1`는 Android APK 빌드/설치 자동화를 위한 스크립트입니다.
 
+`scripts/export_yolo_executorch.py`는 로컬 `yolo26n.pt`, `yolo26s.pt` 같은 Ultralytics 가중치를 ExecuTorch `.pte`로 export하고, 생성된 `.pte`를 `assets/models`로 복사하는 보조 스크립트입니다.
+
 ## 1) 메뉴형 실행
 
 ```powershell
@@ -67,4 +69,35 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_dev_apk.ps1 `
   -BuildMode release -Install -PromptDevice `
   -DartDefine APP_ENV=dev,HUD=true `
   -ExtraBuildArg --verbose
+```
+
+## 5) YOLO -> ExecuTorch export
+
+기본 `416x416`, batch 1로 `yolo26n.pt`를 export하고 앱 asset 경로까지 복사:
+
+```powershell
+python .\scripts\export_yolo_executorch.py .\scripts\yolo26n.pt
+```
+
+`yolo26n.pt`, `yolo26s.pt`를 같이 export:
+
+```powershell
+python .\scripts\export_yolo_executorch.py .\scripts\yolo26n.pt .\scripts\yolo26s.pt
+```
+
+주의:
+
+- 현재 Ultralytics ExecuTorch export는 `torch>=2.9.0`, Python `executorch==1.0.0`, `flatbuffers`, `setuptools<71.0.0` 환경이 필요합니다.
+- 앱 Android runtime AAR과 Python export runtime은 별개이므로, export는 전용 venv에서 돌리는 편이 안전합니다.
+- Windows에서는 `flatc.exe`가 필요합니다. 스크립트는 아래 순서로 찾습니다.
+  - `--flatc <path>`
+  - `FLATC_EXECUTABLE`
+  - `tools/flatbuffers/flatc.exe`
+- 예시 전용 venv:
+
+```powershell
+python -m venv .venv-yolo-export
+.\.venv-yolo-export\Scripts\python.exe -m pip install --upgrade pip
+.\.venv-yolo-export\Scripts\python.exe -m pip install "setuptools<71.0.0" flatbuffers executorch==1.0.0 "torch>=2.9.0" "ultralytics[export]"
+.\.venv-yolo-export\Scripts\python.exe -m pip install ultralytics==8.3.234 --no-deps
 ```

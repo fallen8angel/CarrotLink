@@ -34,9 +34,6 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
     if (!_hudModeLoaded) {
       return const ColoredBox(color: Colors.black);
     }
-    if (_openpilotOverlayMode && !_sidecarConnected) {
-      return const ColoredBox(color: Colors.black);
-    }
     if (_useNativeLiveCamera) {
       return AndroidView(
         key: ValueKey<String>(

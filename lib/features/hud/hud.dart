@@ -1,6 +1,7 @@
 export 'application/hud_controller.dart';
 export 'application/hud_controller_state.dart';
 export 'application/hud_module.dart';
+export 'application/hud_runtime_manager.dart';
 export 'data/adapters/hud_ssh_fallback_metrics_adapter.dart';
 export 'data/datasources/hud_fallback_metrics_data_source.dart';
 export 'data/datasources/hud_preview_data_source.dart';

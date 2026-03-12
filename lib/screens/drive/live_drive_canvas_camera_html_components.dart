@@ -2,13 +2,9 @@ part of 'live_drive_canvas_screen.dart';
 
 extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
   String _buildLiveCameraHtmlImpl(_DriveCameraKind cameraKind) {
-    final streamEndpoints = jsonEncode(
-      _streamEndpointCandidates.map((u) => u.toString()).toList(),
-    );
     final cameraName =
         cameraKind == _DriveCameraKind.wideRoad ? 'wideRoad' : 'road';
     final directWsUrl = 'ws://$_hostIp:7766/ws/camera/$cameraName';
-    final modePolicy = _openpilotOverlayMode ? 'sidecar_only' : 'webrtc_only';
     return '''
 <!doctype html>
 <html>
@@ -45,64 +41,32 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
       transform: translateZ(0);
       will-change: transform;
     }
-    #v {
-      position: fixed;
-      inset: 0;
-      width: 100vw;
-      height: 100vh;
-      object-fit: cover;
-      display: none;
-      background: #000;
-      z-index: 2;
-      backface-visibility: hidden;
-      transform: translateZ(0);
-      will-change: transform;
-    }
-    #v::-webkit-media-controls,
-    #v::-webkit-media-controls-enclosure,
-    #v::-webkit-media-controls-panel,
-    #v::-webkit-media-controls-start-playback-button {
-      display: none !important;
-      -webkit-appearance: none !important;
-      opacity: 0 !important;
-      visibility: hidden !important;
-      pointer-events: none !important;
-    }
   </style>
 </head>
 <body>
   <div id="root">
     <canvas id="c"></canvas>
-    <video id="v" autoplay playsinline muted></video>
   </div>
   <script>
     const DIRECT_WS_URL = ${jsonEncode(directWsUrl)};
     const CAMERA_NAME = ${jsonEncode(cameraName)};
-    const STREAM_ENDPOINTS = $streamEndpoints;
     const CODEC_CANDIDATES = ['avc1.640028', 'avc1.64001f', 'avc1.4d401f', 'avc1.42e01f', 'avc1.42e01e'];
-    const MODE_POLICY = ${jsonEncode(modePolicy)};
-    const ALLOW_DIRECT = MODE_POLICY === 'sidecar_only';
-    const ALLOW_WEBRTC = MODE_POLICY === 'webrtc_only';
+    const DIRECT_STARTUP_TIMEOUT_MS = 2200;
     const ENABLE_SHARPEN = ${_LiveDriveCanvasScreenState._webCameraSharpenEnabled ? 'true' : 'false'};
 
     const canvas = document.getElementById('c');
     const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
-    const video = document.getElementById('v');
     const DEVICE_MEMORY_GB = Number(navigator.deviceMemory || 0);
     const CPU_THREADS = Number(navigator.hardwareConcurrency || 0);
 
     let ws = null;
-    let pc = null;
     let decoder = null;
     let decoderCodec = '';
     let waitingKey = true;
     let gotFrame = false;
     let watchdog = null;
     let reconnectTimer = null;
-    let directProbeTimer = null;
-    let mode = ALLOW_DIRECT ? 'direct' : 'webrtc';
     let directErrorCount = 0;
-    let webCodecsUnsupported = false;
     let lastDirectFrameId = -1;
     let droppedOutdated = 0;
     let droppedQueue = 0;
@@ -110,20 +74,7 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
     let sourceH = 0;
     let lastCameraFramePosted = -1;
     let renderDpr = 1.0;
-    let webrtcVideoReady = false;
     const pendingFrameIds = [];
-
-    try {
-      video.controls = false;
-      video.disablePictureInPicture = true;
-      video.playsInline = true;
-      video.autoplay = true;
-      video.muted = true;
-      video.setAttribute('playsinline', '');
-      video.setAttribute('webkit-playsinline', '');
-      video.setAttribute('disablePictureInPicture', '');
-      video.setAttribute('controlsList', 'nodownload noplaybackrate noremoteplayback nofullscreen');
-    } catch (_) {}
 
     function computeRenderDpr() {
       const base = Number(window.devicePixelRatio || 1);
@@ -164,30 +115,6 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
       try { ctx.imageSmoothingEnabled = true; } catch (_) {}
       try { ctx.imageSmoothingQuality = renderDpr > 1.25 ? 'medium' : 'high'; } catch (_) {}
       applySharpenFilter();
-    }
-
-    function updatePresentation() {
-      if (mode === 'direct') {
-        canvas.style.display = 'block';
-        canvas.style.opacity = '1';
-        video.style.display = 'none';
-        video.style.opacity = '0';
-        return;
-      }
-      const showVideo = webrtcVideoReady;
-      canvas.style.display = showVideo ? 'none' : 'block';
-      canvas.style.opacity = '1';
-      video.style.display = showVideo ? 'block' : 'none';
-      video.style.opacity = showVideo ? '1' : '0';
-    }
-
-    function setMode(next) {
-      mode = next;
-      if (next === 'direct') {
-        webrtcVideoReady = false;
-        try { video.pause(); } catch (_) {}
-      }
-      updatePresentation();
     }
 
     function postToFlutter(payload) {
@@ -248,36 +175,11 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
       }
     }
 
-    function clearDirectProbe() {
-      if (directProbeTimer) {
-        clearTimeout(directProbeTimer);
-        directProbeTimer = null;
-      }
-    }
-
-    function scheduleDirectProbe(ms) {
-      if (!ALLOW_DIRECT) return;
-      clearDirectProbe();
-      if (webCodecsUnsupported) return;
-      directProbeTimer = setTimeout(() => {
-        directProbeTimer = null;
-        if (mode === 'webrtc' && ALLOW_DIRECT) {
-          connectDirect().catch(() => {});
-        }
-      }, ms || 8000);
-    }
-
     function scheduleReconnect(ms) {
       clearReconnect();
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
-        if (mode === 'direct' && ALLOW_DIRECT) {
-          connectDirect().catch(() => {});
-        } else if (ALLOW_WEBRTC) {
-          connectWebRtc().catch(() => {});
-        } else if (ALLOW_DIRECT) {
-          connectDirect().catch(() => {});
-        }
+        connectDirect().catch(() => {});
       }, ms || 900);
     }
 
@@ -289,45 +191,19 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
     }
 
     function armWatchdog() {
-      if (!ALLOW_DIRECT) return;
       clearWatchdog();
       watchdog = setTimeout(() => {
-        if (!gotFrame && mode === 'direct' && ALLOW_DIRECT) {
+        if (!gotFrame) {
           postToFlutter(payloadWithCamera({ type: 'camera_error', reason: 'no_frames' }));
-          if (ALLOW_WEBRTC) {
-            fallbackToWebRtc('no_frames');
-          } else {
-            scheduleReconnect(900);
-          }
+          scheduleReconnect(900);
         }
-      }, 4500);
+      }, DIRECT_STARTUP_TIMEOUT_MS);
     }
 
     function cleanupSocket() {
       clearWatchdog();
       try { if (ws) ws.close(); } catch (_) {}
       ws = null;
-    }
-
-    function cleanupPc() {
-      try { if (pc) pc.close(); } catch (_) {}
-      pc = null;
-      try { video.srcObject = null; } catch (_) {}
-      webrtcVideoReady = false;
-      updatePresentation();
-    }
-
-    function publishVideoSize() {
-      const w = Number(video.videoWidth || 0);
-      const h = Number(video.videoHeight || 0);
-      if (w > 0 && h > 0) publishSourceSize(w, h);
-    }
-
-    function webrtcSessionHealthy() {
-      if (!pc) return false;
-      const st = String(pc.connectionState || '');
-      if (st !== 'connected' && st !== 'connecting') return false;
-      return !!video.srcObject;
     }
 
     function normalizeTimestamp(rawTs) {
@@ -525,11 +401,7 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
               payloadWithCamera({ type: 'camera_error', reason: 'decoder_error' }),
             );
             closeDecoder();
-            if (directErrorCount >= 2) {
-              fallbackToWebRtc('decoder_error');
-            } else {
-              scheduleReconnect(900);
-            }
+            scheduleReconnect(900);
           }
         });
         decoder.configure({
@@ -545,61 +417,22 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
       }
     }
 
-    function fallbackToWebRtc(reason) {
-      cleanupSocket();
-      closeDecoder();
-      if (!ALLOW_WEBRTC) {
-        setMode('direct');
-        postToFlutter(
-          payloadWithCamera({
-            type: 'camera_error',
-            reason: 'direct_only_reconnect:' + String(reason || 'unknown'),
-          }),
-        );
-        scheduleReconnect(900);
-        return;
-      }
-      setMode('webrtc');
-      postToFlutter(
-        payloadWithCamera({
-          type: 'camera_error',
-          reason: 'fallback_webrtc:' + String(reason || 'unknown'),
-        }),
-      );
-      connectWebRtc().catch(() => {});
-      scheduleDirectProbe(8000);
-    }
-
     async function connectDirect() {
-      if (!ALLOW_DIRECT) {
-        if (ALLOW_WEBRTC) {
-          connectWebRtc().catch(() => {});
-        }
-        return;
-      }
-      cleanupPc();
       cleanupSocket();
       closeDecoder();
       gotFrame = false;
       directErrorCount = 0;
-      setMode('direct');
 
       if (!window.VideoDecoder || !window.EncodedVideoChunk) {
-        webCodecsUnsupported = true;
-        if (ALLOW_WEBRTC) {
-          fallbackToWebRtc('webcodecs_unsupported');
-        } else {
-          postToFlutter(
-            payloadWithCamera({
-              type: 'camera_error',
-              reason: 'webcodecs_unsupported',
-            }),
-          );
-          scheduleReconnect(1500);
-        }
+        postToFlutter(
+          payloadWithCamera({
+            type: 'camera_error',
+            reason: 'webcodecs_unsupported',
+          }),
+        );
+        scheduleReconnect(1500);
         return;
       }
-      webCodecsUnsupported = false;
 
       armWatchdog();
       try {
@@ -607,7 +440,6 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
         ws.binaryType = 'arraybuffer';
         ws.onopen = () => {
           armWatchdog();
-          clearDirectProbe();
         };
         ws.onmessage = async (event) => {
           if (typeof event.data === 'string') return;
@@ -615,17 +447,13 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
           if (!parsed) return;
           const meta = parsed.meta || {};
           if (!(await ensureDecoder(meta.codec))) {
-            if (ALLOW_WEBRTC) {
-              fallbackToWebRtc('decoder_unsupported');
-            } else {
-              postToFlutter(
-                payloadWithCamera({
-                  type: 'camera_error',
-                  reason: 'decoder_unsupported',
-                }),
-              );
-              scheduleReconnect(900);
-            }
+            postToFlutter(
+              payloadWithCamera({
+                type: 'camera_error',
+                reason: 'decoder_unsupported',
+              }),
+            );
+            scheduleReconnect(900);
             return;
           }
 
@@ -675,183 +503,42 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
           }
         };
         ws.onerror = () => {
-          if (ALLOW_WEBRTC) {
-            fallbackToWebRtc('socket_error');
-          } else {
-            postToFlutter(
-              payloadWithCamera({
-                type: 'camera_error',
-                reason: 'socket_error',
-              }),
-            );
-            scheduleReconnect(900);
-          }
-        };
-        ws.onclose = () => {
-          if (mode === 'direct') {
-            scheduleReconnect(gotFrame ? 700 : 1000);
-          }
-        };
-      } catch (_) {
-        if (ALLOW_WEBRTC) {
-          fallbackToWebRtc('socket_open_failed');
-        } else {
           postToFlutter(
             payloadWithCamera({
               type: 'camera_error',
-              reason: 'socket_open_failed',
+              reason: 'socket_error',
             }),
           );
-          scheduleReconnect(1100);
-        }
-      }
-    }
-
-    async function waitIceComplete(timeoutMs) {
-      if (!pc || pc.iceGatheringState === 'complete') return;
-      await new Promise((resolve) => {
-        const t = setTimeout(resolve, timeoutMs || 8000);
-        const onChange = () => {
-          if (!pc || pc.iceGatheringState === 'complete') {
-            try { pc.removeEventListener('icegatheringstatechange', onChange); } catch (_) {}
-            clearTimeout(t);
-            resolve();
-          }
+          scheduleReconnect(900);
         };
-        pc.addEventListener('icegatheringstatechange', onChange);
-      });
-    }
-
-    async function connectWebRtc() {
-      if (!ALLOW_WEBRTC) {
-        if (ALLOW_DIRECT) {
-          connectDirect().catch(() => {});
-        }
-        return;
-      }
-      cleanupPc();
-      setMode('webrtc');
-      try {
-        pc = new RTCPeerConnection({
-          iceServers: [],
-          sdpSemantics: 'unified-plan',
-          iceCandidatePoolSize: 1
-        });
-        pc.addTransceiver('video', { direction: 'recvonly' });
-
-        pc.ontrack = async (ev) => {
-          const stream = (ev.streams && ev.streams[0]) ? ev.streams[0] : new MediaStream([ev.track]);
-          video.srcObject = stream;
-          try { await video.play(); } catch (_) {}
-          setTimeout(() => {
-            publishVideoSize();
-          }, 100);
+        ws.onclose = () => {
+          scheduleReconnect(gotFrame ? 700 : 1000);
         };
-
-        pc.onconnectionstatechange = () => {
-          const st = pc ? pc.connectionState : 'closed';
-          if (st === 'failed' || st === 'disconnected' || st === 'closed') {
-            cleanupPc();
-            scheduleReconnect(1500);
-          }
-        };
-
-        pc.oniceconnectionstatechange = () => {
-          const st = pc ? pc.iceConnectionState : 'closed';
-          if (st === 'failed' || st === 'disconnected' || st === 'closed') {
-            cleanupPc();
-            scheduleReconnect(1500);
-          }
-        };
-
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        await waitIceComplete(8000);
-
-        let ans = null;
-        let lastErr = 'no endpoint';
-        for (const endpoint of STREAM_ENDPOINTS) {
-          try {
-            const r = await fetch(endpoint, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                sdp: pc.localDescription.sdp,
-                cameras: [CAMERA_NAME],
-                bridge_services_in: [],
-                bridge_services_out: []
-              })
-            });
-            if (!r.ok) {
-              lastErr = endpoint + ' http ' + r.status;
-              continue;
-            }
-            const body = await r.json();
-            if (body && body.sdp) {
-              ans = body;
-              break;
-            }
-            lastErr = endpoint + ' invalid answer';
-          } catch (e) {
-            lastErr = endpoint + ' ' + (e && e.message ? e.message : String(e));
-          }
-        }
-        if (!ans || !ans.sdp) throw new Error(lastErr);
-        await pc.setRemoteDescription({ type: ans.type || 'answer', sdp: ans.sdp });
       } catch (_) {
-        cleanupPc();
-        scheduleReconnect(2000);
+        postToFlutter(
+          payloadWithCamera({
+            type: 'camera_error',
+            reason: 'socket_open_failed',
+          }),
+        );
+        scheduleReconnect(1100);
       }
     }
 
     resizeCanvas();
-    updatePresentation();
-    video.addEventListener('loadedmetadata', () => {
-      publishVideoSize();
-    });
-    video.addEventListener('loadeddata', publishVideoSize);
-    video.addEventListener('canplay', publishVideoSize);
-    video.addEventListener('playing', () => {
-      webrtcVideoReady = true;
-      updatePresentation();
-      publishVideoSize();
-    });
-    video.addEventListener('emptied', () => {
-      if (mode !== 'webrtc') return;
-      webrtcVideoReady = false;
-      updatePresentation();
-    });
-    video.addEventListener('resize', () => {
-      publishVideoSize();
-    });
     window.addEventListener('resize', resizeCanvas);
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) return;
-      if (mode === 'direct' && ALLOW_DIRECT) {
-        if (!ws || !gotFrame) {
-          connectDirect().catch(() => {});
-        }
-      } else if (ALLOW_WEBRTC) {
-        if (webrtcSessionHealthy()) {
-          try { video.play(); } catch (_) {}
-          updatePresentation();
-        } else {
-          connectWebRtc().catch(() => {});
-        }
+      if (!ws || !gotFrame) {
+        connectDirect().catch(() => {});
       }
     });
     window.addEventListener('beforeunload', () => {
       cleanupSocket();
       closeDecoder();
-      cleanupPc();
       clearReconnect();
-      clearDirectProbe();
     });
-    if (ALLOW_DIRECT) {
-      connectDirect().catch(() => scheduleReconnect(1200));
-    } else if (ALLOW_WEBRTC) {
-      connectWebRtc().catch(() => scheduleReconnect(1200));
-    }
+    connectDirect().catch(() => scheduleReconnect(1200));
   </script>
 </body>
 </html>

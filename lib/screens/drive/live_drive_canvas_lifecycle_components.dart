@@ -52,7 +52,8 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
   void _scheduleSuspendForBackground() {
     if (_cameraSuspendedByLifecycle) return;
     _cancelLifecycleSuspendTimer();
-    _lifecycleSuspendTimer = Timer(_LiveDriveCanvasScreenState._lifecycleSuspendDelay, () {
+    _lifecycleSuspendTimer =
+        Timer(_LiveDriveCanvasScreenState._lifecycleSuspendDelay, () {
       _lifecycleSuspendTimer = null;
       if (!mounted) return;
       _suspendForBackground();
@@ -78,7 +79,8 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
 
   void _scheduleBackgroundUiReset() {
     _cancelBackgroundUiResetTimer();
-    _backgroundUiResetTimer = Timer(_LiveDriveCanvasScreenState._backgroundUiResetGrace, () {
+    _backgroundUiResetTimer =
+        Timer(_LiveDriveCanvasScreenState._backgroundUiResetGrace, () {
       _backgroundUiResetTimer = null;
       if (!mounted || !_cameraSuspendedByLifecycle) return;
       _backgroundUiResetDone = true;
@@ -90,9 +92,14 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
     _stopSidecarLoop();
     _lastCameraFrameId = null;
     _lastCameraFrameEventUs = 0;
+    _startupProvisionalSyncEnabled = false;
+    _startupProvisionalSyncUntilUs = 0;
+    _startupNativeFrameSettleCount = 0;
     _lastPublishedModelFrameId = null;
     _lastSyncHitUs = 0;
+    _lastOverlayPublishUs = 0;
     _lastSyncedArrivalUs = 0;
+    _clearOverlayStaleState();
     _latestOverlaySnapshot = const _DriveOverlaySnapshot.empty();
     _overlayByModelFrame.clear();
     _overlayFrameOrder.clear();
@@ -125,8 +132,8 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
       'defer stop ${_LiveDriveCanvasScreenState._backgroundProcessKeepAlive.inSeconds}s',
     );
     _sidecarScheduledStopReason = 'background';
-    _sidecarScheduledStopAt =
-        DateTime.now().add(_LiveDriveCanvasScreenState._backgroundProcessKeepAlive);
+    _sidecarScheduledStopAt = DateTime.now()
+        .add(_LiveDriveCanvasScreenState._backgroundProcessKeepAlive);
     _sidecarProcessStopTimer = Timer(
       _LiveDriveCanvasScreenState._backgroundProcessKeepAlive,
       () {
@@ -140,7 +147,7 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
           message: '백그라운드 유지 시간이 지나 사이드카를 중지합니다.',
         );
         _stopSidecarLoop();
-        unawaited(_stopSidecarProcessIfNeeded(force: true));
+        unawaited(_stopSidecarProcessIfNeeded());
       },
     );
   }
@@ -152,8 +159,8 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
         _sidecarProcessSnapshot['listening'] == '1';
     if (!hadRuntime) return;
     _sidecarScheduledStopReason = 'idle';
-    _sidecarScheduledStopAt =
-        DateTime.now().add(_LiveDriveCanvasScreenState._sidecarWarmProcessKeepAlive);
+    _sidecarScheduledStopAt = DateTime.now()
+        .add(_LiveDriveCanvasScreenState._sidecarWarmProcessKeepAlive);
     _pushSidecarHistory(
       'AUTO_STOP_ARM',
       'idle ${_LiveDriveCanvasScreenState._sidecarWarmProcessKeepAlive.inSeconds}s',
@@ -162,7 +169,8 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
       _LiveDriveCanvasScreenState._sidecarWarmProcessKeepAlive,
       () {
         _sidecarProcessStopTimer = null;
-        final shouldStop = !_openpilotOverlayMode && !_cameraSuspendedByLifecycle;
+        final shouldStop =
+            !_openpilotOverlayMode && !_cameraSuspendedByLifecycle;
         _sidecarScheduledStopAt = null;
         _sidecarScheduledStopReason = null;
         if (!shouldStop) return;
@@ -171,11 +179,10 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
           message: '유휴 시간이 지나 사이드카를 중지합니다.',
         );
         _stopSidecarLoop();
-        unawaited(_stopSidecarProcessIfNeeded(force: true));
+        unawaited(_stopSidecarProcessIfNeeded());
       },
     );
   }
-
 
   Future<void> _restorePortraitOrientationImpl() async {
     await SystemChrome.setPreferredOrientations(const [
@@ -222,7 +229,6 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
   Future<void> _loadAndApplyLandscapeOrientationImpl() async {
     await _lockLandscapeOrientations();
   }
-
 
   Future<void> _lockLandscapeOrientationsImpl() async {
     await SystemChrome.setPreferredOrientations(const [

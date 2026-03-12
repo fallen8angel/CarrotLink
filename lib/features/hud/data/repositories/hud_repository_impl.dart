@@ -107,12 +107,16 @@ class HudRepositoryImpl implements HudRepository {
           .watch(host: host)
           .listen((event) {
         unawaited(session.logWriter?.logRaw(event));
-        final remoteSnapshot = snapshotAssembler.fromRemotePayload(
+        final mappedSnapshot = snapshotAssembler.fromRemotePayload(
           raw: event.payload,
           host: host,
           endpointPort: event.port,
           endpointPath: event.path,
           receivedAtMs: event.receivedAtMs,
+        );
+        final remoteSnapshot = _carryForwardVehicleCore(
+          incoming: mappedSnapshot,
+          previous: session.latestMerged ?? session.latestRemote,
         );
         session.latestRemote = remoteSnapshot;
         final mergedSnapshot = snapshotAssembler.applyFallback(
@@ -188,6 +192,57 @@ class HudRepositoryImpl implements HudRepository {
       return session;
     });
   }
+}
+
+OriginalHudSnapshot _carryForwardVehicleCore({
+  required OriginalHudSnapshot incoming,
+  required OriginalHudSnapshot? previous,
+}) {
+  if (previous == null) {
+    return incoming;
+  }
+
+  var changed = false;
+  var nextVehicle = incoming.vehicle;
+  final previousVehicle = previous.vehicle;
+
+  if (nextVehicle.speedClusterKph == null &&
+      previousVehicle.speedClusterKph != null) {
+    final previousSpeedKph = previousVehicle.speedClusterKph!;
+    nextVehicle = nextVehicle.copyWith(
+      speedClusterKph: previousSpeedKph,
+      speedClusterMps: previousVehicle.speedClusterMps ?? previousSpeedKph / 3.6,
+    );
+    changed = true;
+  }
+
+  if (nextVehicle.setSpeedClusterKph == null &&
+      previousVehicle.setSpeedClusterKph != null) {
+    final previousSetSpeedKph = previousVehicle.setSpeedClusterKph!;
+    nextVehicle = nextVehicle.copyWith(
+      setSpeedClusterKph: previousSetSpeedKph,
+      setSpeedClusterMps:
+          previousVehicle.setSpeedClusterMps ?? previousSetSpeedKph / 3.6,
+    );
+    changed = true;
+  }
+
+  if (_isUnknownGear(nextVehicle.gearText) &&
+      !_isUnknownGear(previousVehicle.gearText)) {
+    nextVehicle = nextVehicle.copyWith(gearText: previousVehicle.gearText);
+    changed = true;
+  }
+
+  if (!changed) {
+    return incoming;
+  }
+
+  return incoming.copyWith(vehicle: nextVehicle);
+}
+
+bool _isUnknownGear(String value) {
+  final normalized = value.trim().toUpperCase();
+  return normalized.isEmpty || normalized == 'U' || normalized == 'X';
 }
 
 class _HudLiveSession {

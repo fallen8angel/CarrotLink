@@ -12,6 +12,20 @@ data class NativeDriveYoloRuntimeSnapshot(
     val inferenceRequests: Int = 0,
     val lastRequestedFrameId: Int = -1,
     val pixelFramesConsumed: Int = 0,
+    val modelPath: String? = null,
+    val modelSource: String? = null,
+    val modelSearchPaths: List<String> = emptyList(),
+    val lastError: String? = null,
+    val forwardSuccesses: Int = 0,
+    val forwardFailures: Int = 0,
+    val lastPreprocessMs: Double? = null,
+    val lastForwardMs: Double? = null,
+    val lastOutputShapes: List<String> = emptyList(),
+    val lastOutputDtypes: List<String> = emptyList(),
+    val lastOutputPreview: List<String> = emptyList(),
+    val parsedCandidateCount: Int = 0,
+    val parsedDetectionCount: Int = 0,
+    val parsedDetectionsPreview: List<String> = emptyList(),
 ) {
   fun toPayload(): Map<String, Any?> {
     return mapOf(
@@ -24,6 +38,20 @@ data class NativeDriveYoloRuntimeSnapshot(
         "inferenceRequests" to inferenceRequests,
         "lastRequestedFrameId" to lastRequestedFrameId,
         "pixelFramesConsumed" to pixelFramesConsumed,
+        "modelPath" to modelPath,
+        "modelSource" to modelSource,
+        "modelSearchPaths" to modelSearchPaths,
+        "lastError" to lastError,
+        "forwardSuccesses" to forwardSuccesses,
+        "forwardFailures" to forwardFailures,
+        "lastPreprocessMs" to lastPreprocessMs,
+        "lastForwardMs" to lastForwardMs,
+        "lastOutputShapes" to lastOutputShapes,
+        "lastOutputDtypes" to lastOutputDtypes,
+        "lastOutputPreview" to lastOutputPreview,
+        "parsedCandidateCount" to parsedCandidateCount,
+        "parsedDetectionCount" to parsedDetectionCount,
+        "parsedDetectionsPreview" to parsedDetectionsPreview,
     )
   }
 }

@@ -4,7 +4,10 @@ import '../models/hud_layout_profile.dart';
 
 class AdaptiveHudDriveOverlaySurface extends StatelessWidget {
   final HudLayoutProfile profile;
+  final bool showMetrics;
+  final bool showDeviceMetrics;
   final Widget topStatusRow;
+  final Widget metricRow;
   final Widget leftColumn;
   final Widget rightColumn;
   final Widget metaRow;
@@ -12,7 +15,10 @@ class AdaptiveHudDriveOverlaySurface extends StatelessWidget {
   const AdaptiveHudDriveOverlaySurface({
     super.key,
     required this.profile,
+    required this.showMetrics,
+    required this.showDeviceMetrics,
     required this.topStatusRow,
+    required this.metricRow,
     required this.leftColumn,
     required this.rightColumn,
     required this.metaRow,
@@ -36,7 +42,12 @@ class AdaptiveHudDriveOverlaySurface extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
         topStatusRow,
-        SizedBox(height: profile.sectionGap * 0.46),
+        if (showMetrics && showDeviceMetrics) ...<Widget>[
+          SizedBox(height: profile.sectionGap * 0.36),
+          metricRow,
+          SizedBox(height: profile.sectionGap * 0.46),
+        ] else
+          SizedBox(height: profile.sectionGap * 0.46),
         Expanded(
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,

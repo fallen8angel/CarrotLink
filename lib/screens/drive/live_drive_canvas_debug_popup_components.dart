@@ -110,7 +110,7 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
             }
 
             final history = _sidecarHistory.take(10).toList(growable: false);
-            final layerToggleEnabled = _openpilotOverlayMode;
+            const layerToggleEnabled = true;
 
             Future<void> runAction(Future<void> Function() action) async {
               if (actionRunning) return;
@@ -682,15 +682,7 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                         'stream_encoderd',
                                                       )
                                                     ),
-                                                    (
-                                                      label: 'webrtcd',
-                                                      value: criticalValue(
-                                                        'webrtcd',
-                                                      ),
-                                                      color: criticalColor(
-                                                        'webrtcd',
-                                                      )
-                                                    ),
+
                                                   ],
                                                   columns: isWideDialog ? 3 : 2,
                                                 ),
@@ -901,22 +893,7 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                             '그래픽 레이어 토글',
                                             Column(
                                               children: [
-                                                if (!layerToggleEnabled)
-                                                  const Padding(
-                                                    padding: EdgeInsets.only(
-                                                        bottom: 6),
-                                                    child: Align(
-                                                      alignment:
-                                                          Alignment.centerLeft,
-                                                      child: Text(
-                                                        '현재 WebRTC 모드라 레이어 토글이 비활성화됩니다.',
-                                                        style: TextStyle(
-                                                          color: Colors.white54,
-                                                          fontSize: 11,
-                                                        ),
-                                                      ),
-                                                    ),
-                                                  ),
+
                                                 layerSwitch(
                                                   'AR Overlay 표시',
                                                   _debugShowArOverlay,
@@ -1484,6 +1461,20 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                     icon: const Icon(Icons
                                                         .system_update_alt_rounded),
                                                     label: const Text('재배포'),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: OutlinedButton.icon(
+                                                    onPressed: actionRunning
+                                                        ? null
+                                                        : () => runAction(
+                                                            _debugActionLegacyMigration),
+                                                    icon: const Icon(Icons
+                                                        .cleaning_services_rounded),
+                                                    label: const Text(
+                                                        '레거시 정리+재배포'),
                                                   ),
                                                 ),
                                                 const SizedBox(height: 8),

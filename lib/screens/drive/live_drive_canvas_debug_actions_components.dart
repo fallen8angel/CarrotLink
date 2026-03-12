@@ -77,7 +77,8 @@ extension _LiveDriveCanvasDebugActionsComponents
     if (_debugArReplayMode && _activeArReplayFrame != null) {
       lines.add('replay 활성: ${_activeArReplayFrame!.label}');
     } else if (_arReplayFrames.isNotEmpty) {
-      lines.add('저장된 replay ${_arReplayFrames.length}개 있음: "마지막 캡처 재생"으로 테스트 가능');
+      lines.add(
+          '저장된 replay ${_arReplayFrames.length}개 있음: "마지막 캡처 재생"으로 테스트 가능');
     }
 
     if (lines.isEmpty) {
@@ -128,10 +129,30 @@ extension _LiveDriveCanvasDebugActionsComponents
     final copyFailures = debug['copyFailures'] ?? '-';
     final lastSkip = debug['lastSkipReason'] ?? '-';
     final requests = debug['inferenceRequests'] ?? '-';
+    final modelSource = debug['modelSource'] ?? '-';
+    final lastError = debug['lastError'] ?? '-';
+    final forwardOk = debug['forwardSuccesses'] ?? '-';
+    final forwardFail = debug['forwardFailures'] ?? '-';
+    final preprocessMs = debug['lastPreprocessMs'] ?? '-';
+    final forwardMs = debug['lastForwardMs'] ?? '-';
+    final parsedCandidates = debug['parsedCandidateCount'] ?? '-';
+    final parsedDetections = debug['parsedDetectionCount'] ?? '-';
+    final outputShapes = debug['lastOutputShapes'];
+    final outputSummary = outputShapes is List && outputShapes.isNotEmpty
+        ? outputShapes.join('|')
+        : '-';
+    final detectionPreview = debug['parsedDetectionsPreview'];
+    final detectionSummary =
+        detectionPreview is List && detectionPreview.isNotEmpty
+            ? detectionPreview.join('|')
+            : '-';
     return 'enabled=$enabled stage=$stage blocker=$blocker pixelReady=$pixelReady '
         'backend=$backend model=$model seen=$seen sampled=$sampled '
         'skipped=$skipped copies=$copies copyFail=$copyFailures '
-        'lastSkip=$lastSkip requests=$requests';
+        'lastSkip=$lastSkip requests=$requests ok=$forwardOk fail=$forwardFail '
+        'preMs=$preprocessMs fwdMs=$forwardMs out=$outputSummary '
+        'cand=$parsedCandidates det=$parsedDetections dets=$detectionSummary '
+        'source=$modelSource err=$lastError';
   }
 
   Future<void> _debugActionHealthImpl() async {
@@ -199,6 +220,74 @@ extension _LiveDriveCanvasDebugActionsComponents
       _pushSidecarHistory('FAIL', 'redeploy: $e');
       _setSidecarPhase(_SidecarPhase.failed, message: e.toString());
       _toast('재배포 실패: $e', isError: true);
+    }
+  }
+
+  Future<void> _debugActionLegacyMigrationImpl() async {
+    final ssh = _sshService ??
+        (mounted ? Provider.of<SSHService>(context, listen: false) : null);
+    if (ssh == null || !ssh.isConnected) {
+      _toast('SSH 연결 안됨', isError: true);
+      return;
+    }
+
+    final confirmed = await _confirmDebugAction(
+      title: '레거시 정리 + 재배포',
+      message: '예전 legacy sidecar/hud 파일과 runtime 흔적을 정리한 뒤\n'
+          '최신 sidecar/hud를 다시 배포하고 시작합니다.\n'
+          '기존 레거시 경로를 청소하는 1회 migration 용도입니다. 계속할까요?',
+      confirmText: '정리+배포',
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      _setSidecarPhase(_SidecarPhase.deploying, message: '레거시 정리 중...');
+      _stopSidecarLoop();
+      final sidecarCleanup =
+          await _sidecarService.cleanupLegacyInstall(ssh, force: true);
+
+      _setSidecarPhase(_SidecarPhase.deploying, message: '최신 배포 중...');
+      await _sidecarService.deploy(ssh);
+      _sidecarLastDeployAt = DateTime.now();
+      _sidecarLastDeployResult = 'success';
+      _sidecarLocalRevision = await _sidecarService.localRevision();
+      _sidecarRemoteRevision = await _sidecarService.remoteRevision(ssh);
+      _sidecarLastRevisionCheckedAt = DateTime.now();
+      _sidecarRevisionAction = 'legacy_migration_deploy';
+
+      _setSidecarPhase(_SidecarPhase.starting, message: '서비스 시작 중...');
+      await _sidecarService.start(ssh);
+      _sidecarLastStartAt = DateTime.now();
+      await _waitForSidecarReady();
+      _startSidecarLoop();
+      if (mounted) {
+        await Provider.of<SharedRuntimeManager>(context, listen: false)
+            .prewarm();
+      }
+      _pushSidecarHistory('LEGACY_MIGRATE', 'cleanup+redeploy ok');
+      _pushSidecarHistory(
+        'LEGACY_MIGRATE_SIDE',
+        sidecarCleanup
+            .split('\n')
+            .map((e) => e.trim())
+            .where((e) =>
+                e.startsWith('legacy_base=') ||
+                e.startsWith('cfg_removed=') ||
+                e.startsWith('legacy_files_removed=') ||
+                e.startsWith('legacy_runtime_killed='))
+            .join(' '),
+      );
+      await _refreshSidecarProcessStatus();
+      _setSidecarPhase(_SidecarPhase.running, message: '레거시 정리+재배포 완료');
+      _toast('레거시 정리 + 재배포 완료');
+    } catch (e) {
+      _sidecarLastDeployResult = 'fail';
+      _sidecarRevisionAction = 'legacy_migration_fail';
+      _pushSidecarHistory('FAIL', 'legacy migrate: $e');
+      _setSidecarPhase(_SidecarPhase.failed, message: e.toString());
+      _toast('레거시 정리 + 재배포 실패: $e', isError: true);
     }
   }
 
@@ -421,12 +510,14 @@ extension _LiveDriveCanvasDebugActionsComponents
       return '$base\nnativeRender=-\nnativeYolo=-';
     }
     try {
-      final rawAr = await _LiveDriveCanvasScreenState._nativeCameraControlChannel
+      final rawAr = await _LiveDriveCanvasScreenState
+          ._nativeCameraControlChannel
           .invokeMethod<dynamic>(
         'getArRenderDebug',
         <String, dynamic>{'viewId': viewId},
       );
-      final rawYolo = await _LiveDriveCanvasScreenState._nativeCameraControlChannel
+      final rawYolo = await _LiveDriveCanvasScreenState
+          ._nativeCameraControlChannel
           .invokeMethod<dynamic>(
         'getYoloState',
         <String, dynamic>{'viewId': viewId},

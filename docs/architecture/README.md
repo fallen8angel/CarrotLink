@@ -14,6 +14,8 @@
 
 Adaptive HUD 재구성, semantic snapshot, layout, handoff 문서.
 
+- 현재 HUD 기준 문서:
+  - `hud/refactoring/HUD_REFACTORING_V3_2026-03-11_KO.md`
 - `hud/ADAPTIVE_DISPLAY_REFACTOR_PLAN_2026-03-05_KO.md`
 - `hud/ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md`
 - `hud/HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md`
@@ -21,6 +23,12 @@ Adaptive HUD 재구성, semantic snapshot, layout, handoff 문서.
 - `hud/HUD_ADAPTIVE_LAYOUT_SPEC_2026-03-07_KO.md`
 - `hud/HUD_IMPLEMENTATION_CHECKLIST_2026-03-07_KO.md`
 - `hud/HUD_PROGRESS_HANDOFF_2026-03-07_1622_KO.md`
+
+## link
+
+CarrotLink side-load/app 계약, producer-consumer 매핑 문서.
+
+- `link/CARROTLINK_PRODUCER_CONSUMER_MAP_2026-03-11_KO.md`
 
 ## carrotpilot
 
@@ -55,6 +63,12 @@ stock mode remote AR 설계, 구현, 테스트, handoff 문서.
 ## yolo
 
 YOLO 기반 객체감지 설계, 타당성, 통합 계획, 진행 handoff 문서.
+
+AI나 신규 작업자가 YOLO 작업을 이어갈 때는 아래 순서를 권장한다.
+
+1. `yolo/STOCK_MODE_YOLO26_PROGRESS_HANDOFF_2026-03-10_KO.md`
+2. `yolo/STOCK_MODE_YOLO26_INTEGRATION_PLAN_2026-03-10_KO.md`
+3. `yolo/STOCK_MODE_YOLO26_OBJECT_DETECTION_FEASIBILITY_2026-03-10_KO.md`
 
 - `yolo/STOCK_MODE_YOLO26_OBJECT_DETECTION_FEASIBILITY_2026-03-10_KO.md`
 - `yolo/STOCK_MODE_YOLO26_INTEGRATION_PLAN_2026-03-10_KO.md`

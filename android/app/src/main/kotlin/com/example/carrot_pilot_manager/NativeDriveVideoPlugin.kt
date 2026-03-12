@@ -192,7 +192,8 @@ class NativeDriveVideoView(
           surfaceView = surfaceView,
           onStateChanged = { payload ->
             emitYoloState(payload)
-          })
+          },
+          runtime = NativeDriveExecuTorchRuntime(context))
   private val reconnectHandler = Handler(Looper.getMainLooper())
   private val decodeThread = HandlerThread("CarrotNativeDecode-$viewId").apply { start() }
   private val decodeHandler = Handler(decodeThread.looper)
@@ -206,13 +207,15 @@ class NativeDriveVideoView(
   @Volatile private var codecConfigured = false
   @Volatile private var waitingKeyFrame = true
   @Volatile private var closed = false
-  @Volatile private var lastFrameId = -1
+  @Volatile private var lastSourceFrameId = -1
+  @Volatile private var nextRenderedFrameId = 0
   @Volatile private var currentWidth = 0
   @Volatile private var currentHeight = 0
   @Volatile private var connectAttempts = 0
   @Volatile private var lastPacketAtMs = 0L
   @Volatile private var lastDecodedAtMs = 0L
-  private val pendingFrameIds: ArrayDeque<Int> = ArrayDeque()
+  private val pendingFrames: ArrayDeque<PendingFrame> = ArrayDeque()
+  @Volatile private var pendingSyncFrameCount = 0
   private val pendingDecodeTasks = AtomicInteger(0)
   @Volatile private var frameStallStrikes = 0
   @Volatile private var decodeBacklogDropCount = 0
@@ -233,6 +236,11 @@ class NativeDriveVideoView(
   @Volatile private var hintedFrameRate = 30f
   @Volatile private var performanceHintTargetNs = 33_333_333L
   @Volatile private var performanceHintSession: PerformanceHintManager.Session? = null
+
+  private data class PendingFrame(
+      val yoloFrameId: Int,
+      val syncFrameId: Int?,
+  )
 
   init {
     rootView.addView(
@@ -493,9 +501,11 @@ class NativeDriveVideoView(
   private fun releaseDecoder() {
     codecConfigured = false
     waitingKeyFrame = true
-    lastFrameId = -1
+    lastSourceFrameId = -1
+    nextRenderedFrameId = 0
     pendingDecodeTasks.set(0)
-    pendingFrameIds.clear()
+    pendingFrames.clear()
+    pendingSyncFrameCount = 0
     val c = codec
     codec = null
     if (c != null) {
@@ -528,10 +538,11 @@ class NativeDriveVideoView(
 
     val parsed = parsePacket(packet) ?: return
     val meta = parsed.meta
-    val frameId = meta.optInt("frameId", -1)
-    if (frameId >= 0 && lastFrameId >= 0 && frameId <= lastFrameId) {
+    val sourceFrameId = meta.optInt("frameId", -1)
+    if (sourceFrameId >= 0 && lastSourceFrameId >= 0 && sourceFrameId <= lastSourceFrameId) {
       return
     }
+    val frameId = if (sourceFrameId >= 0) sourceFrameId else nextRenderedFrameId++
     val keyByMeta =
         meta.optBoolean("keyFrame", false) || ((meta.optInt("flags", 0) and 0x8) != 0)
     val queuedTasks = pendingDecodeTasks.get()
@@ -539,12 +550,12 @@ class NativeDriveVideoView(
       noteBacklogDrop("task", queuedTasks)
       return
     }
-    if (pendingFrameIds.size >= codecBacklogLimit && !keyByMeta) {
-      noteBacklogDrop("codec", pendingFrameIds.size)
+    if (pendingSyncFrameCount >= codecBacklogLimit && !keyByMeta) {
+      noteBacklogDrop("codec", pendingSyncFrameCount)
       return
     }
-    if (frameId >= 0) {
-      lastFrameId = frameId
+    if (sourceFrameId >= 0) {
+      lastSourceFrameId = sourceFrameId
     }
 
     val width = meta.optInt("width", 0).coerceAtLeast(0)
@@ -579,7 +590,12 @@ class NativeDriveVideoView(
           else -> System.nanoTime()
         }
     val ptsUs = if (ts > 0L) ts / 1000L else (System.nanoTime() / 1000L)
-    queueFrame(annexb, ptsUs, frameId)
+    queueFrame(
+      frame = annexb,
+      ptsUs = ptsUs,
+      yoloFrameId = frameId,
+      syncFrameId = if (sourceFrameId >= 0) sourceFrameId else null,
+    )
   }
 
   private fun configureDecoder(width: Int, height: Int): Boolean {
@@ -608,20 +624,30 @@ class NativeDriveVideoView(
     }
   }
 
-  private fun queueFrame(frame: ByteArray, ptsUs: Long, frameId: Int) {
+  private fun queueFrame(
+      frame: ByteArray,
+      ptsUs: Long,
+      yoloFrameId: Int,
+      syncFrameId: Int?,
+  ) {
     val localCodec = codec ?: return
     try {
       val inputIndex = localCodec.dequeueInputBuffer(0)
       if (inputIndex < 0) {
-        noteBacklogDrop("input", pendingFrameIds.size)
+        noteBacklogDrop("input", pendingSyncFrameCount)
         return
       }
       val input = localCodec.getInputBuffer(inputIndex) ?: return
       input.clear()
       input.put(frame)
       localCodec.queueInputBuffer(inputIndex, 0, frame.size, ptsUs, 0)
-      if (frameId >= 0) {
-        pendingFrameIds.addLast(frameId)
+      pendingFrames.addLast(
+          PendingFrame(
+              yoloFrameId = yoloFrameId,
+              syncFrameId = syncFrameId,
+          ))
+      if (syncFrameId != null && syncFrameId >= 0) {
+        pendingSyncFrameCount += 1
       }
       val decodeStartNs = System.nanoTime()
       drainOutput(localCodec, decodeStartNs)
@@ -639,12 +665,18 @@ class NativeDriveVideoView(
         outIndex >= 0 -> {
           lastDecodedAtMs = System.currentTimeMillis()
           reportPerformanceActualWork((System.nanoTime() - decodeStartNs).coerceAtLeast(1_000_000L))
-          val renderedFrameId = if (pendingFrameIds.isEmpty()) -1 else pendingFrameIds.removeFirst()
-          if (renderedFrameId >= 0) {
-            emitFrame(renderedFrameId)
+          val renderedFrame =
+              if (pendingFrames.isEmpty()) null else pendingFrames.removeFirst()
+          val yoloFrameId = renderedFrame?.yoloFrameId ?: -1
+          val syncFrameId = renderedFrame?.syncFrameId
+          if (syncFrameId != null && syncFrameId >= 0) {
+            pendingSyncFrameCount = (pendingSyncFrameCount - 1).coerceAtLeast(0)
+            emitFrame(syncFrameId)
+          }
+          if (yoloFrameId >= 0) {
             yoloController.onFrameRendered(
                 NativeDriveYoloFrame(
-                    frameId = renderedFrameId,
+                    frameId = yoloFrameId,
                     ptsUs = info.presentationTimeUs,
                     camera = cameraName,
                     sourceWidth = currentWidth,

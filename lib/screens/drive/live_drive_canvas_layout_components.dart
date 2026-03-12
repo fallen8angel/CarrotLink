@@ -316,9 +316,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
         final drawH = placement.height;
         final left = placement.left;
         final top = placement.top;
-        final showViewportEdgeGradient = !_debugOverlayPreviewMode &&
-            (_hudDefaultMode == HudDriveSettingsService.modeWebrtc ||
-                _openpilotOverlayMode);
+        final showViewportEdgeGradient = !_debugOverlayPreviewMode;
         final fullSurfaceRect = Rect.fromLTWH(0.0, 0.0, drawW, drawH);
         final visibleViewportRect =
             Rect.fromLTWH(-left, -top, vw, vh).intersect(fullSurfaceRect);
@@ -629,14 +627,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                             Row(
                               children: [
                                 Icon(
-                                  _sidecarPhase == _SidecarPhase.failed
-                                      ? Icons.error_outline
-                                      : (_sidecarPhase == _SidecarPhase.stopping
-                                          ? Icons.stop_circle_outlined
-                                          : (_sidecarPhase ==
-                                                  _SidecarPhase.running
-                                              ? Icons.check_circle_outline
-                                              : Icons.hourglass_top_rounded)),
+                                  _sidecarStatusIcon(),
                                   color: Colors.white,
                                   size: statusBannerIconSize,
                                 ),
@@ -655,14 +646,13 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                                 ),
                               ],
                             ),
-                            if (_sidecarPhase == _SidecarPhase.failed &&
-                                (_sidecarPhaseMessage ?? '').trim().isNotEmpty)
+                            if (_sidecarStatusDetailMessage() != null)
                               Padding(
                                 padding: EdgeInsets.only(
                                   top: statusBannerGap * 0.5,
                                 ),
                                 child: Text(
-                                  _sidecarPhaseMessage!.trim(),
+                                  _sidecarStatusDetailMessage()!,
                                   maxLines: 2,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(

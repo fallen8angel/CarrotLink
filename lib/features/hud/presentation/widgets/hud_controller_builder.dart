@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
-import '../../../../services/link_hud_service.dart';
 import '../../../../services/ssh_service.dart';
 import '../../application/hud_controller.dart';
 import '../../application/hud_controller_state.dart';
@@ -17,6 +16,7 @@ typedef HudControllerViewBuilder = Widget Function(
 
 class HudControllerBuilder extends StatefulWidget {
   final String? host;
+  final String clientRole;
   final bool preview;
   final SSHService? sshService;
   final HudControllerViewBuilder builder;
@@ -24,6 +24,7 @@ class HudControllerBuilder extends StatefulWidget {
   const HudControllerBuilder({
     super.key,
     this.host,
+    this.clientRole = 'app_hud',
     this.preview = false,
     this.sshService,
     required this.builder,
@@ -34,13 +35,14 @@ class HudControllerBuilder extends StatefulWidget {
 }
 
 class _HudControllerBuilderState extends State<HudControllerBuilder> {
-  static final LinkHudService _linkHudService = LinkHudService();
+  HudControllerLease? _controllerLease;
   HudRepositoryLease? _repositoryLease;
   HudController? _controller;
   SSHService? _observedSshService;
   bool _buildScheduled = false;
   bool _lastObservedSshConnected = false;
   String? _lastObservedSshEndpoint;
+  int _transportEnsureGeneration = 0;
 
   @override
   void initState() {
@@ -66,15 +68,23 @@ class _HudControllerBuilderState extends State<HudControllerBuilder> {
 
   @override
   void dispose() {
+    _transportEnsureGeneration += 1;
     _detachSshListener();
     final controller = _controller;
+    final controllerLease = _controllerLease;
     final repositoryLease = _repositoryLease;
     _controller = null;
+    _controllerLease = null;
     _repositoryLease = null;
     if (controller != null) {
       controller.removeListener(_handleControllerChanged);
-      unawaited(controller.clear());
-      controller.dispose();
+      if (controllerLease == null) {
+        unawaited(controller.clear());
+        controller.dispose();
+      }
+    }
+    if (controllerLease != null) {
+      unawaited(controllerLease.release());
     }
     if (repositoryLease != null) {
       unawaited(repositoryLease.release());
@@ -84,8 +94,21 @@ class _HudControllerBuilderState extends State<HudControllerBuilder> {
 
   void _createBinding() {
     _attachSshListener();
+    if (!widget.preview) {
+      final controllerLease = HudModule.acquireSharedController(
+        sshService: widget.sshService,
+        clientRole: widget.clientRole,
+      );
+      final controller = controllerLease.controller;
+      controller.addListener(_handleControllerChanged);
+      _controllerLease = controllerLease;
+      _controller = controller;
+      unawaited(_bindCurrent());
+      return;
+    }
     final repositoryLease = HudModule.acquireSharedRepository(
       sshService: widget.sshService,
+      clientRole: widget.clientRole,
     );
     final controller = HudModule.createController(
       repository: repositoryLease.repository,
@@ -97,15 +120,23 @@ class _HudControllerBuilderState extends State<HudControllerBuilder> {
   }
 
   void _recreateBinding() {
+    _transportEnsureGeneration += 1;
     _detachSshListener();
     final oldController = _controller;
+    final oldControllerLease = _controllerLease;
     final oldRepositoryLease = _repositoryLease;
     _controller = null;
+    _controllerLease = null;
     _repositoryLease = null;
     if (oldController != null) {
       oldController.removeListener(_handleControllerChanged);
-      unawaited(oldController.clear());
-      oldController.dispose();
+      if (oldControllerLease == null) {
+        unawaited(oldController.clear());
+        oldController.dispose();
+      }
+    }
+    if (oldControllerLease != null) {
+      unawaited(oldControllerLease.release());
     }
     if (oldRepositoryLease != null) {
       unawaited(oldRepositoryLease.release());
@@ -177,27 +208,65 @@ class _HudControllerBuilderState extends State<HudControllerBuilder> {
     }
     final host = widget.host?.trim();
     if (host == null || host.isEmpty) {
-      await controller.clear();
+      if (_controllerLease == null) {
+        await controller.clear();
+      }
       return;
     }
     final ssh = widget.sshService;
-    Object? ensureError;
-    StackTrace? ensureStackTrace;
-    if (ssh != null && ssh.isConnected) {
-      try {
-        await _linkHudService.ensureRunning(ssh);
-      } catch (error, stackTrace) {
-        ensureError = error;
-        ensureStackTrace = stackTrace;
-      }
+    final latest = await controller.getLatest(host: host);
+    if (latest != null && latest.tsMonoMs > 0) {
+      controller.seedLiveSnapshot(host: host, snapshot: latest);
     }
     await controller.bindLive(host);
-    if (ensureError != null && controller.state.snapshot.tsMonoMs <= 0) {
+    if (ssh != null && ssh.isConnected) {
+      _scheduleTransportEnsure(
+        host: host,
+        controller: controller,
+        ssh: ssh,
+      );
+    }
+  }
+
+  void _scheduleTransportEnsure({
+    required String host,
+    required HudController controller,
+    required SSHService ssh,
+  }) {
+    final generation = ++_transportEnsureGeneration;
+    unawaited(
+      _ensureTransportReady(
+        generation: generation,
+        host: host,
+        controller: controller,
+        ssh: ssh,
+      ),
+    );
+  }
+
+  Future<void> _ensureTransportReady({
+    required int generation,
+    required String host,
+    required HudController controller,
+    required SSHService ssh,
+  }) async {
+    final ensureResult = await HudModule.ensureLiveTransport(ssh);
+    if (!mounted || generation != _transportEnsureGeneration) {
+      return;
+    }
+    final currentHost = widget.host?.trim();
+    if (currentHost == null || currentHost.isEmpty || currentHost != host) {
+      return;
+    }
+    final ensureError = ensureResult.error;
+    if (ensureError != null &&
+        controller.state.host == host &&
+        controller.state.snapshot.tsMonoMs <= 0) {
       controller.reportBindingError(
         host: host,
         isPreview: false,
         error: ensureError,
-        stackTrace: ensureStackTrace,
+        stackTrace: ensureResult.stackTrace,
       );
     }
   }

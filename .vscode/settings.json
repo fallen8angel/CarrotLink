@@ -29,5 +29,6 @@
     ".gradle",
     "android/.gradle",
     "android/build"
-  ]
+  ],
+  "cmake.sourceDirectory": "D:/CarrotLink/CarrotLink-dev/linux"
 }

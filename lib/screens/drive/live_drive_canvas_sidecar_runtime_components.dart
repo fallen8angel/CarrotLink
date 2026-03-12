@@ -82,7 +82,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     final modeLabel =
         _adaptiveCameraQualityLabel(_AdaptiveCameraQualityMode.lowLatency);
     try {
-      final response = await _sidecarPostJson(
+      final response = await _cameraPostJson(
         '/camera_quality',
         body: <String, dynamic>{'mode': modeLabel},
       );
@@ -234,7 +234,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
   String get _sidecarRemotePyName {
     final raw = (_sidecarProcessSnapshot['py_name'] ?? '').trim();
     if (raw.isNotEmpty) return raw;
-    return 'carrot_linkview.py';
+    return 'sidecar.py';
   }
 
   String get _sidecarRemoteRevisionLabel {
@@ -339,12 +339,30 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
         nextError = joinError('health 조회 실패: $e');
       }
       try {
+        final cameraHealth = await _cameraGetJson('/health');
+        final relay = cameraHealth['cameraRelay'];
+        if (relay is Map) {
+          nextHealth['cameraRelay'] = Map<String, dynamic>.from(relay);
+        }
+      } catch (e) {
+        nextError = joinError('camera health 조회 실패: $e');
+      }
+      try {
+        final diagHealth = await _diagGetJson('/health');
+        final relay = diagHealth['diagRelay'];
+        if (relay is Map) {
+          nextHealth['diagRelay'] = Map<String, dynamic>.from(relay);
+        }
+      } catch (e) {
+        nextError = joinError('diag health 조회 실패: $e');
+      }
+      try {
         nextProfile = await _sidecarGetJson('/profile');
       } catch (e) {
         nextError = joinError('/profile 조회 실패: $e');
       }
       try {
-        nextCameraQuality = await _sidecarGetJson('/camera_quality');
+        nextCameraQuality = await _cameraGetJson('/camera_quality');
       } catch (e) {
         nextError = joinError('/camera_quality 조회 실패: $e');
       }
@@ -391,7 +409,8 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       !_debugOverlayPreviewMode &&
       (_isSidecarBusy ||
           _sidecarPhase == _SidecarPhase.failed ||
-          (_openpilotOverlayMode && !_sidecarConnected));
+          (_openpilotOverlayMode && !_sidecarConnected) ||
+          (_openpilotOverlayMode && _overlayStaleActive));
 
   String _sidecarStatusTitle() {
     if (_sidecarPhase == _SidecarPhase.failed) return '사이드카 준비 실패';
@@ -399,13 +418,50 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     if (_openpilotOverlayMode && !_sidecarConnected) {
       return '사이드카 연결 대기 중...';
     }
+    if (_openpilotOverlayMode && _overlayStaleActive) {
+      return '오버레이 업데이트 지연';
+    }
     if (_sidecarPhase == _SidecarPhase.running) return '사이드카 실행 중';
     return '사이드카 비활성';
+  }
+
+  String? _sidecarStatusDetailMessage() {
+    if (_openpilotOverlayMode && _overlayStaleActive) {
+      final reason = _overlayStaleReason.trim();
+      if (reason.isEmpty) {
+        return '마지막 정상 스냅샷을 잠시 유지합니다.';
+      }
+      return '마지막 정상 스냅샷 유지 중 · $reason';
+    }
+    final message = (_sidecarPhaseMessage ?? '').trim();
+    if (message.isEmpty) {
+      return null;
+    }
+    return message;
+  }
+
+  IconData _sidecarStatusIcon() {
+    if (_sidecarPhase == _SidecarPhase.failed) {
+      return Icons.error_outline;
+    }
+    if (_openpilotOverlayMode && _overlayStaleActive) {
+      return Icons.sync_problem_rounded;
+    }
+    if (_sidecarPhase == _SidecarPhase.stopping) {
+      return Icons.stop_circle_outlined;
+    }
+    if (_sidecarPhase == _SidecarPhase.running) {
+      return Icons.check_circle_outline;
+    }
+    return Icons.hourglass_top_rounded;
   }
 
   Color _sidecarStatusColor() {
     if (_sidecarPhase == _SidecarPhase.failed) return const Color(0xCC7A1010);
     if (_isSidecarBusy) return const Color(0xCC4A2E12);
+    if (_openpilotOverlayMode && _overlayStaleActive) {
+      return const Color(0xCC6A4312);
+    }
     return const Color(0xCC1E3A2A);
   }
 
@@ -517,6 +573,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     if (ssh == null || !ssh.isConnected) return;
     _sidecarAutoManaging = true;
     _suppressCameraErrors = true;
+    _beginStartupProvisionalSync(reason: 'sidecar_runtime_start');
     _pushSidecarHistory('AUTO_RUNTIME', 'start reason=$reason');
     _setSidecarPhase(
       _SidecarPhase.verifying,

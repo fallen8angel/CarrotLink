@@ -13,6 +13,10 @@
   - `architecture/carrotpilot/C3_STOCK_ONROAD_GRAPHICS_HUD_REFERENCE_2026-03-10_KO.md`
 - 원본 HUD 값 의미:
   - `architecture/carrotpilot/CARROTPILOT_ORIGINAL_ONROAD_HUD_ANALYSIS_2026-03-07_KO.md`
+- 원본 producer 와 CarrotLink consumer 매핑:
+  - `architecture/link/CARROTLINK_PRODUCER_CONSUMER_MAP_2026-03-11_KO.md`
+- 현재 HUD 리팩토링 기준:
+  - `architecture/hud/refactoring/HUD_REFACTORING_V3_2026-03-11_KO.md`
 - 현재 앱 구현 수준/요소 매트릭스:
   - `architecture/carrotpilot/CARROTPILOT_ONROAD_ELEMENT_MATRIX_2026-03-02_KO.md`
 - lead/radar 정합:
@@ -24,6 +28,10 @@
   공통 구조, 코드베이스 분석, LiveDriveCanvas 모듈화
 - `architecture/hud/`
   Adaptive HUD 재구성, semantic snapshot, handoff
+- `architecture/hud/refactoring/`
+  HUD 리팩토링 기준 문서와 이후 handoff/checklist 누적
+- `architecture/link/`
+  CarrotLink side-load/app producer-consumer 매핑 문서
 - `architecture/carrotpilot/`
   carrotpilot/onroad/TMAP 입력 구조 분석, stock 원본 onroad 그래픽/HUD 기준 문서
 - `architecture/remote_ar/`

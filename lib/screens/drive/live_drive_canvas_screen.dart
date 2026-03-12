@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:isolate';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -15,6 +14,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../../services/hud_drive_settings_service.dart';
+
 import '../../services/sidecar_service.dart';
 import '../../services/ssh_service.dart';
 import '../../services/storage_layout_service.dart';
@@ -157,8 +157,10 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
 
   late final WebViewController _cameraController;
   final SidecarService _sidecarService = SidecarService();
+
   SSHService? _sshService;
   SSHService? _observedSshService;
+  SharedRuntimeManager? _sharedRuntimeManager;
   late String _activeHostIp;
   bool _lastObservedSshConnected = false;
   String? _lastObservedConnectedHost;
@@ -181,11 +183,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   int _lastNativeOverlayPushUs = 0;
   static const int _nativeOverlayPushIntervalUs = 16666;
 
-  Isolate? _sidecarWorkerIsolate;
-  ReceivePort? _sidecarWorkerReceivePort;
-  StreamSubscription? _sidecarWorkerSubscription;
   bool _sidecarConnected = false;
-  int _sidecarSession = 0;
   bool _sidecarAutoManaging = false;
   bool _sidecarTransitioning = false;
   bool _suppressCameraErrors = false;
@@ -209,14 +207,17 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const int _overlaySyncMaxDeltaLive = 8;
   static const bool _strictFrameLock = true;
   static const int _strictFrameHoldUs = 120000;
+  static const int _overlayStaleKeepAliveUs = 1800000;
   static const int _cameraFrameStaleUs = 350000;
+  static const int _startupProvisionalSyncWindowUs = 4000000;
+  static const int _startupProvisionalNativeSettleFrames = 3;
   static const int _interpMinUs = 12000;
   static const int _interpMaxUs = 90000;
   static const Duration _cameraDiagCaptureCooldown = Duration(seconds: 12);
-  static const Duration _lifecycleSuspendDelay = Duration(milliseconds: 2600);
-  static const Duration _sidecarWarmProcessKeepAlive = Duration(seconds: 20);
+  static const Duration _lifecycleSuspendDelay = Duration(milliseconds: 3200);
+  static const Duration _sidecarWarmProcessKeepAlive = Duration(seconds: 35);
   static const Duration _backgroundProcessKeepAlive = Duration(seconds: 45);
-  static const Duration _backgroundUiResetGrace = Duration(seconds: 8);
+  static const Duration _backgroundUiResetGrace = Duration(seconds: 15);
   static const String _cameraDiagTmuxTailCommand = '''
 if command -v tmux >/dev/null 2>&1; then
   echo "== tmux sessions =="
@@ -239,6 +240,7 @@ fi
   int _lastCameraFrameEventUs = 0;
   int? _lastPublishedModelFrameId;
   int _lastSyncHitUs = 0;
+  int _lastOverlayPublishUs = 0;
   int _lastSyncedArrivalUs = 0;
   double _smoothedSyncIntervalUs = 50000.0;
   late final Stopwatch _renderClock;
@@ -337,12 +339,19 @@ fi
   _DriveDebugPlotState _debugPlotState = const _DriveDebugPlotState.hidden();
   final ListQueue<String> _sidecarHistory = ListQueue<String>();
   int _lastCameraFallbackLogUs = 0;
+  bool _overlayStaleActive = false;
+  String _overlayStaleReason = '';
+  int _lastConsumedSharedOverlayFrameSequence = 0;
+  bool _startupProvisionalSyncEnabled = false;
+  int _startupProvisionalSyncUntilUs = 0;
+  int _startupNativeFrameSettleCount = 0;
+  int _lastProvisionalSyncLogUs = 0;
   Timer? _lifecycleSuspendTimer;
   Timer? _sidecarProcessStopTimer;
   Timer? _backgroundUiResetTimer;
   Timer? _adaptiveCameraQualityTimer;
   bool _backgroundUiResetDone = false;
-  String _hudDefaultMode = HudDriveSettingsService.modeWebrtc;
+  String _hudDefaultMode = HudDriveSettingsService.modeOpenpilotOverlay;
   bool _hudModeLoaded = false;
   _AdaptiveCameraQualityMode _adaptiveCameraQualityMode =
       _AdaptiveCameraQualityMode.lowLatency;
@@ -397,13 +406,10 @@ fi
         ),
       ];
 
-  String get _sidecarWsUrl =>
-      'ws://$_hostIp:7766/ws/live?encoding=zlib-json&camera=$_liveCameraName';
-
   bool get _openpilotOverlayMode =>
       HudDriveSettingsService.isOpenpilotOverlay(_hudDefaultMode);
 
-  String get _modeTagLabel => _openpilotOverlayMode ? 'Stock' : 'webrtc';
+  String get _modeTagLabel => 'Stock';
 
   bool get _canUseNativeCamera => !kIsWeb && Platform.isAndroid;
 
@@ -483,10 +489,13 @@ fi
   void didChangeDependencies() {
     super.didChangeDependencies();
     final ssh = Provider.of<SSHService>(context, listen: false);
+    final sharedRuntime =
+        Provider.of<SharedRuntimeManager>(context, listen: false);
     if (!identical(_sshService, ssh)) {
       _sshService = ssh;
     }
     _attachSshListener(ssh);
+    _attachSharedOverlayRuntime(sharedRuntime);
     unawaited(_syncViewportZoomPresetForOrientation());
   }
 
@@ -609,6 +618,11 @@ fi
     _lastCameraFrameId = null;
     _lastCameraFrameEventUs = 0;
     _lastPublishedModelFrameId = null;
+    _lastSyncHitUs = 0;
+    _lastOverlayPublishUs = 0;
+    _lastSyncedArrivalUs = 0;
+    _clearOverlayStaleState();
+    _lastConsumedSharedOverlayFrameSequence = 0;
   }
 
   Future<void> _handleDriveHostTransition(
@@ -814,6 +828,7 @@ fi
   void dispose() {
     _isDisposing = true;
     _detachSshListener();
+    _detachSharedOverlayRuntime();
     WidgetsBinding.instance.removeObserver(this);
     unawaited(
       _persistArReplaySessionIfNeeded(force: true, reason: 'dispose'),
@@ -833,7 +848,9 @@ fi
     _renderTicker = null;
     unawaited(_clearNativeOverlay());
     _stopSidecarLoop();
-    unawaited(_stopSidecarProcessIfNeeded(force: true));
+    // Keep the resident sidecar alive when leaving the drive route so
+    // returning from dashboard tabs does not cold-start stock graphics again.
+    unawaited(_stopSidecarProcessIfNeeded());
     final nativeSub = _nativeCameraEventSub;
     _nativeCameraEventSub = null;
     if (nativeSub != null) {
@@ -892,6 +909,9 @@ fi
   Uri _sidecarHttpUri(String path, [Map<String, String>? query]) =>
       _sidecarHttpUriImpl(path, query);
 
+  Uri _cameraHttpUri(String path, [Map<String, String>? query]) =>
+      _cameraHttpUriImpl(path, query);
+
   Widget _statusLine(
     String label,
     String value, {
@@ -924,6 +944,9 @@ fi
   Future<void> _debugActionTailLog() => _debugActionTailLogImpl();
 
   Future<void> _debugActionRedeploy() => _debugActionRedeployImpl();
+
+  Future<void> _debugActionLegacyMigration() =>
+      _debugActionLegacyMigrationImpl();
 
   Future<void> _debugActionRestart() => _debugActionRestartImpl();
 

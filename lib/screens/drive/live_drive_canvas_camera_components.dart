@@ -93,6 +93,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
         _cameraLoading = false;
         _cameraError = null;
       });
+      _beginStartupProvisionalSync(reason: 'camera_meta');
       unawaited(_pushNativeYoloConfig(force: true));
       return;
     }
@@ -117,6 +118,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
           _suppressCameraErrors = false;
           _cameraError = null;
         });
+        _beginStartupProvisionalSync(reason: 'camera_state:$state');
         _setSidecarPhase(
           _openpilotOverlayMode ? _SidecarPhase.running : _SidecarPhase.idle,
           message: '카메라 스트림 연결이 확인되었습니다.',
@@ -201,6 +203,8 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
       );
       _safeSetState(() {
         _updateSourceSize(next, kind: eventCameraKind);
+        _cameraLoading = false;
+        _cameraError = null;
       });
       return;
     }
@@ -230,6 +234,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     if (!_hudModeLoaded) return;
 
     if (_useNativeLiveCamera) {
+      _beginStartupProvisionalSync(reason: 'load_camera_source');
       if (mounted) {
         _safeSetState(() {
           _cameraLoading = true;
@@ -317,6 +322,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     });
     _lastCameraFrameId = null;
     _lastCameraFrameEventUs = 0;
+    _beginStartupProvisionalSync(reason: 'camera_kind_switch');
     if (_openpilotOverlayMode && !_cameraSuspendedByLifecycle) {
       _startSidecarLoop();
     }

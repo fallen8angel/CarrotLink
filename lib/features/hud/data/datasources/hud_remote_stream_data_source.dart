@@ -10,15 +10,19 @@ class HudRemoteStreamDataSource {
   final Duration reconnectDelay;
   final Duration idleTimeout;
   final bool stickToPrimaryAfterSuccess;
+  final String clientRole;
 
   const HudRemoteStreamDataSource({
     this.candidates = const <({int port, String path})>[
-      (port: 7767, path: '/ws/hud'),
       (port: 7766, path: '/ws/hud'),
+      (port: 7767, path: '/ws/hud'),
     ],
-    this.reconnectDelay = const Duration(seconds: 2),
-    this.idleTimeout = const Duration(seconds: 4),
+    this.reconnectDelay = const Duration(milliseconds: 250),
+    // Healthy HUD relays send an initial snapshot immediately and then keep
+    // emitting at ~10Hz. Multi-second idle waits only delay fallback.
+    this.idleTimeout = const Duration(milliseconds: 1500),
     this.stickToPrimaryAfterSuccess = true,
+    this.clientRole = 'app_hud',
   });
 
   Stream<HudRemoteStreamEvent> watch({
@@ -27,8 +31,12 @@ class HudRemoteStreamDataSource {
     late final StreamController<HudRemoteStreamEvent> controller;
     WebSocketChannel? channel;
     var disposed = false;
+    DateTime? lastFailureReportedAt;
+    String? lastFailureSummary;
     final primaryCandidate = candidates.isEmpty ? null : candidates.first;
     var primaryDeliveredOnce = false;
+    final sessionId =
+        'hud-${DateTime.now().microsecondsSinceEpoch}-${host.hashCode.abs()}';
 
     bool isPrimary(({int port, String path}) candidate) {
       if (primaryCandidate == null) {
@@ -40,8 +48,8 @@ class HudRemoteStreamDataSource {
 
     Future<void> run() async {
       while (!disposed) {
-        Object? lastError;
-        StackTrace? lastStackTrace;
+        final failedCandidates = <String>[];
+        var deliveredPayloadThisCycle = false;
         final activeCandidates = primaryDeliveredOnce &&
                 primaryCandidate != null &&
                 stickToPrimaryAfterSuccess
@@ -51,8 +59,16 @@ class HudRemoteStreamDataSource {
           if (disposed) break;
           var deliveredPayload = false;
           try {
-            final uri =
-                Uri.parse('ws://$host:${candidate.port}${candidate.path}');
+            final uri = Uri(
+              scheme: 'ws',
+              host: host,
+              port: candidate.port,
+              path: candidate.path,
+              queryParameters: <String, String>{
+                'role': clientRole,
+                'session': sessionId,
+              },
+            );
             channel = WebSocketChannel.connect(uri);
             await for (final event in channel!.stream.timeout(idleTimeout)) {
               if (disposed) {
@@ -72,16 +88,18 @@ class HudRemoteStreamDataSource {
                     receivedAtMs: DateTime.now().millisecondsSinceEpoch,
                   ),
                 );
+                deliveredPayloadThisCycle = true;
+                lastFailureReportedAt = null;
+                lastFailureSummary = null;
               }
             }
-          } catch (error, stackTrace) {
+          } catch (_, __) {
             if (deliveredPayload) {
-              lastError = null;
-              lastStackTrace = null;
               break;
             }
-            lastError = error;
-            lastStackTrace = stackTrace;
+            failedCandidates.add('${candidate.port}${candidate.path}');
+            // Ignore connection-refused and other transient startup races.
+            // The reconnect loop below will retry shortly.
           } finally {
             try {
               await channel?.sink.close();
@@ -90,14 +108,27 @@ class HudRemoteStreamDataSource {
           }
 
           if (deliveredPayload) {
-            lastError = null;
-            lastStackTrace = null;
             break;
           }
         }
 
-        if (!disposed && lastError != null) {
-          controller.addError(lastError, lastStackTrace);
+        // Transient startup races are expected while the broker/hud port is
+        // still coming up. Keep retrying quietly instead of surfacing an
+        // uncaught websocket error to the app layer on every refused connect.
+        if (!disposed && !deliveredPayloadThisCycle) {
+          final summary = failedCandidates.isEmpty
+              ? 'HUD stream unavailable'
+              : 'HUD stream unavailable (${failedCandidates.join(', ')})';
+          final now = DateTime.now();
+          final shouldReport = lastFailureSummary != summary ||
+              lastFailureReportedAt == null ||
+              now.difference(lastFailureReportedAt!) >=
+                  const Duration(seconds: 5);
+          if (shouldReport) {
+            controller.addError(StateError(summary));
+            lastFailureSummary = summary;
+            lastFailureReportedAt = now;
+          }
         }
 
         if (!disposed) {

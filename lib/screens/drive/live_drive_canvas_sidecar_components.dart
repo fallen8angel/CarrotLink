@@ -1,151 +1,108 @@
 part of 'live_drive_canvas_screen.dart';
 
-@pragma('vm:entry-point')
-Future<void> _driveSidecarWorkerMain(Map<String, dynamic> config) async {
-  final wsUrl = (config['wsUrl']?.toString() ?? '').trim();
-  final sendPort = config['sendPort'] as SendPort?;
-  if (wsUrl.isEmpty || sendPort == null) return;
-  while (true) {
-    WebSocket? socket;
-    try {
-      socket = await WebSocket.connect(wsUrl).timeout(
-        const Duration(seconds: 4),
-      );
-      sendPort.send(<String, dynamic>{'type': 'connected', 'connected': true});
-      await for (final event in socket) {
-        Map<String, dynamic>? payload;
-        if (event is String) {
-          try {
-            final decoded = jsonDecode(event);
-            if (decoded is Map<String, dynamic>) {
-              payload = decoded;
-            } else if (decoded is Map) {
-              payload = Map<String, dynamic>.from(decoded);
-            }
-          } catch (_) {
-            payload = null;
-          }
-        } else if (event is List<int>) {
-          List<int> bytes = event;
-          try {
-            bytes = zlib.decode(bytes);
-          } catch (_) {
-            // server may still send plain UTF-8 payloads.
-          }
-          try {
-            final decoded = jsonDecode(utf8.decode(bytes));
-            if (decoded is Map<String, dynamic>) {
-              payload = decoded;
-            } else if (decoded is Map) {
-              payload = Map<String, dynamic>.from(decoded);
-            }
-          } catch (_) {
-            payload = null;
-          }
-        }
-        if (payload == null) continue;
-        sendPort.send(<String, dynamic>{
-          'type': 'frame',
-          'payload': payload,
-        });
-      }
-    } catch (_) {
-      // reconnect loop
-    } finally {
-      sendPort.send(<String, dynamic>{'type': 'connected', 'connected': false});
-      try {
-        await socket?.close();
-      } catch (_) {}
-    }
-    await Future<void>.delayed(const Duration(milliseconds: 350));
-  }
-}
-
 extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
+  void _attachSharedOverlayRuntime(SharedRuntimeManager runtime) {
+    if (identical(_sharedRuntimeManager, runtime)) {
+      return;
+    }
+    _detachSharedOverlayRuntime();
+    _sharedRuntimeManager = runtime;
+    runtime.overlayStreamListenable.addListener(_handleSharedOverlayRuntimeTick);
+    _syncSharedOverlayRuntime(seedBufferedFrames: true);
+  }
+
+  void _detachSharedOverlayRuntime() {
+    final runtime = _sharedRuntimeManager;
+    if (runtime != null) {
+      runtime.overlayStreamListenable
+          .removeListener(_handleSharedOverlayRuntimeTick);
+    }
+    _sharedRuntimeManager = null;
+  }
+
+  void _handleSharedOverlayRuntimeTick() {
+    if (!mounted) {
+      return;
+    }
+    _syncSharedOverlayRuntime(seedBufferedFrames: false);
+  }
+
+  void _syncSharedOverlayRuntime({
+    required bool seedBufferedFrames,
+  }) {
+    final runtime = _sharedRuntimeManager;
+    if (runtime == null) {
+      _applySidecarConnectionState(false, allowRecovery: false);
+      return;
+    }
+
+    final sameHost = runtime.overlayHost == _hostIp;
+    final effectiveConnected =
+        _openpilotOverlayMode && sameHost && runtime.overlayConnected;
+    _applySidecarConnectionState(
+      effectiveConnected,
+      allowRecovery: _openpilotOverlayMode,
+      provisionalReason:
+          seedBufferedFrames ? 'shared_overlay_seed' : 'shared_overlay_update',
+    );
+
+    if (!sameHost) {
+      return;
+    }
+    if (seedBufferedFrames) {
+      for (final frame in runtime.overlayFrameBuffer) {
+        _consumeSharedOverlayFrame(frame);
+      }
+    }
+    _consumeSharedOverlayFrame(runtime.latestOverlayFrame);
+  }
+
+  void _consumeSharedOverlayFrame(OverlayStreamFrame? frame) {
+    if (frame == null || !_openpilotOverlayMode) {
+      return;
+    }
+    if (frame.host != _hostIp) {
+      return;
+    }
+    if (frame.sequence <= _lastConsumedSharedOverlayFrameSequence) {
+      return;
+    }
+    _lastConsumedSharedOverlayFrameSequence = frame.sequence;
+    _handleSidecarPayload(Map<String, dynamic>.from(frame.payload));
+  }
+
   void _startSidecarLoop() {
-    _stopSidecarLoop(resetSession: false);
-    _sidecarSession++;
-    final session = _sidecarSession;
-    unawaited(_startSidecarWorker(session));
+    final runtime = _sharedRuntimeManager;
+    if (runtime == null) {
+      _applySidecarConnectionState(false, allowRecovery: false);
+      return;
+    }
+    unawaited(runtime.ensureOverlayStream(forceRestart: false));
+    _syncSharedOverlayRuntime(seedBufferedFrames: true);
   }
 
   void _stopSidecarLoop({bool resetSession = true}) {
-    if (resetSession) _sidecarSession++;
-    _sidecarWorkerSubscription?.cancel();
-    _sidecarWorkerSubscription = null;
-    _sidecarWorkerReceivePort?.close();
-    _sidecarWorkerReceivePort = null;
-    _sidecarWorkerIsolate?.kill(priority: Isolate.immediate);
-    _sidecarWorkerIsolate = null;
-    if (mounted && _sidecarConnected) {
-      _safeSetState(() => _sidecarConnected = false);
-    } else {
-      _sidecarConnected = false;
+    _applySidecarConnectionState(false, allowRecovery: false);
+    if (resetSession) {
+      _lastConsumedSharedOverlayFrameSequence = 0;
     }
   }
 
-  Future<void> _startSidecarWorker(int session) async {
-    if (!mounted || session != _sidecarSession) return;
-    final receivePort = ReceivePort();
-    _sidecarWorkerReceivePort = receivePort;
-    _sidecarWorkerSubscription = receivePort.listen((event) {
-      if (!mounted || session != _sidecarSession) return;
-      _handleSidecarWorkerEvent(event);
-    });
-    try {
-      final isolate = await Isolate.spawn<Map<String, dynamic>>(
-        _driveSidecarWorkerMain,
-        <String, dynamic>{
-          'wsUrl': _sidecarWsUrl,
-          'sendPort': receivePort.sendPort,
-        },
-        debugName: 'drive_sidecar_worker_$_hostIp',
-      );
-      if (!mounted || session != _sidecarSession) {
-        isolate.kill(priority: Isolate.immediate);
-        return;
-      }
-      _sidecarWorkerIsolate = isolate;
-    } catch (_) {
-      _sidecarWorkerSubscription?.cancel();
-      _sidecarWorkerSubscription = null;
-      _sidecarWorkerReceivePort?.close();
-      _sidecarWorkerReceivePort = null;
-      if (_sidecarConnected && mounted) {
-        _safeSetState(() => _sidecarConnected = false);
-      } else {
-        _sidecarConnected = false;
-      }
-      _setSidecarPhase(
-        _SidecarPhase.failed,
-        message: '사이드카 워커 시작에 실패했습니다.',
-      );
-    }
-  }
-
-  void _handleSidecarWorkerEvent(dynamic event) {
-    if (event is! Map) return;
-    final map = Map<String, dynamic>.from(event);
-    final type = map['type']?.toString() ?? '';
-    if (type == 'connected') {
-      final next = map['connected'] == true;
+  void _applySidecarConnectionState(
+    bool next, {
+    required bool allowRecovery,
+    String provisionalReason = 'sidecar_ws_connected',
+  }) {
+    final changed = _sidecarConnected != next;
+    if (changed) {
       _pushSidecarHistory('WS', next ? 'connected' : 'disconnected');
       if (next && _isSidecarBusy) {
         _sidecarTransitionTimer?.cancel();
       }
-      if (mounted) {
-        _safeSetState(() {
-          _sidecarConnected = next;
-          if (next) {
-            _suppressCameraErrors = false;
-            _cameraError = null;
-          } else if (_openpilotOverlayMode) {
-            _suppressCameraErrors = true;
-            _cameraError = null;
-            _cameraLoading = false;
-          }
-        });
-      } else {
+    }
+
+    if (mounted) {
+      _safeSetState(() {
         _sidecarConnected = next;
         if (next) {
           _suppressCameraErrors = false;
@@ -155,45 +112,61 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
           _cameraError = null;
           _cameraLoading = false;
         }
-      }
+      });
+    } else {
+      _sidecarConnected = next;
       if (next) {
-        _clearSidecarRecoverySchedule();
-        _setSidecarPhase(
-          _SidecarPhase.running,
-          message: '사이드카 연결이 복구되었습니다.',
+        _suppressCameraErrors = false;
+        _cameraError = null;
+      } else if (_openpilotOverlayMode) {
+        _suppressCameraErrors = true;
+        _cameraError = null;
+        _cameraLoading = false;
+      }
+    }
+
+    if (next) {
+      _clearSidecarRecoverySchedule();
+      _beginStartupProvisionalSync(reason: provisionalReason);
+      _setSidecarPhase(
+        _SidecarPhase.running,
+        message: '사이드카 연결이 복구되었습니다.',
+      );
+      if (!_adaptiveCameraQualitySynced) {
+        unawaited(
+          _setAdaptiveCameraQualityMode(
+            _adaptiveCameraQualityMode,
+            reason: 'shared_runtime_reconnected',
+            force: true,
+          ),
         );
-        if (!_adaptiveCameraQualitySynced) {
-          unawaited(
-            _setAdaptiveCameraQualityMode(
-              _adaptiveCameraQualityMode,
-              reason: 'ws_reconnected',
-              force: true,
-            ),
-          );
-        }
-      } else if (_openpilotOverlayMode && !_cameraSuspendedByLifecycle) {
+      }
+      if (_openpilotOverlayMode &&
+          !_cameraSuspendedByLifecycle &&
+          _cameraSourceKey == null) {
+        unawaited(_loadCameraSource(force: false));
+      }
+      return;
+    }
+
+    if (_openpilotOverlayMode && !_cameraSuspendedByLifecycle) {
+      if (allowRecovery) {
         _setSidecarPhase(
           _SidecarPhase.verifying,
           message: '사이드카 재연결을 시도합니다.',
         );
-      } else if (!_openpilotOverlayMode) {
+        if (!_isSidecarBusy) {
+          _scheduleSidecarRuntimeRecovery(reason: 'shared_runtime_disconnected');
+        }
+      } else {
         _setSidecarPhase(_SidecarPhase.idle);
-      }
-      if (next && !_cameraSuspendedByLifecycle && _cameraSourceKey == null) {
-        unawaited(_loadCameraSource(force: false));
-      } else if (!next &&
-          _openpilotOverlayMode &&
-          !_cameraSuspendedByLifecycle &&
-          !_isSidecarBusy) {
-        _scheduleSidecarRuntimeRecovery(reason: 'worker_disconnected');
       }
       return;
     }
-    if (type != 'frame') return;
-    final rawPayload = map['payload'];
-    if (rawPayload is! Map) return;
-    final payload = Map<String, dynamic>.from(rawPayload);
-    _handleSidecarPayload(payload);
+
+    if (!_openpilotOverlayMode) {
+      _setSidecarPhase(_SidecarPhase.idle);
+    }
   }
 
   void _handleSidecarPayload(Map<String, dynamic> payload) {
@@ -242,12 +215,20 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
         (nowUs - _lastCameraFrameEventUs) >
             _LiveDriveCanvasScreenState._cameraFrameStaleUs;
     if (inferredCameraFrame != null &&
-        (_lastCameraFrameId == null || cameraStale)) {
+        (_lastCameraFrameId == null ||
+            cameraStale ||
+            _startupProvisionalSyncActive)) {
       _lastCameraFrameId = inferredCameraFrame;
       if (cameraStale && (nowUs - _lastCameraFallbackLogUs) >= 2000000) {
         _lastCameraFallbackLogUs = nowUs;
         debugPrint(
           '[DriveCanvas][sync] fallback cameraFrame=$inferredCameraFrame via sidecar (native frame event stale)',
+        );
+      } else if (_startupProvisionalSyncActive &&
+          (nowUs - _lastCameraFallbackLogUs) >= 1200000) {
+        _lastCameraFallbackLogUs = nowUs;
+        debugPrint(
+          '[DriveCanvas][sync] provisional cameraFrame=$inferredCameraFrame via sidecar (startup)',
         );
       }
     }

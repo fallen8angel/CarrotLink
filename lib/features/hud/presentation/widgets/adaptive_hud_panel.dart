@@ -198,11 +198,8 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
   }
 
   Widget _buildStateLayout() {
-    final title =
-        (stateTitle ?? '').trim().isEmpty ? 'HUD 대기' : stateTitle!.trim();
-    final message = (stateMessage ?? '').trim().isEmpty
-        ? '의미 데이터 수신 전입니다.'
-        : stateMessage!.trim();
+    final title = (stateTitle ?? '').trim();
+    final message = (stateMessage ?? '').trim();
     final compact = profile.density == HudDensityClass.micro ||
         profile.density == HudDensityClass.compact;
     return Center(
@@ -213,35 +210,39 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
             color: const Color(0xFF5BD7FF),
             size: compact ? 14 : 16,
           ),
-          SizedBox(height: compact ? 10 : 12),
-          Text(
-            title,
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: profile.secondaryValueFontSize + 1.0,
-              fontWeight: FontWeight.w900,
-              letterSpacing: 0.2,
-            ),
-          ),
-          SizedBox(height: compact ? 6 : 8),
-          ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth: profile.maxWidth * (compact ? 0.78 : 0.68),
-            ),
-            child: Text(
-              message,
+          if (title.isNotEmpty) ...<Widget>[
+            SizedBox(height: compact ? 10 : 12),
+            Text(
+              title,
               textAlign: TextAlign.center,
-              maxLines: compact ? 2 : 3,
-              overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                color: Colors.white60,
-                fontSize: profile.labelFontSize + 1.0,
-                fontWeight: FontWeight.w700,
-                height: 1.24,
+                color: Colors.white,
+                fontSize: profile.secondaryValueFontSize + 1.0,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 0.2,
               ),
             ),
-          ),
+          ],
+          if (message.isNotEmpty) ...<Widget>[
+            SizedBox(height: compact ? 6 : 8),
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: profile.maxWidth * (compact ? 0.78 : 0.68),
+              ),
+              child: Text(
+                message,
+                textAlign: TextAlign.center,
+                maxLines: compact ? 2 : 3,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: Colors.white60,
+                  fontSize: profile.labelFontSize + 1.0,
+                  fontWeight: FontWeight.w700,
+                  height: 1.24,
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -310,7 +311,10 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
     final compactMeta = _useCompactMetaPolicy();
     return AdaptiveHudDriveOverlaySurface(
       profile: profile,
+      showMetrics: false,
+      showDeviceMetrics: model.showDeviceMetrics,
       topStatusRow: _buildTopStatusRow(),
+      metricRow: _buildMetricRow(),
       leftColumn: AdaptiveHudLeftClusterColumn(
         speedCluster: AdaptiveHudDriveOverlaySpeedCluster(
           profile: profile,
