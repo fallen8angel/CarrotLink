@@ -88,14 +88,14 @@ def _safe_int(v: Any) -> int | None:
 
 def _downsample(values: list[float], max_points: int = 24) -> list[float]:
     if len(values) <= max_points:
-        return values
+        return [round(v, 1) for v in values]
     if max_points <= 1:
-        return [values[0]]
+        return [round(values[0], 1)]
     step = (len(values) - 1) / float(max_points - 1)
     out = []
     for i in range(max_points):
         idx = int(round(i * step))
-        out.append(values[idx])
+        out.append(round(values[idx], 1))
     return out
 
 
@@ -1624,13 +1624,13 @@ class SidecarApp:
             pass
 
         try:
-            lane_probs = [float(v) for v in list(getattr(mv2, "laneLineProbs", []))]
+            lane_probs = [round(float(v), 2) for v in list(getattr(mv2, "laneLineProbs", []))]
             out["laneLineProbs"] = lane_probs[:4]
         except Exception:
             pass
 
         try:
-            lane_stds = [float(v) for v in list(getattr(mv2, "laneLineStds", []))]
+            lane_stds = [round(float(v), 1) for v in list(getattr(mv2, "laneLineStds", []))]
             out["laneLineStds"] = lane_stds[:4]
         except Exception:
             pass
@@ -1678,7 +1678,7 @@ class SidecarApp:
             pass
 
         try:
-            edge_stds = [float(v) for v in list(getattr(mv2, "roadEdgeStds", []))]
+            edge_stds = [round(float(v), 1) for v in list(getattr(mv2, "roadEdgeStds", []))]
             out["roadEdgeStds"] = edge_stds[:2]
         except Exception:
             pass
@@ -1944,9 +1944,17 @@ class SidecarApp:
             pass
         try:
             if self.sm.alive.get("liveCalibration", False):
-                payload["liveCalibration"] = self._payload_live_calibration(
-                    self.sm["liveCalibration"]
-                )
+                # liveCalibration changes very slowly (~1Hz).
+                # Cache and refresh every 20 ticks (~1s at 20Hz).
+                calib_tick = getattr(self, "_calib_cache_tick", 0)
+                if calib_tick <= 0 or not hasattr(self, "_calib_cache"):
+                    self._calib_cache = self._payload_live_calibration(
+                        self.sm["liveCalibration"]
+                    )
+                    self._calib_cache_tick = 20
+                else:
+                    self._calib_cache_tick = calib_tick - 1
+                payload["liveCalibration"] = self._calib_cache
         except Exception:
             pass
         try:
