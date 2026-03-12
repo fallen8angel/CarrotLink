@@ -1997,7 +1997,7 @@ class SidecarApp:
                 sm = self.sm
                 if sm is not None and (self.clients or self.hud_clients):
                     sm.update(0)
-                live_send_timeout = 0.15
+                live_send_timeout = 0.5
                 if self.clients:
                     build_started = time.monotonic()
                     live_payload = self._build_live_payload(do_update=False)
@@ -2059,7 +2059,7 @@ class SidecarApp:
                                 continue
                             fail_count = self._live_send_failures.get(ws, 0) + 1
                             self._live_send_failures[ws] = fail_count
-                            if fail_count >= 3:
+                            if fail_count >= 5:
                                 stale.append(ws)
                                 self._live_send_drop_count += 1
                     for ws in stale:
@@ -2116,7 +2116,7 @@ class SidecarApp:
                                 continue
                             fail_count = self._hud_send_failures.get(ws, 0) + 1
                             self._hud_send_failures[ws] = fail_count
-                            if fail_count >= 3:
+                            if fail_count >= 5:
                                 stale_hud.append(ws)
                                 self._hud_send_drop_count += 1
                     for ws in stale_hud:
