@@ -2070,7 +2070,6 @@ class SidecarApp:
                         except Exception:
                             pass
                 if self.hud_clients and tick % hud_every == 0:
-                    stale_hud: list[web.WebSocketResponse] = []
                     hud_send_jobs: list[
                         tuple[web.WebSocketResponse, asyncio.Task[Any]]
                     ] = []
@@ -2094,13 +2093,13 @@ class SidecarApp:
                                     asyncio.create_task(
                                         asyncio.wait_for(
                                             ws.send_str(hud_message),
-                                            timeout=live_send_timeout,
+                                            timeout=1.0,
                                         )
                                     ),
                                 )
                             )
                         except Exception:
-                            stale_hud.append(ws)
+                            pass  # skip this tick, retry next
                     if hud_send_jobs:
                         hud_results = await asyncio.gather(
                             *[task for _, task in hud_send_jobs],
@@ -2110,22 +2109,12 @@ class SidecarApp:
                             0.0,
                             (time.monotonic() - hud_batch_started) * 1000.0,
                         )
+                        # HUD clients are never kicked on send failure.
+                        # Dead connections are cleaned up by aiohttp's
+                        # heartbeat=20 ping/pong mechanism instead.
                         for (ws, _), result in zip(hud_send_jobs, hud_results):
-                            if not isinstance(result, Exception):
-                                self._hud_send_failures.pop(ws, None)
-                                continue
-                            fail_count = self._hud_send_failures.get(ws, 0) + 1
-                            self._hud_send_failures[ws] = fail_count
-                            if fail_count >= 5:
-                                stale_hud.append(ws)
+                            if isinstance(result, Exception):
                                 self._hud_send_drop_count += 1
-                    for ws in stale_hud:
-                        self.hud_clients.discard(ws)
-                        self._hud_send_failures.pop(ws, None)
-                        try:
-                            await ws.close(code=1011, message=b"hud_send_failed")
-                        except Exception:
-                            pass
                 tick += 1
                 await asyncio.sleep(base_interval)
             except asyncio.CancelledError:
