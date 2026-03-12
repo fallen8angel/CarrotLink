@@ -1992,9 +1992,6 @@ class SidecarApp:
         # HUD broadcasts every hud_every ticks (~10Hz when base is 20Hz).
         hud_every = 2
         tick = 0
-        # Delta update: send only changed top-level keys most of the time.
-        full_every = 20  # send full payload every ~1s
-        _prev_live: dict[str, Any] = {}
         while True:
             try:
                 sm = self.sm
@@ -2004,45 +2001,13 @@ class SidecarApp:
                 if self.clients:
                     build_started = time.monotonic()
                     live_payload = self._build_live_payload(do_update=False)
-                    is_full = (tick % full_every == 0) or not _prev_live
-                    if is_full:
-                        send_payload = live_payload
-                        send_payload["_d"] = 0
-                    else:
-                        delta: dict[str, Any] = {}
-                        # Keys that always change (timestamps) – include in delta
-                        # but don't count them for the "nothing changed" decision.
-                        _always_keys = {"ts", "source", "profile", "repo"}
-                        for k, v in live_payload.items():
-                            if k in _always_keys:
-                                delta[k] = v
-                                continue
-                            prev_v = _prev_live.get(k)
-                            if prev_v != v:
-                                delta[k] = v
-                        # If delta is >= 90% of full, just send full.
-                        data_keys_changed = len(delta) - len(_always_keys)
-                        data_keys_total = len(live_payload) - len(
-                            _always_keys & live_payload.keys()
-                        )
-                        if data_keys_total > 0 and data_keys_changed >= data_keys_total * 0.9:
-                            send_payload = live_payload
-                            send_payload["_d"] = 0
-                        elif data_keys_changed > 0:
-                            send_payload = delta
-                            send_payload["_d"] = 1
-                        else:
-                            # Nothing changed: send heartbeat to keep connection alive.
-                            send_payload = {"_d": 1, "ts": live_payload.get("ts")}
-                    _prev_live = live_payload
                     message = json.dumps(
-                        send_payload, separators=(",", ":"), ensure_ascii=False
+                        live_payload, separators=(",", ":"), ensure_ascii=False
                     )
                     self._last_live_build_ms = max(
                         0.0, (time.monotonic() - build_started) * 1000.0,
                     )
                     compressed: bytes | None = None
-                    packed: bytes | None = None
                     stale: list[web.WebSocketResponse] = []
                     send_jobs: list[
                         tuple[web.WebSocketResponse, asyncio.Task[Any]]
@@ -2051,21 +2016,7 @@ class SidecarApp:
                     for ws, entry in list(self.clients.items()):
                         encoding, _camera_mode, _role, _session = entry
                         try:
-                            if encoding == "msgpack" and _msgpack is not None:
-                                if packed is None:
-                                    packed = _msgpack.packb(send_payload, use_bin_type=True)
-                                send_jobs.append(
-                                    (
-                                        ws,
-                                        asyncio.create_task(
-                                            asyncio.wait_for(
-                                                ws.send_bytes(packed),
-                                                timeout=live_send_timeout,
-                                            )
-                                        ),
-                                    )
-                                )
-                            elif encoding == "zlib-json":
+                            if encoding == "zlib-json":
                                 if compressed is None:
                                     compressed = zlib.compress(message.encode("utf-8"), level=1)
                                 send_jobs.append(
