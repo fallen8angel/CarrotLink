@@ -1984,6 +1984,9 @@ class SidecarApp:
 
     async def _broadcast_loop(self, app: web.Application) -> None:
         base_interval = 0.05
+        # HUD broadcasts every hud_every ticks (~5Hz when base is 20Hz).
+        hud_every = 4
+        tick = 0
         while True:
             try:
                 sm = self.sm
@@ -2062,7 +2065,7 @@ class SidecarApp:
                             await ws.close(code=1011, message=b"broadcast_send_failed")
                         except Exception:
                             pass
-                if self.hud_clients:
+                if self.hud_clients and tick % hud_every == 0:
                     stale_hud: list[web.WebSocketResponse] = []
                     hud_send_jobs: list[
                         tuple[web.WebSocketResponse, asyncio.Task[Any]]
@@ -2119,6 +2122,7 @@ class SidecarApp:
                             await ws.close(code=1011, message=b"hud_send_failed")
                         except Exception:
                             pass
+                tick += 1
                 await asyncio.sleep(base_interval)
             except asyncio.CancelledError:
                 break
