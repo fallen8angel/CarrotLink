@@ -1989,8 +1989,8 @@ class SidecarApp:
 
     async def _broadcast_loop(self, app: web.Application) -> None:
         base_interval = 0.05
-        # HUD broadcasts every hud_every ticks (~5Hz when base is 20Hz).
-        hud_every = 4
+        # HUD broadcasts every hud_every ticks (~10Hz when base is 20Hz).
+        hud_every = 2
         tick = 0
         # Delta update: send only changed top-level keys most of the time.
         full_every = 20  # send full payload every ~1s
@@ -2022,15 +2022,12 @@ class SidecarApp:
                             send_payload = delta
                             send_payload["_d"] = 1
                         else:
-                            # Nothing changed, skip send entirely.
-                            send_payload = None  # type: ignore[assignment]
+                            # Nothing changed: send heartbeat to keep connection alive.
+                            send_payload = {"_d": 1}
                     _prev_live = live_payload
-                    if send_payload is not None:
-                        message = json.dumps(
-                            send_payload, separators=(",", ":"), ensure_ascii=False
-                        )
-                    else:
-                        message = None  # type: ignore[assignment]
+                    message = json.dumps(
+                        send_payload, separators=(",", ":"), ensure_ascii=False
+                    )
                     self._last_live_build_ms = max(
                         0.0, (time.monotonic() - build_started) * 1000.0,
                     )
@@ -2041,8 +2038,7 @@ class SidecarApp:
                         tuple[web.WebSocketResponse, asyncio.Task[Any]]
                     ] = []
                     batch_started = time.monotonic()
-                    if message is not None:
-                      for ws, entry in list(self.clients.items()):
+                    for ws, entry in list(self.clients.items()):
                         encoding, _camera_mode, _role, _session = entry
                         try:
                             if encoding == "msgpack" and _msgpack is not None:
