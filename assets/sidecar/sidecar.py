@@ -1997,7 +1997,7 @@ class SidecarApp:
                 sm = self.sm
                 if sm is not None and (self.clients or self.hud_clients):
                     sm.update(0)
-                live_send_timeout = 0.5
+                live_send_timeout = 1.0
                 if self.clients:
                     build_started = time.monotonic()
                     live_payload = self._build_live_payload(do_update=False)
@@ -2008,7 +2008,6 @@ class SidecarApp:
                         0.0, (time.monotonic() - build_started) * 1000.0,
                     )
                     compressed: bytes | None = None
-                    stale: list[web.WebSocketResponse] = []
                     send_jobs: list[
                         tuple[web.WebSocketResponse, asyncio.Task[Any]]
                     ] = []
@@ -2043,7 +2042,7 @@ class SidecarApp:
                                     )
                                 )
                         except Exception:
-                            stale.append(ws)
+                            pass  # skip this tick, retry next
                     if send_jobs:
                         results = await asyncio.gather(
                             *[task for _, task in send_jobs],
@@ -2053,22 +2052,12 @@ class SidecarApp:
                             0.0,
                             (time.monotonic() - batch_started) * 1000.0,
                         )
+                        # Live clients are never kicked on send failure.
+                        # Dead connections are cleaned up by aiohttp's
+                        # heartbeat=20 ping/pong mechanism instead.
                         for (ws, _), result in zip(send_jobs, results):
-                            if not isinstance(result, Exception):
-                                self._live_send_failures.pop(ws, None)
-                                continue
-                            fail_count = self._live_send_failures.get(ws, 0) + 1
-                            self._live_send_failures[ws] = fail_count
-                            if fail_count >= 5:
-                                stale.append(ws)
+                            if isinstance(result, Exception):
                                 self._live_send_drop_count += 1
-                    for ws in stale:
-                        self.clients.pop(ws, None)
-                        self._live_send_failures.pop(ws, None)
-                        try:
-                            await ws.close(code=1011, message=b"broadcast_send_failed")
-                        except Exception:
-                            pass
                 if self.hud_clients and tick % hud_every == 0:
                     hud_send_jobs: list[
                         tuple[web.WebSocketResponse, asyncio.Task[Any]]
