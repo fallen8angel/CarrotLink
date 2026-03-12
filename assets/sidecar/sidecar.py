@@ -9,6 +9,11 @@ import time
 import zlib
 from typing import Any
 
+try:
+    import msgpack as _msgpack  # type: ignore[import-untyped]
+except ImportError:
+    _msgpack = None
+
 from aiohttp import web
 
 
@@ -1987,6 +1992,9 @@ class SidecarApp:
         # HUD broadcasts every hud_every ticks (~5Hz when base is 20Hz).
         hud_every = 4
         tick = 0
+        # Delta update: send only changed top-level keys most of the time.
+        full_every = 20  # send full payload every ~1s
+        _prev_live: dict[str, Any] = {}
         while True:
             try:
                 sm = self.sm
@@ -1996,25 +2004,64 @@ class SidecarApp:
                 if self.clients:
                     build_started = time.monotonic()
                     live_payload = self._build_live_payload(do_update=False)
-                    message = json.dumps(
-                        live_payload, separators=(",", ":"), ensure_ascii=False
-                    )
-                    message_bytes = message.encode("utf-8")
+                    is_full = (tick % full_every == 0) or not _prev_live
+                    if is_full:
+                        send_payload = live_payload
+                        send_payload["_d"] = 0
+                    else:
+                        delta: dict[str, Any] = {}
+                        for k, v in live_payload.items():
+                            prev_v = _prev_live.get(k)
+                            if prev_v != v:
+                                delta[k] = v
+                        # If delta is >= 90% of full, just send full.
+                        if len(delta) >= len(live_payload) * 0.9:
+                            send_payload = live_payload
+                            send_payload["_d"] = 0
+                        elif delta:
+                            send_payload = delta
+                            send_payload["_d"] = 1
+                        else:
+                            # Nothing changed, skip send entirely.
+                            send_payload = None  # type: ignore[assignment]
+                    _prev_live = live_payload
+                    if send_payload is not None:
+                        message = json.dumps(
+                            send_payload, separators=(",", ":"), ensure_ascii=False
+                        )
+                    else:
+                        message = None  # type: ignore[assignment]
                     self._last_live_build_ms = max(
                         0.0, (time.monotonic() - build_started) * 1000.0,
                     )
                     compressed: bytes | None = None
+                    packed: bytes | None = None
                     stale: list[web.WebSocketResponse] = []
                     send_jobs: list[
                         tuple[web.WebSocketResponse, asyncio.Task[Any]]
                     ] = []
                     batch_started = time.monotonic()
-                    for ws, entry in list(self.clients.items()):
+                    if message is not None:
+                      for ws, entry in list(self.clients.items()):
                         encoding, _camera_mode, _role, _session = entry
                         try:
-                            if encoding == "zlib-json":
+                            if encoding == "msgpack" and _msgpack is not None:
+                                if packed is None:
+                                    packed = _msgpack.packb(send_payload, use_bin_type=True)
+                                send_jobs.append(
+                                    (
+                                        ws,
+                                        asyncio.create_task(
+                                            asyncio.wait_for(
+                                                ws.send_bytes(packed),
+                                                timeout=live_send_timeout,
+                                            )
+                                        ),
+                                    )
+                                )
+                            elif encoding == "zlib-json":
                                 if compressed is None:
-                                    compressed = zlib.compress(message_bytes, level=1)
+                                    compressed = zlib.compress(message.encode("utf-8"), level=1)
                                 send_jobs.append(
                                     (
                                         ws,
@@ -2132,7 +2179,10 @@ class SidecarApp:
 
     async def ws_live(self, request: web.Request) -> web.WebSocketResponse:
         encoding = request.query.get("encoding", "json").strip().lower()
-        if encoding not in {"json", "zlib-json"}:
+        _valid_encodings = {"json", "zlib-json", "msgpack"}
+        if encoding not in _valid_encodings:
+            encoding = "json"
+        if encoding == "msgpack" and _msgpack is None:
             encoding = "json"
         camera_mode = str(request.query.get("camera", "both")).strip()
         if camera_mode not in ("road", "wideRoad"):

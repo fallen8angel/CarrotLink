@@ -2,6 +2,9 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:msgpack_dart/msgpack_dart.dart' as msgpack;
 import 'dart:isolate';
 
 import 'package:flutter/foundation.dart';
@@ -79,23 +82,35 @@ Future<void> _overlayRuntimeWorkerMain(Map<String, dynamic> config) async {
           return Map<String, dynamic>.from(decoded);
         }
       } else if (event is List<int>) {
-        var bytes = event;
+        final bytes = event is Uint8List ? event : Uint8List.fromList(event);
+        // Try msgpack first (binary WS frames from sidecar).
         try {
-          bytes = zlib.decode(bytes);
-        } catch (_) {
-          // Sidecar may still send plain UTF-8 frames during fallback paths.
-        }
-        final decoded = jsonDecode(utf8.decode(bytes, allowMalformed: true));
-        if (decoded is Map<String, dynamic>) {
-          return decoded;
-        }
-        if (decoded is Map) {
-          return Map<String, dynamic>.from(decoded);
-        }
+          final decoded = msgpack.deserialize(bytes);
+          if (decoded is Map) {
+            return Map<String, dynamic>.from(decoded);
+          }
+        } catch (_) {}
+        // Fallback: zlib-compressed JSON or plain UTF-8 JSON.
+        try {
+          List<int> decompressed = bytes;
+          try {
+            decompressed = zlib.decode(bytes);
+          } catch (_) {}
+          final decoded = jsonDecode(utf8.decode(decompressed, allowMalformed: true));
+          if (decoded is Map<String, dynamic>) {
+            return decoded;
+          }
+          if (decoded is Map) {
+            return Map<String, dynamic>.from(decoded);
+          }
+        } catch (_) {}
       }
     } catch (_) {}
     return null;
   }
+
+  // Delta merge state: sidecar sends `_d:1` for delta, `_d:0` for full.
+  Map<String, dynamic> cachedPayload = <String, dynamic>{};
 
   while (true) {
     WebSocket? socket;
@@ -103,15 +118,26 @@ Future<void> _overlayRuntimeWorkerMain(Map<String, dynamic> config) async {
       socket = await WebSocket.connect(wsUrl).timeout(
         const Duration(seconds: 4),
       );
+      cachedPayload.clear();
       sendPort.send(<String, dynamic>{'type': 'connected', 'connected': true});
       await for (final event in socket) {
-        final payload = decodePayload(event);
-        if (payload == null) {
+        final raw = decodePayload(event);
+        if (raw == null) {
           continue;
+        }
+        final isDelta = raw['_d'];
+        if (isDelta == 1) {
+          // Delta: merge changed keys into cached state.
+          raw.remove('_d');
+          cachedPayload.addAll(raw);
+        } else {
+          // Full payload (or legacy without _d).
+          raw.remove('_d');
+          cachedPayload = Map<String, dynamic>.from(raw);
         }
         sendPort.send(<String, dynamic>{
           'type': 'frame',
-          'payload': payload,
+          'payload': Map<String, dynamic>.from(cachedPayload),
         });
       }
     } catch (_) {
@@ -473,7 +499,7 @@ class SharedRuntimeManager extends ChangeNotifier {
 
   String _overlayWsUrl(String host, int generation) {
     return 'ws://$host:7766/ws/live'
-        '?encoding=json'
+        '?encoding=msgpack'
         '&camera=road'
         '&role=drive_overlay'
         '&session=app_overlay_$generation';
