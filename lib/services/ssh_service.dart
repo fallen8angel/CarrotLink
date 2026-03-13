@@ -50,6 +50,7 @@ class SSHService extends ChangeNotifier {
   SSHClient? _client;
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
   final DiagnosticsService _diag = DiagnosticsService.instance;
+  static const String _lastConnectedIpStorageKey = 'ssh_last_connected_ip';
   static const int _defaultSshPort = 22;
   static const int _maxHeartbeatFailures = 5;
   static const Duration _heartbeatInterval = Duration(seconds: 8);
@@ -126,6 +127,18 @@ class SSHService extends ChangeNotifier {
       final connected = event['connectedIp']?.toString();
       _serviceConnectedIp =
           (connected != null && _isValidIpv4(connected)) ? connected : null;
+      final lastSuccessful = event['lastSuccessfulIp']?.toString();
+      if (lastSuccessful != null && _isValidIpv4(lastSuccessful)) {
+        _serviceLastSuccessfulIp = lastSuccessful;
+      }
+      final lastSuccessfulAgeRaw = event['lastSuccessfulAgeMs'];
+      if (lastSuccessfulAgeRaw is int &&
+          _serviceLastSuccessfulIp != null &&
+          lastSuccessfulAgeRaw >= 0) {
+        _serviceLastSuccessfulSeenAt = DateTime.now().subtract(
+          Duration(milliseconds: lastSuccessfulAgeRaw.clamp(0, 3600000)),
+        );
+      }
       notifyListeners();
     });
 
@@ -143,6 +156,15 @@ class SSHService extends ChangeNotifier {
       }
       final ip = event['ip']?.toString();
       _serviceConnectedIp = (ip != null && _isValidIpv4(ip)) ? ip : null;
+      final lastSuccessful = event['lastSuccessfulIp']?.toString();
+      if (lastSuccessful != null && _isValidIpv4(lastSuccessful)) {
+        _serviceLastSuccessfulIp = lastSuccessful;
+      }
+      final lastSuccessfulSeenAtRaw = event['lastSuccessfulSeenAt'];
+      if (lastSuccessfulSeenAtRaw is int && lastSuccessfulSeenAtRaw > 0) {
+        _serviceLastSuccessfulSeenAt =
+            DateTime.fromMillisecondsSinceEpoch(lastSuccessfulSeenAtRaw);
+      }
 
       if (_manualDisconnectRequested) {
         notifyListeners();
@@ -207,9 +229,11 @@ class SSHService extends ChangeNotifier {
       password = 'comma';
     }
 
-    final targetIp = preferredIp != null && _isValidIpv4(preferredIp)
-        ? preferredIp
-        : _serviceCandidateIp;
+    final storedLastIp = await _loadLastKnownIp();
+    final targetIp = _pickReconnectTarget(
+      preferredIp: preferredIp,
+      storedLastIp: storedLastIp,
+    );
 
     debugPrint(
         '[SSHService] Reconnect from storage - IP: $targetIp, Username: $username, Port: $port');
@@ -221,6 +245,33 @@ class SSHService extends ChangeNotifier {
       await connect(targetIp, username,
           port: port, password: password, privateKey: privateKey);
     }
+  }
+
+  String? _pickReconnectTarget({
+    String? preferredIp,
+    String? storedLastIp,
+  }) {
+    final candidates = <String?>[
+      preferredIp,
+      _serviceConnectedIp,
+      _serviceCandidateIp,
+      _serviceLastSuccessfulIp,
+      storedLastIp,
+    ];
+    for (final candidate in candidates) {
+      if (candidate != null && _isValidIpv4(candidate)) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  Future<String?> _loadLastKnownIp() async {
+    final raw = await _storage.read(key: _lastConnectedIpStorageKey);
+    if (raw == null || !_isValidIpv4(raw)) {
+      return null;
+    }
+    return raw;
   }
 
   bool get isConnected => _client != null && !_client!.isClosed;
@@ -246,6 +297,10 @@ class SSHService extends ChangeNotifier {
   DateTime? get serviceCandidateSeenAt => _serviceCandidateSeenAt;
   String? _serviceConnectedIp;
   String? get serviceConnectedIp => _serviceConnectedIp;
+  String? _serviceLastSuccessfulIp;
+  String? get serviceLastSuccessfulIp => _serviceLastSuccessfulIp;
+  DateTime? _serviceLastSuccessfulSeenAt;
+  DateTime? get serviceLastSuccessfulSeenAt => _serviceLastSuccessfulSeenAt;
 
   // IP Discovery
   StreamController<String>? _ipDiscoveryController;
@@ -295,6 +350,8 @@ class SSHService extends ChangeNotifier {
     int port = _defaultSshPort,
     String? password,
     String? privateKey,
+    Duration socketTimeout = const Duration(seconds: 5),
+    Duration authTimeout = const Duration(seconds: 10),
   }) async {
     if (_isConnecting) return;
 
@@ -310,8 +367,7 @@ class SSHService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final socket = await SSHSocket.connect(ip, port,
-          timeout: const Duration(seconds: 5));
+      final socket = await SSHSocket.connect(ip, port, timeout: socketTimeout);
 
       // Check if disconnected while connecting
       if (!_isConnecting) {
@@ -351,7 +407,7 @@ class SSHService extends ChangeNotifier {
         );
       }
 
-      await _client!.authenticated.timeout(const Duration(seconds: 10));
+      await _client!.authenticated.timeout(authTimeout);
 
       // Check if disconnected while authenticating
       if (!_isConnecting) {
@@ -363,6 +419,9 @@ class SSHService extends ChangeNotifier {
       _connectionStatus = "Connected";
       _connectedIp = ip; // Set IP only after successful connection
       _connectedPort = port;
+      _serviceLastSuccessfulIp = ip;
+      _serviceLastSuccessfulSeenAt = DateTime.now();
+      await _storage.write(key: _lastConnectedIpStorageKey, value: ip);
       _diag.info('ssh', 'Connected to $ip:$port');
 
       // 키 인증 성공 시 key_verified = true 설정
@@ -402,6 +461,60 @@ class SSHService extends ChangeNotifier {
     } finally {
       _isConnecting = false;
       notifyListeners();
+    }
+  }
+
+  Future<bool> tryFastReconnect({
+    String source = 'ui',
+  }) async {
+    if (_manualDisconnectRequested || isConnected || _isConnecting) {
+      return false;
+    }
+
+    final usernameRaw = await _storage.read(key: 'ssh_username');
+    final username = (usernameRaw == null || usernameRaw.trim().isEmpty)
+        ? 'comma'
+        : usernameRaw.trim();
+    var password = await _storage.read(key: 'ssh_password');
+    final portStr = await _storage.read(key: 'ssh_port');
+    final port = int.tryParse(portStr ?? '') ?? _defaultSshPort;
+    final privateKeyRaw = await _storage.read(key: 'current_private_key');
+    final privateKey = (privateKeyRaw == null || privateKeyRaw.trim().isEmpty)
+        ? null
+        : privateKeyRaw;
+    if (privateKey == null && (password == null || password.trim().isEmpty)) {
+      password = 'comma';
+    }
+
+    final storedLastIp = await _loadLastKnownIp();
+    final targetIp = _pickReconnectTarget(storedLastIp: storedLastIp);
+    if (targetIp == null) {
+      return false;
+    }
+
+    FlutterBackgroundService().invoke('candidateHint', {
+      'ip': targetIp,
+      'source': 'app_fast_path_$source',
+    });
+    _diag.info('ssh', 'Fast reconnect source=$source target=$targetIp:$port');
+
+    try {
+      await connect(
+        targetIp,
+        username,
+        port: port,
+        password: password,
+        privateKey: privateKey,
+        socketTimeout: const Duration(seconds: 2),
+        authTimeout: const Duration(seconds: 3),
+      );
+      return true;
+    } catch (e) {
+      _diag.warn(
+        'ssh',
+        'Fast reconnect failed source=$source target=$targetIp:$port error=$e',
+      );
+      return false;
     }
   }
 
@@ -889,6 +1002,8 @@ class SSHService extends ChangeNotifier {
     await _storage.write(key: 'ssh_port', value: port.toString());
     if (password != null) {
       await _storage.write(key: 'ssh_password', value: password);
+    } else {
+      await _storage.delete(key: 'ssh_password');
     }
     if (keyPath != null) {
       await _storage.write(key: 'ssh_key_path', value: keyPath);
@@ -926,10 +1041,13 @@ class SSHService extends ChangeNotifier {
     const cmd = r'''
 read_cpu_avg() {
 for z in /sys/devices/virtual/thermal/thermal_zone*; do
+  [ -f "$z/temp" ] || continue
   [ -f "$z/type" ] || continue
   t=$(cat "$z/type" 2>/dev/null | tr '[:upper:]' '[:lower:]')
   case "$t" in
-    cpu*|soc*|ap*|big*|little*)
+    gpu*|pmic*|modem*|battery*|usb*|quiet*|skin*|board*|ddr*|xo-*|pa*|wifi*)
+      ;;
+    *)
       cat "$z/temp" 2>/dev/null
       ;;
   esac

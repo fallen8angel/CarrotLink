@@ -1,7 +1,7 @@
 name: carrot_pilot_manager
 description: A CarrotLink App
 publish_to: 'kooingh354'
-version: 2.0019.0+2001900
+version: 2.0061.0+2006100
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -42,6 +42,7 @@ dependencies:
   re_highlight: ^0.0.3
   web_socket_channel: ^2.4.5
   wakelock_plus: ^1.4.0
+  msgpack_dart: ^1.0.1
 
 dev_dependencies:
   flutter_test:
@@ -59,5 +60,7 @@ flutter:
   assets:
     - assets/icon.png
     - assets/speed_bg.png
-    - assets/sidecar/carrotlink_sidecar.py
-    - assets/sidecar/run_sidecar.sh
+    - assets/models/yolo26n.pte
+    - assets/sidecar/sidecar.py
+    - assets/sidecar/sidecar.sh
+

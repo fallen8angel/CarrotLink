@@ -1,6 +1,19 @@
 part of 'live_drive_canvas_screen.dart';
 
 extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
+  double _hudPreferredAspectRatioForWindowImpl(
+    UiWindowInfo window, {
+    required bool wide,
+  }) {
+    return switch (window.windowClass) {
+      UiWindowClass.compact => wide ? 1.24 : 0.92,
+      UiWindowClass.medium => wide ? 1.30 : 0.96,
+      UiWindowClass.expanded => wide ? 1.36 : 1.00,
+      UiWindowClass.large => wide ? 1.42 : 1.04,
+      UiWindowClass.extraLarge => wide ? 1.46 : 1.06,
+    };
+  }
+
   Future<void> _loadHudDefaultModeImpl() async {
     final mode = await HudDriveSettingsService.getDefaultMode();
     if (!mounted) return;
@@ -21,13 +34,13 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
     if (!_hudModeLoaded) {
       return const ColoredBox(color: Colors.black);
     }
-    if (_openpilotOverlayMode && !_sidecarConnected) {
+    if (_openpilotOverlayMode && !_nativeCameraAttachReady) {
       return const ColoredBox(color: Colors.black);
     }
     if (_useNativeLiveCamera) {
       return AndroidView(
         key: ValueKey<String>(
-          'native-live-${widget.hostIp}-$_liveCameraName',
+          'native-live-$_hostIp-$_liveCameraName',
         ),
         viewType: 'carrotlink/native_drive_video',
         creationParams: <String, dynamic>{
@@ -51,6 +64,7 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
               ),
             );
           }
+          unawaited(_pushNativeYoloConfig(force: true));
         },
       );
     }
@@ -60,8 +74,14 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
   String? _cameraCenterNoticeMessageImpl() {
     if (_debugOverlayPreviewMode) return null;
     if (!_hudModeLoaded) return 'HUD 모드 설정을 불러오는 중입니다.';
+    if (_openpilotOverlayMode && !_profileRequiresLiveRuntime(_currentSidecarProfile)) {
+      return '주행 대기 중입니다. HUD 전용 모드를 유지합니다.';
+    }
     if (_openpilotOverlayMode && !_sidecarConnected) {
       return '사이드카 연결 대기 중입니다.';
+    }
+    if (_openpilotOverlayMode && !_nativeCameraAttachReady) {
+      return '카메라/그래픽 연결 대기 중입니다.';
     }
     final err = _cameraError?.trim();
     if (err != null && err.isNotEmpty) {
@@ -100,8 +120,7 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
     };
     final label = _modeTagLabel;
     final isOpenpilot = _openpilotOverlayMode;
-    final tagBorderColor =
-        isOpenpilot ? _debugSelectedBorder : Colors.white12;
+    final tagBorderColor = isOpenpilot ? _debugSelectedBorder : Colors.white12;
     final tagFillColor = isOpenpilot ? _debugSelectedBg : _debugNavBg;
     const tagTextColor = Colors.white;
 
@@ -299,47 +318,32 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
       UiWindowInfo window, BoxConstraints constraints) {
     final width = constraints.maxWidth;
     final height = constraints.maxHeight;
-    final aspect = height / math.max(1.0, width);
-    var ratio = switch (window.windowClass) {
-      UiWindowClass.compact => 0.365,
-      UiWindowClass.medium => 0.35,
-      UiWindowClass.expanded => 0.338,
-      UiWindowClass.large => 0.328,
-      UiWindowClass.extraLarge => 0.32,
+    final horizontalInset = switch (window.windowClass) {
+      UiWindowClass.compact => 12.0,
+      UiWindowClass.medium => 14.0,
+      UiWindowClass.expanded => 16.0,
+      UiWindowClass.large || UiWindowClass.extraLarge => 18.0,
     };
-
-    if (aspect >= 2.05) {
-      ratio += 0.015;
-    } else if (aspect >= 1.9) {
-      ratio += 0.008;
-    } else if (aspect <= 1.55) {
-      ratio -= 0.02;
-    } else if (aspect <= 1.7) {
-      ratio -= 0.012;
-    }
-
-    if (window.shortestSide >= 720) {
-      ratio -= 0.01;
-    } else if (window.shortestSide <= 380) {
-      ratio += 0.01;
-    }
+    final usableWidth = math.max(1.0, width - (horizontalInset * 2));
+    final aspectRatio = _hudPreferredAspectRatioForWindow(window, wide: true);
+    final desiredHeight = usableWidth / aspectRatio;
 
     final minHeight = switch (window.windowClass) {
-      UiWindowClass.compact => 200.0,
-      UiWindowClass.medium => 212.0,
-      UiWindowClass.expanded => 224.0,
-      UiWindowClass.large => 234.0,
-      UiWindowClass.extraLarge => 244.0,
+      UiWindowClass.compact => 190.0,
+      UiWindowClass.medium => 204.0,
+      UiWindowClass.expanded => 216.0,
+      UiWindowClass.large => 228.0,
+      UiWindowClass.extraLarge => 236.0,
     };
     final maxHeight = switch (window.windowClass) {
-      UiWindowClass.compact => math.min(460.0, height * 0.44),
-      UiWindowClass.medium => math.min(470.0, height * 0.43),
-      UiWindowClass.expanded => math.min(480.0, height * 0.42),
-      UiWindowClass.large => math.min(500.0, height * 0.41),
-      UiWindowClass.extraLarge => math.min(520.0, height * 0.4),
+      UiWindowClass.compact => math.min(430.0, height * 0.42),
+      UiWindowClass.medium => math.min(450.0, height * 0.41),
+      UiWindowClass.expanded => math.min(470.0, height * 0.4),
+      UiWindowClass.large => math.min(490.0, height * 0.39),
+      UiWindowClass.extraLarge => math.min(510.0, height * 0.38),
     };
 
-    return (height * ratio).clamp(minHeight, maxHeight).toDouble();
+    return desiredHeight.clamp(minHeight, maxHeight).toDouble();
   }
 
   Widget _buildPortraitHudPanelImpl(UiWindowInfo window) {
@@ -358,12 +362,14 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
       child: Padding(
         padding:
             EdgeInsets.fromLTRB(panelPadding, panelPadding, panelPadding, 0),
-        child: HomeHudPreviewCard(
-          deviceIp: widget.hostIp,
+        child: AdaptiveHudHost(
+          deviceIp: _hostIp,
           enabled: true,
+          surface: HudSurfaceVariant.driveInline,
           fillParent: true,
+          syncNativeOverlay: true,
           key: ValueKey<String>(
-              'drive_hud_panel_${window.windowClass.name}_${widget.hostIp}'),
+              'drive_hud_panel_${window.windowClass.name}_$_hostIp'),
         ),
       ),
     );
@@ -401,56 +407,71 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
     return false;
   }
 
-  double _computeLandscapeHudOverlaySizeImpl(UiWindowInfo window, Size drawSize) {
+  double _computeLandscapeHudOverlayHeightImpl(
+    UiWindowInfo window,
+    Size drawSize,
+  ) {
     final base = math.min(drawSize.width, drawSize.height);
     final ratio = switch (window.windowClass) {
-      UiWindowClass.compact => 0.305,
+      UiWindowClass.compact => 0.30,
       UiWindowClass.medium => 0.29,
-      UiWindowClass.expanded => 0.275,
-      UiWindowClass.large => 0.262,
-      UiWindowClass.extraLarge => 0.25,
+      UiWindowClass.expanded => 0.28,
+      UiWindowClass.large => 0.27,
+      UiWindowClass.extraLarge => 0.26,
     };
     final minSize = switch (window.windowClass) {
-      UiWindowClass.compact => 182.0,
-      UiWindowClass.medium => 198.0,
-      UiWindowClass.expanded => 214.0,
-      UiWindowClass.large => 230.0,
-      UiWindowClass.extraLarge => 246.0,
+      UiWindowClass.compact => 184.0,
+      UiWindowClass.medium => 196.0,
+      UiWindowClass.expanded => 208.0,
+      UiWindowClass.large => 220.0,
+      UiWindowClass.extraLarge => 232.0,
     };
     final maxSize = switch (window.windowClass) {
-      UiWindowClass.compact => 352.0,
-      UiWindowClass.medium => 376.0,
-      UiWindowClass.expanded => 404.0,
-      UiWindowClass.large => 432.0,
-      UiWindowClass.extraLarge => 460.0,
+      UiWindowClass.compact => 304.0,
+      UiWindowClass.medium => 324.0,
+      UiWindowClass.expanded => 344.0,
+      UiWindowClass.large => 364.0,
+      UiWindowClass.extraLarge => 384.0,
     };
-    final viewportCap = drawSize.height * 0.48;
+    final viewportCap = drawSize.height * 0.44;
     final upperBound = math.max(minSize, math.min(maxSize, viewportCap));
     return (base * ratio).clamp(minSize, upperBound).toDouble();
+  }
+
+  double _computeLandscapeHudOverlayWidthImpl(
+    UiWindowInfo window,
+    double overlayHeight,
+  ) {
+    return overlayHeight *
+        _hudPreferredAspectRatioForWindow(window, wide: true);
   }
 
   Widget _buildLandscapeHudOverlayImpl(
     UiWindowInfo window,
     Size drawSize, {
-    double? overlaySize,
+    double? overlayHeight,
+    double? overlayWidth,
   }) {
-    final size =
-        overlaySize ?? _computeLandscapeHudOverlaySize(window, drawSize);
+    final height =
+        overlayHeight ?? _computeLandscapeHudOverlayHeight(window, drawSize);
+    final width =
+        overlayWidth ?? _computeLandscapeHudOverlayWidth(window, height);
     return Opacity(
       opacity: 0.8,
       child: SizedBox(
-        width: size,
-        height: size,
-        child: HomeHudPreviewCard(
-          deviceIp: widget.hostIp,
+        width: width,
+        height: height,
+        child: AdaptiveHudHost(
+          deviceIp: _hostIp,
           enabled: true,
+          surface: HudSurfaceVariant.driveOverlay,
           fillParent: true,
+          syncNativeOverlay: true,
           key: ValueKey<String>(
-            'drive_hud_overlay_${window.windowClass.name}_${widget.hostIp}',
+            'drive_hud_overlay_${window.windowClass.name}_$_hostIp',
           ),
         ),
       ),
     );
   }
-
 }

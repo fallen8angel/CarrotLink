@@ -32,12 +32,6 @@ class ConnectionSettingsScreen extends StatefulWidget {
 class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
   // 기본 연결 설정
   final TextEditingController _ipController = TextEditingController(text: '');
-  final TextEditingController _usernameController =
-      TextEditingController(text: 'comma');
-  final TextEditingController _passwordController =
-      TextEditingController(text: 'comma');
-  final TextEditingController _portController =
-      TextEditingController(text: '22');
 
   // 수동 키 입력용
   final TextEditingController _manualKeyController = TextEditingController();
@@ -129,9 +123,6 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
       } catch (_) {}
     }
     _ipController.dispose();
-    _usernameController.dispose();
-    _passwordController.dispose();
-    _portController.dispose();
     _manualKeyController.dispose();
     super.dispose();
   }

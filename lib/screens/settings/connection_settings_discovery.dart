@@ -167,15 +167,11 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
 
     try {
       final privateKey = _currentPrivateKey?.trim();
-      final savedPassword = _passwordController.text.trim();
       final authKey =
           (privateKey != null && privateKey.isNotEmpty) ? privateKey : null;
-      final authPassword = authKey == null
-          ? (savedPassword.isNotEmpty ? savedPassword : null)
-          : null;
 
-      if (authKey == null && authPassword == null) {
-        CustomToast.show(context, "SSH 키 또는 비밀번호를 준비하세요.", isError: true);
+      if (authKey == null) {
+        CustomToast.show(context, "SSH 개인키를 준비하세요.", isError: true);
         return;
       }
 
@@ -183,7 +179,7 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
         ipToSave,
         usernameToSave,
         port: port,
-        password: authPassword,
+        password: null,
         privateKey: authKey,
       );
 
@@ -191,9 +187,7 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
       await _storage.delete(key: 'ssh_ip');
       await _storage.write(key: 'ssh_username', value: usernameToSave);
       await _storage.write(key: 'ssh_port', value: port.toString());
-      if (authPassword != null) {
-        await _storage.write(key: 'ssh_password', value: authPassword);
-      }
+      await _storage.delete(key: 'ssh_password');
       _lockDiscoveryIpOverwrite = true;
       _autoFilledIp = null;
       ssh.stopDiscovery();

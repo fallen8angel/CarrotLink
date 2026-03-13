@@ -82,7 +82,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     final modeLabel =
         _adaptiveCameraQualityLabel(_AdaptiveCameraQualityMode.lowLatency);
     try {
-      final response = await _sidecarPostJson(
+      final response = await _cameraPostJson(
         '/camera_quality',
         body: <String, dynamic>{'mode': modeLabel},
       );
@@ -189,6 +189,102 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     return '${ageMs}ms';
   }
 
+  bool _profileRequiresLiveRuntime(String? profile) {
+    switch ((profile ?? '').trim().toLowerCase()) {
+      case 'p2':
+      case 'p3':
+      case 'p4':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  String get _currentSidecarProfile =>
+      _sidecarProfileName(_sidecarProfileSnapshot) ??
+      SidecarService.hudBootstrapProfile;
+
+  void _setNativeCameraAttachReady(bool value) {
+    if (_nativeCameraAttachReady == value) {
+      return;
+    }
+    if (mounted) {
+      _safeSetState(() {
+        _nativeCameraAttachReady = value;
+        if (!value) {
+          _nativeCameraViewId = null;
+          _cameraSourceKey = null;
+        }
+      });
+    } else {
+      _nativeCameraAttachReady = value;
+      if (!value) {
+        _nativeCameraViewId = null;
+        _cameraSourceKey = null;
+      }
+    }
+  }
+
+  bool _isSidecarCriticalProcUp(Map<String, String> procs, String name) =>
+      (procs[name] ?? '').trim().startsWith('up:');
+
+  bool _hasDriveRuntimeProcesses(Map<String, String> procs) {
+    final hasControlCore =
+        _isSidecarCriticalProcUp(procs, 'selfdrived') &&
+        (_isSidecarCriticalProcUp(procs, 'controlsd') ||
+            _isSidecarCriticalProcUp(procs, 'plannerd'));
+    final hasVisionCore =
+        _isSidecarCriticalProcUp(procs, 'stream_encoderd') &&
+        _isSidecarCriticalProcUp(procs, 'modeld') &&
+        _isSidecarCriticalProcUp(procs, 'camerad');
+    final hasRadarCore = _isSidecarCriticalProcUp(procs, 'radard');
+    return hasControlCore && hasVisionCore && hasRadarCore;
+  }
+
+  String _selectDriveRuntimeProfile(Map<String, String> procs) =>
+      _hasDriveRuntimeProcesses(procs)
+          ? SidecarService.driveRuntimeProfile
+          : SidecarService.hudBootstrapProfile;
+
+  Future<Map<String, String>> _loadDriveRuntimeCriticalProcStatus(
+    SSHService ssh,
+  ) async {
+    try {
+      final criticalRaw = await _sidecarService.criticalProcStatus(ssh);
+      final parsed = _parseStatusPairs(criticalRaw);
+      if (!mounted) {
+        _sidecarCriticalProcSnapshot = parsed;
+      } else {
+        _safeSetState(() => _sidecarCriticalProcSnapshot = parsed);
+      }
+      return parsed;
+    } catch (_) {
+      return const <String, String>{};
+    }
+  }
+
+  String? _sidecarProfileName(Map<String, dynamic> raw) {
+    final profile = raw['profile']?.toString().trim();
+    if (profile == null || profile.isEmpty) {
+      return null;
+    }
+    return profile;
+  }
+
+  Future<String?> _loadRunningSidecarProfile() async {
+    try {
+      final profileSnapshot = await _sidecarGetJson('/profile');
+      if (!mounted) {
+        _sidecarProfileSnapshot = profileSnapshot;
+      } else {
+        _safeSetState(() => _sidecarProfileSnapshot = profileSnapshot);
+      }
+      return _sidecarProfileName(profileSnapshot);
+    } catch (_) {
+      return _sidecarProfileName(_sidecarProfileSnapshot);
+    }
+  }
+
   String get _sidecarCameraRelaySummary {
     final camera = _activeCameraRelayStatus;
     if (camera.isEmpty) return 'cam=$_liveCameraName relay=missing';
@@ -234,7 +330,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
   String get _sidecarRemotePyName {
     final raw = (_sidecarProcessSnapshot['py_name'] ?? '').trim();
     if (raw.isNotEmpty) return raw;
-    return 'carrot_linkview.py';
+    return 'sidecar.py';
   }
 
   String get _sidecarRemoteRevisionLabel {
@@ -339,12 +435,30 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
         nextError = joinError('health 조회 실패: $e');
       }
       try {
+        final cameraHealth = await _cameraGetJson('/health');
+        final relay = cameraHealth['cameraRelay'];
+        if (relay is Map) {
+          nextHealth['cameraRelay'] = Map<String, dynamic>.from(relay);
+        }
+      } catch (e) {
+        nextError = joinError('camera health 조회 실패: $e');
+      }
+      try {
+        final diagHealth = await _diagGetJson('/health');
+        final relay = diagHealth['diagRelay'];
+        if (relay is Map) {
+          nextHealth['diagRelay'] = Map<String, dynamic>.from(relay);
+        }
+      } catch (e) {
+        nextError = joinError('diag health 조회 실패: $e');
+      }
+      try {
         nextProfile = await _sidecarGetJson('/profile');
       } catch (e) {
         nextError = joinError('/profile 조회 실패: $e');
       }
       try {
-        nextCameraQuality = await _sidecarGetJson('/camera_quality');
+        nextCameraQuality = await _cameraGetJson('/camera_quality');
       } catch (e) {
         nextError = joinError('/camera_quality 조회 실패: $e');
       }
@@ -391,7 +505,8 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       !_debugOverlayPreviewMode &&
       (_isSidecarBusy ||
           _sidecarPhase == _SidecarPhase.failed ||
-          (_openpilotOverlayMode && !_sidecarConnected));
+          (_openpilotOverlayMode && !_sidecarConnected) ||
+          (_openpilotOverlayMode && _overlayStaleActive));
 
   String _sidecarStatusTitle() {
     if (_sidecarPhase == _SidecarPhase.failed) return '사이드카 준비 실패';
@@ -399,13 +514,50 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     if (_openpilotOverlayMode && !_sidecarConnected) {
       return '사이드카 연결 대기 중...';
     }
+    if (_openpilotOverlayMode && _overlayStaleActive) {
+      return '오버레이 업데이트 지연';
+    }
     if (_sidecarPhase == _SidecarPhase.running) return '사이드카 실행 중';
     return '사이드카 비활성';
+  }
+
+  String? _sidecarStatusDetailMessage() {
+    if (_openpilotOverlayMode && _overlayStaleActive) {
+      final reason = _overlayStaleReason.trim();
+      if (reason.isEmpty) {
+        return '마지막 정상 스냅샷을 잠시 유지합니다.';
+      }
+      return '마지막 정상 스냅샷 유지 중 · $reason';
+    }
+    final message = (_sidecarPhaseMessage ?? '').trim();
+    if (message.isEmpty) {
+      return null;
+    }
+    return message;
+  }
+
+  IconData _sidecarStatusIcon() {
+    if (_sidecarPhase == _SidecarPhase.failed) {
+      return Icons.error_outline;
+    }
+    if (_openpilotOverlayMode && _overlayStaleActive) {
+      return Icons.sync_problem_rounded;
+    }
+    if (_sidecarPhase == _SidecarPhase.stopping) {
+      return Icons.stop_circle_outlined;
+    }
+    if (_sidecarPhase == _SidecarPhase.running) {
+      return Icons.check_circle_outline;
+    }
+    return Icons.hourglass_top_rounded;
   }
 
   Color _sidecarStatusColor() {
     if (_sidecarPhase == _SidecarPhase.failed) return const Color(0xCC7A1010);
     if (_isSidecarBusy) return const Color(0xCC4A2E12);
+    if (_openpilotOverlayMode && _overlayStaleActive) {
+      return const Color(0xCC6A4312);
+    }
     return const Color(0xCC1E3A2A);
   }
 
@@ -437,12 +589,15 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
   }
 
   Future<void> _waitForSidecarReady({
+    required String profile,
     Duration timeout = const Duration(seconds: 10),
     Duration pollInterval = const Duration(milliseconds: 300),
     Duration healthTimeout = const Duration(seconds: 2),
     Duration wsTimeout = const Duration(seconds: 2),
   }) async {
-    Future<void> probeHealth() async {
+    final requiresLiveRuntime = _profileRequiresLiveRuntime(profile);
+
+    Future<Map<String, dynamic>> probeHealth() async {
       final client = HttpClient()..connectionTimeout = healthTimeout;
       try {
         final request = await client.getUrl(_sidecarHttpUri('/health')).timeout(
@@ -455,11 +610,131 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
         }
         final decoded =
             body.trim().isEmpty ? <String, dynamic>{} : jsonDecode(body);
-        if (decoded is! Map || decoded['ok'] != true) {
+        if (decoded is! Map) {
+          throw Exception('health invalid');
+        }
+        final health = Map<String, dynamic>.from(decoded);
+        if (health['ok'] != true) {
           throw Exception('health not ok');
         }
+        final ready = requiresLiveRuntime
+            ? (health['ready'] == true ||
+                (health['hudReady'] == true && health['liveReady'] == true))
+            : (health['ready'] == true || health['hudReady'] == true);
+        if (!ready) {
+          throw Exception('health not ready');
+        }
+        return health;
       } finally {
         client.close(force: true);
+      }
+    }
+
+    Map<String, dynamic>? decodeWsPayload(dynamic event) {
+      try {
+        if (event is String) {
+          final decoded = jsonDecode(event);
+          if (decoded is Map<String, dynamic>) {
+            return decoded;
+          }
+          if (decoded is Map) {
+            return Map<String, dynamic>.from(decoded);
+          }
+        } else if (event is List<int>) {
+          var bytes = event;
+          try {
+            bytes = zlib.decode(bytes);
+          } catch (_) {
+            // Sidecar may send plain UTF-8 JSON frames during fallback paths.
+          }
+          final decoded = jsonDecode(utf8.decode(bytes, allowMalformed: true));
+          if (decoded is Map<String, dynamic>) {
+            return decoded;
+          }
+          if (decoded is Map) {
+            return Map<String, dynamic>.from(decoded);
+          }
+        }
+      } catch (_) {}
+      return null;
+    }
+
+    Future<void> probeLiveWs() async {
+      WebSocket? ws;
+      StreamSubscription<dynamic>? wsSub;
+      try {
+        final firstLiveFrame = Completer<void>();
+        final sessionId = DateTime.now().microsecondsSinceEpoch;
+        final liveWsUrl =
+            'ws://$_hostIp:7766/ws/live?encoding=json&camera=$_liveCameraName'
+            '&role=drive_ready_probe&session=ready_$sessionId';
+        ws = await WebSocket.connect(liveWsUrl).timeout(wsTimeout);
+        wsSub = ws.listen(
+          (event) {
+            if (firstLiveFrame.isCompleted) return;
+            final payload = decodeWsPayload(event);
+            if (payload == null || payload['type'] == 'hello') {
+              return;
+            }
+            final frame = OverlayStreamFrame.fromPayload(
+              host: _hostIp,
+              payload: payload,
+              sequence: 0,
+            );
+            final hasFrameIds =
+                frame.modelFrameId != null || frame.roadFrameId != null;
+            if (hasFrameIds) {
+              firstLiveFrame.complete();
+            }
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            if (!firstLiveFrame.isCompleted) {
+              firstLiveFrame.completeError(error, stackTrace);
+            }
+          },
+          onDone: () {
+            if (!firstLiveFrame.isCompleted) {
+              firstLiveFrame.completeError(Exception('live ws closed'));
+            }
+          },
+          cancelOnError: true,
+        );
+        await firstLiveFrame.future.timeout(wsTimeout);
+      } finally {
+        await wsSub?.cancel();
+        await ws?.close();
+      }
+    }
+
+    Future<void> probeCameraWs() async {
+      WebSocket? ws;
+      StreamSubscription<dynamic>? wsSub;
+      try {
+        final firstPacket = Completer<void>();
+        ws = await WebSocket.connect(_liveCameraWsUrl).timeout(wsTimeout);
+        wsSub = ws.listen(
+          (event) {
+            if (firstPacket.isCompleted) return;
+            if (event is List<int> && event.isNotEmpty) {
+              firstPacket.complete();
+            }
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            if (!firstPacket.isCompleted) {
+              firstPacket.completeError(error, stackTrace);
+            }
+          },
+          onDone: () {
+            if (!firstPacket.isCompleted) {
+              firstPacket.completeError(Exception('camera ws closed'));
+            }
+          },
+          cancelOnError: true,
+        );
+        await firstPacket.future.timeout(wsTimeout);
+      } finally {
+        await wsSub?.cancel();
+        await ws?.close();
       }
     }
 
@@ -468,35 +743,9 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     while (DateTime.now().isBefore(deadline)) {
       try {
         await probeHealth();
-
-        WebSocket? ws;
-        StreamSubscription<dynamic>? wsSub;
-        try {
-          final firstPacket = Completer<void>();
-          ws = await WebSocket.connect(_liveCameraWsUrl).timeout(wsTimeout);
-          wsSub = ws.listen(
-            (event) {
-              if (firstPacket.isCompleted) return;
-              if (event is List<int> && event.isNotEmpty) {
-                firstPacket.complete();
-              }
-            },
-            onError: (Object error, StackTrace stackTrace) {
-              if (!firstPacket.isCompleted) {
-                firstPacket.completeError(error, stackTrace);
-              }
-            },
-            onDone: () {
-              if (!firstPacket.isCompleted) {
-                firstPacket.completeError(Exception('camera ws closed'));
-              }
-            },
-            cancelOnError: true,
-          );
-          await firstPacket.future.timeout(wsTimeout);
-        } finally {
-          await wsSub?.cancel();
-          await ws?.close();
+        if (requiresLiveRuntime) {
+          await probeLiveWs();
+          await probeCameraWs();
         }
         return;
       } catch (e) {
@@ -517,6 +766,9 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     if (ssh == null || !ssh.isConnected) return;
     _sidecarAutoManaging = true;
     _suppressCameraErrors = true;
+    _setNativeCameraAttachReady(false);
+    _startCameraErrorGrace(reason: 'sidecar_runtime_start');
+    _beginStartupProvisionalSync(reason: 'sidecar_runtime_start');
     _pushSidecarHistory('AUTO_RUNTIME', 'start reason=$reason');
     _setSidecarPhase(
       _SidecarPhase.verifying,
@@ -533,18 +785,73 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       final status = _parseStatusPairs(statusRaw);
       final running = status['running'] == '1';
       final listening = status['listening'] == '1';
-      if (running && listening) {
-        _pushSidecarHistory('AUTO_RUNTIME', 'reuse running/listening runtime');
+      final criticalProcs = await _loadDriveRuntimeCriticalProcStatus(ssh);
+      final desiredProfile = _selectDriveRuntimeProfile(criticalProcs);
+      final requiresLiveRuntime = _profileRequiresLiveRuntime(desiredProfile);
+      final currentProfile =
+          running && listening ? await _loadRunningSidecarProfile() : null;
+      final reuseExistingRuntime =
+          running &&
+          listening &&
+          (currentProfile == desiredProfile ||
+              (currentProfile == null &&
+                  desiredProfile == SidecarService.hudBootstrapProfile));
+      if (reuseExistingRuntime) {
+        // Reuse the live runtime when possible, but still verify readiness
+        // briefly so the first Stock attach does not race camera/live startup.
+        _pushSidecarHistory(
+          'AUTO_RUNTIME',
+          'reuse running/listening runtime profile=${currentProfile ?? desiredProfile}',
+        );
+        if (requiresLiveRuntime) {
+          _startSidecarLoop();
+        } else {
+          _stopSidecarLoop(resetSession: true);
+        }
+        _setSidecarPhase(
+          _SidecarPhase.running,
+          message: desiredProfile == SidecarService.hudBootstrapProfile
+              ? '주행 대기 중: HUD 전용 모드 유지 중'
+              : '사이드카 실행 중',
+        );
+        try {
+          await _waitForSidecarReady(
+            profile: desiredProfile,
+            timeout: requiresLiveRuntime
+                ? const Duration(milliseconds: 2200)
+                : const Duration(milliseconds: 1200),
+            pollInterval: const Duration(milliseconds: 150),
+            healthTimeout: const Duration(milliseconds: 700),
+            wsTimeout: const Duration(milliseconds: 1000),
+          );
+          if (requiresLiveRuntime) {
+            _setNativeCameraAttachReady(true);
+            _startCameraErrorGrace(reason: 'runtime_reuse_ready');
+            if (!_cameraSuspendedByLifecycle) {
+              unawaited(_loadCameraSource(force: true));
+            }
+          }
+        } catch (e) {
+          _pushSidecarHistory('READY_DEFER', '$e');
+          if (requiresLiveRuntime) {
+            _setSidecarPhase(
+              _SidecarPhase.running,
+              message: '카메라/그래픽 연결 대기 중...',
+            );
+            _scheduleSidecarRuntimeRecovery(reason: 'ready_deferred_reuse');
+          }
+        }
       } else {
         _setSidecarPhase(
           _SidecarPhase.starting,
-          message:
-              running || listening ? '사이드카 런타임 복구 중...' : '사이드카 시작 중...',
+          message: desiredProfile == SidecarService.hudBootstrapProfile
+              ? '주행 대기 중: HUD 전용 모드 유지 중...'
+              : (running || listening ? '사이드카 런타임 복구 중...' : '사이드카 시작 중...'),
         );
         try {
-          await _sidecarService.start(ssh);
+          await _sidecarService.start(ssh, profile: desiredProfile);
           _sidecarLastStartAt = DateTime.now();
-          _pushSidecarHistory('AUTO_START', 'start ok');
+          _pushSidecarHistory('AUTO_START', 'start ok profile=$desiredProfile');
         } catch (startError) {
           _pushSidecarHistory('AUTO_START_FAIL', '$startError');
           var recoveredByBootstrap = false;
@@ -556,11 +863,16 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
             if (recoveredByBootstrap) {
               _setSidecarPhase(
                 _SidecarPhase.starting,
-                message: '사이드카 시작 중...',
+                message: desiredProfile == SidecarService.hudBootstrapProfile
+                    ? '주행 대기 중: HUD 전용 모드 유지 중...'
+                    : '사이드카 시작 중...',
               );
-              await _sidecarService.start(ssh);
+              await _sidecarService.start(ssh, profile: desiredProfile);
               _sidecarLastStartAt = DateTime.now();
-              _pushSidecarHistory('AUTO_START', 'start ok (after bootstrap)');
+              _pushSidecarHistory(
+                'AUTO_START',
+                'start ok (after bootstrap) profile=$desiredProfile',
+              );
             }
           }
           if (recoveredByBootstrap) {
@@ -576,39 +888,65 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
             _pushSidecarHistory('AUTO_DEPLOY', 'ok');
             _setSidecarPhase(
               _SidecarPhase.starting,
-              message: '사이드카 시작 중...',
+              message: desiredProfile == SidecarService.hudBootstrapProfile
+                  ? '주행 대기 중: HUD 전용 모드 유지 중...'
+                  : '사이드카 시작 중...',
             );
-            await _sidecarService.start(ssh);
+            await _sidecarService.start(ssh, profile: desiredProfile);
             _sidecarLastStartAt = DateTime.now();
-            _pushSidecarHistory('AUTO_RESTART', 'start ok (after deploy)');
+            _pushSidecarHistory(
+              'AUTO_RESTART',
+              'start ok (after deploy) profile=$desiredProfile',
+            );
           } else {
             rethrow;
           }
         }
-      }
 
-      _startSidecarLoop();
-      _setSidecarPhase(
-        _SidecarPhase.verifying,
-        message: '카메라 스트림 연결 확인 중...',
-      );
-      try {
-        await _waitForSidecarReady(
-          timeout: const Duration(milliseconds: 3000),
-          pollInterval: const Duration(milliseconds: 150),
-          healthTimeout: const Duration(milliseconds: 700),
-          wsTimeout: const Duration(milliseconds: 1200),
-        );
+        if (requiresLiveRuntime) {
+          _startSidecarLoop();
+        } else {
+          _stopSidecarLoop(resetSession: true);
+        }
         _setSidecarPhase(
-          _SidecarPhase.running,
-          message: '사이드카 실행 중',
+          _SidecarPhase.verifying,
+          message: desiredProfile == SidecarService.hudBootstrapProfile
+              ? 'HUD 전용 연결 확인 중...'
+              : '카메라 스트림 연결 확인 중...',
         );
-      } catch (e) {
-        _pushSidecarHistory('READY_DEFER', '$e');
-        _setSidecarPhase(
-          _SidecarPhase.running,
-          message: '사이드카 연결 대기 중...',
-        );
+        try {
+          await _waitForSidecarReady(
+            profile: desiredProfile,
+            timeout: const Duration(milliseconds: 3000),
+            pollInterval: const Duration(milliseconds: 150),
+            healthTimeout: const Duration(milliseconds: 700),
+            wsTimeout: const Duration(milliseconds: 1200),
+          );
+          if (requiresLiveRuntime) {
+            _setNativeCameraAttachReady(true);
+            _startCameraErrorGrace(reason: 'runtime_ready');
+            if (!_cameraSuspendedByLifecycle) {
+              unawaited(_loadCameraSource(force: true));
+            }
+          }
+          _setSidecarPhase(
+            _SidecarPhase.running,
+            message: desiredProfile == SidecarService.hudBootstrapProfile
+                ? '주행 대기 중: HUD 전용 모드 유지 중'
+                : '사이드카 실행 중',
+          );
+        } catch (e) {
+          _pushSidecarHistory('READY_DEFER', '$e');
+          _setSidecarPhase(
+            _SidecarPhase.running,
+            message: desiredProfile == SidecarService.hudBootstrapProfile
+                ? 'HUD 전용 연결 대기 중...'
+                : '사이드카 연결 대기 중...',
+          );
+          if (requiresLiveRuntime) {
+            _scheduleSidecarRuntimeRecovery(reason: 'ready_deferred');
+          }
+        }
       }
       unawaited(_refreshSidecarProcessStatus());
       _clearSidecarRecoverySchedule();

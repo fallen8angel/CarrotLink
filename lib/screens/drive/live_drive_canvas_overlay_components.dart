@@ -1,4 +1,7 @@
-﻿part of 'live_drive_canvas_screen.dart';
+part of 'live_drive_canvas_screen.dart';
+
+const bool _driveEnableExperimentalSidecarDecorations = false;
+const bool _driveEnableExperimentalNavAr = false;
 
 class _DriveOverlayPainter extends CustomPainter {
   final _DriveOverlaySnapshot snapshot;
@@ -6,6 +9,7 @@ class _DriveOverlayPainter extends CustomPainter {
   final Size sourceSize;
   final _DriveCameraKind cameraKind;
   final bool coverViewport;
+  final double viewportZoom;
   final Rect? visibleViewportRect;
   final bool showDebugGuides;
   final bool showPathFill;
@@ -22,6 +26,14 @@ class _DriveOverlayPainter extends CustomPainter {
   static const double _baseSourceWidth = 1928.0;
   static const double _baseSourceHeight = 1208.0;
   static const double _clipMargin = 500.0;
+
+  // EMA smoothing for lead box anchor — matches carrot.cc path_fx/fy/fwidth (alpha=0.85).
+  // Two slots: 0 = leadOne, 1 = leadTwo. Static so they persist across painter instances.
+  static const double _leadEmaAlpha = 0.85;
+  static double _emaFx0 = 0.0, _emaFy0 = 0.0, _emaFw0 = 0.0;
+  static int _emaTrackId0 = -99999;
+  static double _emaFx1 = 0.0, _emaFy1 = 0.0, _emaFw1 = 0.0;
+  static int _emaTrackId1 = -99999;
   static const _M3 _viewFromDevice = _M3(
     0.0,
     1.0,
@@ -40,6 +52,7 @@ class _DriveOverlayPainter extends CustomPainter {
     required this.sourceSize,
     required this.cameraKind,
     required this.coverViewport,
+    this.viewportZoom = 1.0,
     this.visibleViewportRect,
     this.showDebugGuides = false,
     this.showPathFill = true,
@@ -137,14 +150,9 @@ class _DriveOverlayPainter extends CustomPainter {
     required Size source,
     required Size canvas,
   }) {
-    final wideCam = cameraKind == _DriveCameraKind.wideRoad;
-    final intrinsic = _intrinsicForSource(source, wideCam);
-    final calibTransform = _calibTransformForSource(source);
-    return _sourceToCanvasPlacement(
+    return _sourceToPlacedCanvasPlacement(
       source: source,
       canvas: canvas,
-      intrinsic: intrinsic,
-      calibTransform: calibTransform,
     );
   }
 
@@ -212,7 +220,7 @@ class _DriveOverlayPainter extends CustomPainter {
   // This block is the source-of-truth for camera->overlay geometric alignment.
   // Keep these equations and transform order stable unless doing explicit
   // projection-engine work with field validation:
-  // - _sourceToCanvasPlacement
+  // - _sourceToPlacedCanvasPlacement
   // - _sourceToCanvasPlacementFromDisplayTransform
   // - _buildTransform
   // - _mapToScreen
@@ -220,45 +228,18 @@ class _DriveOverlayPainter extends CustomPainter {
   // Adaptive/responsive changes must be limited to surrounding UI shells
   // (dock/panel/popup/safe-area spacing), not these math paths.
   // -------------------------------------------------------------------------
-  _SourceCanvasPlacement _sourceToCanvasPlacement({
+  _SourceCanvasPlacement _sourceToPlacedCanvasPlacement({
     required Size source,
     required Size canvas,
-    required _M3 intrinsic,
-    required _M3 calibTransform,
   }) {
     final sx = canvas.width / source.width;
     final sy = canvas.height / source.height;
-    final scale = coverViewport ? math.max(sx, sy) : math.min(sx, sy);
+    final fitScale = coverViewport ? math.max(sx, sy) : math.min(sx, sy);
+    final scale = fitScale;
     final drawW = source.width * scale;
     final drawH = source.height * scale;
-    var dx = (canvas.width - drawW) * 0.5;
-    var dy = (canvas.height - drawH) * 0.5;
-    var xOffset = 0.0;
-    var yOffset = 0.0;
-
-    // openpilot annotated_camera::calcFrameMatrix style:
-    // use the projected point at "infinity" to compute x/y screen offset.
-    final inf = calibTransform.transform(const _V3(1000.0, 0.0, 0.0));
-    if (inf.z.isFinite && inf.z.abs() > 1e-6) {
-      final centerX = intrinsic.m02;
-      final centerY = intrinsic.m12;
-      final maxXOffset =
-          math.max(0.0, centerX * scale - canvas.width * 0.5 - 5.0);
-      final maxYOffset =
-          math.max(0.0, centerY * scale - canvas.height * 0.5 - 5.0);
-      xOffset = _clampDouble(
-        ((inf.x / inf.z) - centerX) * scale,
-        -maxXOffset,
-        maxXOffset,
-      );
-      yOffset = _clampDouble(
-        ((inf.y / inf.z) - centerY) * scale,
-        -maxYOffset,
-        maxYOffset,
-      );
-      dx = (canvas.width * 0.5 - xOffset) - (centerX * scale);
-      dy = (canvas.height * 0.5 - yOffset) - (centerY * scale);
-    }
+    final dx = (canvas.width - drawW) * 0.5;
+    final dy = (canvas.height - drawH) * 0.5;
 
     return _SourceCanvasPlacement(
       transform: _M3(
@@ -273,8 +254,11 @@ class _DriveOverlayPainter extends CustomPainter {
         1.0,
       ),
       scale: scale,
-      xOffset: xOffset,
-      yOffset: yOffset,
+      // The outer layout already applies annotated-camera pan/zoom by placing
+      // the video surface at the resolved global rect. Reapplying x/y shift
+      // inside this local canvas would move every overlay element twice.
+      xOffset: 0.0,
+      yOffset: 0.0,
     );
   }
 
@@ -283,54 +267,13 @@ class _DriveOverlayPainter extends CustomPainter {
     required Size canvas,
     required Map<String, dynamic>? displayTransform,
   }) {
-    final sx = canvas.width / source.width;
-    final sy = canvas.height / source.height;
-    final fitScale = coverViewport ? math.max(sx, sy) : math.min(sx, sy);
-    final baseDrawW = source.width * fitScale;
-    final baseDrawH = source.height * fitScale;
-    final baseDx = (canvas.width - baseDrawW) * 0.5;
-    final baseDy = (canvas.height - baseDrawH) * 0.5;
-
-    final zoomRaw = displayTransform == null
-        ? null
-        : _DriveOverlaySnapshot._asDouble(displayTransform['zoom']);
-    final txRaw = displayTransform == null
-        ? null
-        : _DriveOverlaySnapshot._asDouble(displayTransform['tx']);
-    final tyRaw = displayTransform == null
-        ? null
-        : _DriveOverlaySnapshot._asDouble(displayTransform['ty']);
-    final xOffsetRaw = displayTransform == null
-        ? null
-        : _DriveOverlaySnapshot._asDouble(displayTransform['xOffset']);
-    final yOffsetRaw = displayTransform == null
-        ? null
-        : _DriveOverlaySnapshot._asDouble(displayTransform['yOffset']);
-
-    final zoom =
-        (zoomRaw != null && zoomRaw.isFinite && zoomRaw > 0.1) ? zoomRaw : 1.0;
-    final tx = (txRaw != null && txRaw.isFinite)
-        ? txRaw
-        : ((source.width - (source.width * zoom)) * 0.5);
-    final ty = (tyRaw != null && tyRaw.isFinite)
-        ? tyRaw
-        : ((source.height - (source.height * zoom)) * 0.5);
-
-    return _SourceCanvasPlacement(
-      transform: _M3(
-        fitScale * zoom,
-        0.0,
-        (fitScale * tx) + baseDx,
-        0.0,
-        fitScale * zoom,
-        (fitScale * ty) + baseDy,
-        0.0,
-        0.0,
-        1.0,
-      ),
-      scale: fitScale * zoom,
-      xOffset: (xOffsetRaw != null && xOffsetRaw.isFinite) ? xOffsetRaw : 0.0,
-      yOffset: (yOffsetRaw != null && yOffsetRaw.isFinite) ? yOffsetRaw : 0.0,
+    // `displayTransform` describes the original full-screen annotated-camera
+    // placement. By the time overlay painting happens, the video surface is
+    // already positioned into that resolved global rect by the outer layout,
+    // so the local child canvas must only scale/crop source pixels.
+    return _sourceToPlacedCanvasPlacement(
+      source: source,
+      canvas: canvas,
     );
   }
 
@@ -549,25 +492,146 @@ class _DriveOverlayPainter extends CustomPainter {
       );
       if (okL && okR && lp != null && rp != null) {
         if (!allowInvert && left.isNotEmpty && lp!.dy > left.last.dy) {
-          dist += dist * 0.15;
+          dist += dist * 0.08;
           continue;
         }
         left.add(lp!);
         right.insert(0, rp!);
       }
-      dist += dist * 0.15;
+      dist += dist * 0.08;
     }
     if (left.length < 2 || right.length < 2) return null;
     return <Offset>[...left, ...right];
   }
 
+  /// Builds a closed polygon from [vertices] with quadratic Bezier smoothing
+  /// applied independently to each edge (left: near→far, right: far→near).
+  /// The vertices list is assumed to be [...leftEdge, ...rightEdge] as produced
+  /// by [_mapLineToPolygonVertices] and [_mapTrackToPolygonVertices].
+  /// Using straight lineTo between each vertex produces a visibly jagged polygon;
+  /// the midpoint-Bezier technique rounds the corners at each vertex so the
+  /// resulting path looks smooth like the native openpilot overlay.
   Path _pathFromVertices(List<Offset> vertices) {
-    final path = Path()..moveTo(vertices.first.dx, vertices.first.dy);
-    for (var i = 1; i < vertices.length; i++) {
-      path.lineTo(vertices[i].dx, vertices[i].dy);
+    if (vertices.length < 3) {
+      final path = Path()..moveTo(vertices.first.dx, vertices.first.dy);
+      for (var i = 1; i < vertices.length; i++) {
+        path.lineTo(vertices[i].dx, vertices[i].dy);
+      }
+      path.close();
+      return path;
     }
-    path.close();
+
+    // Split into left edge (near → far) and right edge (far → near).
+    final half = vertices.length ~/ 2;
+    final left = vertices.sublist(0, half);
+    final right = vertices.sublist(half);
+
+    final path = Path()..moveTo(left.first.dx, left.first.dy);
+    _addSmoothedEdge(path, left);
+    // Sharp join at the far end — both sides meet here.
+    path.lineTo(right.first.dx, right.first.dy);
+    _addSmoothedEdge(path, right);
+    path.close(); // Sharp join at the near end.
     return path;
+  }
+
+  /// Appends a quadratic-Bezier–smoothed polyline from [pts][0] to [pts][n-1]
+  /// onto [path].  Caller must have already moved/linked to [pts][0].
+  /// Uses the midpoint technique: for each interior vertex V_i the control point
+  /// is V_i and the anchor is the midpoint of V_i → V_{i+1}, which produces a
+  /// smooth C1-continuous curve through all midpoints.
+  void _addSmoothedEdge(Path path, List<Offset> pts) {
+    if (pts.length < 2) return;
+    if (pts.length == 2) {
+      path.lineTo(pts[1].dx, pts[1].dy);
+      return;
+    }
+    for (var i = 1; i < pts.length - 1; i++) {
+      final mid = Offset(
+        (pts[i].dx + pts[i + 1].dx) * 0.5,
+        (pts[i].dy + pts[i + 1].dy) * 0.5,
+      );
+      path.quadraticBezierTo(pts[i].dx, pts[i].dy, mid.dx, mid.dy);
+    }
+    path.lineTo(pts.last.dx, pts.last.dy);
+  }
+
+  Offset _quadraticPoint(Offset p0, Offset p1, Offset p2, double t) {
+    final mt = 1.0 - t;
+    final x = (mt * mt * p0.dx) + (2.0 * mt * t * p1.dx) + (t * t * p2.dx);
+    final y = (mt * mt * p0.dy) + (2.0 * mt * t * p1.dy) + (t * t * p2.dy);
+    return Offset(x, y);
+  }
+
+  void _appendSampledQuadratic(
+    List<Offset> out, {
+    required Offset start,
+    required Offset control,
+    required Offset end,
+    required int segments,
+  }) {
+    final clampedSegments = segments.clamp(2, 8);
+    for (var i = 1; i <= clampedSegments; i++) {
+      final t = i / clampedSegments;
+      final pt = _quadraticPoint(start, control, end, t);
+      if (out.isEmpty || (pt - out.last).distanceSquared > 0.25) {
+        out.add(pt);
+      }
+    }
+  }
+
+  void _appendSmoothedEdgeVertices(
+    List<Offset> out,
+    List<Offset> pts, {
+    int baseSegments = 3,
+  }) {
+    if (pts.length < 2) return;
+    if (out.isEmpty) {
+      out.add(pts.first);
+    }
+    if (pts.length == 2) {
+      if ((pts.last - out.last).distanceSquared > 0.25) {
+        out.add(pts.last);
+      }
+      return;
+    }
+    for (var i = 1; i < pts.length - 1; i++) {
+      final start = out.last;
+      final control = pts[i];
+      final end = Offset(
+        (pts[i].dx + pts[i + 1].dx) * 0.5,
+        (pts[i].dy + pts[i + 1].dy) * 0.5,
+      );
+      final edgeLength = (end - start).distance;
+      final segments = math.max(baseSegments, (edgeLength / 22.0).round());
+      _appendSampledQuadratic(
+        out,
+        start: start,
+        control: control,
+        end: end,
+        segments: segments,
+      );
+    }
+    if ((pts.last - out.last).distanceSquared > 0.25) {
+      out.add(pts.last);
+    }
+  }
+
+  // Native overlay payload carries polygons only, so approximate the Flutter
+  // quadratic path with extra sampled vertices before serializing.
+  List<Offset> _smoothedPolygonVertices(List<Offset> vertices) {
+    if (vertices.length < 6) return vertices;
+    final half = vertices.length ~/ 2;
+    if (half < 2 || (vertices.length - half) < 2) return vertices;
+    final left = vertices.sublist(0, half);
+    final right = vertices.sublist(half);
+    final out = <Offset>[left.first];
+    _appendSmoothedEdgeVertices(out, left);
+    if ((right.first - out.last).distanceSquared > 0.25) {
+      out.add(right.first);
+    }
+    _appendSmoothedEdgeVertices(out, right);
+    return out;
   }
 
   void _drawTrackPolygon(
@@ -906,6 +970,7 @@ class _DriveOverlayPainter extends CustomPainter {
     required _DriveCameraKind cameraKind,
     required Size canvasSize,
     required bool coverViewport,
+    double viewportZoom = 1.0,
     Rect? visibleViewportRect,
     bool showDebugGuides = false,
     bool showPathFill = true,
@@ -925,6 +990,7 @@ class _DriveOverlayPainter extends CustomPainter {
       sourceSize: sourceSize,
       cameraKind: cameraKind,
       coverViewport: coverViewport,
+      viewportZoom: viewportZoom,
       visibleViewportRect: visibleViewportRect,
       showDebugGuides: showDebugGuides,
       showPathFill: showPathFill,
@@ -941,12 +1007,58 @@ class _DriveOverlayPainter extends CustomPainter {
     return painter._buildNativeOverlayPayload(canvasSize);
   }
 
+  static Map<String, dynamic>? buildArScenePayload({
+    required _DriveOverlaySnapshot snapshot,
+    required Size sourceSize,
+    required _DriveCameraKind cameraKind,
+    required Size canvasSize,
+    required bool coverViewport,
+    double viewportZoom = 1.0,
+    Rect? visibleViewportRect,
+    int frameGapTolerance = 8,
+  }) {
+    final painter = _DriveOverlayPainter(
+      snapshot: snapshot,
+      isConnected: true,
+      sourceSize: sourceSize,
+      cameraKind: cameraKind,
+      coverViewport: coverViewport,
+      viewportZoom: viewportZoom,
+      visibleViewportRect: visibleViewportRect,
+      debugPlotState: const _DriveDebugPlotState.hidden(),
+    );
+    return painter._buildArScenePayload(
+      canvasSize,
+      frameGapTolerance: frameGapTolerance,
+    );
+  }
+
+  Map<String, dynamic>? _buildArScenePayload(
+    Size canvasSize, {
+    int frameGapTolerance = 8,
+  }) {
+    final scene = snapshot.buildArScene(
+      cameraKind: cameraKind,
+      frameGapTolerance: frameGapTolerance,
+    );
+    if (scene.isEmpty) return null;
+    final screenAnchors = _buildArScreenAnchors(
+      scene: scene,
+      canvasSize: canvasSize,
+    );
+    return scene.toPayload(
+      cameraKind: cameraKind,
+      screenAnchors: screenAnchors?.toPayload(),
+    );
+  }
+
   static String buildProjectionDebugText({
     required _DriveOverlaySnapshot snapshot,
     required Size sourceSize,
     required _DriveCameraKind cameraKind,
     required Size canvasSize,
     required bool coverViewport,
+    double viewportZoom = 1.0,
     required String cameraSourceLabel,
   }) {
     final painter = _DriveOverlayPainter(
@@ -955,6 +1067,7 @@ class _DriveOverlayPainter extends CustomPainter {
       sourceSize: sourceSize,
       cameraKind: cameraKind,
       coverViewport: coverViewport,
+      viewportZoom: viewportZoom,
       visibleViewportRect: null,
       debugPlotState: const _DriveDebugPlotState.hidden(),
     );
@@ -1044,7 +1157,8 @@ class _DriveOverlayPainter extends CustomPainter {
         : 'center ref: ${refLines.join(' | ')}';
     final gapText = gap == null ? 'n/a' : '$gap';
     final placementText =
-        'video shift x=${transform.xOffset.toStringAsFixed(1)} y=${transform.yOffset.toStringAsFixed(1)} scale=${transform.sourceScale.toStringAsFixed(3)}';
+        'local canvas scale=${transform.sourceScale.toStringAsFixed(3)} '
+        '(global annotated-camera pan is applied by outer video placement)';
     final frameText =
         'frame model=${modelFrameId ?? '-'} cam=${cameraFrameId ?? '-'} gap=$gapText';
     final modeText =
@@ -1058,12 +1172,95 @@ class _DriveOverlayPainter extends CustomPainter {
     final sourceText =
         'src ${src.width.toStringAsFixed(0)}x${src.height.toStringAsFixed(0)} '
         'canvas ${canvasSize.width.toStringAsFixed(0)}x${canvasSize.height.toStringAsFixed(0)} '
-        'fit=${coverViewport ? 'cover' : 'contain'} cam=${cameraKind.name} $cameraSourceLabel';
+        'fit=${coverViewport ? 'cover' : 'contain'} zoom=${viewportZoom.toStringAsFixed(2)} '
+        'cam=${cameraKind.name} $cameraSourceLabel';
+    final sidecarRoot = snapshot.sidecarOverlay2d;
+    String sidecarCameraText = 'sidecar: n/a';
+    String sidecarLeadText = 'lead debug: n/a';
+    if (sidecarRoot != null) {
+      final sidecarRootMap = Map<dynamic, dynamic>.from(sidecarRoot);
+      final cameras = sidecarRootMap['cameras'];
+      if (cameras is Map) {
+        final selectedKey =
+            cameraKind == _DriveCameraKind.wideRoad ? 'wideRoad' : 'road';
+        final camRaw = cameras[selectedKey];
+        if (camRaw is Map) {
+          final cam = Map<String, dynamic>.from(camRaw);
+          final dtRaw = cam['displayTransform'];
+          final dt = dtRaw is Map ? Map<String, dynamic>.from(dtRaw) : null;
+          final metaRaw = cam['meta'];
+          final meta =
+              metaRaw is Map ? Map<String, dynamic>.from(metaRaw) : null;
+          final sidecarGap = meta == null
+              ? null
+              : _DriveOverlaySnapshot._asInt(meta['leadFrameGap']);
+          final resetReason =
+              meta == null ? null : meta['leadAnchorResetReason']?.toString();
+          final cameraMode = meta == null ? null : meta['cameraMode'];
+          final zoomText = dt == null
+              ? '-'
+              : (_DriveOverlaySnapshot._asDouble(dt['zoom'])
+                      ?.toStringAsFixed(3) ??
+                  '-');
+          final txText = dt == null
+              ? '-'
+              : (_DriveOverlaySnapshot._asDouble(dt['tx'])
+                      ?.toStringAsFixed(1) ??
+                  '-');
+          final tyText = dt == null
+              ? '-'
+              : (_DriveOverlaySnapshot._asDouble(dt['ty'])
+                      ?.toStringAsFixed(1) ??
+                  '-');
+          sidecarCameraText =
+              'sidecar camera=$selectedKey mode=${cameraMode ?? '-'} '
+              'gap=${sidecarGap ?? '-'} reset=${(resetReason == null || resetReason.trim().isEmpty) ? '-' : resetReason} '
+              'zoom=$zoomText tx=$txText ty=$tyText';
+          final leadRaw = cam['leadAreaBoxes'];
+          if (leadRaw is List && leadRaw.isNotEmpty) {
+            final leadDebug = <String>[];
+            for (final item in leadRaw) {
+              if (item is! Map) continue;
+              final lead = Map<String, dynamic>.from(item);
+              final kind = lead['kind']?.toString() ?? 'lead';
+              final centerRaw = lead['anchorCenter'];
+              final width =
+                  _DriveOverlaySnapshot._asDouble(lead['anchorWidth']);
+              final topY = _DriveOverlaySnapshot._asDouble(lead['boxTopY']);
+              final bottomY =
+                  _DriveOverlaySnapshot._asDouble(lead['boxBottomY']);
+              String centerText = '-';
+              if (centerRaw is List && centerRaw.length >= 2) {
+                final cx = _DriveOverlaySnapshot._asDouble(centerRaw[0]);
+                final cy = _DriveOverlaySnapshot._asDouble(centerRaw[1]);
+                if (cx != null && cy != null) {
+                  centerText =
+                      '${cx.toStringAsFixed(1)},${cy.toStringAsFixed(1)}';
+                }
+              }
+              leadDebug.add(
+                '$kind c=[$centerText] w=${width?.toStringAsFixed(1) ?? '-'} '
+                'top=${topY?.toStringAsFixed(1) ?? '-'} bot=${bottomY?.toStringAsFixed(1) ?? '-'} '
+                'lat=${lead['lateralSource'] ?? '-'} '
+                'rb=${lead['radarBadgeCenter'] is List ? 'y' : 'n'} '
+                'vb=${lead['visionBadgeCenter'] is List ? 'y' : 'n'} '
+                'st=${lead['stateTextCenter'] is List ? 'y' : 'n'}',
+              );
+            }
+            if (leadDebug.isNotEmpty) {
+              sidecarLeadText = 'lead debug: ${leadDebug.join(' | ')}';
+            }
+          }
+        }
+      }
+    }
 
     return <String>[
       '[Projection Verify]',
       sourceText,
       frameText,
+      sidecarCameraText,
+      sidecarLeadText,
       modeText,
       pathSourceText,
       'calib rpy: $rpyText',
@@ -1141,6 +1338,14 @@ class _DriveOverlayPainter extends CustomPainter {
   }
 
   Map<String, dynamic>? _buildNativeOverlayPayloadFromSidecar2d(Size size) {
+    if (!_driveEnableExperimentalSidecarDecorations) {
+      return null;
+    }
+    // Stock lead/radar parity work intentionally pins these decorations to the
+    // road camera only. Do not project them on wideRoad until parity is verified.
+    if (cameraKind != _DriveCameraKind.road) {
+      return null;
+    }
     final cam = _currentCameraOverlay2d();
     if (cam == null) return null;
     final sourceWidth =
@@ -1162,12 +1367,14 @@ class _DriveOverlayPainter extends CustomPainter {
       displayTransform: displayTransform,
       polygons: polygons,
       labels: labels,
-      showLead1: showLead1,
-      showLead2: showLead2,
-      showRadarBadge: showRadarBadge,
-      showRadarVector: showRadarVector,
+      // Stock parity path projects lead/radar from raw data in Flutter.
+      // Keep sidecar 2D only for TF-style helpers and debug fallback paths.
+      showLead1: false,
+      showLead2: false,
+      showRadarBadge: false,
+      showRadarVector: false,
       showStopDistanceTf: showStopDistanceTf,
-      showStateText: showStateText,
+      showStateText: false,
     );
 
     if (polygons.isEmpty && labels.isEmpty) return null;
@@ -1223,7 +1430,7 @@ class _DriveOverlayPainter extends CustomPainter {
             laneColor = const Color(0xFFFFD95E);
           }
           polygons.add(_encodePolygon(
-            poly,
+            _smoothedPolygonVertices(poly),
             laneColor.withValues(alpha: alpha),
           ));
           if (i == 1 && (snapshot.leftLaneLine % 10) == 4) {
@@ -1237,7 +1444,7 @@ class _DriveOverlayPainter extends CustomPainter {
             );
             if (doublePoly != null) {
               polygons.add(_encodePolygon(
-                doublePoly,
+                _smoothedPolygonVertices(doublePoly),
                 laneColor.withValues(alpha: alpha),
               ));
             }
@@ -1255,12 +1462,18 @@ class _DriveOverlayPainter extends CustomPainter {
             laneMaxIdx,
           );
           if (poly == null) continue;
-          polygons.add(_encodePolygon(poly, _roadEdgeColor(edge.std)));
+          polygons.add(
+            _encodePolygon(
+              _smoothedPolygonVertices(poly),
+              _roadEdgeColor(edge.std),
+            ),
+          );
         }
       }
 
       final pathMode = snapshot.pathMode;
-      final widthApply = _pathHalfWidthByMode(pathMode, snapshot.pathWidthRatio);
+      final widthApply =
+          _pathHalfWidthByMode(pathMode, snapshot.pathWidthRatio);
       final zOff = snapshot.pathOffsetZ.isFinite ? snapshot.pathOffsetZ : 1.22;
       final startDistance = snapshot.active ? 2.0 : 3.5;
       trackVertices = _mapLineToTrackVerticesDist(
@@ -1284,9 +1497,23 @@ class _DriveOverlayPainter extends CustomPainter {
           brakeLights,
         );
       }
+
+      final usedSidecarLeadRadar = _appendPreferredLeadAndRadarPolygons(
+        canvasSize: size,
+        polygons: polygons,
+        labels: labels ??= <Map<String, dynamic>>[],
+      );
+      if (!usedSidecarLeadRadar) {
+        _appendProjectedLeadAndRadarPolygons(
+          transform: transform,
+          canvasSize: size,
+          polygons: polygons,
+          labels: labels,
+        );
+      }
     }
     labels ??= <Map<String, dynamic>>[];
-    if (sidecarPayload != null) {
+    if (_driveEnableExperimentalSidecarDecorations && sidecarPayload != null) {
       final sidecarPolygons = sidecarPayload['polygons'];
       if (sidecarPolygons is List) {
         for (final item in sidecarPolygons) {
@@ -1304,12 +1531,14 @@ class _DriveOverlayPainter extends CustomPainter {
         }
       }
     }
-    _appendNavArOverlayPolygons(
-      polygons: polygons,
-      labels: labels,
-      transform: transform,
-      canvasSize: size,
-    );
+    if (_driveEnableExperimentalNavAr) {
+      _appendNavArOverlayPolygons(
+        polygons: polygons,
+        labels: labels,
+        transform: transform,
+        canvasSize: size,
+      );
+    }
     _appendDebugPlotPayload(
       polygons,
       labels,
@@ -1349,9 +1578,10 @@ class _DriveOverlayPainter extends CustomPainter {
     required Color strokeColor,
   }) {
     if (vertices.length < 3) return;
+    final encodedVertices = _smoothedPolygonVertices(vertices);
     out.add(
       _encodePolygon(
-        vertices,
+        encodedVertices,
         fillColor.withValues(alpha: 0.42),
         strokeColor: strokeEnabled ? strokeColor : null,
         strokeWidth: strokeEnabled ? 2.0 : 0.0,
@@ -1762,16 +1992,6 @@ class _DriveOverlayPainter extends CustomPainter {
     return fallback;
   }
 
-  List<Offset> _rectVertices(
-      double left, double top, double right, double bottom) {
-    return <Offset>[
-      Offset(left, top),
-      Offset(right, top),
-      Offset(right, bottom),
-      Offset(left, bottom),
-    ];
-  }
-
   List<Offset> _roundedRectVertices(
     Rect rect, {
     double radius = 15.0,
@@ -1822,8 +2042,11 @@ class _DriveOverlayPainter extends CustomPainter {
     required Offset anchor,
     required String text,
     required Color color,
+    Color? strokeColor,
+    double strokeWidth = 0.0,
     double size = 20.0,
     bool centered = true,
+    int fontWeight = 700,
   }) {
     final content = text.trim();
     if (content.isEmpty || !anchor.dx.isFinite || !anchor.dy.isFinite) return;
@@ -1834,7 +2057,10 @@ class _DriveOverlayPainter extends CustomPainter {
       'y': anchor.dy,
       'text': content,
       'color': color.toARGB32(),
+      if (strokeColor != null) 'strokeColor': strokeColor.toARGB32(),
+      if (strokeColor != null && strokeWidth > 0.0) 'strokeWidth': strokeWidth,
       'size': size,
+      'fontWeight': fontWeight,
     });
   }
 
@@ -1846,14 +2072,20 @@ class _DriveOverlayPainter extends CustomPainter {
     required Color fillColor,
     required Color textColor,
     Color? strokeColor,
+    Color? textStrokeColor,
+    double textStrokeWidth = 0.0,
     double fontSize = 22.0,
-    double minWidth = 54.0,
-    double height = 38.0,
+    double minWidth = 56.0,
+    double height = 42.0,
+    double radius = 15.0,
+    double strokeWidth = 2.0,
+    double horizontalPadding = 18.0,
+    int fontWeight = 700,
   }) {
     final content = text.trim();
     if (content.isEmpty || !center.dx.isFinite || !center.dy.isFinite) return;
     final width = math
-        .max(minWidth, (content.length * fontSize * 0.62) + 18.0)
+        .max(minWidth, (content.length * fontSize * 0.60) + horizontalPadding)
         .toDouble();
     final left = center.dx - (width * 0.5);
     final top = center.dy - (height * 0.5);
@@ -1861,10 +2093,14 @@ class _DriveOverlayPainter extends CustomPainter {
     final bottom = top + height;
     polygons.add(
       _encodePolygon(
-        _rectVertices(left, top, right, bottom),
+        _roundedRectVertices(
+          Rect.fromLTRB(left, top, right, bottom),
+          radius: radius,
+          segmentsPerCorner: 5,
+        ),
         fillColor,
         strokeColor: strokeColor,
-        strokeWidth: strokeColor == null ? 0.0 : 2.0,
+        strokeWidth: strokeColor == null ? 0.0 : strokeWidth,
       ),
     );
     _appendOverlayLabel(
@@ -1872,8 +2108,258 @@ class _DriveOverlayPainter extends CustomPainter {
       anchor: Offset(center.dx, top + (height * 0.70)),
       text: content,
       color: textColor,
+      strokeColor: textStrokeColor,
+      strokeWidth: textStrokeWidth,
       size: fontSize,
       centered: true,
+      fontWeight: fontWeight,
+    );
+  }
+
+  double _leadBoxCornerRadius(double sourceScale) {
+    return _clampDouble(11.0 * sourceScale, 8.0, 12.0);
+  }
+
+  double _leadBoxStrokeWidth(double sourceScale) {
+    return _clampDouble(2.0 * sourceScale, 1.6, 2.4);
+  }
+
+  double _leadBadgeRadius(double sourceScale) {
+    return _clampDouble(18.0 * sourceScale, 14.0, 20.0);
+  }
+
+  double _leadBadgeStrokeWidth(double sourceScale) {
+    return _clampDouble(2.2 * sourceScale, 1.8, 2.8);
+  }
+
+  _LeadDistanceBadgeLayout _leadDistanceBadgeLayout(
+    Rect rect,
+    double sourceScale,
+  ) {
+    final height = _clampDouble(26.0 * sourceScale, 22.0, 30.0);
+    final fontSize = _clampDouble(21.0 * sourceScale, 18.0, 24.0);
+    final minWidth = _clampDouble(46.0 * sourceScale, 40.0, 56.0);
+    final attachOverlap = _clampDouble(4.0 * sourceScale, 3.0, 5.0);
+    return _LeadDistanceBadgeLayout(
+      center: Offset(
+        rect.center.dx,
+        rect.bottom + (height * 0.5) - attachOverlap,
+      ),
+      fontSize: fontSize,
+      minWidth: minWidth,
+      height: height,
+    );
+  }
+
+  _LeadDistanceBadgeLayout _leadStateBadgeLayout(
+    Rect rect,
+    double sourceScale,
+  ) {
+    final height = _clampDouble(44.0 * sourceScale, 38.0, 50.0);
+    final fontSize = _clampDouble(25.0 * sourceScale, 21.0, 30.0);
+    final minWidth = _clampDouble(132.0 * sourceScale, 108.0, 176.0);
+    final attachOverlap = _clampDouble(5.0 * sourceScale, 4.0, 7.0);
+    return _LeadDistanceBadgeLayout(
+      center: Offset(
+        rect.center.dx,
+        rect.bottom + (height * 0.5) - attachOverlap,
+      ),
+      fontSize: fontSize,
+      minWidth: minWidth,
+      height: height,
+    );
+  }
+
+  Color _leadCardFillColor(
+    Color accent,
+    Color baseFill, {
+    required bool primary,
+  }) {
+    final darkBase = Colors.black.withValues(alpha: primary ? 0.055 : 0.045);
+    final tintedBase = Color.alphaBlend(
+      accent.withValues(alpha: primary ? 0.028 : 0.022),
+      darkBase,
+    );
+    return Color.alphaBlend(
+      baseFill.withValues(alpha: primary ? 0.022 : 0.018),
+      tintedBase,
+    );
+  }
+
+  void _appendLeadBoxCard(
+    List<Map<String, dynamic>> polygons, {
+    required Rect rect,
+    required double sourceScale,
+    required Color strokeColor,
+    required Color fillColor,
+    required bool primary,
+  }) {
+    final cornerRadius = _leadBoxCornerRadius(sourceScale);
+    final shadowShiftY = _clampDouble(5.0 * sourceScale, 3.0, 7.0);
+    final shadowInflate = _clampDouble(2.5 * sourceScale, 1.5, 3.5);
+    final glowInflate = _clampDouble(8.0 * sourceScale, 5.0, 10.0);
+    final innerInset = _clampDouble(4.0 * sourceScale, 2.5, 5.5);
+
+    polygons.add(
+      _encodePolygon(
+        _roundedRectVertices(
+          rect.shift(Offset(0.0, shadowShiftY)).inflate(shadowInflate),
+          radius: cornerRadius + shadowShiftY,
+          segmentsPerCorner: 4,
+        ),
+        const Color(0x22000000),
+      ),
+    );
+    polygons.add(
+      _encodePolygon(
+        _roundedRectVertices(
+          rect.inflate(glowInflate),
+          radius: cornerRadius + glowInflate,
+          segmentsPerCorner: 4,
+        ),
+        strokeColor.withValues(alpha: primary ? 0.13 : 0.09),
+      ),
+    );
+    polygons.add(
+      _encodePolygon(
+        _roundedRectVertices(
+          rect,
+          radius: cornerRadius,
+          segmentsPerCorner: 4,
+        ),
+        _leadCardFillColor(
+          strokeColor,
+          fillColor,
+          primary: primary,
+        ),
+        strokeColor: strokeColor,
+        strokeWidth: _leadBoxStrokeWidth(sourceScale),
+      ),
+    );
+
+    final innerRect = rect.deflate(innerInset);
+    if (innerRect.width > 18.0 && innerRect.height > 18.0) {
+      polygons.add(
+        _encodePolygon(
+          _roundedRectVertices(
+            innerRect,
+            radius: math.max(2.0, cornerRadius - innerInset),
+            segmentsPerCorner: 4,
+          ),
+          Colors.white.withValues(alpha: primary ? 0.012 : 0.008),
+          strokeColor: Colors.white.withValues(alpha: primary ? 0.08 : 0.05),
+          strokeWidth: _clampDouble(1.0 * sourceScale, 0.8, 1.2),
+        ),
+      );
+    }
+  }
+
+  void _appendLeadDistanceBadge(
+    List<Map<String, dynamic>> polygons,
+    List<Map<String, dynamic>> labels, {
+    required _LeadDistanceBadgeLayout layout,
+    required double sourceScale,
+    required String text,
+    required Color accentColor,
+    required Color textColor,
+  }) {
+    final fillColor = Color.alphaBlend(
+      accentColor.withValues(alpha: 0.92),
+      const Color(0xFF0F141B),
+    );
+    _appendBadge(
+      polygons,
+      labels,
+      center: layout.center,
+      text: text,
+      fillColor: fillColor,
+      textColor: textColor,
+      strokeColor: Colors.black.withValues(alpha: 0.96),
+      textStrokeColor: Colors.black,
+      textStrokeWidth: 2.6,
+      fontSize: layout.fontSize,
+      minWidth: layout.minWidth,
+      height: layout.height,
+      radius: _leadBadgeRadius(sourceScale),
+      strokeWidth: _clampDouble(2.8 * sourceScale, 2.2, 3.4),
+      horizontalPadding: _clampDouble(10.0 * sourceScale, 8.0, 12.0),
+      fontWeight: 900,
+    );
+  }
+
+  Color _leadStateAccentColor(int xState) {
+    switch (xState) {
+      case 3:
+      case 5:
+        return const Color(0xFFFFA726);
+      case 4:
+        return const Color(0xFF23D55D);
+      case 1:
+        return const Color(0xFF91A4BF);
+      default:
+        return Colors.white;
+    }
+  }
+
+  void _appendLeadStateBadge(
+    List<Map<String, dynamic>> polygons,
+    List<Map<String, dynamic>> labels, {
+    required Rect rect,
+    required double sourceScale,
+    required int xState,
+    required String text,
+  }) {
+    final layout = _leadStateBadgeLayout(rect, sourceScale);
+    final accentColor = _leadStateAccentColor(xState);
+    final fillColor = Color.alphaBlend(
+      accentColor.withValues(alpha: 0.18),
+      const Color(0xE610151C),
+    );
+    _appendBadge(
+      polygons,
+      labels,
+      center: layout.center,
+      text: text,
+      fillColor: fillColor,
+      textColor: Colors.white,
+      strokeColor: accentColor.withValues(alpha: 0.82),
+      textStrokeColor: Colors.black,
+      textStrokeWidth: 1.9,
+      fontSize: layout.fontSize,
+      minWidth: layout.minWidth,
+      height: layout.height,
+      radius: _leadBadgeRadius(sourceScale),
+      strokeWidth: _leadBadgeStrokeWidth(sourceScale),
+    );
+  }
+
+  void _appendRadarSpeedBadge(
+    List<Map<String, dynamic>> polygons,
+    List<Map<String, dynamic>> labels, {
+    required Offset center,
+    required double sourceScale,
+    required String text,
+    required Color accentColor,
+  }) {
+    final fillColor = Color.alphaBlend(
+      accentColor.withValues(alpha: 0.76),
+      const Color(0xFF10161E),
+    );
+    _appendBadge(
+      polygons,
+      labels,
+      center: center,
+      text: text,
+      fillColor: fillColor,
+      textColor: Colors.white,
+      strokeColor: Colors.white.withValues(alpha: 0.24),
+      textStrokeColor: Colors.black,
+      textStrokeWidth: 1.8,
+      fontSize: _clampDouble(24.0 * sourceScale, 21.0, 28.0),
+      minWidth: _clampDouble(62.0 * sourceScale, 54.0, 72.0),
+      height: _clampDouble(42.0 * sourceScale, 36.0, 46.0),
+      radius: _clampDouble(16.0 * sourceScale, 13.0, 18.0),
+      strokeWidth: _leadBadgeStrokeWidth(sourceScale),
     );
   }
 
@@ -1936,6 +2422,149 @@ class _DriveOverlayPainter extends CustomPainter {
     return <Offset>[left, tip, right, inner];
   }
 
+  _DriveArScreenAnchors? _buildArScreenAnchors({
+    required _DriveArScene scene,
+    required Size canvasSize,
+  }) {
+    if (cameraKind != _DriveCameraKind.road) return null;
+    if (scene.isEmpty) return null;
+    final transform = _buildTransform(canvasSize);
+    const distanceScale = 0.92;
+    final pathVerticalOffsetPx = canvasSize.height * 0.018;
+    final laneBaseLine = snapshot.laneLines.length > 2
+        ? snapshot.laneLines[2].line
+        : (snapshot.laneLines.isNotEmpty
+            ? snapshot.laneLines.first.line
+            : null);
+    final laneX = laneBaseLine?.x ?? snapshot.path.x;
+    final laneZ = laneBaseLine?.z ?? snapshot.path.z;
+    final zOffset = snapshot.pathOffsetZ.isFinite ? snapshot.pathOffsetZ : 1.22;
+
+    final projected = <Offset>[];
+    final projectedDist = <double>[];
+    for (final p in scene.routePoints) {
+      if (!p.x.isFinite || !p.y.isFinite || !p.d.isFinite) continue;
+      if (p.x < 2.0 || p.x > 140.0) continue;
+      final sampleDist = (p.d > 0 ? p.d : p.x) * distanceScale;
+      var z = 0.0;
+      if (laneX.isNotEmpty && laneZ.isNotEmpty) {
+        final idx = _getPathLengthIdx(laneX, sampleDist);
+        if (laneZ.isNotEmpty) {
+          final zi = idx.clamp(0, laneZ.length - 1);
+          z = laneZ[zi];
+        }
+      }
+      Offset? out;
+      final ok = _mapToScreen(
+        transform,
+        ((p.x < 3.0 ? 5.0 : p.x) * distanceScale).clamp(2.0, 140.0),
+        p.y,
+        z + zOffset,
+        (pt) => out = pt,
+      );
+      if (!ok || out == null) continue;
+      final o = Offset(out!.dx, out!.dy + pathVerticalOffsetPx);
+      if (o.dx < -60.0 ||
+          o.dx > canvasSize.width + 60.0 ||
+          o.dy < -60.0 ||
+          o.dy > canvasSize.height + 60.0) {
+        continue;
+      }
+      projected.add(o);
+      projectedDist.add(sampleDist);
+      if (projected.length >= 90) break;
+    }
+
+    Offset? gateAnchor;
+    if (projected.isNotEmpty) {
+      var anchorIdx = -1;
+      for (var i = 0; i < projected.length; i++) {
+        final d = i < projectedDist.length ? projectedDist[i] : 0.0;
+        if (d >= 14.0 && d <= 38.0) {
+          anchorIdx = i;
+          break;
+        }
+      }
+      if (anchorIdx < 0) anchorIdx = projected.length ~/ 2;
+      gateAnchor = projected[anchorIdx];
+    } else if (scene.turnCue != null) {
+      gateAnchor = Offset(canvasSize.width * 0.5, canvasSize.height * 0.28);
+    }
+
+    final sampledPoints = <Offset>[];
+    final sampledDistances = <double>[];
+    if (projected.length <= 18) {
+      sampledPoints.addAll(projected);
+      sampledDistances.addAll(projectedDist);
+    } else {
+      final sampleStep = math.max(1, (projected.length / 18).floor());
+      for (var i = 0; i < projected.length; i += sampleStep) {
+        sampledPoints.add(projected[i]);
+        sampledDistances.add(projectedDist[i]);
+      }
+      if (sampledPoints.last != projected.last) {
+        sampledPoints.add(projected.last);
+        sampledDistances.add(projectedDist.last);
+      }
+    }
+
+    final defaultStatusAnchor = Offset(
+      canvasSize.width * 0.5,
+      canvasSize.height - 58.0,
+    );
+    final statusAnchorSource = projected.isNotEmpty
+        ? projected.first
+        : (gateAnchor ?? defaultStatusAnchor);
+    final statusHorizontalMargin = math.min(92.0, canvasSize.width * 0.18);
+    final statusAnchor = Offset(
+      statusAnchorSource.dx.clamp(
+        statusHorizontalMargin,
+        canvasSize.width - statusHorizontalMargin,
+      ),
+      defaultStatusAnchor.dy,
+    );
+    final visibleDistanceMeters =
+        sampledDistances.isNotEmpty ? sampledDistances.last : 0.0;
+    var minDx = double.infinity;
+    var maxDx = double.negativeInfinity;
+    var minDy = double.infinity;
+    var maxDy = double.negativeInfinity;
+    for (final point in sampledPoints) {
+      if (point.dx < minDx) minDx = point.dx;
+      if (point.dx > maxDx) maxDx = point.dx;
+      if (point.dy < minDy) minDy = point.dy;
+      if (point.dy > maxDy) maxDy = point.dy;
+    }
+    final pathSpanX = sampledPoints.length >= 2 ? (maxDx - minDx) : 0.0;
+    final pathSpanY = sampledPoints.length >= 2 ? (maxDy - minDy) : 0.0;
+    final countScore = (sampledPoints.length / 8.0).clamp(0.0, 1.0);
+    final distanceScore = (visibleDistanceMeters / 34.0).clamp(0.0, 1.0);
+    final spanYScore = (pathSpanY / (canvasSize.height * 0.24)).clamp(0.0, 1.0);
+    final centeredScore = sampledPoints.isNotEmpty
+        ? (1.0 -
+                (((sampledPoints.first.dx - (canvasSize.width * 0.5)).abs()) /
+                        (canvasSize.width * 0.5))
+                    .clamp(0.0, 1.0))
+            .clamp(0.0, 1.0)
+        : 0.0;
+    final qualityScore = ((countScore * 0.34) +
+            (distanceScore * 0.30) +
+            (spanYScore * 0.24) +
+            (centeredScore * 0.12))
+        .clamp(0.0, 1.0);
+
+    return _DriveArScreenAnchors(
+      pathPoints: sampledPoints,
+      pathDistances: sampledDistances,
+      gateAnchor: gateAnchor,
+      statusAnchor: statusAnchor,
+      visibleDistanceMeters: visibleDistanceMeters,
+      pathSpanX: pathSpanX,
+      pathSpanY: pathSpanY,
+      qualityScore: qualityScore,
+    );
+  }
+
   void _appendNavArOverlayPolygons({
     required List<Map<String, dynamic>> polygons,
     required List<Map<String, dynamic>> labels,
@@ -1943,6 +2572,7 @@ class _DriveOverlayPainter extends CustomPainter {
     required Size canvasSize,
   }) {
     if (cameraKind != _DriveCameraKind.road) return;
+    final arScene = snapshot.buildArScene(cameraKind: cameraKind);
 
     // Road-camera AR tuning knobs:
     // - distanceScale: perspective depth scaling for nav path/chevrons
@@ -1952,10 +2582,9 @@ class _DriveOverlayPainter extends CustomPainter {
     final pathVerticalOffsetPx = canvasSize.height * 0.018;
     final gateVerticalOffsetPx = -(canvasSize.height * 0.028);
 
-    final navPath = snapshot.navPathPoints;
-    final hasTurnText = snapshot.navMainText.trim().isNotEmpty;
-    final hasTurnInfo = snapshot.navTurnInfo != 0 || hasTurnText;
-    if (navPath.length < 2 && !hasTurnInfo) return;
+    final navPath = arScene.routePoints;
+    final turnCue = arScene.turnCue;
+    if (arScene.isEmpty) return;
 
     final laneBaseLine = snapshot.laneLines.length > 2
         ? snapshot.laneLines[2].line
@@ -2050,8 +2679,10 @@ class _DriveOverlayPainter extends CustomPainter {
       }
     }
 
-    final turnText = _navTurnText(snapshot.navTurnInfo, snapshot.navMainText);
-    final turnDistText = _formatNavDistance(snapshot.navDistToTurn);
+    final turnText = turnCue == null
+        ? ''
+        : _navTurnText(turnCue.turnInfo, turnCue.primaryText);
+    final turnDistText = _formatNavDistance(turnCue?.distanceMeters);
     final gateText = turnText.isEmpty
         ? ''
         : (turnDistText.isEmpty ? turnText : '$turnDistText ??$turnText');
@@ -2111,9 +2742,15 @@ class _DriveOverlayPainter extends CustomPainter {
 
     String statusText;
     Color statusFill;
-    if (snapshot.navTurnInfo == 8 ||
+    if (!arScene.health.calibrationOk) {
+      statusText = '캘리브레이션 대기';
+      statusFill = const Color(0xD97A5100);
+    } else if (!arScene.health.frameGapOk) {
+      statusText = '프레임 정합 대기';
+      statusFill = const Color(0xD97A5100);
+    } else if ((turnCue?.isArrival ?? false) ||
         turnText.contains('도착') ||
-        snapshot.navMainText.contains('도착')) {
+        (turnCue?.primaryText.contains('도착') ?? false)) {
       statusText = '도착 임박';
       statusFill = const Color(0xE617A84B);
     } else if (projected.length >= 2) {
@@ -2152,6 +2789,17 @@ class _DriveOverlayPainter extends CustomPainter {
     required bool showStopDistanceTf,
     required bool showStateText,
   }) {
+    final cameraFrameId = _DriveOverlaySnapshot._asInt(cam['cameraFrameId']);
+    final modelFrameId = _DriveOverlaySnapshot._asInt(cam['modelFrameId']);
+    final frameGap = (cameraFrameId != null && modelFrameId != null)
+        ? (modelFrameId - cameraFrameId).abs()
+        : null;
+    // Stock lead/radar box parity is more important than showing stale boxes.
+    // When model/camera frames drift too far apart, skip the decorations.
+    if (frameGap != null && frameGap > 3) {
+      return;
+    }
+
     final meta = cam['meta'];
     final showRadarInfo = meta is Map
         ? (_DriveOverlaySnapshot._asInt(meta['showRadarInfo']) ?? 0)
@@ -2190,6 +2838,11 @@ class _DriveOverlayPainter extends CustomPainter {
     final badgeTextColor = xState == 0
         ? Colors.white
         : (xState == 1 ? const Color(0xFFB0B0B0) : const Color(0xFF23D55D));
+    final sourceScale = _sourceToCanvasPlacementFromDisplayTransform(
+      source: Size(sourceWidth, sourceHeight),
+      canvas: canvasSize,
+      displayTransform: displayTransform,
+    ).scale;
 
     Offset? mapSingleSourcePoint(dynamic raw) {
       if (raw is! List || raw.length < 2) return null;
@@ -2207,8 +2860,6 @@ class _DriveOverlayPainter extends CustomPainter {
       return mapped.first;
     }
 
-    Offset? leadPrimaryCenter;
-    Rect? leadPrimaryBounds;
     final leadRaw = cam['leadAreaBoxes'];
     if (leadRaw is List) {
       for (final item in leadRaw) {
@@ -2265,60 +2916,47 @@ class _DriveOverlayPainter extends CustomPainter {
                 isLeadScc ? const Color(0xFFFF3B30) : const Color(0xFFFFA726);
           }
         }
-        polygons.add(
-          _encodePolygon(
-            _roundedRectVertices(bounds, radius: 15.0, segmentsPerCorner: 4),
-            fillColor,
-            strokeColor: strokeColor,
-            strokeWidth: 3.0,
-          ),
+        _appendLeadBoxCard(
+          polygons,
+          rect: bounds,
+          sourceScale: sourceScale,
+          strokeColor: strokeColor,
+          fillColor: fillColor,
+          primary: kind == 'leadOne',
         );
 
         if (kind == 'leadOne') {
-          leadPrimaryBounds ??= bounds;
-          leadPrimaryCenter ??=
-              mapSingleSourcePoint(lead['anchorCenter']) ?? bounds.center;
           final radarDist =
               _DriveOverlaySnapshot._asDouble(lead['radarDistance']) ?? 0.0;
           final visionDist =
               _DriveOverlaySnapshot._asDouble(lead['visionDistance']) ?? 0.0;
-          final radarBadgeCenter =
-              mapSingleSourcePoint(lead['radarBadgeCenter']);
-          final visionBadgeCenter =
-              mapSingleSourcePoint(lead['visionBadgeCenter']);
           final radarBadgeColorArgb =
               _DriveOverlaySnapshot._asInt(lead['radarBadgeColorArgb']);
           final visionBadgeColorArgb =
               _DriveOverlaySnapshot._asInt(lead['visionBadgeColorArgb']);
-          final canvasBadgeDx =
-              (bounds.width * 0.62).clamp(64.0, 140.0).toDouble();
-          final canvasBadgeY = bounds.bottom +
-              (bounds.height * 0.32).clamp(18.0, 48.0).toDouble();
-          if (drawDistanceBadges && showRadarBadge && radarDist > 0.0) {
-            _appendBadge(
-              polygons,
-              labels,
-              center: radarBadgeCenter ??
-                  Offset(bounds.center.dx - canvasBadgeDx, canvasBadgeY),
-              text: radarDist.toStringAsFixed(1),
-              fillColor: radarBadgeColorArgb != null
+          final badgeLayout = _leadDistanceBadgeLayout(bounds, sourceScale);
+          final hasRadarDistance = radarDist > 0.0;
+          final hasVisionDistance = visionDist > 0.0;
+          final primaryDistance = hasRadarDistance
+              ? radarDist
+              : (hasVisionDistance ? visionDist : 0.0);
+          final primaryBadgeColor = hasRadarDistance
+              ? (radarBadgeColorArgb != null
                   ? Color(radarBadgeColorArgb)
                   : (isLeadScc
                       ? const Color(0xFFFF3B30)
-                      : const Color(0xFFFFA726)),
-              textColor: badgeTextColor,
-            );
-          }
-          if (drawDistanceBadges && showRadarBadge && visionDist > 0.0) {
-            _appendBadge(
+                      : const Color(0xFFFFA726)))
+              : (visionBadgeColorArgb != null
+                  ? Color(visionBadgeColorArgb)
+                  : const Color(0xFF3D7BFF));
+          if (drawDistanceBadges && showRadarBadge && primaryDistance > 0.0) {
+            _appendLeadDistanceBadge(
               polygons,
               labels,
-              center: visionBadgeCenter ??
-                  Offset(bounds.center.dx + canvasBadgeDx, canvasBadgeY),
-              text: visionDist.toStringAsFixed(1),
-              fillColor: visionBadgeColorArgb != null
-                  ? Color(visionBadgeColorArgb)
-                  : const Color(0xFF3D7BFF),
+              layout: badgeLayout,
+              sourceScale: sourceScale,
+              text: primaryDistance.toStringAsFixed(1),
+              accentColor: primaryBadgeColor,
               textColor: badgeTextColor,
             );
           }
@@ -2371,46 +3009,26 @@ class _DriveOverlayPainter extends CustomPainter {
           }
         }
       }
-      Offset? stateAnchor;
       if (leadOneAnchorRaw is Map) {
-        final stateCenterRaw = leadOneAnchorRaw['stateTextCenter'];
-        stateAnchor = mapSingleSourcePoint(stateCenterRaw);
-      }
-      if (stateAnchor == null && leadOneAnchorRaw is Map) {
-        final raw = leadOneAnchorRaw['anchorCenter'];
-        final anchorWidthSrc =
-            _DriveOverlaySnapshot._asDouble(leadOneAnchorRaw['anchorWidth']);
-        final sourceStateDy = (anchorWidthSrc != null && anchorWidthSrc > 0.0)
-            ? (anchorWidthSrc * 0.52).clamp(52.0, 140.0).toDouble()
-            : 60.0;
-        if (raw is List && raw.length >= 2) {
-          final ax = _DriveOverlaySnapshot._asDouble(raw[0]);
-          final ay = _DriveOverlaySnapshot._asDouble(raw[1]);
-          if (ax != null && ay != null) {
-            stateAnchor =
-                mapSingleSourcePoint(<double>[ax, ay + sourceStateDy]);
-          }
+        final mapped = _mapSourcePointsToCanvas(
+          _decodeOverlayPoints(leadOneAnchorRaw['points']),
+          canvasSize: canvasSize,
+          sourceWidth: sourceWidth,
+          sourceHeight: sourceHeight,
+          displayTransform: displayTransform,
+        );
+        final bounds = mapped.length >= 3 ? _verticesBounds(mapped) : null;
+        if (bounds != null) {
+          _appendLeadStateBadge(
+            polygons,
+            labels,
+            rect: bounds,
+            sourceScale: sourceScale,
+            xState: xState,
+            text: stateText,
+          );
         }
       }
-      final primaryCenter = leadPrimaryCenter;
-      final anchor = stateAnchor ??
-          (primaryCenter != null
-              ? Offset(
-                  primaryCenter.dx,
-                  (leadPrimaryBounds?.bottom ?? primaryCenter.dy) +
-                      ((leadPrimaryBounds?.height ?? 72.0) * 0.72)
-                          .clamp(36.0, 92.0)
-                          .toDouble(),
-                )
-              : Offset(canvasSize.width * 0.5, canvasSize.height * 0.72));
-      _appendOverlayLabel(
-        labels,
-        anchor: anchor,
-        text: stateText,
-        color: Colors.white,
-        size: 34.0,
-        centered: true,
-      );
     }
 
     final radarRaw = cam['radarTargets'];
@@ -2467,29 +3085,33 @@ class _DriveOverlayPainter extends CustomPainter {
         } else {
           badgeColor = const Color(0xFFFF3B30);
         }
-        _appendBadge(
+        _appendRadarSpeedBadge(
           polygons,
           labels,
-          center: Offset(center.dx, center.dy - 14.0),
+          center: Offset(center.dx, center.dy - (18.0 * sourceScale)),
+          sourceScale: sourceScale,
           text: speedKph.toStringAsFixed(0),
-          fillColor: badgeColor,
-          textColor: Colors.white,
+          accentColor: badgeColor,
         );
         if (showRadarInfo >= 2) {
           _appendOverlayLabel(
             labels,
-            anchor: Offset(center.dx, center.dy - 44.0),
+            anchor: Offset(center.dx, center.dy - (48.0 * sourceScale)),
             text: yRel.toStringAsFixed(1),
             color: Colors.white,
-            size: 18.0,
+            strokeColor: Colors.black,
+            strokeWidth: 1.4,
+            size: _clampDouble(18.0 * sourceScale, 16.0, 21.0),
             centered: true,
           );
           _appendOverlayLabel(
             labels,
-            anchor: Offset(center.dx, center.dy + 28.0),
+            anchor: Offset(center.dx, center.dy + (30.0 * sourceScale)),
             text: dRel.toStringAsFixed(1),
             color: Colors.white,
-            size: 18.0,
+            strokeColor: Colors.black,
+            strokeWidth: 1.4,
+            size: _clampDouble(18.0 * sourceScale, 16.0, 21.0),
             centered: true,
           );
         }
@@ -2497,6 +3119,479 @@ class _DriveOverlayPainter extends CustomPainter {
         _appendOverlayLabel(
           labels,
           anchor: center,
+          text: '*',
+          color: Colors.white,
+          size: 28.0,
+          centered: true,
+        );
+      }
+    }
+  }
+
+  double _sampleModelZAtDistance(double distance) {
+    final modelPath =
+        snapshot.modelPath.length >= 2 ? snapshot.modelPath : snapshot.path;
+    if (modelPath.length < 2) return 0.0;
+    final xs =
+        _monotonicX(modelPath.x.take(modelPath.length).toList(growable: false));
+    if (xs.isEmpty) return 0.0;
+    final zs = modelPath.z.take(modelPath.length).toList(growable: false);
+    final idxs = List<double>.generate(
+      modelPath.length,
+      (i) => i.toDouble(),
+      growable: false,
+    );
+    final idx = _interp1D(distance, xs, idxs);
+    return _interp1D(idx, idxs, zs);
+  }
+
+  double _sampleRadarZAtDistance(double distance) {
+    if (snapshot.laneLines.length >= 3) {
+      final lane = snapshot.laneLines[2].line;
+      if (lane.length >= 2) {
+        final xs = _monotonicX(lane.x.take(lane.length).toList(growable: false));
+        if (xs.isNotEmpty) {
+          final zs = lane.z.take(lane.length).toList(growable: false);
+          final idxs = List<double>.generate(
+            lane.length,
+            (i) => i.toDouble(),
+            growable: false,
+          );
+          final idx = _interp1D(distance, xs, idxs);
+          return _interp1D(idx, idxs, zs);
+        }
+      }
+    }
+    return _sampleModelZAtDistance(distance);
+  }
+
+  bool _appendPreferredLeadAndRadarPolygons({
+    required Size canvasSize,
+    required List<Map<String, dynamic>> polygons,
+    required List<Map<String, dynamic>> labels,
+  }) {
+    final cam = _currentCameraOverlay2d();
+    if (cam == null) return false;
+    final hasLeadBoxes = cam['leadAreaBoxes'] is List;
+    final hasRadarTargets = cam['radarTargets'] is List;
+    final hasTfMarker = cam['tfMarker'] is Map;
+    if (!hasLeadBoxes && !hasRadarTargets && !hasTfMarker) {
+      return false;
+    }
+    final sourceWidth =
+        _DriveOverlaySnapshot._asDouble(cam['sourceWidth']) ?? _baseSourceWidth;
+    final sourceHeight = _DriveOverlaySnapshot._asDouble(cam['sourceHeight']) ??
+        _baseSourceHeight;
+    final displayTransformRaw = cam['displayTransform'];
+    final displayTransform = displayTransformRaw is Map
+        ? Map<String, dynamic>.from(displayTransformRaw)
+        : null;
+
+    // Prefer the sidecar's projected lead/radar overlays when available.
+    // The sidecar already mirrors carrot.cc anchor smoothing/clamping and
+    // fixed-Z lead box policy, which is more stable in close stop-and-go scenes.
+    _appendSidecarLeadAndRadarPolygons(
+      cam: cam,
+      canvasSize: canvasSize,
+      sourceWidth: sourceWidth,
+      sourceHeight: sourceHeight,
+      displayTransform: displayTransform,
+      polygons: polygons,
+      labels: labels,
+      showLead1: showLead1,
+      showLead2: showLead2,
+      showRadarBadge: showRadarBadge,
+      showRadarVector: showRadarVector,
+      showStopDistanceTf: showStopDistanceTf,
+      showStateText: showStateText,
+    );
+    return true;
+  }
+
+  _ProjectedLeadBox? _projectLeadBox(
+    _ProjectionTransform transform,
+    Size canvasSize,
+    _RadarLeadSample lead, {
+    int slot = 0,
+  }) {
+    if (!lead.status || !lead.dRel.isFinite || lead.dRel <= 0.0) return null;
+    const zBase = 1.22;
+    final z = _sampleModelZAtDistance(lead.dRel);
+    final yCenter = -lead.yRel;
+
+    Offset? left;
+    Offset? right;
+    final okL = _mapToScreen(
+      transform,
+      lead.dRel,
+      yCenter - 1.2,
+      z + zBase,
+      (p) => left = p,
+    );
+    final okR = _mapToScreen(
+      transform,
+      lead.dRel,
+      yCenter + 1.2,
+      z + zBase,
+      (p) => right = p,
+    );
+    if (!okL || !okR || left == null || right == null) return null;
+
+    final rawWidth = (right!.dx - left!.dx).abs();
+    final rawCenterX = (left!.dx + right!.dx) * 0.5;
+    final rawCenterY = (left!.dy + right!.dy) * 0.5;
+    if (!rawWidth.isFinite ||
+        !rawCenterX.isFinite ||
+        !rawCenterY.isFinite ||
+        rawWidth <= 1.0) {
+      return null;
+    }
+
+    // EMA smoothing — matches carrot.cc path_fx/fy/fwidth with alpha=0.85.
+    // Prevents the anchor from jumping when a vehicle appears or comes close.
+    final int prevTrackId;
+    final double prevFx, prevFy, prevFw;
+    if (slot == 0) {
+      prevTrackId = _emaTrackId0;
+      prevFx = _emaFx0;
+      prevFy = _emaFy0;
+      prevFw = _emaFw0;
+    } else {
+      prevTrackId = _emaTrackId1;
+      prevFx = _emaFx1;
+      prevFy = _emaFy1;
+      prevFw = _emaFw1;
+    }
+    final bool trackChanged =
+        prevTrackId != lead.radarTrackId || !prevFx.isFinite || !prevFy.isFinite;
+    final double smoothX = trackChanged
+        ? rawCenterX
+        : prevFx * _leadEmaAlpha + rawCenterX * (1.0 - _leadEmaAlpha);
+    final double smoothY = trackChanged
+        ? rawCenterY
+        : prevFy * _leadEmaAlpha + rawCenterY * (1.0 - _leadEmaAlpha);
+    final double smoothW = trackChanged
+        ? rawWidth
+        : prevFw * _leadEmaAlpha + rawWidth * (1.0 - _leadEmaAlpha);
+    if (slot == 0) {
+      _emaFx0 = smoothX;
+      _emaFy0 = smoothY;
+      _emaFw0 = smoothW;
+      _emaTrackId0 = lead.radarTrackId;
+    } else {
+      _emaFx1 = smoothX;
+      _emaFy1 = smoothY;
+      _emaFw1 = smoothW;
+      _emaTrackId1 = lead.radarTrackId;
+    }
+
+    final sourceScale =
+        transform.sourceScale.isFinite && transform.sourceScale > 0.0
+            ? transform.sourceScale
+            : 1.0;
+    // Clamp margins match carrot.cc: [350, fb_w-350] × [200, fb_h-80] in source pixels.
+    final marginX = math.min(canvasSize.width * 0.35, 350.0 * sourceScale);
+    final topMargin = math.min(canvasSize.height * 0.28, 200.0 * sourceScale);
+    // Use max (not min) for bottom margin so it is at least 80 source-px from bottom.
+    final bottomMargin = math.max(canvasSize.height * 0.14, 80.0 * sourceScale);
+    final centerX = _clampDouble(
+      smoothX,
+      marginX,
+      math.max(marginX, canvasSize.width - marginX),
+    );
+    final centerY = _clampDouble(
+      smoothY,
+      topMargin,
+      math.max(topMargin, canvasSize.height - bottomMargin),
+    );
+    final width =
+        _clampDouble(smoothW, 120.0 * sourceScale, 800.0 * sourceScale);
+    final sidePad = 10.0 * sourceScale;
+    final boxHeight = math.max(width * 0.8, 12.0 * sourceScale);
+    final rect = Rect.fromLTRB(
+      centerX - (width * 0.5) - sidePad,
+      centerY - boxHeight,
+      centerX + (width * 0.5) + sidePad,
+      centerY,
+    );
+    return _ProjectedLeadBox(
+      rect: rect,
+      center: Offset(centerX, centerY),
+      width: width,
+      yCenter: centerY,
+      radarDetected: lead.radar,
+      radarTrackId: lead.radarTrackId,
+    );
+  }
+
+  void _appendProjectedLeadAndRadarPolygons({
+    required _ProjectionTransform transform,
+    required Size canvasSize,
+    required List<Map<String, dynamic>> polygons,
+    required List<Map<String, dynamic>> labels,
+  }) {
+    if (cameraKind != _DriveCameraKind.road) return;
+    final cameraFrameId = snapshot.roadFrameId;
+    final modelFrameId = snapshot.modelFrameId;
+    final frameGap = (cameraFrameId != null && modelFrameId != null)
+        ? (modelFrameId - cameraFrameId).abs()
+        : null;
+    if (frameGap != null && frameGap > 3) {
+      return;
+    }
+
+    final cam = _currentCameraOverlay2d();
+    final meta = cam?['meta'];
+    final showRadarInfo = meta is Map
+        ? (_DriveOverlaySnapshot._asInt(meta['showRadarInfo']) ?? 0)
+        : 0;
+    final xState =
+        meta is Map ? (_DriveOverlaySnapshot._asInt(meta['xState']) ?? 0) : 0;
+    final trafficState = meta is Map
+        ? (_DriveOverlaySnapshot._asInt(meta['trafficState']) ?? 0)
+        : 0;
+    final longActive = meta is Map
+        ? _boolFromDynamic(meta['longActive'], fallback: false)
+        : false;
+    final vEgoMps = meta is Map
+        ? (_DriveOverlaySnapshot._asDouble(meta['vEgoMps']) ?? 0.0)
+        : 0.0;
+    final radarLatFactor = meta is Map
+        ? (_DriveOverlaySnapshot._asDouble(meta['radarLatFactor']) ?? 0.0)
+        : 0.0;
+
+    var drawDistanceBadges = true;
+    String? stateText;
+    if (longActive) {
+      if (xState == 3 || xState == 5) {
+        drawDistanceBadges = false;
+        if (vEgoMps < 1.0) {
+          stateText = trafficState >= 1000 ? 'Signal Error' : 'Signal Ready';
+        } else {
+          stateText = 'Signal slowing';
+        }
+      } else if (xState == 4) {
+        drawDistanceBadges = false;
+        stateText = 'E2E 주행중';
+      } else if (xState == 0 || xState == 1 || xState == 2) {
+        drawDistanceBadges = true;
+      } else {
+        drawDistanceBadges = false;
+      }
+    }
+    final badgeTextColor = xState == 0
+        ? Colors.white
+        : (xState == 1 ? const Color(0xFFB0B0B0) : const Color(0xFF23D55D));
+
+    final sourceScale =
+        transform.sourceScale.isFinite && transform.sourceScale > 0.0
+            ? transform.sourceScale
+            : 1.0;
+    int leadTwoStatus = 1;
+    final leadAreaBoxes = cam?['leadAreaBoxes'];
+    if (leadAreaBoxes is List) {
+      for (final item in leadAreaBoxes) {
+        if (item is Map && (item['kind']?.toString() ?? '') == 'leadTwo') {
+          leadTwoStatus = _DriveOverlaySnapshot._asInt(item['status']) ?? 1;
+          break;
+        }
+      }
+    }
+
+    final leadOne = snapshot.leadOne;
+    final leadOneBox = leadOne != null && leadOne.status
+        ? _projectLeadBox(transform, canvasSize, leadOne, slot: 0)
+        : null;
+    if (leadOneBox != null && showLead1) {
+      final isLeadScc = leadOneBox.radarTrackId < 1;
+      final strokeColor = !leadOneBox.radarDetected
+          ? const Color(0xFF3D7BFF)
+          : (isLeadScc ? const Color(0xFFFF3B30) : const Color(0xFFFFA726));
+      _appendLeadBoxCard(
+        polygons,
+        rect: leadOneBox.rect,
+        sourceScale: sourceScale,
+        strokeColor: strokeColor,
+        fillColor: const Color(0x33000000),
+        primary: true,
+      );
+
+      final radarDist =
+          leadOneBox.radarDetected ? math.max(0.0, leadOne?.dRel ?? 0.0) : 0.0;
+      final visionDist = leadOne != null && leadOne.modelProb > 0.5
+          ? math.max(0.0, leadOne.dRel - 1.52)
+          : 0.0;
+      final badgeLayout =
+          _leadDistanceBadgeLayout(leadOneBox.rect, sourceScale);
+      final hasRadarDistance = radarDist > 0.0;
+      final hasVisionDistance = visionDist > 0.0;
+      final primaryDistance =
+          hasRadarDistance ? radarDist : (hasVisionDistance ? visionDist : 0.0);
+      final primaryBadgeColor = hasRadarDistance
+          ? (isLeadScc ? const Color(0xFFFF3B30) : const Color(0xFFFFA726))
+          : const Color(0xFF3D7BFF);
+      if (drawDistanceBadges && showRadarBadge && primaryDistance > 0.0) {
+        _appendLeadDistanceBadge(
+          polygons,
+          labels,
+          layout: badgeLayout,
+          sourceScale: sourceScale,
+          text: primaryDistance.toStringAsFixed(1),
+          accentColor: primaryBadgeColor,
+          textColor: badgeTextColor,
+        );
+      }
+      if (showStateText && stateText != null) {
+        _appendLeadStateBadge(
+          polygons,
+          labels,
+          rect: leadOneBox.rect,
+          sourceScale: sourceScale,
+          xState: xState,
+          text: stateText,
+        );
+      }
+    }
+
+    final leadTwo = snapshot.leadTwo;
+    final validLeadTwo = leadTwo != null &&
+        leadTwo.status &&
+        leadTwo.radar &&
+        (leadOne == null || leadTwo.dRel > (leadOne.dRel + 3.0)) &&
+        leadTwo.radarTrackId != (leadOne?.radarTrackId ?? -9999);
+    final _RadarLeadSample? leadTwoSample = validLeadTwo ? leadTwo : null;
+    final leadTwoBox = leadTwoSample != null
+        ? _projectLeadBox(transform, canvasSize, leadTwoSample, slot: 1)
+        : null;
+    if (leadTwoBox != null && showLead2) {
+      _appendLeadBoxCard(
+        polygons,
+        rect: leadTwoBox.rect,
+        sourceScale: sourceScale,
+        strokeColor: const Color(0xFFB68A3A),
+        fillColor: leadTwoStatus >= 2
+            ? const Color(0x66FF3B30)
+            : const Color(0x33000000),
+        primary: false,
+      );
+    }
+
+    if (showRadarInfo <= 0 || (!showRadarBadge && !showRadarVector)) {
+      return;
+    }
+    final radarTracks = <_RadarTrackSample>[
+      ...snapshot.leadsLeft,
+      ...snapshot.leadsCenter,
+      ...snapshot.leadsRight,
+    ];
+    for (final radar in radarTracks) {
+      if (!radar.dRel.isFinite || radar.dRel <= 2.5) continue;
+      final z = _sampleRadarZAtDistance(radar.dRel) - 0.61;
+      Offset? center;
+      final okCenter = _mapToScreen(
+        transform,
+        radar.dRel,
+        -radar.yRel,
+        z,
+        (p) => center = p,
+      );
+      if (!okCenter || center == null) continue;
+      final Offset centerPoint = center!;
+
+      final vLead = radar.vLeadK.isFinite ? radar.vLeadK : radar.vRel;
+      final vAbs = math.sqrt((vLead * vLead) + (radar.vLat * radar.vLat));
+      final vSigned = vLead >= 0.0 ? vAbs : -vAbs;
+      if (showRadarVector && vAbs > 3.0 && radarLatFactor > 0.0) {
+        final futureDRel = math.max(2.0, radar.dRel + (vLead * radarLatFactor));
+        final futureYRel = radar.yRel + (radar.vLat * radarLatFactor);
+        Offset? future;
+        final okFuture = _mapToScreen(
+          transform,
+          futureDRel,
+          -futureYRel,
+          z,
+          (p) => future = p,
+        );
+        if (okFuture && future != null) {
+          final Offset futurePoint = future!;
+          _appendDebugLinePolygon(
+            polygons,
+            a: centerPoint,
+            b: futurePoint,
+            color: vSigned >= 0.0
+                ? const Color(0xFF23D55D)
+                : const Color(0xFFFF3B30),
+            thickness: 3.0,
+          );
+          polygons.add(
+            _encodePolygon(
+              _circleVertices(
+                futurePoint,
+                7.0,
+              ),
+              vSigned >= 0.0
+                  ? const Color(0xFF23D55D)
+                  : const Color(0xFFFF3B30),
+            ),
+          );
+        }
+      }
+
+      if (showRadarBadge && vAbs > 3.0) {
+        final speedKph = vSigned * 3.6;
+        Color badgeColor;
+        if (!radar.radar) {
+          badgeColor = const Color(0xFF3D7BFF);
+        } else if ((radar.modelProb - 0.01).abs() < 1e-3) {
+          badgeColor = const Color(0xFF23D55D);
+        } else if (vSigned > 0.0) {
+          badgeColor = const Color(0xFFFFA726);
+        } else {
+          badgeColor = const Color(0xFFFF3B30);
+        }
+        _appendRadarSpeedBadge(
+          polygons,
+          labels,
+          center: Offset(
+            centerPoint.dx,
+            centerPoint.dy - (18.0 * sourceScale),
+          ),
+          sourceScale: sourceScale,
+          text: speedKph.toStringAsFixed(0),
+          accentColor: badgeColor,
+        );
+        if (showRadarInfo >= 2) {
+          _appendOverlayLabel(
+            labels,
+            anchor: Offset(
+              centerPoint.dx,
+              centerPoint.dy - (48.0 * sourceScale),
+            ),
+            text: radar.yRel.toStringAsFixed(1),
+            color: Colors.white,
+            strokeColor: Colors.black,
+            strokeWidth: 1.4,
+            size: _clampDouble(18.0 * sourceScale, 16.0, 21.0),
+            centered: true,
+          );
+          _appendOverlayLabel(
+            labels,
+            anchor: Offset(
+              centerPoint.dx,
+              centerPoint.dy + (30.0 * sourceScale),
+            ),
+            text: radar.dRel.toStringAsFixed(1),
+            color: Colors.white,
+            strokeColor: Colors.black,
+            strokeWidth: 1.4,
+            size: _clampDouble(18.0 * sourceScale, 16.0, 21.0),
+            centered: true,
+          );
+        }
+      } else if (showRadarInfo >= 3) {
+        _appendOverlayLabel(
+          labels,
+          anchor: centerPoint,
           text: '*',
           color: Colors.white,
           size: 28.0,
@@ -2900,15 +3995,33 @@ class _DriveOverlayPainter extends CustomPainter {
       if (dx == null || dy == null || text.isEmpty) continue;
       final colorInt = _DriveOverlaySnapshot._asInt(item['color']) ??
           const Color(0xFFFFFFFF).toARGB32();
+      final strokeInt = _DriveOverlaySnapshot._asInt(item['strokeColor']);
+      final strokeWidth =
+          (_DriveOverlaySnapshot._asDouble(item['strokeWidth']) ?? 0.0)
+              .clamp(0.0, 8.0);
       final sizePx = (_DriveOverlaySnapshot._asDouble(item['size']) ?? 16.0)
           .clamp(8.0, 72.0);
+      final fontWeightRaw =
+          _DriveOverlaySnapshot._asInt(item['fontWeight']) ?? 700;
+      final fontWeight = switch (fontWeightRaw) {
+        >= 900 => FontWeight.w900,
+        >= 800 => FontWeight.w800,
+        >= 700 => FontWeight.w700,
+        >= 600 => FontWeight.w600,
+        >= 500 => FontWeight.w500,
+        >= 400 => FontWeight.w400,
+        >= 300 => FontWeight.w300,
+        >= 200 => FontWeight.w200,
+        >= 100 => FontWeight.w100,
+        _ => FontWeight.w700,
+      };
       final centered = _boolFromDynamic(item['centered']);
       tp.text = TextSpan(
         text: text,
         style: TextStyle(
           color: Color(colorInt),
           fontSize: sizePx,
-          fontWeight: FontWeight.w700,
+          fontWeight: fontWeight,
         ),
       );
       final labelMaxWidth = (canvasSize.width * 0.42).clamp(140.0, 760.0);
@@ -2916,6 +4029,26 @@ class _DriveOverlayPainter extends CustomPainter {
       final paintOffset = centered
           ? Offset(dx - (tp.width * 0.5), dy - (tp.height * 0.5))
           : Offset(dx, dy - tp.height);
+      if (strokeInt != null && strokeWidth > 0.0) {
+        final strokeTp = TextPainter(
+          textDirection: TextDirection.ltr,
+          textAlign: TextAlign.left,
+          text: TextSpan(
+            text: text,
+            style: TextStyle(
+              fontSize: sizePx,
+              fontWeight: fontWeight,
+              foreground: Paint()
+                ..style = PaintingStyle.stroke
+                ..strokeJoin = StrokeJoin.round
+                ..strokeWidth = strokeWidth
+                ..color = Color(strokeInt),
+            ),
+          ),
+        );
+        strokeTp.layout(maxWidth: labelMaxWidth.toDouble());
+        strokeTp.paint(canvas, paintOffset);
+      }
       tp.paint(canvas, paintOffset);
     }
   }
@@ -2927,7 +4060,8 @@ class _DriveOverlayPainter extends CustomPainter {
   ) {
     final sidecarPayload = _buildNativeOverlayPayloadFromSidecar2d(size);
     if (snapshot.path.length < 2) {
-      if (sidecarPayload != null) {
+      if (_driveEnableExperimentalSidecarDecorations &&
+          sidecarPayload != null) {
         _drawEncodedOverlayPayload(canvas, size, sidecarPayload);
       }
       final plotPayload = _buildDebugPlotOverlayPayload(size);
@@ -3021,26 +4155,28 @@ class _DriveOverlayPainter extends CustomPainter {
     if (showPathFill && trackVertices != null) {
       _drawPathByMode(canvas, trackVertices);
     }
-    if (sidecarPayload != null) {
+    if (_driveEnableExperimentalSidecarDecorations && sidecarPayload != null) {
       _drawEncodedOverlayPayload(canvas, size, sidecarPayload);
     }
-    final navPolygons = <Map<String, dynamic>>[];
-    final navLabels = <Map<String, dynamic>>[];
-    _appendNavArOverlayPolygons(
-      polygons: navPolygons,
-      labels: navLabels,
-      transform: transform,
-      canvasSize: size,
-    );
-    if (navPolygons.isNotEmpty || navLabels.isNotEmpty) {
-      _drawEncodedOverlayPayload(
-        canvas,
-        size,
-        <String, dynamic>{
-          'polygons': navPolygons,
-          if (navLabels.isNotEmpty) 'labels': navLabels,
-        },
+    if (_driveEnableExperimentalNavAr) {
+      final navPolygons = <Map<String, dynamic>>[];
+      final navLabels = <Map<String, dynamic>>[];
+      _appendNavArOverlayPolygons(
+        polygons: navPolygons,
+        labels: navLabels,
+        transform: transform,
+        canvasSize: size,
       );
+      if (navPolygons.isNotEmpty || navLabels.isNotEmpty) {
+        _drawEncodedOverlayPayload(
+          canvas,
+          size,
+          <String, dynamic>{
+            'polygons': navPolygons,
+            if (navLabels.isNotEmpty) 'labels': navLabels,
+          },
+        );
+      }
     }
     if (showDebugGuides) {
       _drawDebugGuides(
@@ -3063,6 +4199,7 @@ class _DriveOverlayPainter extends CustomPainter {
         oldDelegate.sourceSize != sourceSize ||
         oldDelegate.cameraKind != cameraKind ||
         oldDelegate.coverViewport != coverViewport ||
+        oldDelegate.viewportZoom != viewportZoom ||
         oldDelegate.visibleViewportRect != visibleViewportRect ||
         oldDelegate.showDebugGuides != showDebugGuides ||
         oldDelegate.showPathFill != showPathFill ||
@@ -3078,3 +4215,73 @@ class _DriveOverlayPainter extends CustomPainter {
   }
 }
 
+class _DriveArScreenAnchors {
+  final List<Offset> pathPoints;
+  final List<double> pathDistances;
+  final Offset? gateAnchor;
+  final Offset statusAnchor;
+  final double visibleDistanceMeters;
+  final double pathSpanX;
+  final double pathSpanY;
+  final double qualityScore;
+
+  const _DriveArScreenAnchors({
+    required this.pathPoints,
+    required this.pathDistances,
+    required this.gateAnchor,
+    required this.statusAnchor,
+    required this.visibleDistanceMeters,
+    required this.pathSpanX,
+    required this.pathSpanY,
+    required this.qualityScore,
+  });
+
+  bool get hasPath => pathPoints.length >= 2;
+
+  Map<String, dynamic> toPayload() {
+    return <String, dynamic>{
+      'pathPoints':
+          pathPoints.map((p) => <double>[p.dx, p.dy]).toList(growable: false),
+      'pathDistances': pathDistances.toList(growable: false),
+      if (gateAnchor != null)
+        'gateAnchor': <double>[gateAnchor!.dx, gateAnchor!.dy],
+      'statusAnchor': <double>[statusAnchor.dx, statusAnchor.dy],
+      'visibleDistanceMeters': visibleDistanceMeters,
+      'pathSpanX': pathSpanX,
+      'pathSpanY': pathSpanY,
+      'qualityScore': qualityScore,
+    };
+  }
+}
+
+class _ProjectedLeadBox {
+  final Rect rect;
+  final Offset center;
+  final double width;
+  final double yCenter;
+  final bool radarDetected;
+  final int radarTrackId;
+
+  const _ProjectedLeadBox({
+    required this.rect,
+    required this.center,
+    required this.width,
+    required this.yCenter,
+    required this.radarDetected,
+    required this.radarTrackId,
+  });
+}
+
+class _LeadDistanceBadgeLayout {
+  final Offset center;
+  final double fontSize;
+  final double minWidth;
+  final double height;
+
+  const _LeadDistanceBadgeLayout({
+    required this.center,
+    required this.fontSize,
+    required this.minWidth,
+    required this.height,
+  });
+}

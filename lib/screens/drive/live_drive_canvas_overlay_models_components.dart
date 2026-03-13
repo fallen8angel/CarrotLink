@@ -1,4 +1,4 @@
-﻿part of 'live_drive_canvas_screen.dart';
+part of 'live_drive_canvas_screen.dart';
 
 class _PreviewRoadBackdropPainter extends CustomPainter {
   const _PreviewRoadBackdropPainter();
@@ -80,6 +80,7 @@ class _PreviewRoadBackdropPainter extends CustomPainter {
 }
 
 class _DriveOverlaySnapshot {
+  final _XyzSeries modelPath;
   final _XyzSeries path;
   final List<_LaneLineSeries> laneLines;
   final List<_RoadEdgeSeries> roadEdges;
@@ -106,6 +107,11 @@ class _DriveOverlaySnapshot {
   final int? wideRoadFrameId;
   final _DriveDebugPlotSample? debugPlot;
   final Map<String, dynamic>? sidecarOverlay2d;
+  final _RadarLeadSample? leadOne;
+  final _RadarLeadSample? leadTwo;
+  final List<_RadarTrackSample> leadsLeft;
+  final List<_RadarTrackSample> leadsRight;
+  final List<_RadarTrackSample> leadsCenter;
   final bool usingLateralPath;
   final double modelPathXMax;
   final double lateralPathXMax;
@@ -115,6 +121,7 @@ class _DriveOverlaySnapshot {
   final String navMainText;
 
   const _DriveOverlaySnapshot({
+    required this.modelPath,
     required this.path,
     required this.laneLines,
     required this.roadEdges,
@@ -141,6 +148,11 @@ class _DriveOverlaySnapshot {
     required this.wideRoadFrameId,
     required this.debugPlot,
     required this.sidecarOverlay2d,
+    required this.leadOne,
+    required this.leadTwo,
+    required this.leadsLeft,
+    required this.leadsRight,
+    required this.leadsCenter,
     required this.usingLateralPath,
     required this.modelPathXMax,
     required this.lateralPathXMax,
@@ -151,7 +163,8 @@ class _DriveOverlaySnapshot {
   });
 
   const _DriveOverlaySnapshot.empty()
-      : path = const _XyzSeries.empty(),
+      : modelPath = const _XyzSeries.empty(),
+        path = const _XyzSeries.empty(),
         laneLines = const <_LaneLineSeries>[],
         roadEdges = const <_RoadEdgeSeries>[],
         active = false,
@@ -177,6 +190,11 @@ class _DriveOverlaySnapshot {
         wideRoadFrameId = null,
         debugPlot = null,
         sidecarOverlay2d = null,
+        leadOne = null,
+        leadTwo = null,
+        leadsLeft = const <_RadarTrackSample>[],
+        leadsRight = const <_RadarTrackSample>[],
+        leadsCenter = const <_RadarTrackSample>[],
         usingLateralPath = false,
         modelPathXMax = 0.0,
         lateralPathXMax = 0.0,
@@ -201,6 +219,7 @@ class _DriveOverlaySnapshot {
   }) {
     final phase = animationPhase ?? this.animationPhase;
     return _DriveOverlaySnapshot(
+      modelPath: modelPath,
       path: path,
       laneLines: laneLines,
       roadEdges: roadEdges,
@@ -227,6 +246,11 @@ class _DriveOverlaySnapshot {
       wideRoadFrameId: wideRoadFrameId,
       debugPlot: debugPlot ?? this.debugPlot,
       sidecarOverlay2d: sidecarOverlay2d ?? this.sidecarOverlay2d,
+      leadOne: leadOne,
+      leadTwo: leadTwo,
+      leadsLeft: leadsLeft,
+      leadsRight: leadsRight,
+      leadsCenter: leadsCenter,
       usingLateralPath: usingLateralPath,
       modelPathXMax: modelPathXMax,
       lateralPathXMax: lateralPathXMax,
@@ -418,6 +442,29 @@ class _DriveOverlaySnapshot {
     );
   }
 
+  static _RadarLeadSample? _lerpRadarLead(
+    _RadarLeadSample? a,
+    _RadarLeadSample? b,
+    double t,
+  ) {
+    if (a == null) return b;
+    if (b == null) return a;
+    return _RadarLeadSample(
+      dRel: _lerp(a.dRel, b.dRel, t),
+      yRel: _lerp(a.yRel, b.yRel, t),
+      vRel: _lerp(a.vRel, b.vRel, t),
+      vLeadK: _lerp(a.vLeadK, b.vLeadK, t),
+      vLat: _lerp(a.vLat, b.vLat, t),
+      aRel: _lerp(a.aRel, b.aRel, t),
+      aLeadK: _lerp(a.aLeadK, b.aLeadK, t),
+      status: t < 0.5 ? a.status : b.status,
+      radar: t < 0.5 ? a.radar : b.radar,
+      radarTrackId: t < 0.5 ? a.radarTrackId : b.radarTrackId,
+      modelProb: _lerp(a.modelProb, b.modelProb, t),
+      score: _lerp(a.score, b.score, t),
+    );
+  }
+
   static _DriveOverlaySnapshot interpolate(
     _DriveOverlaySnapshot from,
     _DriveOverlaySnapshot to,
@@ -427,6 +474,7 @@ class _DriveOverlaySnapshot {
     if (tt <= 0.0) return from;
     if (tt >= 1.0) return to;
     return _DriveOverlaySnapshot(
+      modelPath: _lerpSeries(from.modelPath, to.modelPath, tt),
       path: _lerpSeries(from.path, to.path, tt),
       laneLines: _lerpLaneLines(from.laneLines, to.laneLines, tt),
       roadEdges: _lerpRoadEdges(from.roadEdges, to.roadEdges, tt),
@@ -455,6 +503,11 @@ class _DriveOverlaySnapshot {
       wideRoadFrameId: tt < 0.5 ? from.wideRoadFrameId : to.wideRoadFrameId,
       debugPlot: to.debugPlot ?? from.debugPlot,
       sidecarOverlay2d: tt < 0.5 ? from.sidecarOverlay2d : to.sidecarOverlay2d,
+      leadOne: _lerpRadarLead(from.leadOne, to.leadOne, tt),
+      leadTwo: _lerpRadarLead(from.leadTwo, to.leadTwo, tt),
+      leadsLeft: tt < 0.5 ? from.leadsLeft : to.leadsLeft,
+      leadsRight: tt < 0.5 ? from.leadsRight : to.leadsRight,
+      leadsCenter: tt < 0.5 ? from.leadsCenter : to.leadsCenter,
       usingLateralPath: tt < 0.5 ? from.usingLateralPath : to.usingLateralPath,
       modelPathXMax: _lerp(from.modelPathXMax, to.modelPathXMax, tt),
       lateralPathXMax: _lerp(from.lateralPathXMax, to.lateralPathXMax, tt),
@@ -576,10 +629,20 @@ class _DriveOverlaySnapshot {
     }
 
     var leadDetected = false;
+    _RadarLeadSample? leadOne;
+    _RadarLeadSample? leadTwo;
+    var leadsLeft = const <_RadarTrackSample>[];
+    var leadsRight = const <_RadarTrackSample>[];
+    var leadsCenter = const <_RadarTrackSample>[];
     if (radarState is Map) {
-      final leadOne = radarState['leadOne'];
-      if (leadOne is Map) {
-        final status = leadOne['status'];
+      leadOne = _parseRadarLead(radarState['leadOne']);
+      leadTwo = _parseRadarLead(radarState['leadTwo']);
+      leadsLeft = _parseRadarTracks(radarState['leadsLeft']);
+      leadsRight = _parseRadarTracks(radarState['leadsRight']);
+      leadsCenter = _parseRadarTracks(radarState['leadsCenter']);
+      final leadOneRaw = radarState['leadOne'];
+      if (leadOneRaw is Map) {
+        final status = leadOneRaw['status'];
         if (status is bool) leadDetected = status;
         if (status is num) leadDetected = status != 0;
       }
@@ -819,6 +882,7 @@ class _DriveOverlaySnapshot {
     }
 
     return _DriveOverlaySnapshot(
+      modelPath: modelPath,
       path: path,
       laneLines: lines,
       roadEdges: edges,
@@ -845,6 +909,11 @@ class _DriveOverlaySnapshot {
       wideRoadFrameId: wideRoadFrameId,
       debugPlot: debugPlot,
       sidecarOverlay2d: sidecarOverlay2d,
+      leadOne: leadOne,
+      leadTwo: leadTwo,
+      leadsLeft: leadsLeft,
+      leadsRight: leadsRight,
+      leadsCenter: leadsCenter,
       usingLateralPath: canUseLateralPath,
       modelPathXMax: modelPathXMax,
       lateralPathXMax: lateralPathXMax,
@@ -897,6 +966,121 @@ class _RoadEdgeSeries {
   });
 }
 
+class _RadarLeadSample {
+  final double dRel;
+  final double yRel;
+  final double vRel;
+  final double vLeadK;
+  final double vLat;
+  final double aRel;
+  final double aLeadK;
+  final bool status;
+  final bool radar;
+  final int radarTrackId;
+  final double modelProb;
+  final double score;
+
+  const _RadarLeadSample({
+    required this.dRel,
+    required this.yRel,
+    required this.vRel,
+    required this.vLeadK,
+    required this.vLat,
+    required this.aRel,
+    required this.aLeadK,
+    required this.status,
+    required this.radar,
+    required this.radarTrackId,
+    required this.modelProb,
+    required this.score,
+  });
+}
+
+class _RadarTrackSample {
+  final double dRel;
+  final double yRel;
+  final double vRel;
+  final double vLeadK;
+  final double vLat;
+  final double aRel;
+  final double aLeadK;
+  final bool radar;
+  final int radarTrackId;
+  final double modelProb;
+  final double score;
+
+  const _RadarTrackSample({
+    required this.dRel,
+    required this.yRel,
+    required this.vRel,
+    required this.vLeadK,
+    required this.vLat,
+    required this.aRel,
+    required this.aLeadK,
+    required this.radar,
+    required this.radarTrackId,
+    required this.modelProb,
+    required this.score,
+  });
+}
+
+_RadarLeadSample? _parseRadarLead(dynamic raw) {
+  if (raw is! Map) return null;
+  final map = Map<String, dynamic>.from(raw);
+  final dRel = _DriveOverlaySnapshot._asDouble(map['dRel']);
+  final yRel = _DriveOverlaySnapshot._asDouble(map['yRel']);
+  if (dRel == null || yRel == null || !dRel.isFinite || !yRel.isFinite) {
+    return null;
+  }
+  return _RadarLeadSample(
+    dRel: dRel,
+    yRel: yRel,
+    vRel: _DriveOverlaySnapshot._asDouble(map['vRel']) ?? 0.0,
+    vLeadK: _DriveOverlaySnapshot._asDouble(map['vLeadK']) ?? 0.0,
+    vLat: _DriveOverlaySnapshot._asDouble(map['vLat']) ?? 0.0,
+    aRel: _DriveOverlaySnapshot._asDouble(map['aRel']) ?? 0.0,
+    aLeadK: _DriveOverlaySnapshot._asDouble(map['aLeadK']) ?? 0.0,
+    status: map['status'] == true ||
+        _DriveOverlaySnapshot._asInt(map['status']) == 1,
+    radar:
+        map['radar'] == true || _DriveOverlaySnapshot._asInt(map['radar']) == 1,
+    radarTrackId: _DriveOverlaySnapshot._asInt(map['radarTrackId']) ?? -1,
+    modelProb: _DriveOverlaySnapshot._asDouble(map['modelProb']) ?? 0.0,
+    score: _DriveOverlaySnapshot._asDouble(map['score']) ?? 0.0,
+  );
+}
+
+List<_RadarTrackSample> _parseRadarTracks(dynamic raw) {
+  if (raw is! List) return const <_RadarTrackSample>[];
+  final out = <_RadarTrackSample>[];
+  for (final item in raw) {
+    if (item is! Map) continue;
+    final map = Map<String, dynamic>.from(item);
+    final dRel = _DriveOverlaySnapshot._asDouble(map['dRel']);
+    final yRel = _DriveOverlaySnapshot._asDouble(map['yRel']);
+    if (dRel == null || yRel == null || !dRel.isFinite || !yRel.isFinite) {
+      continue;
+    }
+    out.add(
+      _RadarTrackSample(
+        dRel: dRel,
+        yRel: yRel,
+        vRel: _DriveOverlaySnapshot._asDouble(map['vRel']) ?? 0.0,
+        vLeadK: _DriveOverlaySnapshot._asDouble(map['vLeadK']) ?? 0.0,
+        vLat: _DriveOverlaySnapshot._asDouble(map['vLat']) ?? 0.0,
+        aRel: _DriveOverlaySnapshot._asDouble(map['aRel']) ?? 0.0,
+        aLeadK: _DriveOverlaySnapshot._asDouble(map['aLeadK']) ?? 0.0,
+        radar: map['radar'] == true ||
+            _DriveOverlaySnapshot._asInt(map['radar']) == 1,
+        radarTrackId: _DriveOverlaySnapshot._asInt(map['radarTrackId']) ?? -1,
+        modelProb: _DriveOverlaySnapshot._asDouble(map['modelProb']) ?? 0.0,
+        score: _DriveOverlaySnapshot._asDouble(map['score']) ?? 0.0,
+      ),
+    );
+  }
+  return out;
+}
+
 class _NavPathPoint {
   final double x;
   final double y;
@@ -908,4 +1092,3 @@ class _NavPathPoint {
     required this.d,
   });
 }
-

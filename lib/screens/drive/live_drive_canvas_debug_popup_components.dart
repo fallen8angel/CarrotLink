@@ -21,7 +21,7 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
           builder: (context, setLocalState) {
             final debugEnabled =
                 !_LiveDriveCanvasScreenState._temporaryLimitedHudControls &&
-                _overlayVerifyMode;
+                    _overlayVerifyMode;
             final process = _sidecarProcessSnapshot;
             final health = _sidecarHealthSnapshot;
             final method = (process['method'] ?? '-').trim().isEmpty
@@ -75,22 +75,26 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
             final scheduledStopSummary = _sidecarScheduledStopSummary;
             final remotePyName = _sidecarRemotePyName;
             final remoteUpdated = _sidecarRemoteUpdatedLabel;
-            final profileEndpoint = (_sidecarProfileSnapshot['profile']?.toString() ?? '-')
-                .trim();
+            final profileEndpoint =
+                (_sidecarProfileSnapshot['profile']?.toString() ?? '-').trim();
             final profileModesRaw = _sidecarProfileSnapshot['profiles'];
-            final profileModeCount = profileModesRaw is List ? profileModesRaw.length : 0;
+            final profileModeCount =
+                profileModesRaw is List ? profileModesRaw.length : 0;
             final profileEndpointSummary = profileEndpoint.isEmpty
                 ? '-'
                 : '$profileEndpoint (${profileModeCount > 0 ? 'modes $profileModeCount' : 'modes -'})';
-            final qualityEndpoint = (_sidecarCameraQualitySnapshot['mode']?.toString() ?? '-')
-                .trim();
+            final qualityEndpoint =
+                (_sidecarCameraQualitySnapshot['mode']?.toString() ?? '-')
+                    .trim();
             final qualityModesRaw = _sidecarCameraQualitySnapshot['modes'];
-            final qualityModeCount = qualityModesRaw is List ? qualityModesRaw.length : 0;
+            final qualityModeCount =
+                qualityModesRaw is List ? qualityModesRaw.length : 0;
             final qualityEndpointSummary = qualityEndpoint.isEmpty
                 ? '-'
                 : '$qualityEndpoint (${qualityModeCount > 0 ? 'modes $qualityModeCount' : 'modes -'})';
-            final healthEndpointSummary =
-                health.isEmpty ? '-' : 'ok:$healthOk profile:$healthProfile clients:$healthClients';
+            final healthEndpointSummary = health.isEmpty
+                ? '-'
+                : 'ok:$healthOk profile:$healthProfile clients:$healthClients';
 
             String criticalValue(String name) {
               final value = (_sidecarCriticalProcSnapshot[name] ?? '-').trim();
@@ -106,8 +110,6 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
             }
 
             final history = _sidecarHistory.take(10).toList(growable: false);
-            final layerToggleEnabled = _openpilotOverlayMode;
-
             Future<void> runAction(Future<void> Function() action) async {
               if (actionRunning) return;
               setLocalState(() => actionRunning = true);
@@ -524,8 +526,7 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                     ),
                                                     (
                                                       label: '카메라 릴레이',
-                                                      value:
-                                                          cameraRelaySummary,
+                                                      value: cameraRelaySummary,
                                                       color: null
                                                     ),
                                                     (
@@ -679,15 +680,7 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                         'stream_encoderd',
                                                       )
                                                     ),
-                                                    (
-                                                      label: 'webrtcd',
-                                                      value: criticalValue(
-                                                        'webrtcd',
-                                                      ),
-                                                      color: criticalColor(
-                                                        'webrtcd',
-                                                      )
-                                                    ),
+
                                                   ],
                                                   columns: isWideDialog ? 3 : 2,
                                                 ),
@@ -797,23 +790,26 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                       label: 'GET /profile',
                                                       value:
                                                           profileEndpointSummary,
-                                                      color: profileEndpointSummary ==
-                                                              '-'
-                                                          ? const Color(
-                                                              0xFFFF8A8A)
-                                                          : const Color(
-                                                              0xFF73E07C)
+                                                      color:
+                                                          profileEndpointSummary ==
+                                                                  '-'
+                                                              ? const Color(
+                                                                  0xFFFF8A8A)
+                                                              : const Color(
+                                                                  0xFF73E07C)
                                                     ),
                                                     (
-                                                      label: 'GET /camera_quality',
+                                                      label:
+                                                          'GET /camera_quality',
                                                       value:
                                                           qualityEndpointSummary,
-                                                      color: qualityEndpointSummary ==
-                                                              '-'
-                                                          ? const Color(
-                                                              0xFFFF8A8A)
-                                                          : const Color(
-                                                              0xFF73E07C)
+                                                      color:
+                                                          qualityEndpointSummary ==
+                                                                  '-'
+                                                              ? const Color(
+                                                                  0xFFFF8A8A)
+                                                              : const Color(
+                                                                  0xFF73E07C)
                                                     ),
                                                     (
                                                       label: '프로세스 점검',
@@ -895,48 +891,66 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                             '그래픽 레이어 토글',
                                             Column(
                                               children: [
-                                                if (!layerToggleEnabled)
-                                                  const Padding(
-                                                    padding: EdgeInsets.only(
-                                                        bottom: 6),
-                                                    child: Align(
-                                                      alignment:
-                                                          Alignment.centerLeft,
-                                                      child: Text(
-                                                        '현재 WebRTC 모드라 레이어 토글이 비활성화됩니다.',
-                                                        style: TextStyle(
-                                                          color: Colors.white54,
-                                                          fontSize: 11,
-                                                        ),
-                                                      ),
-                                                    ),
-                                                  ),
+
                                                 layerSwitch(
                                                   'AR Overlay 표시',
                                                   _debugShowArOverlay,
-                                                  layerToggleEnabled
-                                                      ? (value) {
-                                                          _onLayerToggleChanged(
-                                                            setLocalState,
-                                                            () =>
-                                                                _debugShowArOverlay =
-                                                                    value,
-                                                          );
-                                                          if (!value) {
-                                                            unawaited(
-                                                              _clearNativeOverlay(),
-                                                            );
-                                                          } else if (_useNativeOverlayRenderer) {
-                                                            unawaited(
-                                                              _pushNativeOverlay(
-                                                                _overlayNotifier
-                                                                    .value,
-                                                                force: true,
-                                                              ),
-                                                            );
-                                                          }
-                                                        }
-                                                      : null,
+                                                  (value) {
+                                                    _onLayerToggleChanged(
+                                                      setLocalState,
+                                                      () =>
+                                                          _debugShowArOverlay =
+                                                              value,
+                                                    );
+                                                    if (!value) {
+                                                      unawaited(
+                                                        _clearNativeOverlay(),
+                                                      );
+                                                    } else if (_useNativeOverlayRenderer) {
+                                                      unawaited(
+                                                        _pushNativeOverlay(
+                                                          _overlayNotifier.value,
+                                                          force: true,
+                                                        ),
+                                                      );
+                                                    }
+                                                  },
+                                                ),
+                                                layerSwitch(
+                                                  'Native AR scene 전송',
+                                                  _debugPushNativeArScene,
+                                                  (value) {
+                                                    _onLayerToggleChanged(
+                                                      setLocalState,
+                                                      () =>
+                                                          _debugPushNativeArScene =
+                                                              value,
+                                                    );
+                                                    if (_useNativeOverlayRenderer) {
+                                                      unawaited(
+                                                        _pushNativeOverlay(
+                                                          _overlayNotifier.value,
+                                                          force: true,
+                                                        ),
+                                                      );
+                                                    }
+                                                  },
+                                                ),
+                                                layerSwitch(
+                                                  'AR 자동 저장',
+                                                  _debugArCaptureEnabled &&
+                                                      _debugArAutoPersistEnabled,
+                                                  (value) {
+                                                    _onLayerToggleChanged(
+                                                      setLocalState,
+                                                      () {
+                                                        _debugArCaptureEnabled =
+                                                            value;
+                                                        _debugArAutoPersistEnabled =
+                                                            value;
+                                                      },
+                                                    );
+                                                  },
                                                 ),
                                                 const Divider(
                                                     color: Colors.white12,
@@ -961,44 +975,38 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                 layerSwitch(
                                                   'Path Fill',
                                                   _debugShowPathFill,
-                                                  layerToggleEnabled
-                                                      ? (value) {
-                                                          _onLayerToggleChanged(
-                                                            setLocalState,
-                                                            () =>
-                                                                _debugShowPathFill =
-                                                                    value,
-                                                          );
-                                                        }
-                                                      : null,
+                                                  (value) {
+                                                    _onLayerToggleChanged(
+                                                      setLocalState,
+                                                      () =>
+                                                          _debugShowPathFill =
+                                                              value,
+                                                    );
+                                                  },
                                                 ),
                                                 layerSwitch(
                                                   'Lane Lines',
                                                   _debugShowLaneLines,
-                                                  layerToggleEnabled
-                                                      ? (value) {
-                                                          _onLayerToggleChanged(
-                                                            setLocalState,
-                                                            () =>
-                                                                _debugShowLaneLines =
-                                                                    value,
-                                                          );
-                                                        }
-                                                      : null,
+                                                  (value) {
+                                                    _onLayerToggleChanged(
+                                                      setLocalState,
+                                                      () =>
+                                                          _debugShowLaneLines =
+                                                              value,
+                                                    );
+                                                  },
                                                 ),
                                                 layerSwitch(
                                                   'Road Edge',
                                                   _debugShowRoadEdge,
-                                                  layerToggleEnabled
-                                                      ? (value) {
-                                                          _onLayerToggleChanged(
-                                                            setLocalState,
-                                                            () =>
-                                                                _debugShowRoadEdge =
-                                                                    value,
-                                                          );
-                                                        }
-                                                      : null,
+                                                  (value) {
+                                                    _onLayerToggleChanged(
+                                                      setLocalState,
+                                                      () =>
+                                                          _debugShowRoadEdge =
+                                                              value,
+                                                    );
+                                                  },
                                                 ),
                                                 const Divider(
                                                     color: Colors.white12,
@@ -1023,86 +1031,154 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                 layerSwitch(
                                                   'Lead1',
                                                   _debugShowLead1,
-                                                  layerToggleEnabled
-                                                      ? (value) {
-                                                          _onLayerToggleChanged(
-                                                            setLocalState,
-                                                            () =>
-                                                                _debugShowLead1 =
-                                                                    value,
-                                                          );
-                                                        }
-                                                      : null,
+                                                  (value) {
+                                                    _onLayerToggleChanged(
+                                                      setLocalState,
+                                                      () =>
+                                                          _debugShowLead1 =
+                                                              value,
+                                                    );
+                                                  },
                                                 ),
                                                 layerSwitch(
                                                   'Lead2',
                                                   _debugShowLead2,
-                                                  layerToggleEnabled
-                                                      ? (value) {
-                                                          _onLayerToggleChanged(
-                                                            setLocalState,
-                                                            () =>
-                                                                _debugShowLead2 =
-                                                                    value,
-                                                          );
-                                                        }
-                                                      : null,
+                                                  (value) {
+                                                    _onLayerToggleChanged(
+                                                      setLocalState,
+                                                      () =>
+                                                          _debugShowLead2 =
+                                                              value,
+                                                    );
+                                                  },
                                                 ),
                                                 layerSwitch(
                                                   'Radar Badge',
                                                   _debugShowRadarBadge,
-                                                  layerToggleEnabled
-                                                      ? (value) {
-                                                          _onLayerToggleChanged(
-                                                            setLocalState,
-                                                            () =>
-                                                                _debugShowRadarBadge =
-                                                                    value,
-                                                          );
-                                                        }
-                                                      : null,
+                                                  (value) {
+                                                    _onLayerToggleChanged(
+                                                      setLocalState,
+                                                      () =>
+                                                          _debugShowRadarBadge =
+                                                              value,
+                                                    );
+                                                  },
                                                 ),
                                                 layerSwitch(
                                                   'Radar Vector',
                                                   _debugShowRadarVector,
-                                                  layerToggleEnabled
-                                                      ? (value) {
-                                                          _onLayerToggleChanged(
-                                                            setLocalState,
-                                                            () =>
-                                                                _debugShowRadarVector =
-                                                                    value,
-                                                          );
-                                                        }
-                                                      : null,
+                                                  (value) {
+                                                    _onLayerToggleChanged(
+                                                      setLocalState,
+                                                      () =>
+                                                          _debugShowRadarVector =
+                                                              value,
+                                                    );
+                                                  },
                                                 ),
                                                 layerSwitch(
                                                   'Stop-distance (TF)',
                                                   _debugShowStopDistanceTf,
-                                                  layerToggleEnabled
-                                                      ? (value) {
-                                                          _onLayerToggleChanged(
-                                                            setLocalState,
-                                                            () =>
-                                                                _debugShowStopDistanceTf =
-                                                                    value,
-                                                          );
-                                                        }
-                                                      : null,
+                                                  (value) {
+                                                    _onLayerToggleChanged(
+                                                      setLocalState,
+                                                      () =>
+                                                          _debugShowStopDistanceTf =
+                                                              value,
+                                                    );
+                                                  },
                                                 ),
                                                 layerSwitch(
                                                   'State Text',
                                                   _debugShowStateText,
-                                                  layerToggleEnabled
-                                                      ? (value) {
-                                                          _onLayerToggleChanged(
-                                                            setLocalState,
-                                                            () =>
-                                                                _debugShowStateText =
-                                                                    value,
-                                                          );
-                                                        }
-                                                      : null,
+                                                  (value) {
+                                                    _onLayerToggleChanged(
+                                                      setLocalState,
+                                                      () =>
+                                                          _debugShowStateText =
+                                                              value,
+                                                    );
+                                                  },
+                                                ),
+                                                const Divider(
+                                                    color: Colors.white12,
+                                                    height: 10),
+                                                const Align(
+                                                  alignment:
+                                                      Alignment.centerLeft,
+                                                  child: Padding(
+                                                    padding: EdgeInsets.only(
+                                                        top: 2, bottom: 4),
+                                                    child: Text(
+                                                      'YOLO',
+                                                      style: TextStyle(
+                                                        color: Colors.white70,
+                                                        fontSize: 12,
+                                                        fontWeight:
+                                                            FontWeight.w700,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                                layerSwitch(
+                                                  'YOLO Enabled',
+                                                  _debugYoloEnabled,
+                                                  (value) {
+                                                    _onLayerToggleChanged(
+                                                      setLocalState,
+                                                      () =>
+                                                          _debugYoloEnabled =
+                                                              value,
+                                                    );
+                                                  },
+                                                ),
+                                                layerSwitch(
+                                                  'YOLO Boxes',
+                                                  _debugYoloBoxes,
+                                                  (value) {
+                                                    _onLayerToggleChanged(
+                                                      setLocalState,
+                                                      () =>
+                                                          _debugYoloBoxes =
+                                                              value,
+                                                    );
+                                                  },
+                                                ),
+                                                layerSwitch(
+                                                  'YOLO Labels',
+                                                  _debugYoloLabels,
+                                                  (value) {
+                                                    _onLayerToggleChanged(
+                                                      setLocalState,
+                                                      () =>
+                                                          _debugYoloLabels =
+                                                              value,
+                                                    );
+                                                  },
+                                                ),
+                                                layerSwitch(
+                                                  'YOLO TrafficLight',
+                                                  _debugYoloTrafficLights,
+                                                  (value) {
+                                                    _onLayerToggleChanged(
+                                                      setLocalState,
+                                                      () =>
+                                                          _debugYoloTrafficLights =
+                                                              value,
+                                                    );
+                                                  },
+                                                ),
+                                                layerSwitch(
+                                                  'YOLO Stats',
+                                                  _debugYoloStats,
+                                                  (value) {
+                                                    _onLayerToggleChanged(
+                                                      setLocalState,
+                                                      () =>
+                                                          _debugYoloStats =
+                                                              value,
+                                                    );
+                                                  },
                                                 ),
                                                 const Divider(
                                                     color: Colors.white12,
@@ -1273,10 +1349,94 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                     onPressed: actionRunning
                                                         ? null
                                                         : () => runAction(
+                                                            _debugActionInspectArScene),
+                                                    icon: const Icon(Icons
+                                                        .view_in_ar_outlined),
+                                                    label: const Text(
+                                                        'AR scene 보기'),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: OutlinedButton.icon(
+                                                    onPressed: actionRunning
+                                                        ? null
+                                                        : () => runAction(
+                                                            _debugActionCaptureArReplay),
+                                                    icon: const Icon(
+                                                        Icons.save_alt_rounded),
+                                                    label:
+                                                        const Text('AR 캡처 저장'),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: OutlinedButton.icon(
+                                                    onPressed: actionRunning
+                                                        ? null
+                                                        : () => runAction(
+                                                            _debugActionExportArReplay),
+                                                    icon: const Icon(Icons
+                                                        .file_download_outlined),
+                                                    label:
+                                                        const Text('AR 파일 저장'),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: OutlinedButton.icon(
+                                                    onPressed: actionRunning
+                                                        ? null
+                                                        : () => runAction(
+                                                            _debugActionUseLatestArReplay),
+                                                    icon: const Icon(Icons
+                                                        .play_circle_outline_rounded),
+                                                    label:
+                                                        const Text('마지막 캡처 재생'),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: OutlinedButton.icon(
+                                                    onPressed: actionRunning
+                                                        ? null
+                                                        : () => runAction(
+                                                            _debugActionStopArReplay),
+                                                    icon: const Icon(Icons
+                                                        .stop_circle_outlined),
+                                                    label:
+                                                        const Text('AR 재생 종료'),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: OutlinedButton.icon(
+                                                    onPressed: actionRunning
+                                                        ? null
+                                                        : () => runAction(
                                                             _debugActionRedeploy),
                                                     icon: const Icon(Icons
                                                         .system_update_alt_rounded),
                                                     label: const Text('재배포'),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 8),
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: OutlinedButton.icon(
+                                                    onPressed: actionRunning
+                                                        ? null
+                                                        : () => runAction(
+                                                            _debugActionLegacyMigration),
+                                                    icon: const Icon(Icons
+                                                        .cleaning_services_rounded),
+                                                    label: const Text(
+                                                        '레거시 정리+재배포'),
                                                   ),
                                                 ),
                                                 const SizedBox(height: 8),
@@ -1383,8 +1543,7 @@ extension _LiveDriveCanvasDebugPopupComponents on _LiveDriveCanvasScreenState {
                                                       _debugOverlayPreviewPlotMode,
                                                   decoration:
                                                       const InputDecoration(
-                                                    labelText:
-                                                        'Plot 미리보기 모드',
+                                                    labelText: 'Plot 미리보기 모드',
                                                     border:
                                                         OutlineInputBorder(),
                                                     isDense: true,

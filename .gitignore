@@ -32,6 +32,8 @@ migrate_working_dir/
 .pub/
 /build/
 /coverage/
+.venv-yolo-export/
+/tools/flatbuffers/
 
 # Symbolication related
 app.*.symbols

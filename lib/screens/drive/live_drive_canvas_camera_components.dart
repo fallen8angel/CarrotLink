@@ -1,6 +1,20 @@
 part of 'live_drive_canvas_screen.dart';
 
 extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
+  bool get _cameraErrorGraceActive =>
+      _renderClock.elapsedMicroseconds <= _cameraErrorGraceUntilUs;
+
+  void _startCameraErrorGrace({
+    required String reason,
+    int windowUs = 2500000,
+  }) {
+    final nowUs = _renderClock.elapsedMicroseconds;
+    _cameraErrorGraceUntilUs = math.max(_cameraErrorGraceUntilUs, nowUs + windowUs);
+    debugPrint(
+      '[DriveCanvas][native] error-grace on reason=$reason window=${(windowUs / 1000).round()}ms',
+    );
+  }
+
   _DriveCameraKind _cameraKindFromLabel(
     String? raw,
     _DriveCameraKind fallback,
@@ -38,7 +52,6 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
       );
     } catch (_) {}
   }
-
 
   void _handleNativeCameraEventImpl(dynamic event) {
     if (!_canUseNativeCamera) return;
@@ -94,6 +107,18 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
         _cameraLoading = false;
         _cameraError = null;
       });
+      _beginStartupProvisionalSync(reason: 'camera_meta');
+      unawaited(_pushNativeYoloConfig(force: true));
+      return;
+    }
+    if (type == 'yolo_config') {
+      debugPrint(
+        '[DriveCanvas][native] yolo enabled=${map['yoloEnabled']} backend=${map['runtimeBackend']} model=${map['modelVariant']} source=${map['sourceWidth']}x${map['sourceHeight']}',
+      );
+      return;
+    }
+    if (type == 'yolo_state') {
+      _lastNativeYoloState = map;
       return;
     }
     if (type == 'camera_state') {
@@ -107,6 +132,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
           _suppressCameraErrors = false;
           _cameraError = null;
         });
+        _beginStartupProvisionalSync(reason: 'camera_state:$state');
         _setSidecarPhase(
           _openpilotOverlayMode ? _SidecarPhase.running : _SidecarPhase.idle,
           message: '카메라 스트림 연결이 확인되었습니다.',
@@ -119,7 +145,10 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
       if (reason.isEmpty) return;
       final unsupported = reason.contains('invalid_ws_url') ||
           reason.contains('decoder_init_failed');
-      if ((_sidecarTransitioning || _suppressCameraErrors) && !unsupported) {
+      if ((_sidecarTransitioning ||
+              _suppressCameraErrors ||
+              _cameraErrorGraceActive) &&
+          !unsupported) {
         debugPrint('[DriveCanvas][native] suppressed error=$reason');
         return;
       }
@@ -143,7 +172,6 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
       }
     }
   }
-
 
   void _handleCameraJsMessageImpl(String raw) {
     dynamic decoded;
@@ -192,13 +220,17 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
       );
       _safeSetState(() {
         _updateSourceSize(next, kind: eventCameraKind);
+        _cameraLoading = false;
+        _cameraError = null;
       });
       return;
     }
     if (type == 'camera_error') {
       final reason = map['reason']?.toString().trim() ?? '';
       if (reason.isEmpty || !mounted) return;
-      if (_sidecarTransitioning || _suppressCameraErrors) {
+      if (_sidecarTransitioning ||
+          _suppressCameraErrors ||
+          _cameraErrorGraceActive) {
         debugPrint('[DriveCanvas] suppressed camera_error reason=$reason');
         return;
       }
@@ -220,17 +252,32 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
   Future<void> _loadCameraSource({bool force = false}) async {
     if (!_hudModeLoaded) return;
 
+    if (_openpilotOverlayMode && !_nativeCameraAttachReady) {
+      if (mounted) {
+        _safeSetState(() {
+          _cameraLoading = true;
+          _cameraError = null;
+        });
+      } else {
+        _cameraLoading = true;
+        _cameraError = null;
+      }
+      return;
+    }
+
     if (_useNativeLiveCamera) {
+      _beginStartupProvisionalSync(reason: 'load_camera_source');
+      _startCameraErrorGrace(reason: 'native_camera_attach');
       if (mounted) {
         _safeSetState(() {
           _cameraLoading = true;
           _cameraError = null;
         });
       }
-      _cameraSourceKey = 'native-live:${widget.hostIp}:$_liveCameraName';
+      _cameraSourceKey = 'native-live:$_hostIp:$_liveCameraName';
       return;
     }
-    final key = 'live:${widget.hostIp}:$_liveCameraName';
+    final key = 'live:$_hostIp:$_liveCameraName';
     if (!force && _cameraSourceKey == key) return;
     _cameraSourceKey = key;
 
@@ -308,6 +355,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     });
     _lastCameraFrameId = null;
     _lastCameraFrameEventUs = 0;
+    _beginStartupProvisionalSync(reason: 'camera_kind_switch');
     if (_openpilotOverlayMode && !_cameraSuspendedByLifecycle) {
       _startSidecarLoop();
     }
@@ -315,5 +363,4 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
       unawaited(_loadCameraSource(force: true));
     }
   }
-
 }

@@ -14,7 +14,9 @@ import '../../services/google_drive_service.dart';
 import '../../services/update_service.dart';
 import '../../services/diagnostics_service.dart';
 import '../../services/github_service.dart';
+import '../../services/hud_feature_settings_service.dart';
 import '../../services/native_overlay_hud_service.dart';
+import '../../features/hud/hud.dart';
 import '../../widgets/custom_toast.dart';
 import '../../widgets/update_dialog.dart';
 import 'tabs/home_tab.dart';
@@ -82,6 +84,15 @@ class _DashboardScreenState extends State<DashboardScreen>
     unawaited(_restoreLastTabIndex());
     _requestPermissions();
     _setServiceAppVisibility(true, source: 'dashboard_init');
+    Provider.of<SharedRuntimeManager>(context, listen: false)
+        .setAppForeground(true);
+    final hudFeatureSettings =
+        Provider.of<HudFeatureSettingsService>(context, listen: false);
+    if (hudFeatureSettings.enabled) {
+      unawaited(
+        Provider.of<SharedRuntimeManager>(context, listen: false).prewarm(),
+      );
+    }
     unawaited(
       _syncOverlayForAppVisibility(
         appForeground: true,
@@ -296,45 +307,15 @@ class _DashboardScreenState extends State<DashboardScreen>
     required String reason,
   }) async {
     if (!mounted) return;
-    if (!NativeOverlayHudService.isSupported) return;
     if (_overlayLifecycleBusy) return;
     _overlayLifecycleBusy = true;
     try {
-      final overlayEnabled = await NativeOverlayHudService.isEnabled();
-      if (!overlayEnabled) {
-        final running = await NativeOverlayHudService.isRunning();
-        if (running) {
-          await NativeOverlayHudService.stop();
-        }
-        _diag.info('overlay', 'Disabled by settings. reason=$reason');
-        return;
-      }
-
-      if (appForeground) {
-        final running = await NativeOverlayHudService.isRunning();
-        if (running) {
-          await NativeOverlayHudService.stop();
-        }
-        return;
-      }
-
-      final hasPermission = await NativeOverlayHudService.hasPermission();
-      if (!hasPermission) return;
-
-      final ssh = Provider.of<SSHService>(context, listen: false);
-      final host = NativeOverlayHudService.normalizeHost(
-        ssh.connectedIp ?? ssh.targetIp,
+      await NativeOverlayHudService.shutdownLegacyOverlay();
+      _diag.info(
+        'overlay',
+        'Legacy background HUD overlay disabled. '
+            'foreground=$appForeground reason=$reason',
       );
-      if (host == null) return;
-
-      final running = await NativeOverlayHudService.isRunning();
-      if (running) {
-        await NativeOverlayHudService.updateEndpoint(host);
-      } else {
-        await NativeOverlayHudService.start(host);
-      }
-      _diag.info('overlay',
-          'Lifecycle sync: foreground=$appForeground reason=$reason host=$host');
     } catch (e) {
       _diag.warn('overlay', 'Lifecycle sync failed reason=$reason error=$e');
     } finally {
@@ -346,6 +327,8 @@ class _DashboardScreenState extends State<DashboardScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _setServiceAppVisibility(true, source: 'lifecycle_resumed');
+      Provider.of<SharedRuntimeManager>(context, listen: false)
+          .setAppForeground(true);
       unawaited(
         _syncOverlayForAppVisibility(
           appForeground: true,
@@ -367,6 +350,8 @@ class _DashboardScreenState extends State<DashboardScreen>
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
       _setServiceAppVisibility(false, source: 'lifecycle_background');
+      Provider.of<SharedRuntimeManager>(context, listen: false)
+          .setAppForeground(false);
       unawaited(
         _syncOverlayForAppVisibility(
           appForeground: false,
@@ -557,6 +542,12 @@ class _DashboardScreenState extends State<DashboardScreen>
 
       // Broadcast-first: do not use persisted IP.
       ssh.resumeAutoReconnect();
+      unawaited(ssh.tryFastReconnect(source: 'dashboard_$reason'));
+      _diag.info(
+        'autoconnect',
+        'Fast reconnect kicked reason=$reason '
+            'candidate=${ssh.serviceCandidateIp} last=${ssh.serviceLastSuccessfulIp}',
+      );
       _diag.info('autoconnect',
           'Broadcast sync reason=$reason candidate=${ssh.serviceCandidateIp}');
       final fastStart = reason == 'app_start';

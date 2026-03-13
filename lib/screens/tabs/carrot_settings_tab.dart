@@ -1,3 +1,5 @@
+// ignore_for_file: unused_element, unused_element_parameter
+
 import 'dart:async';
 import 'dart:convert';
 
@@ -13,6 +15,7 @@ import '../../ui/adaptive/layout_tokens.dart';
 import '../../ui/adaptive/window_class.dart';
 import '../../widgets/custom_toast.dart';
 import '../../widgets/design_components.dart';
+import 'widgets/carrot_setting_editor_widgets.dart';
 
 class _CarrotSettingFavorite {
   final String group;
@@ -931,9 +934,10 @@ class _CarrotSettingsGroupScreenState
   String? _pendingFocusItemName;
   late Set<String> _favoriteNames;
   final Set<String> _favoriteBusyNames = <String>{};
-  final Set<String> _savingNames = <String>{};
   final Map<String, int> _stepByName = <String, int>{};
   final Map<String, double> _sliderDraftByName = <String, double>{};
+  final Map<String, dynamic> _pendingPersistValuesByName = <String, dynamic>{};
+  final Set<String> _syncingNames = <String>{};
   Timer? _highlightClearTimer;
 
   List<CarrotSettingItemMeta> get _items =>
@@ -1158,22 +1162,56 @@ class _CarrotSettingsGroupScreenState
         : item.defaultValue;
   }
 
+  bool _sameSettingValue(dynamic a, dynamic b) {
+    if (a is num && b is num) {
+      return (a.toDouble() - b.toDouble()).abs() < 0.0001;
+    }
+    return a?.toString() == b?.toString();
+  }
+
   Future<void> _setValue(CarrotSettingItemMeta item, dynamic value) async {
-    if (_savingNames.contains(item.name)) return;
-    setState(() => _savingNames.add(item.name));
-    try {
-      final saved = await widget.service
-          .setParam(widget.host, name: item.name, value: value);
-      if (!mounted) return;
-      setState(() {
-        _values[item.name] = saved;
-      });
-    } catch (e) {
-      if (mounted) {
-        CustomToast.show(context, '저장 실패 (${item.name}): $e', isError: true);
+    if (!mounted) return;
+    final current = _values[item.name];
+    if (_sameSettingValue(current, value) &&
+        !_pendingPersistValuesByName.containsKey(item.name)) {
+      return;
+    }
+    setState(() {
+      _values[item.name] = value;
+      _sliderDraftByName.remove(item.name);
+    });
+    _pendingPersistValuesByName[item.name] = value;
+    if (_syncingNames.add(item.name)) {
+      unawaited(_flushQueuedValue(item));
+    }
+  }
+
+  Future<void> _flushQueuedValue(CarrotSettingItemMeta item) async {
+    final name = item.name;
+    while (mounted) {
+      if (!_pendingPersistValuesByName.containsKey(name)) break;
+      final target = _pendingPersistValuesByName.remove(name);
+      try {
+        final saved = await widget.service
+            .setParam(widget.host, name: name, value: target);
+        if (!mounted) return;
+        if (!_pendingPersistValuesByName.containsKey(name) &&
+            !_sameSettingValue(_values[name], saved)) {
+          setState(() {
+            _values[name] = saved;
+          });
+        }
+      } catch (e) {
+        if (mounted) {
+          CustomToast.show(context, '저장 실패 ($name): $e', isError: true);
+        }
       }
-    } finally {
-      if (mounted) setState(() => _savingNames.remove(item.name));
+    }
+    _syncingNames.remove(name);
+    if (mounted &&
+        _pendingPersistValuesByName.containsKey(name) &&
+        _syncingNames.add(name)) {
+      unawaited(_flushQueuedValue(item));
     }
   }
 
@@ -1232,21 +1270,6 @@ class _CarrotSettingsGroupScreenState
     return next;
   }
 
-  Future<void> _adjustValueByStep(
-    CarrotSettingItemMeta item,
-    int deltaSign, {
-    int? stepOverride,
-  }) async {
-    if (item.isBooleanLike || _savingNames.contains(item.name)) return;
-    final cur = _asNumValue(_effectiveValue(item)) ??
-        _asNumValue(item.defaultValue) ??
-        item.min ??
-        0;
-    final step = (stepOverride ?? _stepFor(item)) * deltaSign;
-    final next = _normalizeNumericValue(item, cur + step);
-    await _setValue(item, next);
-  }
-
   double _quantizeSliderValue(
     CarrotSettingItemMeta item,
     double value, {
@@ -1278,34 +1301,12 @@ class _CarrotSettingsGroupScreenState
     }
     final raw = _sliderDraftByName[item.name] ?? _asNumValue(currentValue);
     if (raw == null) return null;
-    return _quantizeSliderValue(item, raw.toDouble());
-  }
-
-  void _onSliderChanged(
-    CarrotSettingItemMeta item,
-    double value, {
-    int? stepOverride,
-  }) {
-    if (_savingNames.contains(item.name)) return;
-    final snapped =
-        _quantizeSliderValue(item, value, stepOverride: stepOverride);
-    setState(() => _sliderDraftByName[item.name] = snapped);
-  }
-
-  Future<void> _onSliderChangeEnd(
-    CarrotSettingItemMeta item,
-    double value, {
-    int? stepOverride,
-  }) async {
-    if (_savingNames.contains(item.name)) return;
-    setState(() => _sliderDraftByName.remove(item.name));
-    final snapped =
-        _quantizeSliderValue(item, value, stepOverride: stepOverride);
-    await _setValue(item, _normalizeNumericValue(item, snapped));
+    final min = item.min!.toDouble();
+    final max = item.max!.toDouble();
+    return raw.toDouble().clamp(min, max);
   }
 
   Future<void> _showQuickValueInput(CarrotSettingItemMeta item) async {
-    if (_savingNames.contains(item.name)) return;
     final window = UiWindowInfo.of(context);
     final tokens = UiLayoutTokens.of(context);
     final dialogHorizontalInset = window.isCompact
@@ -1383,35 +1384,12 @@ class _CarrotSettingsGroupScreenState
   }
 
   Future<void> _openEditor(CarrotSettingItemMeta item) async {
-    final current = _effectiveValue(item);
-    final window = UiWindowInfo.of(context);
-    final maxSheetWidth = switch (window.windowClass) {
-      UiWindowClass.compact => double.infinity,
-      UiWindowClass.medium => 620.0,
-      UiWindowClass.expanded => 700.0,
-      UiWindowClass.large => 760.0,
-      UiWindowClass.extraLarge => 820.0,
-    };
-    final changed = await showModalBottomSheet<bool>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      builder: (context) => Align(
-        alignment: Alignment.topCenter,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: maxSheetWidth),
-          child: _SettingEditSheet(
-            item: item,
-            currentValue: current,
-            unitCycle: widget.bundle.unitCycle,
-            onCommit: (value) => _setValue(item, value),
-          ),
-        ),
-      ),
-    );
-    if (changed == true && mounted) {
-      CustomToast.show(context, '${item.displayTitle} 저장됨');
+    if (item.isBooleanLike) {
+      final next = !_asBoolLike(_effectiveValue(item));
+      await _setValue(item, next ? 1 : 0);
+      return;
     }
+    await _showQuickValueInput(item);
   }
 
   @override
@@ -1565,32 +1543,28 @@ class _CarrotSettingsGroupScreenState
                         final effectiveValue = _effectiveValue(item);
                         final sliderValue =
                             _sliderValueFor(item, effectiveValue);
-                        final value = sliderValue ?? effectiveValue;
-                        final isSaving = _savingNames.contains(item.name);
+                        final value = effectiveValue;
                         final step = item.isBooleanLike ? null : _stepFor(item);
                         return KeyedSubtree(
                           key: _rowKeyFor(item.name),
                           child: _SettingRowCard(
                             item: item,
                             value: value,
-                            isSaving: isSaving,
+                            isSaving: false,
                             isHighlighted: _highlightedItemName == item.name,
                             isFavorite: _isFavoriteItem(item),
                             quickStep: step,
+                            onValueCommitted: item.isBooleanLike
+                                ? null
+                                : (next) => unawaited(_setValue(item, next)),
                             onBooleanChanged: item.isBooleanLike
                                 ? (next) => _setValue(item, next ? 1 : 0)
                                 : null,
                             onTap: () => _openEditor(item),
                             onFavoriteLongPress: () =>
                                 unawaited(_toggleFavoriteItem(item)),
-                            onDecrement: item.isBooleanLike
-                                ? null
-                                : () => _adjustValueByStep(item, -1,
-                                    stepOverride: step),
-                            onIncrement: item.isBooleanLike
-                                ? null
-                                : () => _adjustValueByStep(item, 1,
-                                    stepOverride: step),
+                            onDecrement: null,
+                            onIncrement: null,
                             onQuickInput: item.isBooleanLike
                                 ? null
                                 : () => _showQuickValueInput(item),
@@ -1603,24 +1577,8 @@ class _CarrotSettingsGroupScreenState
                             sliderDivisions: step == null
                                 ? null
                                 : _sliderDivisions(item, step),
-                            onSliderChanged:
-                                item.isBooleanLike || sliderValue == null
-                                    ? null
-                                    : (v) => _onSliderChanged(
-                                          item,
-                                          v,
-                                          stepOverride: step,
-                                        ),
-                            onSliderChangeEnd:
-                                item.isBooleanLike || sliderValue == null
-                                    ? null
-                                    : (v) => unawaited(
-                                          _onSliderChangeEnd(
-                                            item,
-                                            v,
-                                            stepOverride: step,
-                                          ),
-                                        ),
+                            onSliderChanged: null,
+                            onSliderChangeEnd: null,
                           ),
                         );
                       },
@@ -1653,6 +1611,7 @@ class _SettingRowCard extends StatelessWidget {
   final int? sliderDivisions;
   final ValueChanged<double>? onSliderChanged;
   final ValueChanged<double>? onSliderChangeEnd;
+  final ValueChanged<dynamic>? onValueCommitted;
 
   const _SettingRowCard({
     required this.item,
@@ -1674,272 +1633,32 @@ class _SettingRowCard extends StatelessWidget {
     required this.sliderDivisions,
     required this.onSliderChanged,
     required this.onSliderChangeEnd,
+    this.onValueCommitted,
   });
 
   @override
   Widget build(BuildContext context) {
-    final window = UiWindowInfo.of(context);
-    final description = item.displayDescription?.replaceAll('\n', ' ').trim();
-    final rangeText = (item.min != null && item.max != null)
-        ? '범위 ${_fmtNum(item.min)} ~ ${_fmtNum(item.max)}'
-        : null;
-    final subtitleParts = <String>[];
-    if (description != null && description.isNotEmpty) {
-      subtitleParts.add(description);
-    }
-    if (rangeText != null) subtitleParts.add(rangeText);
-
-    final borderColor = isHighlighted
-        ? Theme.of(context).colorScheme.primary
-        : Colors.transparent;
-    final bgColor = isHighlighted
-        ? Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.36)
-        : Theme.of(context).colorScheme.surfaceContainer;
-    final controlColumnWidth = switch (window.windowClass) {
-      UiWindowClass.compact => 156.0,
-      UiWindowClass.medium => 166.0,
-      UiWindowClass.expanded => 182.0,
-      UiWindowClass.large => 196.0,
-      UiWindowClass.extraLarge => 208.0,
-    };
-    final cardHorizontalPadding = switch (window.windowClass) {
-      UiWindowClass.compact => 12.0,
-      UiWindowClass.medium => 12.0,
-      UiWindowClass.expanded => 13.0,
-      UiWindowClass.large => 14.0,
-      UiWindowClass.extraLarge => 14.0,
-    };
-    final cardVerticalPadding = switch (window.windowClass) {
-      UiWindowClass.compact => 10.0,
-      UiWindowClass.medium => 10.0,
-      UiWindowClass.expanded => 11.0,
-      UiWindowClass.large => 12.0,
-      UiWindowClass.extraLarge => 12.0,
-    };
-    final titleFontSize = switch (window.windowClass) {
-      UiWindowClass.compact => 14.0,
-      UiWindowClass.medium => 14.0,
-      UiWindowClass.expanded => 14.5,
-      UiWindowClass.large => 15.0,
-      UiWindowClass.extraLarge => 15.0,
-    };
-    final nameFontSize = switch (window.windowClass) {
-      UiWindowClass.compact => 11.0,
-      UiWindowClass.medium => 11.0,
-      UiWindowClass.expanded => 12.0,
-      UiWindowClass.large => 12.0,
-      UiWindowClass.extraLarge => 12.0,
-    };
-    final subtitleFontSize = switch (window.windowClass) {
-      UiWindowClass.compact => 12.0,
-      UiWindowClass.medium => 12.0,
-      UiWindowClass.expanded => 12.5,
-      UiWindowClass.large => 13.0,
-      UiWindowClass.extraLarge => 13.0,
-    };
-    final valueFontSize = switch (window.windowClass) {
-      UiWindowClass.compact => 16.0,
-      UiWindowClass.medium => 17.0,
-      UiWindowClass.expanded => 17.0,
-      UiWindowClass.large => 18.0,
-      UiWindowClass.extraLarge => 18.0,
-    };
-
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 220),
-      decoration: BoxDecoration(
-        color: bgColor,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: borderColor, width: isHighlighted ? 1.4 : 0),
-      ),
-      child: Stack(
-        children: [
-          Material(
-            color: Colors.transparent,
-            borderRadius: BorderRadius.circular(14),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(14),
-              onLongPress: onFavoriteLongPress,
-              onTap: onTap,
-              child: Padding(
-                padding: EdgeInsets.fromLTRB(
-                  cardHorizontalPadding,
-                  cardVerticalPadding,
-                  cardHorizontalPadding,
-                  cardVerticalPadding,
-                ),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  item.displayTitle,
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w700,
-                                    fontSize: titleFontSize,
-                                  ),
-                                ),
-                              ),
-                              if (isSaving)
-                                const SizedBox(
-                                  width: 14,
-                                  height: 14,
-                                  child:
-                                      CircularProgressIndicator(strokeWidth: 2),
-                                ),
-                            ],
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            item.name,
-                            style: TextStyle(
-                              fontSize: nameFontSize,
-                              fontFamily: 'monospace',
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .onSurfaceVariant,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          if (subtitleParts.isNotEmpty)
-                            Text(
-                              subtitleParts.join(' · '),
-                              style: TextStyle(
-                                fontSize: subtitleFontSize,
-                                color: Theme.of(context)
-                                    .colorScheme
-                                    .onSurfaceVariant,
-                              ),
-                            ),
-                          const SizedBox(height: 8),
-                          if (item.isBooleanLike)
-                            Text(
-                              _displaySettingValue(value),
-                              style: TextStyle(
-                                fontSize: valueFontSize,
-                                fontWeight: FontWeight.w800,
-                                color: Theme.of(context).colorScheme.primary,
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    if (item.isBooleanLike)
-                      Switch(
-                        value: _asBoolLike(value),
-                        onChanged: isSaving ? null : onBooleanChanged,
-                      )
-                    else
-                      SizedBox(
-                        width: controlColumnWidth,
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: _ValuePill(
-                                    text: _displaySettingValue(value),
-                                    onTap: isSaving ? null : onQuickInput,
-                                  ),
-                                ),
-                                const SizedBox(width: 6),
-                                _TinyInfoPill(
-                                  text: '단위 ${quickStep ?? 1}',
-                                  onTap: isSaving ? null : onStepTap,
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            if (sliderValue != null &&
-                                sliderMin != null &&
-                                sliderMax != null)
-                              Row(
-                                children: [
-                                  _InlineActionButton(
-                                    icon: Icons.remove,
-                                    onTap: isSaving ? null : onDecrement,
-                                  ),
-                                  const SizedBox(width: 2),
-                                  Expanded(
-                                    child: SliderTheme(
-                                      data: SliderTheme.of(context).copyWith(
-                                        trackHeight: 7,
-                                        thumbShape: const RoundSliderThumbShape(
-                                          enabledThumbRadius: 11,
-                                        ),
-                                        overlayShape:
-                                            const RoundSliderOverlayShape(
-                                          overlayRadius: 18,
-                                        ),
-                                      ),
-                                      child: SizedBox(
-                                        height: 42,
-                                        child: Slider(
-                                          value: sliderValue!,
-                                          min: sliderMin!,
-                                          max: sliderMax!,
-                                          divisions: sliderDivisions,
-                                          onChanged:
-                                              isSaving ? null : onSliderChanged,
-                                          onChangeEnd: isSaving
-                                              ? null
-                                              : onSliderChangeEnd,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 2),
-                                  _InlineActionButton(
-                                    icon: Icons.add,
-                                    onTap: isSaving ? null : onIncrement,
-                                  ),
-                                ],
-                              )
-                            else
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.end,
-                                children: [
-                                  _InlineActionButton(
-                                    icon: Icons.remove,
-                                    onTap: isSaving ? null : onDecrement,
-                                  ),
-                                  const SizedBox(width: 6),
-                                  _InlineActionButton(
-                                    icon: Icons.add,
-                                    onTap: isSaving ? null : onIncrement,
-                                  ),
-                                ],
-                              ),
-                          ],
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          if (!isSaving && isFavorite)
-            const Positioned(
-              top: 6,
-              right: 6,
-              child: IgnorePointer(
-                child: Icon(
-                  Icons.bookmark,
-                  size: 16,
-                  color: Colors.amber,
-                ),
-              ),
-            ),
-        ],
-      ),
+    return CarrotSettingRowCard(
+      item: item,
+      value: value,
+      isSaving: isSaving,
+      isHighlighted: isHighlighted,
+      isFavorite: isFavorite,
+      quickStep: quickStep,
+      onBooleanChanged: onBooleanChanged,
+      onTap: onTap,
+      onFavoriteLongPress: onFavoriteLongPress,
+      onDecrement: onDecrement,
+      onIncrement: onIncrement,
+      onQuickInput: onQuickInput,
+      onStepTap: onStepTap,
+      sliderValue: sliderValue,
+      sliderMin: sliderMin,
+      sliderMax: sliderMax,
+      sliderDivisions: sliderDivisions,
+      onSliderChanged: onSliderChanged,
+      onSliderChangeEnd: onSliderChangeEnd,
+      onValueCommitted: onValueCommitted,
     );
   }
 }
@@ -1967,16 +1686,34 @@ class _InlineActionButton extends StatelessWidget {
       UiWindowClass.large => 16.0,
       UiWindowClass.extraLarge => 16.0,
     };
-    return Material(
-      color: Theme.of(context).colorScheme.surfaceContainerHighest,
-      borderRadius: BorderRadius.circular(8),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(8),
-        onTap: onTap,
-        child: SizedBox(
-          width: buttonSize,
-          height: buttonSize,
-          child: Icon(icon, size: iconSize),
+    final hitSize = switch (window.windowClass) {
+      UiWindowClass.compact => buttonSize + 10,
+      UiWindowClass.medium => buttonSize + 10,
+      UiWindowClass.expanded => buttonSize + 10,
+      UiWindowClass.large => buttonSize + 12,
+      UiWindowClass.extraLarge => buttonSize + 12,
+    };
+    return SizedBox(
+      width: hitSize,
+      height: hitSize,
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(12),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: onTap,
+          child: Center(
+            child: Container(
+              width: buttonSize,
+              height: buttonSize,
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              alignment: Alignment.center,
+              child: Icon(icon, size: iconSize),
+            ),
+          ),
         ),
       ),
     );

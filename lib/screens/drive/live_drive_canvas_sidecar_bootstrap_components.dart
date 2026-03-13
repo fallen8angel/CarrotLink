@@ -1,6 +1,7 @@
 part of 'live_drive_canvas_screen.dart';
 
-extension _LiveDriveCanvasSidecarBootstrapComponents on _LiveDriveCanvasScreenState {
+extension _LiveDriveCanvasSidecarBootstrapComponents
+    on _LiveDriveCanvasScreenState {
   Future<bool> _isSidecarBootstrapDoneImpl() async {
     if (_sidecarBootstrapDone != null) return _sidecarBootstrapDone!;
     try {
@@ -36,7 +37,7 @@ extension _LiveDriveCanvasSidecarBootstrapComponents on _LiveDriveCanvasScreenSt
     var shouldNotify = true;
     try {
       final prefs = await SharedPreferences.getInstance();
-      final key = '${widget.hostIp}:$normalized';
+      final key = '$_hostIp:$normalized';
       final prev = prefs.getString(
         _LiveDriveCanvasScreenState._sidecarRevisionNotifiedPrefKey,
       );
@@ -147,5 +148,4 @@ extension _LiveDriveCanvasSidecarBootstrapComponents on _LiveDriveCanvasScreenSt
       return false;
     }
   }
-
 }

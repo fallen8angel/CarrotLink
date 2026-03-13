@@ -1,0 +1,75 @@
+# Architecture Docs Index
+
+`docs/architecture/`는 기능/주제별로 아래처럼 나뉜다.
+
+## core
+
+공통 구조, 코드베이스 분석, 대형 화면 모듈화 문서.
+
+- `core/DEV_STRUCTURE_REFACTOR_2026-02-26.md`
+- `core/CODEBASE_DEEP_ANALYSIS_2026-02-26_KO.md`
+- `core/LIVE_DRIVE_CANVAS_MODULARIZATION_PLAN_2026-03-06_KO.md`
+
+## hud
+
+Adaptive HUD 재구성, semantic snapshot, layout, handoff 문서.
+
+- 현재 HUD 기준 문서:
+  - `hud/refactoring/HUD_REFACTORING_V3_2026-03-11_KO.md`
+- `hud/ADAPTIVE_DISPLAY_REFACTOR_PLAN_2026-03-05_KO.md`
+- `hud/ADAPTIVE_HUD_REBUILD_PLAN_2026-03-07_KO.md`
+- `hud/HUD_SEMANTIC_SNAPSHOT_SPEC_2026-03-07_KO.md`
+- `hud/HUD_DATA_PIPELINE_REFACTOR_PLAN_2026-03-07_KO.md`
+- `hud/HUD_ADAPTIVE_LAYOUT_SPEC_2026-03-07_KO.md`
+- `hud/HUD_IMPLEMENTATION_CHECKLIST_2026-03-07_KO.md`
+- `hud/HUD_PROGRESS_HANDOFF_2026-03-07_1622_KO.md`
+
+## link
+
+CarrotLink side-load/app 계약, producer-consumer 매핑 문서.
+
+- `link/CARROTLINK_PRODUCER_CONSUMER_MAP_2026-03-11_KO.md`
+
+## carrotpilot
+
+carrotpilot/onroad/TMAP 입력 구조와 HUD 원본 분석 문서.
+
+AI나 신규 작업자가 stock onroad parity를 볼 때는 아래 순서를 권장한다.
+
+1. `carrotpilot/C3_STOCK_ONROAD_GRAPHICS_HUD_REFERENCE_2026-03-10_KO.md`
+2. `carrotpilot/CARROTPILOT_ORIGINAL_ONROAD_HUD_ANALYSIS_2026-03-07_KO.md`
+3. `carrotpilot/CARROTPILOT_ONROAD_ELEMENT_MATRIX_2026-03-02_KO.md`
+
+- `carrotpilot/C3_STOCK_ONROAD_GRAPHICS_HUD_REFERENCE_2026-03-10_KO.md`
+- `carrotpilot/CARROTPILOT_DATACHANNEL_PERF_PLAN_2026-03-02_KO.md`
+- `carrotpilot/CARROTPILOT_ONROAD_ELEMENT_MATRIX_2026-03-02_KO.md`
+- `carrotpilot/CARROTPILOT_ONROAD_FULL_CHECKLIST_2026-03-02_KO.md`
+- `carrotpilot/CARROTPILOT_ORIGINAL_ONROAD_HUD_ANALYSIS_2026-03-07_KO.md`
+- `carrotpilot/TMAP_7712_CARROTPILOT_ANALYSIS_2026-03-06_KO.md`
+
+## remote_ar
+
+stock mode remote AR 설계, 구현, 테스트, handoff 문서.
+
+- `remote_ar/AR_STYLE_DRIVE_NAV_PLAN_2026-03-06_KO.md`
+- `remote_ar/STOCK_MODE_REMOTE_AR_FEASIBILITY_2026-03-06_KO.md`
+- `remote_ar/STOCK_MODE_REMOTE_AR_DISPLAY_DESIGN_2026-03-06_KO.md`
+- `remote_ar/STOCK_MODE_REMOTE_AR_MAPPING_OPTIMIZATION_2026-03-06_KO.md`
+- `remote_ar/STOCK_MODE_REMOTE_AR_IMPLEMENTATION_CHECKLIST_2026-03-06_KO.md`
+- `remote_ar/STOCK_MODE_REMOTE_AR_MVP_EXECUTION_PLAN_2026-03-06_KO.md`
+- `remote_ar/STOCK_MODE_REMOTE_AR_ON_DEVICE_TEST_2026-03-07_KO.md`
+- `remote_ar/STOCK_MODE_REMOTE_AR_HANDOFF_2026-03-07_KO.md`
+
+## yolo
+
+YOLO 기반 객체감지 설계, 타당성, 통합 계획, 진행 handoff 문서.
+
+AI나 신규 작업자가 YOLO 작업을 이어갈 때는 아래 순서를 권장한다.
+
+1. `yolo/STOCK_MODE_YOLO26_PROGRESS_HANDOFF_2026-03-10_KO.md`
+2. `yolo/STOCK_MODE_YOLO26_INTEGRATION_PLAN_2026-03-10_KO.md`
+3. `yolo/STOCK_MODE_YOLO26_OBJECT_DETECTION_FEASIBILITY_2026-03-10_KO.md`
+
+- `yolo/STOCK_MODE_YOLO26_OBJECT_DETECTION_FEASIBILITY_2026-03-10_KO.md`
+- `yolo/STOCK_MODE_YOLO26_INTEGRATION_PLAN_2026-03-10_KO.md`
+- `yolo/STOCK_MODE_YOLO26_PROGRESS_HANDOFF_2026-03-10_KO.md`

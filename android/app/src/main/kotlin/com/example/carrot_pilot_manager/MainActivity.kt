@@ -1,5 +1,6 @@
 package com.example.carrot_pilot_manager
 
+import android.app.ActivityManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -11,7 +12,9 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.provider.Settings
+import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
@@ -21,6 +24,7 @@ import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.renderer.FlutterUiDisplayListener
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 
@@ -37,9 +41,41 @@ class MainActivity : FlutterActivity() {
   private var nativeDriveVideoPlugin: NativeDriveVideoPlugin? = null
   private var oauthCodeHudView: View? = null
   private var oauthCodeHudParams: WindowManager.LayoutParams? = null
+  private val launchAtMs = SystemClock.elapsedRealtime()
+
+  override fun onCreate(savedInstanceState: Bundle?) {
+    Log.i(TAG, "onCreate +${elapsedSinceLaunch()}ms savedState=${savedInstanceState != null}")
+    super.onCreate(savedInstanceState)
+  }
+
+  override fun onStart() {
+    Log.i(TAG, "onStart +${elapsedSinceLaunch()}ms")
+    super.onStart()
+  }
+
+  override fun onResume() {
+    Log.i(TAG, "onResume +${elapsedSinceLaunch()}ms")
+    super.onResume()
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    Log.i(TAG, "onNewIntent +${elapsedSinceLaunch()}ms action=${intent.action}")
+    super.onNewIntent(intent)
+  }
 
   override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+    Log.i(TAG, "configureFlutterEngine:start +${elapsedSinceLaunch()}ms")
     super.configureFlutterEngine(flutterEngine)
+    flutterEngine.renderer.addIsDisplayingFlutterUiListener(object : FlutterUiDisplayListener {
+      override fun onFlutterUiDisplayed() {
+        Log.i(TAG, "firstFlutterFrame +${elapsedSinceLaunch()}ms")
+        flutterEngine.renderer.removeIsDisplayingFlutterUiListener(this)
+      }
+
+      override fun onFlutterUiNoLongerDisplayed() {
+        Log.i(TAG, "flutterUiHidden +${elapsedSinceLaunch()}ms")
+      }
+    })
     if (nativeDriveVideoPlugin == null) {
       nativeDriveVideoPlugin = NativeDriveVideoPlugin(flutterEngine.dartExecutor.binaryMessenger)
       nativeDriveVideoPlugin?.register(this, flutterEngine.platformViewsController.registry)
@@ -55,36 +91,46 @@ class MainActivity : FlutterActivity() {
 
             "start" -> {
               val host = call.argument<String>("host")?.trim().orEmpty()
+              val snapshotJson = call.argument<String>("snapshotJson")?.trim()
               if (!hasOverlayPermission()) {
                 result.success(false)
                 return@setMethodCallHandler
               }
-              startOverlayService(OverlayHudService.ACTION_START, host)
+              startOverlayService(
+                  OverlayHudService.ACTION_START,
+                  host,
+                  snapshotJson = snapshotJson
+              )
               result.success(true)
             }
 
             "updateEndpoint" -> {
               val host = call.argument<String>("host")?.trim().orEmpty()
+              val snapshotJson = call.argument<String>("snapshotJson")?.trim()
               if (host.isNotEmpty()) {
-                startOverlayService(OverlayHudService.ACTION_UPDATE_ENDPOINT, host)
+                startOverlayService(
+                    OverlayHudService.ACTION_UPDATE_ENDPOINT,
+                    host,
+                    snapshotJson = snapshotJson
+                )
               }
               result.success(true)
             }
 
-            "updateFallbackMetrics" -> {
+            "updateSemanticSnapshot" -> {
               if (!OverlayHudService.isRunning()) {
                 result.success(false)
                 return@setMethodCallHandler
               }
-              val cpuTempC = call.argument<Double>("cpuTempC")
-              val memPct = call.argument<Double>("memPct")
-              val diskPct = call.argument<Double>("diskPct")
+              val snapshotJson = call.argument<String>("snapshotJson")?.trim().orEmpty()
+              if (snapshotJson.isBlank()) {
+                result.success(false)
+                return@setMethodCallHandler
+              }
               startOverlayService(
-                  OverlayHudService.ACTION_UPDATE_FALLBACK_METRICS,
+                  OverlayHudService.ACTION_UPDATE_SNAPSHOT,
                   null,
-                  cpuTempC,
-                  memPct,
-                  diskPct
+                  snapshotJson = snapshotJson
               )
               result.success(true)
             }
@@ -151,6 +197,8 @@ class MainActivity : FlutterActivity() {
             else -> result.notImplemented()
           }
         }
+    stopLegacyOverlayService()
+    Log.i(TAG, "configureFlutterEngine:end +${elapsedSinceLaunch()}ms")
   }
 
   override fun onDestroy() {
@@ -336,14 +384,34 @@ class MainActivity : FlutterActivity() {
 
   private fun bringAppToFront(): Boolean {
     return try {
-      val launchIntent = packageManager.getLaunchIntentForPackage(packageName) ?: return false
-      launchIntent.addFlags(
-          Intent.FLAG_ACTIVITY_NEW_TASK or
-              Intent.FLAG_ACTIVITY_SINGLE_TOP or
-              Intent.FLAG_ACTIVITY_CLEAR_TOP
-      )
-      startActivity(launchIntent)
-      true
+      var moved = false
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+        val am = getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        val task = am?.appTasks?.firstOrNull()
+        if (task != null) {
+          try {
+            task.moveToFront()
+            moved = true
+          } catch (e: Throwable) {
+            Log.w(TAG, "moveToFront failed", e)
+          }
+        }
+      }
+
+      val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+      if (launchIntent != null) {
+        launchIntent.action = Intent.ACTION_MAIN
+        launchIntent.addCategory(Intent.CATEGORY_LAUNCHER)
+        launchIntent.addFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+        )
+        startActivity(launchIntent)
+        moved = true
+      }
+      moved
     } catch (e: Throwable) {
       Log.w(TAG, "Failed to bring app to front", e)
       false
@@ -441,23 +509,15 @@ class MainActivity : FlutterActivity() {
   private fun startOverlayService(
       action: String,
       host: String?,
-      cpuTempC: Double? = null,
-      memPct: Double? = null,
-      diskPct: Double? = null
+      snapshotJson: String? = null
   ) {
     val intent = Intent(this, OverlayHudService::class.java).apply {
       this.action = action
       if (!host.isNullOrBlank()) {
         putExtra(OverlayHudService.EXTRA_HOST, host)
       }
-      if (cpuTempC != null) {
-        putExtra(OverlayHudService.EXTRA_CPU_TEMP_C, cpuTempC)
-      }
-      if (memPct != null) {
-        putExtra(OverlayHudService.EXTRA_MEM_PCT, memPct)
-      }
-      if (diskPct != null) {
-        putExtra(OverlayHudService.EXTRA_DISK_PCT, diskPct)
+      if (!snapshotJson.isNullOrBlank()) {
+        putExtra(OverlayHudService.EXTRA_SNAPSHOT_JSON, snapshotJson)
       }
     }
     val useForegroundStart =
@@ -480,4 +540,14 @@ class MainActivity : FlutterActivity() {
       }
     }
   }
+
+  private fun stopLegacyOverlayService() {
+    try {
+      stopService(Intent(this, OverlayHudService::class.java))
+    } catch (e: Throwable) {
+      Log.w(TAG, "Failed to stop legacy overlay service", e)
+    }
+  }
+
+  private fun elapsedSinceLaunch(): Long = SystemClock.elapsedRealtime() - launchAtMs
 }

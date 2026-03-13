@@ -1,8 +1,7 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:isolate';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -15,16 +14,21 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../../services/hud_drive_settings_service.dart';
+import '../../services/hud_feature_settings_service.dart';
+
 import '../../services/sidecar_service.dart';
 import '../../services/ssh_service.dart';
 import '../../services/storage_layout_service.dart';
+import '../../features/yolo/yolo.dart';
 import '../../ui/adaptive/display_feature_utils.dart';
 import '../../ui/adaptive/layout_tokens.dart';
 import '../../ui/adaptive/window_class.dart';
-import '../../widgets/home_hud_preview_card.dart';
+import '../../features/hud/hud.dart';
 
 part 'live_drive_canvas_overlay_components.dart';
 part 'live_drive_canvas_overlay_models_components.dart';
+part 'live_drive_canvas_ar_scene_components.dart';
+part 'live_drive_canvas_ar_replay_components.dart';
 part 'live_drive_canvas_plot_models_components.dart';
 part 'live_drive_canvas_plot_components.dart';
 part 'live_drive_canvas_overlay_math_components.dart';
@@ -44,9 +48,6 @@ part 'live_drive_canvas_sidecar_transport_components.dart';
 part 'live_drive_canvas_sidecar_runtime_components.dart';
 part 'live_drive_canvas_lifecycle_components.dart';
 part 'live_drive_canvas_layout_components.dart';
-
-
-
 
 enum _DriveCameraKind { road, wideRoad }
 
@@ -69,6 +70,39 @@ enum _OverlayPreviewScenario {
   gentleLeft,
   gentleRight,
   traffic,
+}
+
+enum _DriveViewportZoomPreset {
+  zoomOut,
+  fit,
+  crop,
+}
+
+extension _DriveViewportZoomPresetX on _DriveViewportZoomPreset {
+  bool get coverPreferred => switch (this) {
+        _DriveViewportZoomPreset.zoomOut ||
+        _DriveViewportZoomPreset.fit =>
+          false,
+        _DriveViewportZoomPreset.crop => true,
+      };
+
+  double get zoomFactor => switch (this) {
+        _DriveViewportZoomPreset.zoomOut => 0.92,
+        _DriveViewportZoomPreset.fit => 1.0,
+        _DriveViewportZoomPreset.crop => 1.0,
+      };
+
+  IconData get icon => switch (this) {
+        _DriveViewportZoomPreset.zoomOut => Icons.zoom_out_map_rounded,
+        _DriveViewportZoomPreset.fit => Icons.fit_screen_rounded,
+        _DriveViewportZoomPreset.crop => Icons.crop_free_rounded,
+      };
+
+  String get tooltip => switch (this) {
+        _DriveViewportZoomPreset.zoomOut => '축소',
+        _DriveViewportZoomPreset.fit => '정사이즈',
+        _DriveViewportZoomPreset.crop => '크롭',
+      };
 }
 
 class LiveDriveCanvasScreen extends StatefulWidget {
@@ -103,9 +137,13 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const String _sidecarRevisionNotifiedPrefKey =
       'sidecar_revision_notified_v1';
   static const String _hudDebugLayerTogglesPrefKey =
-      'hud_debug_layer_toggles_v3';
+      'hud_debug_layer_toggles_v5';
   static const String _hudDebugLayerTogglesInitPrefKey =
-      'hud_debug_layer_toggles_init_v3';
+      'hud_debug_layer_toggles_init_v5';
+  static const String _viewportZoomPresetPortraitPrefKey =
+      'drive_viewport_zoom_preset_portrait_v1';
+  static const String _viewportZoomPresetLandscapePrefKey =
+      'drive_viewport_zoom_preset_landscape_v1';
   static const _M3 _viewFromDevice = _M3(
     0.0,
     1.0,
@@ -119,11 +157,19 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   );
 
   late final WebViewController _cameraController;
-  final SidecarService _sidecarService = SidecarService();
+  final SidecarService _sidecarService = SidecarService.shared;
+
   SSHService? _sshService;
+  bool _driveFeatureGuardHandled = false;
+  SSHService? _observedSshService;
+  SharedRuntimeManager? _sharedRuntimeManager;
+  late String _activeHostIp;
+  bool _lastObservedSshConnected = false;
+  String? _lastObservedConnectedHost;
   bool _cameraLoading = true;
   String? _cameraError;
   String? _cameraSourceKey;
+  bool _nativeCameraAttachReady = false;
   Size _cameraSourceSize = const Size(1928, 1208);
   final Map<_DriveCameraKind, Size> _sourceSizeByKind =
       <_DriveCameraKind, Size>{
@@ -133,22 +179,20 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   StreamSubscription<dynamic>? _nativeCameraEventSub;
   int? _nativeCameraViewId;
   bool _nativeCameraUnsupported = false;
+  bool _isDisposing = false;
   final bool _nativeOverlayEnabled = true;
   Size _nativeOverlaySize = Size.zero;
   Rect _nativeOverlayVisibleViewportRect = Rect.zero;
   int _lastNativeOverlayPushUs = 0;
   static const int _nativeOverlayPushIntervalUs = 16666;
 
-  Isolate? _sidecarWorkerIsolate;
-  ReceivePort? _sidecarWorkerReceivePort;
-  StreamSubscription? _sidecarWorkerSubscription;
   bool _sidecarConnected = false;
-  int _sidecarSession = 0;
   bool _sidecarAutoManaging = false;
   bool _sidecarTransitioning = false;
   bool _suppressCameraErrors = false;
   Timer? _sidecarTransitionTimer;
   Timer? _sidecarRecoveryTimer;
+  Timer? _overlayDisconnectDebounce;
   DateTime? _sidecarRecoveryNextAt;
   int _sidecarRecoveryBackoffSeconds = 1;
   _SidecarPhase _sidecarPhase = _SidecarPhase.idle;
@@ -168,13 +212,15 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const bool _strictFrameLock = true;
   static const int _strictFrameHoldUs = 120000;
   static const int _cameraFrameStaleUs = 350000;
+  static const int _startupProvisionalSyncWindowUs = 4000000;
+  static const int _startupProvisionalNativeSettleFrames = 3;
   static const int _interpMinUs = 12000;
   static const int _interpMaxUs = 90000;
   static const Duration _cameraDiagCaptureCooldown = Duration(seconds: 12);
-  static const Duration _lifecycleSuspendDelay = Duration(milliseconds: 2600);
-  static const Duration _sidecarWarmProcessKeepAlive = Duration(seconds: 20);
+  static const Duration _lifecycleSuspendDelay = Duration(milliseconds: 3200);
+  static const Duration _sidecarWarmProcessKeepAlive = Duration(seconds: 35);
   static const Duration _backgroundProcessKeepAlive = Duration(seconds: 45);
-  static const Duration _backgroundUiResetGrace = Duration(seconds: 8);
+  static const Duration _backgroundUiResetGrace = Duration(seconds: 15);
   static const String _cameraDiagTmuxTailCommand = '''
 if command -v tmux >/dev/null 2>&1; then
   echo "== tmux sessions =="
@@ -195,8 +241,10 @@ fi
   DateTime? _lastCameraDiagCapturedAt;
   int? _lastCameraFrameId;
   int _lastCameraFrameEventUs = 0;
+  int _cameraErrorGraceUntilUs = 0;
   int? _lastPublishedModelFrameId;
   int _lastSyncHitUs = 0;
+  int _lastOverlayPublishUs = 0;
   int _lastSyncedArrivalUs = 0;
   double _smoothedSyncIntervalUs = 50000.0;
   late final Stopwatch _renderClock;
@@ -215,24 +263,56 @@ fi
   int _lastPathAnimationTickUs = 0;
   int? _lastNativeOverlaySignature;
   bool _lastNativeOverlayHadPayload = false;
+  int? _lastNativeArSceneSignature;
+  bool _lastNativeArSceneHadPayload = false;
+  int? _lastNativeYoloConfigSignature;
+  Map<String, dynamic>? _lastNativeYoloState;
   bool _overlayVerifyMode = false;
   String _overlayVerifyText = '';
   int _lastOverlayVerifyUpdateUs = 0;
   static const int _overlayVerifyIntervalUs = 200000;
-  bool _coverViewportPreferred = true;
+  _DriveViewportZoomPreset _viewportZoomPreset = _DriveViewportZoomPreset.crop;
+  bool? _lastViewportZoomOrientationLandscape;
   bool _debugShowGuides = false;
   bool _debugShowVerifyPanel = false;
   bool _debugShowViewportFrame = false;
+  // AR debug overlay defaults:
+  // - Core AR/lead/radar layers stay enabled by default.
+  // - Native AR scene, autosave, and YOLO overlays stay off by default.
   bool _debugShowArOverlay = true;
   bool _debugShowPathFill = true;
   bool _debugShowLaneLines = true;
   bool _debugShowRoadEdge = true;
-  bool _debugShowLead1 = false;
-  bool _debugShowLead2 = false;
-  bool _debugShowRadarBadge = false;
-  bool _debugShowRadarVector = false;
+  bool _debugShowLead1 = true;
+  bool _debugShowLead2 = true;
+  bool _debugShowRadarBadge = true;
+  bool _debugShowRadarVector = true;
   bool _debugShowStopDistanceTf = true;
   bool _debugShowStateText = true;
+  bool _debugYoloEnabled = false;
+  bool _debugYoloBoxes = false;
+  bool _debugYoloLabels = false;
+  bool _debugYoloTrafficLights = false;
+  bool _debugYoloStats = false;
+  bool _debugPushNativeArScene = false;
+  bool _debugArCaptureEnabled = false;
+  bool _debugArAutoPersistEnabled = false;
+  bool _debugArReplayMode = false;
+  _DriveArReplayFrame? _activeArReplayFrame;
+  final ListQueue<_DriveArReplayFrame> _arReplayFrames =
+      ListQueue<_DriveArReplayFrame>();
+  int _arReplayCaptureSeq = 0;
+  int _lastArReplayCaptureUs = 0;
+  int _lastArReplayPersistUs = 0;
+  static const int _arReplayCaptureIntervalUs = 250000;
+  static const int _arReplayPersistIntervalUs = 1500000;
+  static const int _arReplayMaxFrames = 96;
+  String? _lastArReplayExportPath;
+  String? _arReplaySessionId;
+  String? _arReplaySessionDirPath;
+  String? _arReplaySessionTimelinePath;
+  String? _arReplaySessionMetaPath;
+  int _lastPersistedArReplaySeq = 0;
   Map<String, String> _sidecarProcessSnapshot = <String, String>{};
   Map<String, String> _sidecarCriticalProcSnapshot = <String, String>{};
   Map<String, dynamic> _sidecarHealthSnapshot = <String, dynamic>{};
@@ -263,12 +343,19 @@ fi
   _DriveDebugPlotState _debugPlotState = const _DriveDebugPlotState.hidden();
   final ListQueue<String> _sidecarHistory = ListQueue<String>();
   int _lastCameraFallbackLogUs = 0;
+  bool _overlayStaleActive = false;
+  String _overlayStaleReason = '';
+  int _lastConsumedSharedOverlayFrameSequence = 0;
+  bool _startupProvisionalSyncEnabled = false;
+  int _startupProvisionalSyncUntilUs = 0;
+  int _startupNativeFrameSettleCount = 0;
+  int _lastProvisionalSyncLogUs = 0;
   Timer? _lifecycleSuspendTimer;
   Timer? _sidecarProcessStopTimer;
   Timer? _backgroundUiResetTimer;
   Timer? _adaptiveCameraQualityTimer;
   bool _backgroundUiResetDone = false;
-  String _hudDefaultMode = HudDriveSettingsService.modeWebrtc;
+  String _hudDefaultMode = HudDriveSettingsService.modeOpenpilotOverlay;
   bool _hudModeLoaded = false;
   _AdaptiveCameraQualityMode _adaptiveCameraQualityMode =
       _AdaptiveCameraQualityMode.lowLatency;
@@ -292,41 +379,46 @@ fi
     const _DriveOverlaySnapshot.empty(),
   );
 
+  String get _hostIp => _activeHostIp;
+
+  String? _normalizeDriveHost(String? raw) {
+    final host = raw?.trim();
+    if (host == null || host.isEmpty) {
+      return null;
+    }
+    return host;
+  }
+
   Uri get _cameraBaseUri => Uri(
         scheme: 'http',
-        host: widget.hostIp,
+        host: _hostIp,
         port: 5001,
       );
 
   List<Uri> get _streamEndpointCandidates => <Uri>[
         Uri(
           scheme: 'http',
-          host: widget.hostIp,
+          host: _hostIp,
           port: 5001,
           path: '/stream',
         ),
         Uri(
           scheme: 'http',
-          host: widget.hostIp,
+          host: _hostIp,
           port: 7000,
           path: '/stream',
         ),
       ];
 
-  String get _sidecarWsUrl =>
-      'ws://${widget.hostIp}:7766/ws/live?encoding=zlib-json&camera=$_liveCameraName';
-
   bool get _openpilotOverlayMode =>
       HudDriveSettingsService.isOpenpilotOverlay(_hudDefaultMode);
 
-  String get _modeTagLabel => _openpilotOverlayMode ? 'stock' : 'webrtc';
+  String get _modeTagLabel => 'Stock';
 
   bool get _canUseNativeCamera => !kIsWeb && Platform.isAndroid;
 
   bool get _useNativeLiveCamera =>
-      _openpilotOverlayMode &&
-      _canUseNativeCamera &&
-      !_nativeCameraUnsupported;
+      _openpilotOverlayMode && _canUseNativeCamera && !_nativeCameraUnsupported;
 
   bool get _useNativeOverlayRenderer =>
       _openpilotOverlayMode && _useNativeLiveCamera && _nativeOverlayEnabled;
@@ -338,16 +430,22 @@ fi
       _sourceSizeByKind[kind] ?? const Size(1928, 1208);
 
   String get _liveCameraWsUrl =>
-      'ws://${widget.hostIp}:7766/ws/camera/$_liveCameraName';
+      'ws://$_hostIp:7766/ws/camera/$_liveCameraName';
 
   bool get _coverViewport =>
-      _overlayVerifyMode ? false : _coverViewportPreferred;
+      _overlayVerifyMode ? false : _viewportZoomPreset.coverPreferred;
+
+  bool get _coverViewportPreferred => _viewportZoomPreset.coverPreferred;
+
+  double get _viewportPlacementZoom =>
+      _overlayVerifyMode ? 1.0 : _viewportZoomPreset.zoomFactor;
 
   int get _overlaySyncMaxDeltaCurrent => _overlaySyncMaxDeltaLive;
 
   @override
   void initState() {
     super.initState();
+    _activeHostIp = widget.hostIp.trim();
     _renderClock = Stopwatch()..start();
     _renderTicker = createTicker(_onRenderTick)..start();
     WidgetsBinding.instance.addObserver(this);
@@ -361,21 +459,18 @@ fi
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageStarted: (_) {
-            if (!mounted) return;
-            setState(() {
+            _safeSetState(() {
               _cameraLoading = true;
               _cameraError = null;
             });
           },
           onPageFinished: (_) {
-            if (!mounted) return;
-            setState(() {
+            _safeSetState(() {
               _cameraLoading = false;
             });
           },
           onWebResourceError: (error) {
-            if (!mounted) return;
-            setState(() {
+            _safeSetState(() {
               _cameraLoading = false;
               _cameraError = '카메라 로드 실패: ${error.description}';
             });
@@ -397,40 +492,206 @@ fi
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    _sshService ??= Provider.of<SSHService>(context, listen: false);
+    final featureSettings =
+        Provider.of<HudFeatureSettingsService>(context, listen: false);
+    if (!featureSettings.enabled && !_driveFeatureGuardHandled) {
+      _driveFeatureGuardHandled = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _toast('HUD/Stock 기능이 비활성화되어 있습니다.', isError: true);
+        Navigator.of(context).maybePop();
+      });
+      return;
+    }
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    final sharedRuntime =
+        Provider.of<SharedRuntimeManager>(context, listen: false);
+    if (!identical(_sshService, ssh)) {
+      _sshService = ssh;
+    }
+    _attachSshListener(ssh);
+    _attachSharedOverlayRuntime(sharedRuntime);
+    unawaited(_syncViewportZoomPresetForOrientation());
   }
 
   @override
   void didUpdateWidget(covariant LiveDriveCanvasScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.hostIp != widget.hostIp) {
-      _applyOverlaySnapshot(
-        const _DriveOverlaySnapshot.empty(),
-        forceNativePush: true,
+      unawaited(
+        _handleDriveHostTransition(
+          widget.hostIp,
+          reason: 'route_host_changed',
+          forceRestart: true,
+        ),
       );
-      setState(() {
+    }
+  }
+
+  void _attachSshListener(SSHService ssh) {
+    if (identical(_observedSshService, ssh)) {
+      return;
+    }
+    _detachSshListener();
+    _observedSshService = ssh;
+    _lastObservedSshConnected = ssh.isConnected;
+    _lastObservedConnectedHost = _normalizeDriveHost(ssh.connectedIp);
+    ssh.addListener(_handleObservedSshChanged);
+    final currentHost = _lastObservedConnectedHost;
+    if (_lastObservedSshConnected &&
+        currentHost != null &&
+        currentHost != _hostIp) {
+      unawaited(
+        _handleDriveHostTransition(
+          currentHost,
+          reason: 'attach_sync',
+          forceRestart: true,
+        ),
+      );
+    }
+  }
+
+  void _detachSshListener() {
+    final ssh = _observedSshService;
+    if (ssh != null) {
+      ssh.removeListener(_handleObservedSshChanged);
+    }
+    _observedSshService = null;
+  }
+
+  void _handleObservedSshChanged() {
+    final ssh = _observedSshService;
+    if (ssh == null || !mounted) {
+      return;
+    }
+    final connected = ssh.isConnected;
+    final host = _normalizeDriveHost(ssh.connectedIp);
+    final connectedChanged = connected != _lastObservedSshConnected;
+    final hostChanged = host != _lastObservedConnectedHost;
+    _lastObservedSshConnected = connected;
+    _lastObservedConnectedHost = host;
+
+    if (!connected) {
+      if (connectedChanged) {
+        unawaited(
+          _handleDriveConnectionLost(reason: 'ssh_disconnected'),
+        );
+      }
+      return;
+    }
+
+    final nextHost = host ?? _hostIp;
+    if (connectedChanged || hostChanged || nextHost != _hostIp) {
+      unawaited(
+        _handleDriveHostTransition(
+          nextHost,
+          reason: connectedChanged ? 'ssh_reconnected' : 'ssh_host_changed',
+          forceRestart: true,
+        ),
+      );
+    }
+  }
+
+  void _resetDriveRuntimeState({
+    required bool cameraLoading,
+    String? cameraError,
+  }) {
+    _applyOverlaySnapshot(
+      const _DriveOverlaySnapshot.empty(),
+      forceNativePush: true,
+    );
+    if (mounted) {
+      _safeSetState(() {
         _cameraSourceKey = null;
         _nativeCameraViewId = null;
         _nativeCameraUnsupported = false;
+        _nativeCameraAttachReady = false;
         _liveCameraKind = _DriveCameraKind.road;
         _cameraSourceSize = const Size(1928, 1208);
         _wideCamRequested = false;
+        _cameraLoading = cameraLoading;
+        _cameraError = cameraError;
       });
-      _sourceSizeByKind[_DriveCameraKind.road] = const Size(1928, 1208);
-      _sourceSizeByKind[_DriveCameraKind.wideRoad] = const Size(1928, 1208);
-      _overlayByModelFrame.clear();
-      _overlayFrameOrder.clear();
-      _latestOverlaySnapshot = const _DriveOverlaySnapshot.empty();
-      _pathAnimationPhase = 0.0;
-      _pathAnimationSeq2 = -1;
-      _pathAnimationForward = true;
-      _lastPathAnimationTickUs = 0;
-      _lastCameraFrameId = null;
-      _lastCameraFrameEventUs = 0;
-      _lastPublishedModelFrameId = null;
-      _stopAdaptiveCameraQualityLoop(resetMode: true);
-      _applyHudModeRuntime();
+    } else {
+      _cameraSourceKey = null;
+      _nativeCameraViewId = null;
+      _nativeCameraUnsupported = false;
+      _nativeCameraAttachReady = false;
+      _liveCameraKind = _DriveCameraKind.road;
+      _cameraSourceSize = const Size(1928, 1208);
+      _wideCamRequested = false;
+      _cameraLoading = cameraLoading;
+      _cameraError = cameraError;
     }
+    _sourceSizeByKind[_DriveCameraKind.road] = const Size(1928, 1208);
+    _sourceSizeByKind[_DriveCameraKind.wideRoad] = const Size(1928, 1208);
+    _overlayByModelFrame.clear();
+    _overlayFrameOrder.clear();
+    _latestOverlaySnapshot = const _DriveOverlaySnapshot.empty();
+    _pathAnimationPhase = 0.0;
+    _pathAnimationSeq2 = -1;
+    _pathAnimationForward = true;
+    _lastPathAnimationTickUs = 0;
+    _lastCameraFrameId = null;
+    _lastCameraFrameEventUs = 0;
+    _cameraErrorGraceUntilUs = 0;
+    _lastPublishedModelFrameId = null;
+    _lastSyncHitUs = 0;
+    _lastOverlayPublishUs = 0;
+    _lastSyncedArrivalUs = 0;
+    _clearOverlayStaleState();
+    _lastConsumedSharedOverlayFrameSequence = 0;
+  }
+
+  Future<void> _handleDriveHostTransition(
+    String nextHost, {
+    required String reason,
+    bool forceRestart = false,
+  }) async {
+    final normalizedHost = _normalizeDriveHost(nextHost);
+    if (normalizedHost == null) {
+      return;
+    }
+    if (!forceRestart && normalizedHost == _hostIp) {
+      return;
+    }
+    final previousHost = _hostIp;
+    _activeHostIp = normalizedHost;
+    _pushSidecarHistory(
+      'HOST_CHANGE',
+      '$previousHost -> $normalizedHost reason=$reason',
+    );
+    _clearSidecarRecoverySchedule();
+    _cancelDelayedSidecarStop();
+    _stopAdaptiveCameraQualityLoop(resetMode: true);
+    _stopSidecarLoop();
+    _resetDriveRuntimeState(cameraLoading: true);
+    await _clearNativeOverlay();
+    await _unloadWebCameraSurface();
+    if (_cameraSuspendedByLifecycle) {
+      return;
+    }
+    _applyHudModeRuntime();
+  }
+
+  Future<void> _handleDriveConnectionLost({
+    required String reason,
+  }) async {
+    _pushSidecarHistory('SSH_LOST', reason);
+    _clearSidecarRecoverySchedule();
+    _cancelDelayedSidecarStop();
+    _stopAdaptiveCameraQualityLoop(resetMode: true);
+    _stopSidecarLoop();
+    _setSidecarPhase(
+      _SidecarPhase.idle,
+      message: 'SSH 연결을 기다리는 중입니다.',
+    );
+    _resetDriveRuntimeState(
+      cameraLoading: false,
+      cameraError: '기기 연결이 끊어졌습니다.',
+    );
+    await _clearNativeOverlay();
+    await _unloadWebCameraSurface();
   }
 
   Future<void> _loadHudDefaultMode() => _loadHudDefaultModeImpl();
@@ -446,19 +707,22 @@ fi
   void _setViewportFitMode(bool coverPreferred) =>
       _setViewportFitModeImpl(coverPreferred);
 
+  void _setViewportZoomPreset(_DriveViewportZoomPreset preset) =>
+      _setViewportZoomPresetImpl(preset);
+
+  Future<void> _syncViewportZoomPresetForOrientation() =>
+      _syncViewportZoomPresetForOrientationImpl();
+
   void _setDebugGuides(bool enabled) => _setDebugGuidesImpl(enabled);
 
-  void _setDebugVerifyPanel(bool enabled) =>
-      _setDebugVerifyPanelImpl(enabled);
+  void _setDebugVerifyPanel(bool enabled) => _setDebugVerifyPanelImpl(enabled);
 
   void _setDebugViewportFrame(bool enabled) =>
       _setDebugViewportFrameImpl(enabled);
 
-  Future<void> _loadHudDebugLayerToggles() =>
-      _loadHudDebugLayerTogglesImpl();
+  Future<void> _loadHudDebugLayerToggles() => _loadHudDebugLayerTogglesImpl();
 
-  Future<void> _saveHudDebugLayerToggles() =>
-      _saveHudDebugLayerTogglesImpl();
+  Future<void> _saveHudDebugLayerToggles() => _saveHudDebugLayerTogglesImpl();
 
   void _onLayerToggleChanged(StateSetter setLocalState, VoidCallback update) =>
       _onLayerToggleChangedImpl(setLocalState, update);
@@ -487,7 +751,8 @@ fi
     required double t,
     required double speedKph,
     required double leadDist,
-  }) => _buildOverlayPreviewDebugPlotImpl(
+  }) =>
+      _buildOverlayPreviewDebugPlotImpl(
         seq: seq,
         t: t,
         speedKph: speedKph,
@@ -507,11 +772,12 @@ fi
     required int sourceWidth,
     required int sourceHeight,
     required double t,
-  }) => _previewRoadPathVerticesImpl(
-    sourceWidth: sourceWidth,
-    sourceHeight: sourceHeight,
-    t: t,
-  );
+  }) =>
+      _previewRoadPathVerticesImpl(
+        sourceWidth: sourceWidth,
+        sourceHeight: sourceHeight,
+        t: t,
+      );
 
   List<List<double>> _previewLanePolygon({
     required int sourceWidth,
@@ -519,13 +785,14 @@ fi
     required double t,
     required double laneFactor,
     required double thickness,
-  }) => _previewLanePolygonImpl(
-    sourceWidth: sourceWidth,
-    sourceHeight: sourceHeight,
-    t: t,
-    laneFactor: laneFactor,
-    thickness: thickness,
-  );
+  }) =>
+      _previewLanePolygonImpl(
+        sourceWidth: sourceWidth,
+        sourceHeight: sourceHeight,
+        t: t,
+        laneFactor: laneFactor,
+        thickness: thickness,
+      );
 
   _DriveOverlaySnapshot _buildOverlayPreviewSnapshot({required int seq}) =>
       _buildOverlayPreviewSnapshotImpl(seq: seq);
@@ -538,7 +805,8 @@ fi
   Future<void> _setDisplayHighRefreshPreference(
     bool enabled, {
     required String reason,
-  }) => _setDisplayHighRefreshPreferenceImpl(enabled, reason: reason);
+  }) =>
+      _setDisplayHighRefreshPreferenceImpl(enabled, reason: reason);
 
   Future<void> _enableScreenAwake() => _enableScreenAwakeImpl();
 
@@ -567,21 +835,29 @@ fi
   Future<bool> _tryAutoBootstrapSidecar(
     SSHService ssh, {
     required Object startError,
-  }) => _tryAutoBootstrapSidecarImpl(ssh, startError: startError);
+  }) =>
+      _tryAutoBootstrapSidecarImpl(ssh, startError: startError);
 
-  Future<void> _lockLandscapeOrientations() =>
-      _lockLandscapeOrientationsImpl();
+  Future<void> _lockLandscapeOrientations() => _lockLandscapeOrientationsImpl();
 
   Future<void> _exitScreen() => _exitScreenImpl();
 
   @override
   void dispose() {
+    _isDisposing = true;
+    _detachSshListener();
+    _detachSharedOverlayRuntime();
     WidgetsBinding.instance.removeObserver(this);
+    unawaited(
+      _persistArReplaySessionIfNeeded(force: true, reason: 'dispose'),
+    );
     _stopOverlayPreviewLoop();
     _sidecarTransitionTimer?.cancel();
     _sidecarTransitionTimer = null;
     _sidecarRecoveryTimer?.cancel();
     _sidecarRecoveryTimer = null;
+    _overlayDisconnectDebounce?.cancel();
+    _overlayDisconnectDebounce = null;
     _hudNoticeTimer?.cancel();
     _hudNoticeTimer = null;
     _stopAdaptiveCameraQualityLoop(resetMode: true);
@@ -592,7 +868,9 @@ fi
     _renderTicker = null;
     unawaited(_clearNativeOverlay());
     _stopSidecarLoop();
-    unawaited(_stopSidecarProcessIfNeeded(force: true));
+    // Keep the resident sidecar alive when leaving the drive route so
+    // returning from dashboard tabs does not cold-start stock graphics again.
+    unawaited(_stopSidecarProcessIfNeeded());
     final nativeSub = _nativeCameraEventSub;
     _nativeCameraEventSub = null;
     if (nativeSub != null) {
@@ -639,17 +917,11 @@ fi
   ) =>
       _stabilizeOverlaySnapshotImpl(snapshot);
 
-  Map<String, dynamic>? _mergeSidecarOverlay2dTrackVertices({
-    required Map<String, dynamic>? current,
-    required Map<String, dynamic>? previous,
-  }) =>
-      _mergeSidecarOverlay2dTrackVerticesImpl(
-        current: current,
-        previous: previous,
-      );
-
   Uri _sidecarHttpUri(String path, [Map<String, String>? query]) =>
       _sidecarHttpUriImpl(path, query);
+
+  Uri _cameraHttpUri(String path, [Map<String, String>? query]) =>
+      _cameraHttpUriImpl(path, query);
 
   Widget _statusLine(
     String label,
@@ -676,39 +948,78 @@ fi
   Future<void> _showDebugTextDialog(String title, String content) =>
       _showDebugTextDialogImpl(title, content);
 
-
   Future<void> _debugActionHealth() => _debugActionHealthImpl();
-
 
   Future<void> _debugActionWsProbe() => _debugActionWsProbeImpl();
 
-
   Future<void> _debugActionTailLog() => _debugActionTailLogImpl();
-
 
   Future<void> _debugActionRedeploy() => _debugActionRedeployImpl();
 
+  Future<void> _debugActionLegacyMigration() =>
+      _debugActionLegacyMigrationImpl();
 
   Future<void> _debugActionRestart() => _debugActionRestartImpl();
 
+  Future<void> _debugActionInspectArScene() => _debugActionInspectArSceneImpl();
+
+  Future<void> _debugActionCaptureArReplay() =>
+      _debugActionCaptureArReplayImpl();
+
+  Future<void> _debugActionUseLatestArReplay() =>
+      _debugActionUseLatestArReplayImpl();
+
+  Future<void> _debugActionStopArReplay() => _debugActionStopArReplayImpl();
+
+  Future<void> _debugActionExportArReplay() => _debugActionExportArReplayImpl();
+
+  String _arReplayStatusLabel() => _arReplayStatusLabelImpl();
+
+  Map<String, dynamic>? _currentLiveArScenePayload() =>
+      _currentLiveArScenePayloadImpl();
+
+  Future<void> _captureArReplayFrame({
+    required Map<String, dynamic> arScenePayload,
+    int? viewId,
+    Map<String, dynamic>? nativeRenderDebug,
+    bool force = false,
+  }) =>
+      _captureArReplayFrameImpl(
+        arScenePayload: arScenePayload,
+        viewId: viewId,
+        nativeRenderDebug: nativeRenderDebug,
+        force: force,
+      );
+
+  Future<Map<String, dynamic>?> _fetchNativeArRenderDebug(int viewId) =>
+      _fetchNativeArRenderDebugImpl(viewId);
+
+  Future<void> _persistArReplaySessionIfNeeded({
+    bool force = false,
+    String? reason,
+  }) =>
+      _persistArReplaySessionIfNeededImpl(force: force, reason: reason);
+
+  void _setArReplayMode(
+    bool enabled, {
+    _DriveArReplayFrame? frame,
+  }) =>
+      _setArReplayModeImpl(enabled, frame: frame);
 
   Future<bool> _confirmDebugAction({
     required String title,
     required String message,
     String confirmText = '?ㅽ뻾',
-  }) => _confirmDebugActionImpl(
+  }) =>
+      _confirmDebugActionImpl(
         title: title,
         message: message,
         confirmText: confirmText,
       );
 
-
-  Future<void> _debugActionResetSidecar() =>
-      _debugActionResetSidecarImpl();
-
+  Future<void> _debugActionResetSidecar() => _debugActionResetSidecarImpl();
 
   String _buildDebugSnapshotText() => _buildDebugSnapshotTextImpl();
-
 
   Future<void> _copyDebugSnapshot() => _copyDebugSnapshotImpl();
 
@@ -717,15 +1028,13 @@ fi
     bool isError = false,
     Duration duration = const Duration(seconds: 2),
   }) {
-    if (!mounted) return;
     _hudNoticeTimer?.cancel();
-    setState(() {
+    _safeSetState(() {
       _hudNoticeMessage = message;
       _hudNoticeIsError = isError;
     });
     _hudNoticeTimer = Timer(duration, () {
-      if (!mounted) return;
-      setState(() {
+      _safeSetState(() {
         _hudNoticeMessage = null;
         _hudNoticeIsError = false;
       });
@@ -733,19 +1042,15 @@ fi
   }
 
   void _safeSetState(VoidCallback fn) {
-    if (!mounted) return;
+    if (!mounted || _isDisposing) return;
     setState(fn);
   }
 
-
   Future<void> _openDebugOptionsPopup() => _openDebugOptionsPopupImpl();
-
 
   Widget _buildDriveCameraSurface() => _buildDriveCameraSurfaceImpl();
 
-
   String? _cameraCenterNoticeMessage() => _cameraCenterNoticeMessageImpl();
-
 
   Widget _buildDriveModeTag(UiWindowInfo window) =>
       _buildDriveModeTagImpl(window);
@@ -753,47 +1058,59 @@ fi
   Widget _buildSidecarRevisionBadge(UiWindowInfo window) =>
       _buildSidecarRevisionBadgeImpl(window);
 
+  double _hudPreferredAspectRatioForWindow(
+    UiWindowInfo window, {
+    required bool wide,
+  }) =>
+      _hudPreferredAspectRatioForWindowImpl(window, wide: wide);
 
   double _computePortraitHudHeight(
     UiWindowInfo window,
     BoxConstraints constraints,
-  ) => _computePortraitHudHeightImpl(window, constraints);
-
+  ) =>
+      _computePortraitHudHeightImpl(window, constraints);
 
   Widget _buildPortraitHudPanel(UiWindowInfo window) =>
       _buildPortraitHudPanelImpl(window);
-
 
   bool _shouldHideHudForTinyViewport(
     UiWindowInfo window,
     BoxConstraints constraints, {
     required bool isLandscape,
-  }) => _shouldHideHudForTinyViewportImpl(
+  }) =>
+      _shouldHideHudForTinyViewportImpl(
         window,
         constraints,
         isLandscape: isLandscape,
       );
 
-
-  double _computeLandscapeHudOverlaySize(
+  double _computeLandscapeHudOverlayHeight(
     UiWindowInfo window,
     Size drawSize,
-  ) => _computeLandscapeHudOverlaySizeImpl(window, drawSize);
+  ) =>
+      _computeLandscapeHudOverlayHeightImpl(window, drawSize);
 
+  double _computeLandscapeHudOverlayWidth(
+    UiWindowInfo window,
+    double overlayHeight,
+  ) =>
+      _computeLandscapeHudOverlayWidthImpl(window, overlayHeight);
 
   Widget _buildLandscapeHudOverlay(
     UiWindowInfo window,
     Size drawSize, {
-    double? overlaySize,
-  }) => _buildLandscapeHudOverlayImpl(
-      window,
-      drawSize,
-      overlaySize: overlaySize,
-    );
+    double? overlayHeight,
+    double? overlayWidth,
+  }) =>
+      _buildLandscapeHudOverlayImpl(
+        window,
+        drawSize,
+        overlayHeight: overlayHeight,
+        overlayWidth: overlayWidth,
+      );
 
   Widget _buildDriveScaffoldBody(UiWindowInfo window) =>
       _buildDriveScaffoldBodyImpl(window);
-
 
   @override
   Widget build(BuildContext context) {
@@ -811,5 +1128,4 @@ fi
       ),
     );
   }
-
 }

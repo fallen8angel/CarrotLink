@@ -48,7 +48,7 @@ extension _LiveDriveCanvasCameraDiagComponents on _LiveDriveCanvasScreenState {
           (mounted ? Provider.of<SSHService>(context, listen: false) : null);
       final report = <String, dynamic>{
         'timestamp': now.toIso8601String(),
-        'hostIp': widget.hostIp,
+        'hostIp': _hostIp,
         'source': source,
         'reason': reason,
         'modeTag': _modeTagLabel,
@@ -67,8 +67,14 @@ extension _LiveDriveCanvasCameraDiagComponents on _LiveDriveCanvasScreenState {
         } catch (e) {
           report['sidecarHealthError'] = e.toString();
         }
+        try {
+          report['cameraHealth'] = await _cameraGetJson('/health');
+        } catch (e) {
+          report['cameraHealthError'] = e.toString();
+        }
       } else {
         report['sidecarHealth'] = 'skipped (webrtc_mode)';
+        report['cameraHealth'] = 'skipped (webrtc_mode)';
       }
 
       String tmuxTail = 'ssh_not_connected';

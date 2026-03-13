@@ -1,12 +1,14 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
-import '../../services/hud_drive_settings_service.dart';
-import '../../services/native_overlay_hud_service.dart';
+import '../../features/hud/hud.dart';
+import '../../services/hud_feature_settings_service.dart';
+import '../../services/sidecar_service.dart';
+import '../../services/ssh_service.dart';
 import '../../ui/adaptive/layout_tokens.dart';
 import '../../ui/adaptive/window_class.dart';
-import '../../widgets/custom_toast.dart';
 
 class HudSettingsScreen extends StatefulWidget {
   const HudSettingsScreen({super.key});
@@ -16,64 +18,528 @@ class HudSettingsScreen extends StatefulWidget {
 }
 
 class _HudSettingsScreenState extends State<HudSettingsScreen> {
-  bool _loading = true;
-  bool _enabled = true;
-  bool _running = false;
-  bool _hasPermission = false;
-  String _defaultDriveMode = HudDriveSettingsService.modeWebrtc;
+  final SidecarService _sidecar = SidecarService.shared;
+  final ScrollController _terminalScrollController = ScrollController();
+  static const Duration _installHudBootstrapTimeout = Duration(seconds: 8);
+  bool _busy = false;
+  final List<_StepLog> _steps = <_StepLog>[];
+  final List<String> _terminalLines = <String>[];
+
+  SSHService get _ssh => Provider.of<SSHService>(context, listen: false);
+  HudFeatureSettingsService get _featureSettings =>
+      Provider.of<HudFeatureSettingsService>(context, listen: false);
+  SharedRuntimeManager get _runtime =>
+      Provider.of<SharedRuntimeManager>(context, listen: false);
 
   @override
-  void initState() {
-    super.initState();
-    _load();
+  void dispose() {
+    _terminalScrollController.dispose();
+    super.dispose();
   }
 
-  Future<void> _load() async {
-    final enabled = await NativeOverlayHudService.isEnabled();
-    final running = await NativeOverlayHudService.isRunning();
-    final hasPermission = await NativeOverlayHudService.hasPermission();
-    final defaultDriveMode = await HudDriveSettingsService.getDefaultMode();
+  Future<void> _setFeatureEnabled(bool enabled) async {
+    if (_busy) return;
+    final ssh = _ssh;
+    setState(() {
+      _busy = true;
+      _steps.clear();
+    });
+    _clearTerminal();
+    _appendTerminal(
+      'FEATURE',
+      'HUD/Stock 기능을 ${enabled ? '활성화' : '비활성화'}합니다.',
+    );
+    try {
+      _addStep('설정 저장', status: _StepStatus.running);
+      await _featureSettings.setEnabled(enabled);
+      _updateLastStep(
+        status: _StepStatus.ok,
+        detail: 'enabled=${enabled ? 1 : 0}',
+      );
+
+      _addStep('앱 런타임 동기화', status: _StepStatus.running);
+      await _runtime.resetRuntime(
+        clearCachedSnapshots: true,
+        releaseHostSession: true,
+      );
+      if (enabled && ssh.isConnected) {
+        unawaited(_runtime.prewarm());
+        _updateLastStep(
+          status: _StepStatus.ok,
+          detail: '활성화됨 · Home HUD는 백그라운드에서 준비됩니다.',
+        );
+      } else {
+        _updateLastStep(
+          status: _StepStatus.ok,
+          detail: enabled
+              ? '활성화됨 · 기기 연결 후 Home HUD가 준비됩니다.'
+              : '비활성화됨 · Home HUD/Stock 런타임을 정리했습니다.',
+        );
+      }
+
+      if (!enabled && ssh.isConnected) {
+        _addStep('사이드카 중지', status: _StepStatus.running);
+        try {
+          final stopOut = await _sidecar.stop(ssh);
+          _appendTerminal('STOP', stopOut);
+          _updateLastStep(
+            status: _StepStatus.ok,
+            detail: _summarizeOutput(stopOut),
+          );
+        } catch (e) {
+          _appendTerminal('STOP', '$e');
+          _updateLastStep(
+            status: _StepStatus.warn,
+            detail: '중지 실패 또는 이미 종료됨',
+          );
+        }
+      }
+
+      _showSnack(
+        enabled ? 'HUD/Stock 기능을 활성화했습니다.' : 'HUD/Stock 기능을 비활성화했습니다.',
+      );
+    } catch (e) {
+      _appendTerminal('FEATURE_FAIL', '$e');
+      _updateLastStep(status: _StepStatus.fail, detail: '$e');
+      _showSnack('설정 변경 실패: $e', isError: true);
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  Future<void> _installSidecar() async {
+    if (_busy) return;
+    final ssh = _ssh;
+    if (!ssh.isConnected) {
+      _showSnack('SSH 연결이 되어있지 않습니다.', isError: true);
+      return;
+    }
+
+    final confirmed = await _confirm(
+      title: 'Stock 주행모드 설치',
+      message: '디바이스에 sidecar를 배포하고 시작한 뒤 상태를 검증합니다.\n\n'
+          '기본 동작은 재부팅 없이 설치/업데이트입니다.',
+      confirmText: '설치',
+    );
+    if (!confirmed) return;
+
+    setState(() {
+      _busy = true;
+      _steps.clear();
+    });
+    _clearTerminal();
+
+    try {
+      _appendTerminal('INSTALL', 'Stock 주행모드 설치를 시작합니다.');
+
+      _addStep('기존 상태 확인', status: _StepStatus.running);
+      try {
+        final before = await _sidecar.status(ssh);
+        _appendTerminal('STATUS_BEFORE', before);
+        _updateLastStep(
+          status: _StepStatus.ok,
+          detail: _summarizeOutput(before),
+        );
+      } catch (e) {
+        _appendTerminal('STATUS_BEFORE', '$e');
+        _updateLastStep(
+          status: _StepStatus.warn,
+          detail: '사전 상태 조회 실패',
+        );
+      }
+
+      _addStep('앱 런타임 정리', status: _StepStatus.running);
+      await _runtime.resetRuntime(
+        clearCachedSnapshots: true,
+        releaseHostSession: true,
+      );
+      _updateLastStep(
+        status: _StepStatus.ok,
+        detail: '기존 Home HUD/Stock 세션과 캐시를 정리했습니다.',
+      );
+
+      _addStep('기존 사이드카 중지', status: _StepStatus.running);
+      try {
+        final stopOut = await _sidecar.stop(ssh);
+        _appendTerminal('STOP_BEFORE_INSTALL', stopOut);
+        _updateLastStep(
+          status: _StepStatus.ok,
+          detail: _summarizeOutput(stopOut),
+        );
+      } catch (e) {
+        _appendTerminal('STOP_BEFORE_INSTALL', '$e');
+        _updateLastStep(
+          status: _StepStatus.warn,
+          detail: '중지 실패 또는 이미 종료됨',
+        );
+      }
+
+      _addStep('최신 파일 배포', status: _StepStatus.running);
+      final deployOut = await _sidecar.deploy(ssh);
+      _appendTerminal('DEPLOY', deployOut);
+      _updateLastStep(
+        status: _StepStatus.ok,
+        detail: deployOut.trim(),
+      );
+
+      _addStep('사이드카 시작', status: _StepStatus.running);
+      final startOut = await _sidecar.start(
+        ssh,
+        profile: SidecarService.hudBootstrapProfile,
+      );
+      _appendTerminal('START', startOut);
+      _updateLastStep(
+        status: _StepStatus.ok,
+        detail: _summarizeOutput(startOut),
+      );
+
+      _addStep('상태 검증', status: _StepStatus.running);
+      final verify = await Future.wait<String>([
+        _sidecar.status(ssh),
+        _sidecar.criticalProcStatus(ssh),
+      ]);
+      _appendTerminal('STATUS_AFTER', verify[0]);
+      _appendTerminal('CRITICAL_PROCS', verify[1]);
+      _updateLastStep(
+        status: _StepStatus.ok,
+        detail: _summarizeOutput(verify[0]),
+      );
+
+      _addStep('새 런타임 재바인드 준비', status: _StepStatus.running);
+        await _runtime.resetRuntime(
+          clearCachedSnapshots: true,
+          releaseHostSession: true,
+        );
+      _updateLastStep(
+        status: _StepStatus.ok,
+        detail: '설치된 sidecar 기준으로 새 HUD 세션을 준비합니다.',
+      );
+
+      if (_featureSettings.enabled) {
+        _addStep('Home HUD 재연결', status: _StepStatus.running);
+        await _runtime.prewarm();
+        final host = (ssh.connectedIp ?? ssh.targetIp ?? '').trim();
+        final snapshot = await _waitForMeaningfulHudSnapshot(
+          host: host,
+          timeout: _installHudBootstrapTimeout,
+        );
+        if (snapshot != null) {
+          final speedText = snapshot.vehicle.speedClusterKph == null
+              ? '--'
+              : '${snapshot.vehicle.speedClusterKph!.round()}';
+          _appendTerminal(
+            'HUD_READY',
+            'transport=${snapshot.source.transport} speed=$speedText '
+                'cpu=${snapshot.device.cpuTempAvgC?.toStringAsFixed(0) ?? "--"} '
+                'mem=${snapshot.device.memUsagePct?.toStringAsFixed(0) ?? "--"} '
+                'volt=${snapshot.device.voltV?.toStringAsFixed(1) ?? "--"}',
+          );
+          _updateLastStep(
+            status: _StepStatus.ok,
+            detail: '첫 HUD 값이 확인되었습니다.',
+          );
+        } else {
+          _appendTerminal(
+            'HUD_READY',
+            '첫 HUD 값 확인 지연: ${_installHudBootstrapTimeout.inSeconds}s timeout',
+          );
+          _updateLastStep(
+            status: _StepStatus.warn,
+            detail: '설치는 완료됐지만 첫 HUD 값 확인이 지연되고 있습니다.',
+          );
+        }
+      } else {
+        _addStep('기능 비활성 상태 유지', status: _StepStatus.running);
+        _updateLastStep(
+          status: _StepStatus.ok,
+          detail: '기능이 꺼져 있어 런타임은 정지 상태로 유지합니다.',
+        );
+      }
+
+      _showSnack('Stock 주행모드 설치가 완료되었습니다.');
+    } catch (e) {
+      _appendTerminal('INSTALL_FAIL', '$e');
+      _updateLastStep(status: _StepStatus.fail, detail: '$e');
+      _showSnack('설치 실패: $e', isError: true);
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  Future<void> _deleteSidecar() async {
+    if (_busy) return;
+    final ssh = _ssh;
+    if (!ssh.isConnected) {
+      _showSnack('SSH 연결이 되어있지 않습니다.', isError: true);
+      return;
+    }
+
+    final confirmed = await _confirm(
+      title: 'Stock 주행모드 삭제',
+      message: '디바이스에서 sidecar 파일과 현재 실행 흔적을 제거합니다.\n\n'
+          'openpilot 전체 재부팅은 수행하지 않습니다.',
+      confirmText: '삭제',
+    );
+    if (!confirmed) return;
+
+    setState(() {
+      _busy = true;
+      _steps.clear();
+    });
+    _clearTerminal();
+
+    try {
+      _appendTerminal('DELETE', 'Stock 주행모드 삭제를 시작합니다.');
+
+      _addStep('사이드카 중지', status: _StepStatus.running);
+      try {
+        final stopOut = await _sidecar.stop(ssh);
+        _appendTerminal('STOP', stopOut);
+        _updateLastStep(
+          status: _StepStatus.ok,
+          detail: _summarizeOutput(stopOut),
+        );
+      } catch (e) {
+        _appendTerminal('STOP', '$e');
+        _updateLastStep(
+          status: _StepStatus.warn,
+          detail: '중지 실패 또는 이미 종료됨',
+        );
+      }
+
+      _addStep('파일/흔적 삭제', status: _StepStatus.running);
+      final resetOut = await _sidecar.resetForTesting(
+        ssh,
+        removeManagerRegistration: true,
+        skipStop: true,
+      );
+      _appendTerminal('RESET', resetOut);
+      _updateLastStep(
+        status: _StepStatus.ok,
+        detail: _summarizeOutput(resetOut),
+      );
+
+      _addStep('앱 런타임 정리', status: _StepStatus.running);
+      await _runtime.resetRuntime(
+        clearCachedSnapshots: true,
+        releaseHostSession: true,
+      );
+      _updateLastStep(
+        status: _StepStatus.ok,
+        detail: 'Home HUD/Stock 캐시를 정리했습니다.',
+      );
+
+      if (_featureSettings.enabled) {
+        _addStep('기능 상태 안내', status: _StepStatus.running);
+        _updateLastStep(
+          status: _StepStatus.warn,
+          detail: '기능은 켜져 있습니다. 재사용하려면 다시 설치가 필요합니다.',
+        );
+      }
+
+      _addStep('삭제 후 상태 확인', status: _StepStatus.running);
+      try {
+        final after = await _sidecar.status(ssh);
+        _appendTerminal('STATUS_AFTER_DELETE', after);
+        _updateLastStep(
+          status: _StepStatus.ok,
+          detail: _summarizeOutput(after),
+        );
+      } catch (e) {
+        _appendTerminal('STATUS_AFTER_DELETE', '$e');
+        _updateLastStep(
+          status: _StepStatus.warn,
+          detail: '삭제 후 상태 조회 실패',
+        );
+      }
+
+      _showSnack('Stock 주행모드를 삭제했습니다.');
+    } catch (e) {
+      _appendTerminal('DELETE_FAIL', '$e');
+      _updateLastStep(status: _StepStatus.fail, detail: '$e');
+      _showSnack('삭제 실패: $e', isError: true);
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  void _clearTerminal() {
+    if (!mounted) return;
+    setState(() => _terminalLines.clear());
+  }
+
+  void _appendTerminal(String section, String output) {
+    final now = DateTime.now();
+    String two(int value) => value.toString().padLeft(2, '0');
+    final stamp =
+        '${two(now.hour)}:${two(now.minute)}:${two(now.second)}.${now.millisecond.toString().padLeft(3, '0')}';
+    final normalized = output.trim().isEmpty ? '(출력 없음)' : output.trim();
     if (!mounted) return;
     setState(() {
-      _enabled = enabled;
-      _running = running;
-      _hasPermission = hasPermission;
-      _defaultDriveMode = defaultDriveMode;
-      _loading = false;
+      _terminalLines.add('[$stamp] $section');
+      _terminalLines.add(normalized);
+      _terminalLines.add('');
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_terminalScrollController.hasClients) return;
+      _terminalScrollController.animateTo(
+        _terminalScrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+      );
     });
   }
 
-  Future<void> _toggle(bool next) async {
-    setState(() => _enabled = next);
-    await NativeOverlayHudService.setEnabled(next);
-    if (!next) {
-      await NativeOverlayHudService.stop();
-      if (mounted) {
-        CustomToast.show(context, 'HUD 오버레이를 비활성화했습니다.');
-      }
-    } else {
-      if (mounted) {
-        CustomToast.show(context, 'HUD 오버레이를 활성화했습니다.');
-      }
-    }
-    await _load();
+  String _summarizeOutput(String output) {
+    final lines = output
+        .split('\n')
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .toList(growable: false);
+    if (lines.isEmpty) return '(출력 없음)';
+    final picked = lines
+        .where(
+          (line) =>
+              line.startsWith('SIDECAR_') ||
+              line.startsWith('running=') ||
+              line.startsWith('listening=') ||
+              line.startsWith('port_') ||
+              line.startsWith('base=') ||
+              line.startsWith('remote_revision='),
+        )
+        .toList(growable: false);
+    final source = picked.isEmpty ? lines.take(3).toList() : picked.take(4).toList();
+    return source.join(' | ');
   }
 
-  Future<void> _requestPermission() async {
-    await NativeOverlayHudService.requestPermission();
-    await Future<void>.delayed(const Duration(milliseconds: 250));
-    await _load();
-  }
-
-  Future<void> _changeDefaultMode(String value) async {
-    if (value == _defaultDriveMode) return;
-    await HudDriveSettingsService.setDefaultMode(value);
+  void _addStep(String label, {_StepStatus status = _StepStatus.pending}) {
     if (!mounted) return;
-    setState(() => _defaultDriveMode = value);
-    final label = value == HudDriveSettingsService.modeOpenpilotOverlay
-        ? '오픈파일럿 그래픽'
-        : 'WebRTC';
-    CustomToast.show(context, 'HUD 기본 모드를 $label(으)로 설정했습니다.');
+    setState(() {
+      _steps.add(_StepLog(label: label, status: status, detail: null));
+    });
+  }
+
+  void _updateLastStep({required _StepStatus status, String? detail}) {
+    if (!mounted || _steps.isEmpty) return;
+    setState(() {
+      final last = _steps.last;
+      _steps[_steps.length - 1] = _StepLog(
+        label: last.label,
+        status: status,
+        detail: detail,
+      );
+    });
+  }
+
+  void _showSnack(String message, {bool isError = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: isError ? Theme.of(context).colorScheme.error : null,
+        behavior: SnackBarBehavior.floating,
+        duration: Duration(seconds: isError ? 5 : 3),
+      ),
+    );
+  }
+
+  Future<bool> _confirm({
+    required String title,
+    required String message,
+    required String confirmText,
+  }) async {
+    return await showDialog<bool>(
+          context: context,
+          builder: (ctx) {
+            final scheme = Theme.of(ctx).colorScheme;
+            return AlertDialog(
+              title: Text(title),
+              content: SingleChildScrollView(
+                child: Text(message, style: const TextStyle(height: 1.45)),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('취소'),
+                ),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: scheme.error,
+                  ),
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: Text(confirmText),
+                ),
+              ],
+            );
+          },
+        ) ??
+         false;
+  }
+
+  Future<OriginalHudSnapshot?> _waitForMeaningfulHudSnapshot({
+    required String host,
+    required Duration timeout,
+  }) async {
+    final normalizedHost = host.trim();
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      final snapshot = _runtime.state.snapshot;
+      if (_isMeaningfulHudSnapshot(snapshot, expectedHost: normalizedHost)) {
+        return snapshot;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+    }
+    final lastSnapshot = _runtime.state.snapshot;
+    if (_isMeaningfulHudSnapshot(lastSnapshot, expectedHost: normalizedHost)) {
+      return lastSnapshot;
+    }
+    return null;
+  }
+
+  bool _isMeaningfulHudSnapshot(
+    OriginalHudSnapshot snapshot, {
+    required String expectedHost,
+  }) {
+    if (snapshot.tsMonoMs <= 0 || snapshot.meta.isPreview) {
+      return false;
+    }
+    final snapshotHost = (snapshot.source.deviceHost ?? '').trim();
+    if (expectedHost.isNotEmpty &&
+        snapshotHost.isNotEmpty &&
+        snapshotHost != expectedHost) {
+      return false;
+    }
+    final normalizedTransport = snapshot.source.transport.trim().toLowerCase();
+    if (normalizedTransport != 'sidecar_hud' &&
+        normalizedTransport != 'carrot_linkhud') {
+      return false;
+    }
+
+    final vehicle = snapshot.vehicle;
+    final device = snapshot.device;
+    final hasVehicleCore = vehicle.speedClusterKph != null ||
+        vehicle.setSpeedClusterKph != null ||
+        !_isUnknownGear(vehicle.gearText);
+    final hasDeviceMetrics = device.cpuTempAvgC != null ||
+        device.memUsagePct != null ||
+        device.diskUsedPct != null ||
+        device.voltV != null;
+    final hasAssistSignal = snapshot.tempControl.mode != 'hidden' ||
+        snapshot.limits.mode != 'hidden' ||
+        snapshot.connectivity.badgeMode.trim().isNotEmpty ||
+        snapshot.signals.visualState.trim().isNotEmpty;
+    return hasVehicleCore || hasDeviceMetrics || hasAssistSignal;
+  }
+
+  bool _isUnknownGear(String value) {
+    final normalized = value.trim().toUpperCase();
+    return normalized.isEmpty || normalized == 'U' || normalized == 'X';
   }
 
   @override
@@ -81,132 +547,308 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
     final window = UiWindowInfo.of(context);
     final tokens = UiLayoutTokens.of(context);
     final scheme = Theme.of(context).colorScheme;
-    return Scaffold(
-      appBar: AppBar(title: const Text('HUD')),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : ListView(
-              padding: EdgeInsets.only(
-                left: tokens.screenPadding.clamp(12.0, 24.0).toDouble(),
-                right: tokens.screenPadding.clamp(12.0, 24.0).toDouble(),
-                bottom: tokens.footerSpacer,
-              ),
-              children: [
-                SwitchListTile.adaptive(
-                  value: _enabled,
-                  onChanged: _toggle,
-                  title: const Text('HUD 오버레이 사용'),
-                  subtitle: const Text('앱이 백그라운드일 때 HUD 오버레이 표시'),
-                ),
-                const Divider(height: 1),
-                ListTile(
-                  leading: Icon(
-                    _hasPermission ? Icons.check_circle : Icons.warning_amber,
-                    color: _hasPermission ? Colors.green : Colors.orange,
+    final textTheme = Theme.of(context).textTheme;
+
+    return Consumer<HudFeatureSettingsService>(
+      builder: (context, featureSettings, _) {
+        final enabled = featureSettings.enabled;
+        return Scaffold(
+          appBar: AppBar(title: const Text('HUD')),
+          body: ListView(
+            padding: EdgeInsets.only(
+              left: tokens.screenPadding.clamp(12.0, 24.0).toDouble(),
+              right: tokens.screenPadding.clamp(12.0, 24.0).toDouble(),
+              top: 14.0,
+              bottom: tokens.footerSpacer,
+            ),
+            children: [
+              _sectionHeader(context, Icons.toggle_on_rounded, '기능 상태'),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainerHigh.withValues(alpha: 0.7),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: scheme.outlineVariant.withValues(alpha: 0.3),
+                    ),
                   ),
-                  title: const Text('다른 앱 위에 표시 권한'),
-                  subtitle: Text(_hasPermission ? '허용됨' : '권한 필요'),
-                  trailing: TextButton(
-                    onPressed: _requestPermission,
-                    child: const Text('권한 설정'),
-                  ),
-                ),
-                const Divider(height: 1),
-                ListTile(
-                  leading: Icon(
-                    _running ? Icons.visibility : Icons.visibility_off,
-                    color: _running ? Colors.green : scheme.onSurfaceVariant,
-                  ),
-                  title: const Text('현재 오버레이 상태'),
-                  subtitle: Text(_running ? '실행 중' : '중지됨'),
-                  trailing: IconButton(
-                    tooltip: '새로고침',
-                    onPressed: _load,
-                    icon: const Icon(Icons.refresh),
-                  ),
-                ),
-                const Divider(height: 1),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(4, 14, 4, 6),
-                  child: Row(
-                    children: [
-                      Icon(
-                        Icons.tune,
-                        size: 18,
+                  child: SwitchListTile.adaptive(
+                    value: enabled,
+                    onChanged: _busy ? null : _setFeatureEnabled,
+                    title: const Text('HUD / Stock 활성화'),
+                    subtitle: Text(
+                      enabled
+                          ? 'Home HUD와 Stock 주행모드를 사용할 수 있습니다.'
+                          : '기본값은 비활성입니다. Home HUD는 안내 화면만 표시되고 Stock 진입은 차단됩니다.',
+                      style: textTheme.bodySmall?.copyWith(
                         color: scheme.onSurfaceVariant,
+                        height: 1.45,
                       ),
-                      const SizedBox(width: 6),
-                      Text(
-                        '사이드카 기본 진입 모드',
-                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                              fontWeight: FontWeight.w600,
-                            ),
-                      ),
+                    ),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 8, 8, 20),
+                child: Text(
+                  '설치/삭제는 수동 작업입니다. 토글 ON만으로는 sidecar를 자동 설치하지 않습니다.',
+                  style: TextStyle(
+                    fontSize: window.isCompact ? 11.5 : 12.0,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+
+              _sectionHeader(
+                context,
+                Icons.developer_board_rounded,
+                'Stock 주행모드 관리',
+              ),
+              const SizedBox(height: 4),
+              _actionCard(
+                context,
+                icon: Icons.download_done_rounded,
+                iconColor: scheme.primary,
+                title: 'Stock 주행모드 설치',
+                subtitle: 'sidecar 배포 → 시작 → 상태 검증',
+                onTap: _busy ? null : _installSidecar,
+                destructive: false,
+              ),
+              const SizedBox(height: 8),
+              _actionCard(
+                context,
+                icon: Icons.delete_forever_rounded,
+                iconColor: scheme.error,
+                title: 'Stock 주행모드 삭제',
+                subtitle: 'sidecar 중지 → 파일/흔적 제거 → 런타임 정리',
+                onTap: _busy ? null : _deleteSidecar,
+                destructive: true,
+              ),
+
+              if (_steps.isNotEmpty) ...[
+                const SizedBox(height: 20),
+                _sectionHeader(context, Icons.playlist_add_check, '작업 요약'),
+                const SizedBox(height: 4),
+                Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 4),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (final step in _steps) _buildStepRow(context, step),
                     ],
                   ),
                 ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(4, 0, 4, 4),
-                  child: LayoutBuilder(
-                    builder: (context, constraints) {
-                      final compact =
-                          window.isCompact || constraints.maxWidth < 520;
-                      if (!compact) {
-                        return SegmentedButton<String>(
-                          segments: const <ButtonSegment<String>>[
-                            ButtonSegment<String>(
-                              value: HudDriveSettingsService.modeWebrtc,
-                              label: Text('WebRTC'),
-                            ),
-                            ButtonSegment<String>(
-                              value:
-                                  HudDriveSettingsService.modeOpenpilotOverlay,
-                              label: Text('오픈파일럿 그래픽'),
-                            ),
-                          ],
-                          selected: <String>{_defaultDriveMode},
-                          onSelectionChanged: (selected) {
-                            if (selected.isEmpty) return;
-                            unawaited(_changeDefaultMode(selected.first));
-                          },
-                        );
-                      }
+              ],
 
-                      return Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          ChoiceChip(
-                            label: const Text('WebRTC'),
-                            selected: _defaultDriveMode ==
-                                HudDriveSettingsService.modeWebrtc,
-                            onSelected: (_) => unawaited(_changeDefaultMode(
-                                HudDriveSettingsService.modeWebrtc)),
-                          ),
-                          ChoiceChip(
-                            label: const Text('오픈파일럿 그래픽'),
-                            selected: _defaultDriveMode ==
-                                HudDriveSettingsService.modeOpenpilotOverlay,
-                            onSelected: (_) => unawaited(_changeDefaultMode(
-                                HudDriveSettingsService.modeOpenpilotOverlay)),
-                          ),
-                        ],
-                      );
-                    },
+              if (_terminalLines.isNotEmpty) ...[
+                const SizedBox(height: 20),
+                _sectionHeader(context, Icons.terminal_rounded, '터미널 로그'),
+                const SizedBox(height: 4),
+                Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 4),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF09121A),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: scheme.outlineVariant.withValues(alpha: 0.32),
+                    ),
                   ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(4, 0, 4, 12),
-                  child: Text(
-                    'WebRTC: 카메라만 표시, 오픈파일럿 그래픽: 카메라 + 그래픽 오버레이',
-                    style: TextStyle(
-                      fontSize: window.isCompact ? 11.5 : 12.0,
-                      color: scheme.onSurfaceVariant,
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 340),
+                    child: Scrollbar(
+                      controller: _terminalScrollController,
+                      thumbVisibility: true,
+                      child: SingleChildScrollView(
+                        controller: _terminalScrollController,
+                        padding: const EdgeInsets.all(14),
+                        child: SelectableText(
+                          _terminalLines.join('\n'),
+                          style: textTheme.bodySmall?.copyWith(
+                            color: const Color(0xFFD6E2EA),
+                            fontFamily: 'monospace',
+                            height: 1.35,
+                            fontSize: 11.5,
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                 ),
               ],
-            ),
+
+              const SizedBox(height: 24),
+            ],
+          ),
+        );
+      },
     );
   }
+
+  Widget _buildStepRow(BuildContext context, _StepLog step) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
+    final (IconData icon, Color color) = switch (step.status) {
+      _StepStatus.pending => (Icons.circle_outlined, scheme.onSurfaceVariant),
+      _StepStatus.running => (Icons.sync_rounded, scheme.primary),
+      _StepStatus.ok => (Icons.check_circle_rounded, Colors.green),
+      _StepStatus.warn => (Icons.warning_amber_rounded, Colors.orange),
+      _StepStatus.fail => (Icons.error_rounded, scheme.error),
+    };
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              step.status == _StepStatus.running
+                  ? SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: color,
+                      ),
+                    )
+                  : Icon(icon, size: 16, color: color),
+              const SizedBox(width: 8),
+              Text(
+                step.label,
+                style: textTheme.bodyMedium?.copyWith(
+                  fontWeight: FontWeight.w600,
+                  color: color,
+                ),
+              ),
+            ],
+          ),
+          if (step.detail != null && step.detail!.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(left: 24, top: 2),
+              child: Text(
+                step.detail!,
+                style: textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _sectionHeader(BuildContext context, IconData icon, String label) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 14, 4, 6),
+      child: Row(
+        children: [
+          Icon(icon, size: 18, color: scheme.onSurfaceVariant),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: Theme.of(context)
+                .textTheme
+                .titleSmall
+                ?.copyWith(fontWeight: FontWeight.w600),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _actionCard(
+    BuildContext context, {
+    required IconData icon,
+    required Color iconColor,
+    required String title,
+    required String subtitle,
+    required VoidCallback? onTap,
+    required bool destructive,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Material(
+        color: scheme.surfaceContainerHigh.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(14),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            child: Row(
+              children: [
+                Icon(
+                  icon,
+                  size: 24,
+                  color: onTap == null
+                      ? scheme.onSurfaceVariant.withValues(alpha: 0.4)
+                      : iconColor,
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w600,
+                          color: onTap == null
+                              ? scheme.onSurface.withValues(alpha: 0.4)
+                              : (destructive ? scheme.error : scheme.onSurface),
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle,
+                        style: textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant.withValues(
+                            alpha: onTap == null ? 0.4 : 0.8,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(
+                  Icons.chevron_right_rounded,
+                  size: 20,
+                  color: scheme.onSurfaceVariant.withValues(
+                    alpha: onTap == null ? 0.3 : 0.6,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+enum _StepStatus { pending, running, ok, warn, fail }
+
+class _StepLog {
+  const _StepLog({
+    required this.label,
+    required this.status,
+    this.detail,
+  });
+
+  final String label;
+  final _StepStatus status;
+  final String? detail;
 }

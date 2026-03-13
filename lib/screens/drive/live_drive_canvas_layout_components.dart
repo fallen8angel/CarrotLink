@@ -91,6 +91,10 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
       foregroundColor: const Color(0xFFFFB07A),
       child: const Icon(Icons.tune_rounded),
     );
+    final quickControls = _buildViewportZoomQuickControls(
+      debugFab: debugFab,
+      isLandscapeLayout: isLandscapeLayout,
+    );
 
     if (isLandscapeLayout || hideHudForTinyViewport) {
       return Stack(
@@ -100,7 +104,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
             Positioned(
               right: fabInset,
               bottom: fabBottom,
-              child: debugFab,
+              child: quickControls,
             ),
         ],
       );
@@ -118,7 +122,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                 Positioned(
                   right: fabInset,
                   bottom: fabBottom,
-                  child: debugFab,
+                  child: quickControls,
                 ),
             ],
           ),
@@ -155,6 +159,69 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildViewportZoomQuickControls({
+    required Widget debugFab,
+    required bool isLandscapeLayout,
+  }) {
+    final spacing = isLandscapeLayout ? 8.0 : 7.0;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ..._DriveViewportZoomPreset.values.map(
+          (preset) => Padding(
+            padding: EdgeInsets.only(right: spacing),
+            child: _buildViewportZoomButton(preset),
+          ),
+        ),
+        debugFab,
+      ],
+    );
+  }
+
+  Widget _buildViewportZoomButton(_DriveViewportZoomPreset preset) {
+    final active = _viewportZoomPreset == preset;
+    return Tooltip(
+      message: preset.tooltip,
+      child: Material(
+        color: active ? const Color(0xFFE88C53) : const Color(0xCC2A1A12),
+        borderRadius: BorderRadius.circular(18),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(18),
+          onTap: () => _setViewportZoomPreset(preset),
+          child: SizedBox(
+            width: 36,
+            height: 36,
+            child: Icon(
+              preset.icon,
+              size: 18,
+              color: active ? Colors.white : const Color(0xFFFFB07A),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildViewportEdgeGradientOverlay() {
+    return const IgnorePointer(
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            stops: [0.0, 0.14, 0.86, 1.0],
+            colors: [
+              Color(0x5C000000),
+              Color(0x00000000),
+              Color(0x00000000),
+              Color(0x42000000),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -242,12 +309,14 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
           snapshot: _overlayNotifier.value,
           cameraKind: _liveCameraKind,
           coverViewport: _coverViewport,
+          viewportZoom: _viewportPlacementZoom,
           openpilotTransform: _openpilotOverlayMode,
         );
         final drawW = placement.width;
         final drawH = placement.height;
         final left = placement.left;
         final top = placement.top;
+        final showViewportEdgeGradient = !_debugOverlayPreviewMode;
         final fullSurfaceRect = Rect.fromLTWH(0.0, 0.0, drawW, drawH);
         final visibleViewportRect =
             Rect.fromLTWH(-left, -top, vw, vh).intersect(fullSurfaceRect);
@@ -267,14 +336,16 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
           UiWindowClass.compact => math.min(vw - (overlayInset * 2), 520.0),
           UiWindowClass.medium => math.min(vw * 0.72, 620.0),
           UiWindowClass.expanded => math.min(vw * 0.62, 700.0),
-          UiWindowClass.large || UiWindowClass.extraLarge =>
+          UiWindowClass.large ||
+          UiWindowClass.extraLarge =>
             math.min(vw * 0.52, 760.0),
         };
         final verifyPanelWidth = switch (window.windowClass) {
           UiWindowClass.compact => math.min(vw * 0.58, 420.0),
           UiWindowClass.medium => math.min(vw * 0.52, 470.0),
           UiWindowClass.expanded => math.min(vw * 0.45, 520.0),
-          UiWindowClass.large || UiWindowClass.extraLarge =>
+          UiWindowClass.large ||
+          UiWindowClass.extraLarge =>
             math.min(vw * 0.38, 580.0),
         };
         final statusBannerPaddingH = switch (window.windowClass) {
@@ -336,32 +407,37 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
             centerNoticeMessage != null && !_debugOverlayPreviewMode;
         final showBottomStatusBanners = !hasCenterNotice;
         final drawSize = Size(drawW, drawH);
-        final landscapeHudSize = isLandscapeLayout && !hideHudForTinyViewport
-            ? _computeLandscapeHudOverlaySize(window, drawSize)
+        final landscapeHudHeight = isLandscapeLayout && !hideHudForTinyViewport
+            ? _computeLandscapeHudOverlayHeight(window, drawSize)
+            : 0.0;
+        final landscapeHudWidth = landscapeHudHeight > 0
+            ? _computeLandscapeHudOverlayWidth(window, landscapeHudHeight)
             : 0.0;
         final landscapeHudLeftBound = math.max(
           overlayInset,
-          vw - landscapeHudSize - overlayInset,
+          vw - landscapeHudWidth - overlayInset,
         );
         final landscapeHudTopBound = math.max(
           overlayInset,
-          vh - landscapeHudSize - overlayInset,
+          vh - landscapeHudHeight - overlayInset,
         );
         final landscapeHudLeft = (left + overlayInset)
             .clamp(overlayInset, landscapeHudLeftBound)
             .toDouble();
         final landscapeHudTop =
-            (top + drawH - landscapeHudSize - overlayInset)
+            (top + drawH - landscapeHudHeight - overlayInset)
                 .clamp(overlayInset, landscapeHudTopBound)
                 .toDouble();
-        final nativeViewportRectChanged =
-            (_nativeOverlayVisibleViewportRect.left - visibleViewportRect.left)
+        final nativeViewportRectChanged = (_nativeOverlayVisibleViewportRect
+                            .left -
+                        visibleViewportRect.left)
                     .abs() >
                 0.5 ||
             (_nativeOverlayVisibleViewportRect.top - visibleViewportRect.top)
                     .abs() >
                 0.5 ||
-            (_nativeOverlayVisibleViewportRect.width - visibleViewportRect.width)
+            (_nativeOverlayVisibleViewportRect.width -
+                        visibleViewportRect.width)
                     .abs() >
                 0.5 ||
             (_nativeOverlayVisibleViewportRect.height -
@@ -402,6 +478,10 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                     Positioned.fill(
                       child: _buildDriveCameraSurface(),
                     ),
+                    if (showViewportEdgeGradient)
+                      Positioned.fill(
+                        child: _buildViewportEdgeGradientOverlay(),
+                      ),
                     if (_debugShowArOverlay &&
                         ((_openpilotOverlayMode &&
                                 !_useNativeOverlayRenderer) ||
@@ -418,6 +498,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                                   sourceSize: _cameraSourceSize,
                                   cameraKind: _liveCameraKind,
                                   coverViewport: _coverViewport,
+                                  viewportZoom: _viewportPlacementZoom,
                                   visibleViewportRect: visibleViewportRect,
                                   showDebugGuides:
                                       _overlayVerifyMode && _debugShowGuides,
@@ -509,7 +590,8 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                     child: _buildLandscapeHudOverlay(
                       window,
                       drawSize,
-                      overlaySize: landscapeHudSize,
+                      overlayHeight: landscapeHudHeight,
+                      overlayWidth: landscapeHudWidth,
                     ),
                   ),
                 ),
@@ -545,15 +627,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                             Row(
                               children: [
                                 Icon(
-                                  _sidecarPhase == _SidecarPhase.failed
-                                      ? Icons.error_outline
-                                      : (_sidecarPhase ==
-                                              _SidecarPhase.stopping
-                                          ? Icons.stop_circle_outlined
-                                          : (_sidecarPhase ==
-                                                  _SidecarPhase.running
-                                              ? Icons.check_circle_outline
-                                              : Icons.hourglass_top_rounded)),
+                                  _sidecarStatusIcon(),
                                   color: Colors.white,
                                   size: statusBannerIconSize,
                                 ),
@@ -572,14 +646,13 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                                 ),
                               ],
                             ),
-                            if (_sidecarPhase == _SidecarPhase.failed &&
-                                (_sidecarPhaseMessage ?? '').trim().isNotEmpty)
+                            if (_sidecarStatusDetailMessage() != null)
                               Padding(
                                 padding: EdgeInsets.only(
                                   top: statusBannerGap * 0.5,
                                 ),
                                 child: Text(
-                                  _sidecarPhaseMessage!.trim(),
+                                  _sidecarStatusDetailMessage()!,
                                   maxLines: 2,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(

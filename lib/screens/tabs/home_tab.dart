@@ -5,9 +5,10 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:provider/provider.dart';
 import '../../services/ssh_service.dart';
 import '../../services/github_service.dart';
+import '../../services/hud_feature_settings_service.dart';
 import '../../services/native_overlay_hud_service.dart';
 import '../../widgets/custom_toast.dart';
-import '../../widgets/home_hud_preview_card.dart';
+import '../../features/hud/hud.dart';
 import '../drive/live_drive_canvas_screen.dart';
 import '../../ui/adaptive/layout_tokens.dart';
 import '../../ui/adaptive/window_class.dart';
@@ -34,10 +35,6 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   bool _appForeground = true;
   Timer? _prereqTimer;
   Timer? _overlaySyncTimer;
-  Timer? _hudFallbackTimer;
-  double? _fallbackCpuTempC;
-  double? _fallbackMemPct;
-  double? _fallbackDiskPct;
 
   @override
   void initState() {
@@ -61,7 +58,6 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _prereqTimer?.cancel();
     _overlaySyncTimer?.cancel();
-    _hudFallbackTimer?.cancel();
     super.dispose();
   }
 
@@ -83,6 +79,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   }
 
   bool get _realtimeWorkEnabled => widget.isActive && _appForeground;
+  bool get _hudKeepAliveEnabled => _appForeground;
 
   void _applyRealtimeWorkState({bool forceRefresh = false}) {
     if (_realtimeWorkEnabled) {
@@ -96,15 +93,10 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
           (_) => unawaited(_syncOverlayEndpoint()),
         );
       }
-      _hudFallbackTimer ??= Timer.periodic(
-        const Duration(seconds: 5),
-        (_) => unawaited(_refreshHudFallbackMetrics()),
-      );
       if (forceRefresh) {
         unawaited(_refreshConnectionPrerequisites());
         unawaited(_refreshStatus());
         unawaited(_syncOverlayEndpoint(forceProbe: true));
-        unawaited(_refreshHudFallbackMetrics());
       }
       return;
     }
@@ -113,8 +105,6 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     _prereqTimer = null;
     _overlaySyncTimer?.cancel();
     _overlaySyncTimer = null;
-    _hudFallbackTimer?.cancel();
-    _hudFallbackTimer = null;
   }
 
   Future<void> _refreshStatus() async {
@@ -189,8 +179,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   }
 
   String? _currentDeviceHost(SSHService ssh) {
-    return NativeOverlayHudService.normalizeHost(
-        ssh.connectedIp ?? ssh.targetIp);
+    return NativeOverlayHudService.normalizeHost(ssh.connectedIp);
   }
 
   Future<void> _syncOverlayEndpoint({bool forceProbe = false}) async {
@@ -222,49 +211,18 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _refreshHudFallbackMetrics() async {
-    if (!_realtimeWorkEnabled) return;
-    if (!mounted) return;
-    final ssh = Provider.of<SSHService>(context, listen: false);
-    if (!ssh.isConnected) return;
-    final metrics = await ssh.getHudFallbackMetrics();
-    if (metrics == null) return;
-
-    if (NativeOverlayHudService.isSupported) {
-      final overlayEnabled = await NativeOverlayHudService.isEnabled();
-      if (!overlayEnabled) {
-        return;
-      }
-      final overlayRunning = await NativeOverlayHudService.isRunning();
-      if (!overlayRunning) {
-        return;
-      }
-      await NativeOverlayHudService.updateFallbackMetrics(
-        cpuTempC: metrics.cpuTempC,
-        memPct: metrics.memPct,
-        diskPct: metrics.diskPct,
-      );
-    }
-
-    if (!mounted) return;
-    final sameCpu = _fallbackCpuTempC == metrics.cpuTempC;
-    final sameMem = _fallbackMemPct == metrics.memPct;
-    final sameDisk = _fallbackDiskPct == metrics.diskPct;
-    if (sameCpu && sameMem && sameDisk) return;
-    setState(() {
-      _fallbackCpuTempC = metrics.cpuTempC;
-      _fallbackMemPct = metrics.memPct;
-      _fallbackDiskPct = metrics.diskPct;
-    });
-  }
-
-  Future<void> _openWebRtcView(SSHService ssh) async {
-    final host = (ssh.connectedIp ?? ssh.targetIp ?? '').trim();
-    if (host.isEmpty) {
-      CustomToast.show(context, '연결 IP를 먼저 확인하세요.', isError: true);
+  Future<void> _openDriveView(SSHService ssh) async {
+    final featureSettings =
+        Provider.of<HudFeatureSettingsService>(context, listen: false);
+    if (!featureSettings.enabled) {
+      CustomToast.show(context, 'HUD/Stock 기능이 비활성화되어 있습니다.', isError: true);
       return;
     }
-
+    final host = (ssh.connectedIp ?? '').trim();
+    if (host.isEmpty) {
+      CustomToast.show(context, 'SSH 연결이 완료된 뒤 열 수 있습니다.', isError: true);
+      return;
+    }
     if (!mounted) return;
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -277,8 +235,9 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final tokens = UiLayoutTokens.of(context);
     final window = UiWindowInfo.of(context);
-    return Consumer<SSHService>(
-      builder: (context, ssh, child) {
+    return Consumer2<SSHService, HudFeatureSettingsService>(
+      builder: (context, ssh, featureSettings, child) {
+        final hudFeatureEnabled = featureSettings.enabled;
         final media = MediaQuery.of(context);
         final compactStatusStack = window.windowClass == UiWindowClass.compact;
         final statusFontSize = switch (window.windowClass) {
@@ -330,6 +289,10 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
           UiWindowClass.large => 286.0,
           UiWindowClass.extraLarge => 300.0,
         };
+        final bottomDockGap = math.max(
+          16.0,
+          math.max(media.padding.bottom, media.viewPadding.bottom) + 12.0,
+        );
         final estimatedVerticalChrome =
             (tokens.screenPadding * 2) + tokens.sectionGap + 34.0;
         final viewportAwareHudCap = math
@@ -337,26 +300,31 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
               220.0,
               media.size.height -
                   estimatedHeaderHeight -
-                  estimatedVerticalChrome,
+                  estimatedVerticalChrome -
+                  bottomDockGap,
             )
             .clamp(220.0, 520.0)
             .toDouble();
+        final homeHudHeightCap = switch (window.windowClass) {
+          UiWindowClass.compact => viewportAwareHudCap.clamp(220.0, 360.0),
+          UiWindowClass.medium => viewportAwareHudCap.clamp(240.0, 390.0),
+          UiWindowClass.expanded => viewportAwareHudCap.clamp(260.0, 420.0),
+          UiWindowClass.large => viewportAwareHudCap.clamp(280.0, 450.0),
+          UiWindowClass.extraLarge => viewportAwareHudCap.clamp(300.0, 480.0),
+        }
+            .toDouble();
+        final homePreviewProfile = HudLayoutProfile.fromConstraints(
+          BoxConstraints(
+            maxWidth: clampedHomeContentMaxWidth.isFinite
+                ? clampedHomeContentMaxWidth
+                : media.size.width - (tokens.screenPadding * 2),
+            maxHeight: homeHudHeightCap,
+          ),
+          surface: HudSurfaceVariant.homePreview,
+        );
         final hudPreviewMaxWidth = () {
-          if (!window.isLandscape) return clampedHomeContentMaxWidth;
-          final heightRatio = switch (window.windowClass) {
-            UiWindowClass.compact => 0.54,
-            UiWindowClass.medium => 0.50,
-            UiWindowClass.expanded => 0.48,
-            UiWindowClass.large => 0.46,
-            UiWindowClass.extraLarge => 0.44,
-          };
-          final capByHeight = math
-              .min(
-                media.size.height * heightRatio,
-                viewportAwareHudCap,
-              )
-              .clamp(220.0, 520.0)
-              .toDouble();
+          final capByHeight =
+              homeHudHeightCap * homePreviewProfile.preferredAspectRatio;
           return math.min(clampedHomeContentMaxWidth, capByHeight);
         }();
         final cardPadding = switch (window.windowClass) {
@@ -372,96 +340,31 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
           UiWindowClass.large || UiWindowClass.extraLarge => 12.5,
         };
 
-        return ListView(
-          padding: EdgeInsets.all(tokens.screenPadding),
-          children: [
-            // Header Card
-            Center(
-              child: ConstrainedBox(
-                constraints:
-                    BoxConstraints(maxWidth: clampedHomeContentMaxWidth),
-                child: Container(
-                  padding: EdgeInsets.all(cardPadding),
-                  decoration: BoxDecoration(
-                    color: Theme.of(context)
-                        .colorScheme
-                        .surfaceContainer
-                        .withValues(alpha: 0.84),
-                    borderRadius: BorderRadius.circular(18),
-                    border: Border.all(
-                      color: Theme.of(context)
-                          .colorScheme
-                          .outlineVariant
-                          .withValues(alpha: 0.36),
-                    ),
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (compactStatusStack)
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              crossAxisAlignment: CrossAxisAlignment.center,
-                              children: [
-                                Container(
-                                  width: 10,
-                                  height: 10,
-                                  decoration: BoxDecoration(
-                                    color: _statusColor(context, ssh),
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: Text(
-                                    _statusHeadline(ssh),
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .titleLarge
-                                        ?.copyWith(
-                                          fontWeight: FontWeight.w900,
-                                          color: _statusColor(context, ssh),
-                                          fontSize: statusFontSize,
-                                          height: 1.0,
-                                        ),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                                if (ssh.isConnected ||
-                                    ssh.connectionStatus
-                                        .startsWith("Connecting"))
-                                  SizedBox(
-                                    width: compactActionSize * 0.88,
-                                    height: compactActionSize * 0.88,
-                                    child: IconButton(
-                                      padding: EdgeInsets.zero,
-                                      tooltip: '연결 해제',
-                                      iconSize: compactActionSize * 0.52,
-                                      color: Colors.white70,
-                                      onPressed: () {
-                                        ssh.disconnect();
-                                        CustomToast.show(
-                                            context, "연결이 해제되었습니다.");
-                                      },
-                                      icon: const Icon(Icons.link_off_rounded),
-                                    ),
-                                  ),
-                              ],
-                            ),
-                            SizedBox(height: blockGap),
-                            _buildIpField(
-                              context: context,
-                              blockGap: blockGap,
-                              ipChipLabelSize: ipChipLabelSize,
-                              ipFieldText: ipFieldText,
-                              ipFontSize: ipFontSize,
-                            ),
-                          ],
-                        )
-                      else
+        final statusCard = Center(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: clampedHomeContentMaxWidth),
+            child: Container(
+              padding: EdgeInsets.all(cardPadding),
+              decoration: BoxDecoration(
+                color: Theme.of(context)
+                    .colorScheme
+                    .surfaceContainer
+                    .withValues(alpha: 0.84),
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(
+                  color: Theme.of(context)
+                      .colorScheme
+                      .outlineVariant
+                      .withValues(alpha: 0.36),
+                ),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (compactStatusStack)
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
                         Row(
                           crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
@@ -490,21 +393,8 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
-                            const SizedBox(width: 10),
-                            Flexible(
-                              flex: 5,
-                              child: _buildIpField(
-                                context: context,
-                                blockGap: blockGap,
-                                ipChipLabelSize: ipChipLabelSize,
-                                ipFieldText: ipFieldText,
-                                ipFontSize: ipFontSize,
-                              ),
-                            ),
                             if (ssh.isConnected ||
-                                ssh.connectionStatus
-                                    .startsWith("Connecting")) ...[
-                              SizedBox(width: blockGap * 0.6),
+                                ssh.connectionStatus.startsWith("Connecting"))
                               SizedBox(
                                 width: compactActionSize * 0.88,
                                 height: compactActionSize * 0.88,
@@ -515,103 +405,337 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                                   color: Colors.white70,
                                   onPressed: () {
                                     ssh.disconnect();
-                                    CustomToast.show(context, "연결이 해제되었습니다.");
+                                    CustomToast.show(
+                                      context,
+                                      "연결이 해제되었습니다.",
+                                    );
                                   },
                                   icon: const Icon(Icons.link_off_rounded),
                                 ),
                               ),
-                            ],
                           ],
                         ),
-                      SizedBox(height: blockGap),
-                      Divider(
-                        height: 1,
-                        thickness: 1,
-                        color: Colors.white.withValues(alpha: 0.08),
-                      ),
-                      SizedBox(height: blockGap),
-                      LayoutBuilder(
-                        builder: (context, infoConstraints) {
-                          final itemSpacing = switch (window.windowClass) {
-                            UiWindowClass.compact => 8.0,
-                            UiWindowClass.medium => 9.0,
-                            UiWindowClass.expanded => 10.0,
-                            UiWindowClass.large ||
-                            UiWindowClass.extraLarge =>
-                              11.0,
-                          };
-                          final columns =
-                              infoConstraints.maxWidth >= 720 ? 4 : 2;
-                          final itemWidth = (infoConstraints.maxWidth -
-                                  (itemSpacing * (columns - 1))) /
-                              columns;
-                          final itemValues = <MapEntry<String, String>>[
-                            MapEntry(
-                                "브랜치", ssh.isConnected ? _branch : "연결 안 됨"),
-                            MapEntry(
-                                "커밋", ssh.isConnected ? _commit : "연결 안 됨"),
-                            MapEntry("Dongle ID",
-                                ssh.isConnected ? _dongleId : "연결 안 됨"),
-                            MapEntry(
-                                "Serial", ssh.isConnected ? _serial : "연결 안 됨"),
-                          ];
-                          return Wrap(
-                            spacing: itemSpacing,
-                            runSpacing: itemSpacing,
-                            children: itemValues
-                                .map(
-                                  (entry) => SizedBox(
-                                    width: itemWidth,
-                                    child:
-                                        _buildInfoItem(entry.key, entry.value),
-                                  ),
-                                )
-                                .toList(),
-                          );
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            SizedBox(height: tokens.sectionGap),
-            Center(
-              child: ConstrainedBox(
-                constraints: BoxConstraints(maxWidth: hudPreviewMaxWidth),
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () => _openWebRtcView(ssh),
-                  child: Column(
-                    children: [
-                      HomeHudPreviewCard(
-                        enabled: _realtimeWorkEnabled,
-                        deviceIp: ssh.connectedIp ?? ssh.targetIp,
-                        fallbackCpuTempC: _fallbackCpuTempC,
-                        fallbackMemPct: _fallbackMemPct,
-                        fallbackDiskPct: _fallbackDiskPct,
-                        matchParentWidth: true,
-                      ),
-                      SizedBox(height: tokens.itemGap),
-                      Text(
-                        '탭해서 새 주행화면 열기',
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .onSurfaceVariant,
+                        SizedBox(height: blockGap),
+                        _buildIpField(
+                          context: context,
+                          blockGap: blockGap,
+                          ipChipLabelSize: ipChipLabelSize,
+                          ipFieldText: ipFieldText,
+                          ipFontSize: ipFontSize,
+                        ),
+                      ],
+                    )
+                  else
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Container(
+                          width: 10,
+                          height: 10,
+                          decoration: BoxDecoration(
+                            color: _statusColor(context, ssh),
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            _statusHeadline(ssh),
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleLarge
+                                ?.copyWith(
+                                  fontWeight: FontWeight.w900,
+                                  color: _statusColor(context, ssh),
+                                  fontSize: statusFontSize,
+                                  height: 1.0,
+                                ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Flexible(
+                          flex: 5,
+                          child: _buildIpField(
+                            context: context,
+                            blockGap: blockGap,
+                            ipChipLabelSize: ipChipLabelSize,
+                            ipFieldText: ipFieldText,
+                            ipFontSize: ipFontSize,
+                          ),
+                        ),
+                        if (ssh.isConnected ||
+                            ssh.connectionStatus.startsWith("Connecting")) ...[
+                          SizedBox(width: blockGap * 0.6),
+                          SizedBox(
+                            width: compactActionSize * 0.88,
+                            height: compactActionSize * 0.88,
+                            child: IconButton(
+                              padding: EdgeInsets.zero,
+                              tooltip: '연결 해제',
+                              iconSize: compactActionSize * 0.52,
+                              color: Colors.white70,
+                              onPressed: () {
+                                ssh.disconnect();
+                                CustomToast.show(
+                                  context,
+                                  "연결이 해제되었습니다.",
+                                );
+                              },
+                              icon: const Icon(Icons.link_off_rounded),
                             ),
-                      ),
-                    ],
+                          ),
+                        ],
+                      ],
+                    ),
+                  SizedBox(height: blockGap),
+                  Divider(
+                    height: 1,
+                    thickness: 1,
+                    color: Colors.white.withValues(alpha: 0.08),
+                  ),
+                  SizedBox(height: blockGap),
+                  LayoutBuilder(
+                    builder: (context, infoConstraints) {
+                      final itemSpacing = switch (window.windowClass) {
+                        UiWindowClass.compact => 8.0,
+                        UiWindowClass.medium => 9.0,
+                        UiWindowClass.expanded => 10.0,
+                        UiWindowClass.large || UiWindowClass.extraLarge => 11.0,
+                      };
+                      final columns = switch (window.windowClass) {
+                        UiWindowClass.compact || UiWindowClass.medium => 2,
+                        UiWindowClass.expanded => 3,
+                        UiWindowClass.large || UiWindowClass.extraLarge => 4,
+                      };
+                      final itemWidth = (infoConstraints.maxWidth -
+                              (itemSpacing * (columns - 1))) /
+                          columns;
+                      final itemValues = <MapEntry<String, String>>[
+                        MapEntry(
+                          "브랜치",
+                          ssh.isConnected ? _branch : "연결 안 됨",
+                        ),
+                        MapEntry(
+                          "커밋",
+                          ssh.isConnected ? _commit : "연결 안 됨",
+                        ),
+                        MapEntry(
+                          "Dongle ID",
+                          ssh.isConnected ? _dongleId : "연결 안 됨",
+                        ),
+                        MapEntry(
+                          "Serial",
+                          ssh.isConnected ? _serial : "연결 안 됨",
+                        ),
+                      ];
+                      return Wrap(
+                        spacing: itemSpacing,
+                        runSpacing: itemSpacing,
+                        children: itemValues
+                            .map(
+                              (entry) => SizedBox(
+                                width: itemWidth,
+                                child: _buildInfoItem(entry.key, entry.value),
+                              ),
+                            )
+                            .toList(),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+
+        Widget buildScrollableHudPreview() {
+          return Center(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: hudPreviewMaxWidth),
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => _openDriveView(ssh),
+                child: _buildHudPreviewSurface(
+                  context,
+                  width: hudPreviewMaxWidth,
+                  enabled: hudFeatureEnabled,
+                  child: SizedBox(
+                    width: hudPreviewMaxWidth,
+                    child: AdaptiveHudHost(
+                      enabled: hudFeatureEnabled && _hudKeepAliveEnabled,
+                      deviceIp: ssh.connectedIp,
+                      surface: HudSurfaceVariant.homePreview,
+                      matchParentWidth: true,
+                      syncNativeOverlay: false,
+                    ),
                   ),
                 ),
               ),
             ),
+          );
+        }
 
-            // Quick Actions Grid Removed
-            SizedBox(height: tokens.footerSpacer),
-          ],
+        final minPinnedHudHeight = switch (window.windowClass) {
+          UiWindowClass.compact => 250.0,
+          UiWindowClass.medium => 270.0,
+          UiWindowClass.expanded => 290.0,
+          UiWindowClass.large => 310.0,
+          UiWindowClass.extraLarge => 330.0,
+        };
+
+        return LayoutBuilder(
+          builder: (context, viewportConstraints) {
+            final viewportHeight = viewportConstraints.maxHeight.isFinite
+                ? viewportConstraints.maxHeight
+                : media.size.height;
+            final minPinnedViewportHeight = estimatedHeaderHeight +
+                minPinnedHudHeight +
+                (tokens.screenPadding * 2) +
+                tokens.sectionGap +
+                bottomDockGap;
+            final canUsePinnedHudLayout =
+                viewportHeight >= minPinnedViewportHeight;
+
+            if (canUsePinnedHudLayout) {
+              return Padding(
+                padding: EdgeInsets.all(tokens.screenPadding),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    statusCard,
+                    SizedBox(height: tokens.sectionGap),
+                    Expanded(
+                      child: Padding(
+                        padding: EdgeInsets.only(bottom: bottomDockGap),
+                        child: LayoutBuilder(
+                          builder: (context, hudConstraints) {
+                            final availableWidth = hudConstraints
+                                    .maxWidth.isFinite
+                                ? hudConstraints.maxWidth
+                                : media.size.width - (tokens.screenPadding * 2);
+                            final pinnedWidth =
+                                clampedHomeContentMaxWidth.isFinite
+                                    ? math.min(
+                                        clampedHomeContentMaxWidth,
+                                        availableWidth,
+                                      )
+                                    : availableWidth;
+                            final pinnedHeight =
+                                hudConstraints.maxHeight.isFinite
+                                    ? hudConstraints.maxHeight
+                                    : homeHudHeightCap;
+                            return Align(
+                              alignment: Alignment.bottomCenter,
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onTap: () => _openDriveView(ssh),
+                                child: _buildHudPreviewSurface(
+                                  context,
+                                  width: pinnedWidth,
+                                  height: math.max(220.0, pinnedHeight),
+                                  enabled: hudFeatureEnabled,
+                                  child: SizedBox(
+                                    width: pinnedWidth,
+                                    height: math.max(220.0, pinnedHeight),
+                                    child: AdaptiveHudHost(
+                                      enabled:
+                                          hudFeatureEnabled && _hudKeepAliveEnabled,
+                                      deviceIp: ssh.connectedIp,
+                                      surface: HudSurfaceVariant.homePreview,
+                                      fillParent: true,
+                                      syncNativeOverlay: false,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }
+
+            return ListView(
+              padding: EdgeInsets.all(tokens.screenPadding),
+              children: [
+                statusCard,
+                SizedBox(height: tokens.sectionGap),
+                buildScrollableHudPreview(),
+                SizedBox(height: bottomDockGap),
+              ],
+            );
+          },
         );
       },
+    );
+  }
+
+  Widget _buildHudPreviewSurface(
+    BuildContext context, {
+    required Widget child,
+    required bool enabled,
+    double? width,
+    double? height,
+  }) {
+    if (enabled) {
+      return child;
+    }
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    return Stack(
+      children: [
+        child,
+        Positioned.fill(
+          child: Container(
+            width: width,
+            height: height,
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.44),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(
+                color: scheme.outlineVariant.withValues(alpha: 0.5),
+              ),
+            ),
+            alignment: Alignment.center,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.lock_outline_rounded,
+                    color: scheme.onSurface,
+                    size: 28,
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'HUD/Stock 비활성화',
+                    textAlign: TextAlign.center,
+                    style: textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w800,
+                      color: scheme.onSurface,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'HUD 설정에서 기능을 활성화하면 Home HUD와 Stock 주행모드를 사용할 수 있습니다.',
+                    textAlign: TextAlign.center,
+                    style: textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                      height: 1.4,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -631,6 +755,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
       UiWindowClass.large => 16.5,
       UiWindowClass.extraLarge => 17.0,
     };
+    final valueMaxLines = window.windowClass == UiWindowClass.compact ? 1 : 2;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 2),
       child: Column(
@@ -649,12 +774,13 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
           const SizedBox(height: 4),
           Text(
             value,
-            maxLines: 1,
+            maxLines: valueMaxLines,
+            softWrap: valueMaxLines > 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
               fontWeight: FontWeight.w700,
               fontSize: valueSize,
-              height: 1.0,
+              height: valueMaxLines > 1 ? 1.08 : 1.0,
             ),
           ),
         ],

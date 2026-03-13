@@ -2,8 +2,6 @@ package com.example.carrot_pilot_manager
 
 import android.content.Context
 import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Typeface
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.net.Uri
@@ -70,6 +68,31 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
       return view.updateOverlay(overlay)
     }
 
+    fun updateYoloConfig(viewId: Int, yoloConfig: Map<String, Any?>?): Boolean {
+      val view = views[viewId] ?: return false
+      return view.updateYoloConfig(yoloConfig)
+    }
+
+    fun updateArScene(viewId: Int, arScene: Map<String, Any?>?): Boolean {
+      val view = views[viewId] ?: return false
+      return view.updateArScene(arScene)
+    }
+
+    fun getArScene(viewId: Int): Map<String, Any?>? {
+      val view = views[viewId] ?: return null
+      return view.getArScene()
+    }
+
+    fun getArRenderDebug(viewId: Int): Map<String, Any?>? {
+      val view = views[viewId] ?: return null
+      return view.getArRenderDebug()
+    }
+
+    fun getYoloState(viewId: Int): Map<String, Any?>? {
+      val view = views[viewId] ?: return null
+      return view.getYoloState()
+    }
+
     fun clearOverlay(viewId: Int): Boolean {
       val view = views[viewId] ?: return false
       return view.clearOverlay()
@@ -92,12 +115,38 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
                 val viewId = (call.argument<Number>("viewId") ?: -1).toInt()
                 @Suppress("UNCHECKED_CAST")
                 val overlay = call.argument<Map<String, Any?>>("overlay")
-                result.success(updateOverlay(viewId, overlay))
+                @Suppress("UNCHECKED_CAST")
+                val arScene = call.argument<Map<String, Any?>>("arScene")
+                val overlayOk = updateOverlay(viewId, overlay)
+                val sceneOk = updateArScene(viewId, arScene)
+                result.success(overlayOk && sceneOk)
+              }
+
+              "updateYoloConfig" -> {
+                val viewId = (call.argument<Number>("viewId") ?: -1).toInt()
+                @Suppress("UNCHECKED_CAST")
+                val yoloConfig = call.argument<Map<String, Any?>>("yoloConfig")
+                result.success(updateYoloConfig(viewId, yoloConfig))
               }
 
               "clearOverlay" -> {
                 val viewId = (call.argument<Number>("viewId") ?: -1).toInt()
                 result.success(clearOverlay(viewId))
+              }
+
+              "getArScene" -> {
+                val viewId = (call.argument<Number>("viewId") ?: -1).toInt()
+                result.success(getArScene(viewId))
+              }
+
+              "getArRenderDebug" -> {
+                val viewId = (call.argument<Number>("viewId") ?: -1).toInt()
+                result.success(getArRenderDebug(viewId))
+              }
+
+              "getYoloState" -> {
+                val viewId = (call.argument<Number>("viewId") ?: -1).toInt()
+                result.success(getYoloState(viewId))
               }
 
               else -> result.notImplemented()
@@ -138,6 +187,13 @@ class NativeDriveVideoView(
   private val rootView = FrameLayout(context)
   private val surfaceView: SurfaceView = SurfaceView(context)
   private val overlayView = NativeDriveOverlayView(context)
+  private val yoloController =
+      NativeDriveYoloController(
+          surfaceView = surfaceView,
+          onStateChanged = { payload ->
+            emitYoloState(payload)
+          },
+          runtime = NativeDriveExecuTorchRuntime(context))
   private val reconnectHandler = Handler(Looper.getMainLooper())
   private val decodeThread = HandlerThread("CarrotNativeDecode-$viewId").apply { start() }
   private val decodeHandler = Handler(decodeThread.looper)
@@ -147,16 +203,19 @@ class NativeDriveVideoView(
   @Volatile private var webSocket: WebSocket? = null
   @Volatile private var surface: Surface? = null
   @Volatile private var codec: MediaCodec? = null
+  @Volatile private var arScenePayload: Map<String, Any?>? = null
   @Volatile private var codecConfigured = false
   @Volatile private var waitingKeyFrame = true
   @Volatile private var closed = false
-  @Volatile private var lastFrameId = -1
+  @Volatile private var lastSourceFrameId = -1
+  @Volatile private var nextRenderedFrameId = 0
   @Volatile private var currentWidth = 0
   @Volatile private var currentHeight = 0
   @Volatile private var connectAttempts = 0
   @Volatile private var lastPacketAtMs = 0L
   @Volatile private var lastDecodedAtMs = 0L
-  private val pendingFrameIds: ArrayDeque<Int> = ArrayDeque()
+  private val pendingFrames: ArrayDeque<PendingFrame> = ArrayDeque()
+  @Volatile private var pendingSyncFrameCount = 0
   private val pendingDecodeTasks = AtomicInteger(0)
   @Volatile private var frameStallStrikes = 0
   @Volatile private var decodeBacklogDropCount = 0
@@ -177,6 +236,11 @@ class NativeDriveVideoView(
   @Volatile private var hintedFrameRate = 30f
   @Volatile private var performanceHintTargetNs = 33_333_333L
   @Volatile private var performanceHintSession: PerformanceHintManager.Session? = null
+
+  private data class PendingFrame(
+      val yoloFrameId: Int,
+      val syncFrameId: Int?,
+  )
 
   init {
     rootView.addView(
@@ -209,6 +273,7 @@ class NativeDriveVideoView(
     clearSurfaceFrameRateHint()
     closePerformanceHintSession()
     releaseDecoder()
+    yoloController.release()
     clearOverlay()
     try {
       decodeThread.quitSafely()
@@ -399,17 +464,48 @@ class NativeDriveVideoView(
     return true
   }
 
+  fun updateYoloConfig(yoloConfig: Map<String, Any?>?): Boolean {
+    if (closed) return false
+    val parsed = NativeDriveYoloConfig.fromPayload(yoloConfig)
+    overlayView.updateYoloConfig(parsed)
+    yoloController.updateConfig(parsed)
+    emitYoloConfig(parsed)
+    return true
+  }
+
+  fun updateArScene(arScene: Map<String, Any?>?): Boolean {
+    if (closed) return false
+    overlayView.updateArScene(NativeDriveArScene.fromPayload(arScene))
+    arScenePayload = arScene
+    return true
+  }
+
+  fun getArScene(): Map<String, Any?>? {
+    return arScenePayload
+  }
+
+  fun getArRenderDebug(): Map<String, Any?>? {
+    return overlayView.getArRenderDebug()
+  }
+
+  fun getYoloState(): Map<String, Any?> {
+    return yoloController.snapshot(reason = "method_fetch")
+  }
+
   fun clearOverlay(): Boolean {
     overlayView.clearOverlay()
+    arScenePayload = null
     return true
   }
 
   private fun releaseDecoder() {
     codecConfigured = false
     waitingKeyFrame = true
-    lastFrameId = -1
+    lastSourceFrameId = -1
+    nextRenderedFrameId = 0
     pendingDecodeTasks.set(0)
-    pendingFrameIds.clear()
+    pendingFrames.clear()
+    pendingSyncFrameCount = 0
     val c = codec
     codec = null
     if (c != null) {
@@ -442,10 +538,11 @@ class NativeDriveVideoView(
 
     val parsed = parsePacket(packet) ?: return
     val meta = parsed.meta
-    val frameId = meta.optInt("frameId", -1)
-    if (frameId >= 0 && lastFrameId >= 0 && frameId <= lastFrameId) {
+    val sourceFrameId = meta.optInt("frameId", -1)
+    if (sourceFrameId >= 0 && lastSourceFrameId >= 0 && sourceFrameId <= lastSourceFrameId) {
       return
     }
+    val frameId = if (sourceFrameId >= 0) sourceFrameId else nextRenderedFrameId++
     val keyByMeta =
         meta.optBoolean("keyFrame", false) || ((meta.optInt("flags", 0) and 0x8) != 0)
     val queuedTasks = pendingDecodeTasks.get()
@@ -453,12 +550,12 @@ class NativeDriveVideoView(
       noteBacklogDrop("task", queuedTasks)
       return
     }
-    if (pendingFrameIds.size >= codecBacklogLimit && !keyByMeta) {
-      noteBacklogDrop("codec", pendingFrameIds.size)
+    if (pendingSyncFrameCount >= codecBacklogLimit && !keyByMeta) {
+      noteBacklogDrop("codec", pendingSyncFrameCount)
       return
     }
-    if (frameId >= 0) {
-      lastFrameId = frameId
+    if (sourceFrameId >= 0) {
+      lastSourceFrameId = sourceFrameId
     }
 
     val width = meta.optInt("width", 0).coerceAtLeast(0)
@@ -493,7 +590,12 @@ class NativeDriveVideoView(
           else -> System.nanoTime()
         }
     val ptsUs = if (ts > 0L) ts / 1000L else (System.nanoTime() / 1000L)
-    queueFrame(annexb, ptsUs, frameId)
+    queueFrame(
+      frame = annexb,
+      ptsUs = ptsUs,
+      yoloFrameId = frameId,
+      syncFrameId = if (sourceFrameId >= 0) sourceFrameId else null,
+    )
   }
 
   private fun configureDecoder(width: Int, height: Int): Boolean {
@@ -522,20 +624,30 @@ class NativeDriveVideoView(
     }
   }
 
-  private fun queueFrame(frame: ByteArray, ptsUs: Long, frameId: Int) {
+  private fun queueFrame(
+      frame: ByteArray,
+      ptsUs: Long,
+      yoloFrameId: Int,
+      syncFrameId: Int?,
+  ) {
     val localCodec = codec ?: return
     try {
       val inputIndex = localCodec.dequeueInputBuffer(0)
       if (inputIndex < 0) {
-        noteBacklogDrop("input", pendingFrameIds.size)
+        noteBacklogDrop("input", pendingSyncFrameCount)
         return
       }
       val input = localCodec.getInputBuffer(inputIndex) ?: return
       input.clear()
       input.put(frame)
       localCodec.queueInputBuffer(inputIndex, 0, frame.size, ptsUs, 0)
-      if (frameId >= 0) {
-        pendingFrameIds.addLast(frameId)
+      pendingFrames.addLast(
+          PendingFrame(
+              yoloFrameId = yoloFrameId,
+              syncFrameId = syncFrameId,
+          ))
+      if (syncFrameId != null && syncFrameId >= 0) {
+        pendingSyncFrameCount += 1
       }
       val decodeStartNs = System.nanoTime()
       drainOutput(localCodec, decodeStartNs)
@@ -553,9 +665,24 @@ class NativeDriveVideoView(
         outIndex >= 0 -> {
           lastDecodedAtMs = System.currentTimeMillis()
           reportPerformanceActualWork((System.nanoTime() - decodeStartNs).coerceAtLeast(1_000_000L))
-          val renderedFrameId = if (pendingFrameIds.isEmpty()) -1 else pendingFrameIds.removeFirst()
-          if (renderedFrameId >= 0) {
-            emitFrame(renderedFrameId)
+          val renderedFrame =
+              if (pendingFrames.isEmpty()) null else pendingFrames.removeFirst()
+          val yoloFrameId = renderedFrame?.yoloFrameId ?: -1
+          val syncFrameId = renderedFrame?.syncFrameId
+          if (syncFrameId != null && syncFrameId >= 0) {
+            pendingSyncFrameCount = (pendingSyncFrameCount - 1).coerceAtLeast(0)
+            emitFrame(syncFrameId)
+          }
+          if (yoloFrameId >= 0) {
+            yoloController.onFrameRendered(
+                NativeDriveYoloFrame(
+                    frameId = yoloFrameId,
+                    ptsUs = info.presentationTimeUs,
+                    camera = cameraName,
+                    sourceWidth = currentWidth,
+                    sourceHeight = currentHeight,
+                    fpsHint = hintedFrameRate,
+                ))
           }
           localCodec.releaseOutputBuffer(outIndex, true)
         }
@@ -719,6 +846,27 @@ class NativeDriveVideoView(
         ))
   }
 
+  private fun emitYoloConfig(config: NativeDriveYoloConfig) {
+    val payload = mutableMapOf<String, Any?>(
+        "viewId" to viewId,
+        "type" to "yolo_config",
+        "camera" to cameraName,
+    )
+    payload.putAll(config.toPayload())
+    NativeDriveVideoPlugin.emit(
+        payload)
+  }
+
+  private fun emitYoloState(state: Map<String, Any?>) {
+    val payload = mutableMapOf<String, Any?>(
+        "viewId" to viewId,
+        "type" to "yolo_state",
+        "camera" to cameraName,
+    )
+    payload.putAll(state)
+    NativeDriveVideoPlugin.emit(payload)
+  }
+
   private fun parseCameraName(url: String): String {
     val fallback = "road"
     return try {
@@ -852,150 +1000,111 @@ class NativeDriveVideoView(
 }
 
 private class NativeDriveOverlayView(context: Context) : View(context) {
-  private data class OverlayPolygon(
-      val points: FloatArray,
-      val fillColor: Int,
-      val strokeColor: Int?,
-      val strokeWidth: Float,
+  private data class OverlayVisualSuppression(
+      val polygonAlphaMultiplier: Float,
+      val strokeAlphaMultiplier: Float,
+      val labelAlphaMultiplier: Float,
   )
 
-  private data class OverlayLabel(
-      val x: Float,
-      val y: Float,
-      val text: String,
-      val color: Int,
-      val size: Float,
-  )
-
-  @Volatile private var polygons: List<OverlayPolygon> = emptyList()
-  @Volatile private var labels: List<OverlayLabel> = emptyList()
-  @Volatile private var payloadCanvasWidth: Float = 0f
-  @Volatile private var payloadCanvasHeight: Float = 0f
-  private val reusablePath = android.graphics.Path()
-  private val fillPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-    style = android.graphics.Paint.Style.FILL
-  }
-  private val strokePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-    style = android.graphics.Paint.Style.STROKE
-  }
-  private val textPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-    style = android.graphics.Paint.Style.FILL
-    textAlign = android.graphics.Paint.Align.LEFT
-    typeface = Typeface.MONOSPACE
-  }
+  @Volatile private var overlayPayload: NativeDriveOverlayPayload? = null
+  @Volatile private var yoloConfig: NativeDriveYoloConfig = NativeDriveYoloConfig.disabled
+  private val overlayRenderer = NativeDriveOverlayCanvasRenderer()
+  private val arSceneRenderer = NativeDriveArSceneOverlayRenderer()
+  private val arRenderPipeline = NativeDriveArRenderStatePipeline()
 
   fun updateOverlay(payload: Map<String, Any?>?) {
     if (payload == null) {
       clearOverlay()
       return
     }
-    payloadCanvasWidth = ((payload["canvasWidth"] as? Number)?.toFloat() ?: 0f)
-    payloadCanvasHeight = ((payload["canvasHeight"] as? Number)?.toFloat() ?: 0f)
-    val rawPolygons = payload["polygons"] as? List<*> ?: run {
+    val parsed = NativeDriveOverlayPayload.fromPayload(payload) ?: run {
       clearOverlay()
       return
     }
-    val parsed = ArrayList<OverlayPolygon>(rawPolygons.size)
-    for (raw in rawPolygons) {
-      val item = raw as? Map<*, *> ?: continue
-      val pointsRaw = item["points"] as? List<*> ?: continue
-      if (pointsRaw.size < 6 || pointsRaw.size % 2 != 0) continue
-      val pts = FloatArray(pointsRaw.size)
-      var ok = true
-      for (i in pointsRaw.indices) {
-        val n = pointsRaw[i] as? Number
-        if (n == null) {
-          ok = false
-          break
-        }
-        pts[i] = n.toFloat()
-      }
-      if (!ok) continue
-
-      val fillColor = (item["fillColor"] as? Number)?.toInt() ?: Color.TRANSPARENT
-      val strokeColor = (item["strokeColor"] as? Number)?.toInt()
-      val strokeWidth = ((item["strokeWidth"] as? Number)?.toFloat() ?: 0f).coerceAtLeast(0f)
-      parsed.add(
-          OverlayPolygon(
-              points = pts,
-              fillColor = fillColor,
-              strokeColor = strokeColor,
-              strokeWidth = strokeWidth,
-          ))
-    }
-    val rawLabels = payload["labels"] as? List<*>
-    val parsedLabels =
-        if (rawLabels.isNullOrEmpty()) {
-          emptyList()
-        } else {
-          val out = ArrayList<OverlayLabel>(rawLabels.size)
-          for (raw in rawLabels) {
-            val item = raw as? Map<*, *> ?: continue
-            val x = (item["x"] as? Number)?.toFloat() ?: continue
-            val y = (item["y"] as? Number)?.toFloat() ?: continue
-            val text = item["text"]?.toString()?.trim().orEmpty()
-            if (text.isEmpty()) continue
-            val color = (item["color"] as? Number)?.toInt() ?: Color.WHITE
-            val size = ((item["size"] as? Number)?.toFloat() ?: 10f).coerceAtLeast(7f)
-            out.add(
-                OverlayLabel(
-                    x = x,
-                    y = y,
-                    text = text,
-                    color = color,
-                    size = size,
-                ))
-          }
-          out
-        }
-
-    polygons = parsed
-    labels = parsedLabels
+    overlayPayload = parsed
     postInvalidateOnAnimation()
   }
 
+  fun updateArScene(scene: NativeDriveArScene?) {
+    arRenderPipeline.updateScene(scene)
+    postInvalidateOnAnimation()
+  }
+
+  fun updateYoloConfig(config: NativeDriveYoloConfig) {
+    yoloConfig = config
+    postInvalidateOnAnimation()
+  }
+
+  fun getArRenderDebug(): Map<String, Any?>? = arRenderPipeline.currentDebug()
+
   fun clearOverlay() {
-    polygons = emptyList()
-    labels = emptyList()
-    payloadCanvasWidth = 0f
-    payloadCanvasHeight = 0f
+    overlayPayload = null
+    arRenderPipeline.clear()
     postInvalidateOnAnimation()
   }
 
   override fun onDraw(canvas: Canvas) {
     super.onDraw(canvas)
-    if (polygons.isEmpty() && labels.isEmpty()) return
+    val overlay = overlayPayload
+    val scene = arRenderPipeline.currentScene()
+    if (overlay == null && scene == null) return
     val drawWidth = width.toFloat()
     val drawHeight = height.toFloat()
     if (drawWidth <= 1f || drawHeight <= 1f) return
-    val srcWidth = if (payloadCanvasWidth > 1f) payloadCanvasWidth else drawWidth
-    val srcHeight = if (payloadCanvasHeight > 1f) payloadCanvasHeight else drawHeight
-    val scaleX = if (srcWidth > 1f) drawWidth / srcWidth else 1f
-    val scaleY = if (srcHeight > 1f) drawHeight / srcHeight else 1f
-    val strokeScale = ((scaleX + scaleY) * 0.5f).coerceAtLeast(0.5f)
-    for (poly in polygons) {
-      if (poly.points.size < 6) continue
-      reusablePath.reset()
-      reusablePath.moveTo(poly.points[0] * scaleX, poly.points[1] * scaleY)
-      var i = 2
-      while (i + 1 < poly.points.size) {
-        reusablePath.lineTo(poly.points[i] * scaleX, poly.points[i + 1] * scaleY)
-        i += 2
-      }
-      reusablePath.close()
-      fillPaint.color = poly.fillColor
-      canvas.drawPath(reusablePath, fillPaint)
-      if (poly.strokeColor != null && poly.strokeWidth > 0f) {
-        strokePaint.color = poly.strokeColor
-        strokePaint.strokeWidth = (poly.strokeWidth * strokeScale).coerceAtLeast(1f)
-        canvas.drawPath(reusablePath, strokePaint)
-      }
+    val renderFrame = arRenderPipeline.resolveFrame(overlay = overlay, drawWidth = drawWidth)
+    val suppression = overlayVisualSuppression(renderFrame)
+    val strokeScale =
+        overlayRenderer.draw(
+            canvas,
+            overlay,
+            drawWidth,
+            drawHeight,
+            polygonAlphaMultiplier = suppression.polygonAlphaMultiplier,
+            strokeAlphaMultiplier = suppression.strokeAlphaMultiplier,
+            labelAlphaMultiplier = suppression.labelAlphaMultiplier,
+        )
+    if (renderFrame.scene == null || renderFrame.policy == null) return
+    arSceneRenderer.draw(
+        canvas = canvas,
+        scene = renderFrame.scene,
+        drawWidth = drawWidth,
+        drawHeight = drawHeight,
+        strokeScale = strokeScale,
+        policy = renderFrame.policy,
+    )
+  }
+
+  private fun overlayVisualSuppression(renderFrame: NativeDriveArRenderFrame): OverlayVisualSuppression {
+    val scene = renderFrame.scene
+    val policy = renderFrame.policy
+    if (scene == null || policy == null) {
+      return OverlayVisualSuppression(1f, 1f, 1f)
     }
-    for (label in labels) {
-      textPaint.color = label.color
-      textPaint.textSize = (label.size * strokeScale).coerceIn(8f, 28f)
-      textPaint.setShadowLayer(3f, 0f, 0f, Color.BLACK)
-      canvas.drawText(label.text, label.x * scaleX, label.y * scaleY, textPaint)
+    if (!scene.presentation.showGuidePrimitive && !scene.presentation.showStatusPill && !policy.drawCard) {
+      return OverlayVisualSuppression(1f, 1f, 1f)
+    }
+    val mode = scene.presentation.mode
+    val strongAr = policy.effectiveRenderBudget >= 2 &&
+        (policy.drawRibbon || policy.drawTrail || policy.drawGateChip || policy.drawCard)
+    return when {
+      mode == "turn" || mode == "arrival" ->
+          OverlayVisualSuppression(
+              polygonAlphaMultiplier = if (strongAr) 0.28f else 0.42f,
+              strokeAlphaMultiplier = if (strongAr) 0.52f else 0.66f,
+              labelAlphaMultiplier = 0.86f,
+          )
+      mode == "route" ->
+          OverlayVisualSuppression(
+              polygonAlphaMultiplier = if (strongAr) 0.34f else 0.48f,
+              strokeAlphaMultiplier = if (strongAr) 0.58f else 0.72f,
+              labelAlphaMultiplier = 0.90f,
+          )
+      else ->
+          OverlayVisualSuppression(
+              polygonAlphaMultiplier = 0.56f,
+              strokeAlphaMultiplier = 0.78f,
+              labelAlphaMultiplier = 0.94f,
+          )
     }
   }
 }

@@ -1,24 +1,56 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:carrot_pilot_manager/main.dart';
 import 'package:carrot_pilot_manager/screens/splash_screen.dart';
 
 void main() {
-  testWidgets('App starts without crashing', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const CarrotLinkApp());
+  TestWidgetsFlutterBinding.ensureInitialized();
 
-    // Verify that SplashScreen is shown initially
+  const permissionChannel = MethodChannel(
+    'flutter.baseflow.com/permissions/methods',
+  );
+
+  setUpAll(() {
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      'is_first_run': false,
+    });
+    PackageInfo.setMockInitialValues(
+      appName: 'CarrotLink',
+      packageName: 'com.example.carrot_pilot_manager',
+      version: '1.0.0',
+      buildNumber: '1',
+      buildSignature: '',
+    );
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(permissionChannel, (call) async {
+          switch (call.method) {
+            case 'checkPermissionStatus':
+              return 1;
+            case 'requestPermissions':
+              return <int, int>{};
+            default:
+              return null;
+          }
+        });
+  });
+
+  tearDownAll(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(permissionChannel, null);
+  });
+
+  testWidgets('App starts without crashing', (WidgetTester tester) async {
+    await tester.pumpWidget(
+      CarrotLinkApp(startupWarmup: Future<void>.value()),
+    );
+
     expect(find.byType(SplashScreen), findsOneWidget);
 
-    // Wait for any async operations
-    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(milliseconds: 250));
   });
 }

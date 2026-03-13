@@ -1,11 +1,32 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+
 import '../services/update_service.dart';
 import '../ui/adaptive/layout_tokens.dart';
 import '../ui/adaptive/window_class.dart';
 
-class UpdateDialog extends StatelessWidget {
+class UpdateDialog extends StatefulWidget {
   const UpdateDialog({super.key});
+
+  @override
+  State<UpdateDialog> createState() => _UpdateDialogState();
+}
+
+class _UpdateDialogState extends State<UpdateDialog> {
+  bool _requestedRefresh = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_requestedRefresh) return;
+    _requestedRefresh = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(context.read<UpdateService>().checkForUpdate());
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -16,29 +37,43 @@ class UpdateDialog extends StatelessWidget {
       builder: (context, updateService, child) {
         final release = updateService.latestRelease;
 
+        if (updateService.isChecking) {
+          return AlertDialog(
+            title: const Text("업데이트 확인"),
+            content: const Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text("확인 중..."),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text("닫기"),
+              ),
+            ],
+          );
+        }
+
         if (release == null) {
           return AlertDialog(
             title: const Text("업데이트 확인"),
-            content: updateService.isChecking
-                ? const Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      CircularProgressIndicator(),
-                      SizedBox(height: 16),
-                      Text("확인 중..."),
-                    ],
-                  )
-                : const Text("최신 버전입니다."),
+            content: Text(
+              updateService.statusMessage.isNotEmpty
+                  ? updateService.statusMessage
+                  : "최신 버전입니다.",
+            ),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(context),
                 child: const Text("확인"),
               ),
-              if (!updateService.isChecking)
-                ElevatedButton(
-                  onPressed: () => updateService.checkForUpdate(),
-                  child: const Text("다시 확인"),
-                ),
+              ElevatedButton(
+                onPressed: () => updateService.checkForUpdate(),
+                child: const Text("다시 확인"),
+              ),
             ],
           );
         }
@@ -57,8 +92,10 @@ class UpdateDialog extends StatelessWidget {
                 SizedBox(height: tokens.itemGap + 2),
                 if (body.isNotEmpty) ...[
                   const Divider(),
-                  const Text("변경 사항:",
-                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  const Text(
+                    "변경 사항:",
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
                   SizedBox(height: tokens.itemGap - 2),
                   Text(
                     body,
@@ -68,10 +105,16 @@ class UpdateDialog extends StatelessWidget {
                 SizedBox(height: tokens.sectionGap + 2),
                 if (updateService.isDownloading) ...[
                   LinearProgressIndicator(
-                      value: updateService.downloadProgress),
+                    value: updateService.downloadProgress > 0
+                        ? updateService.downloadProgress
+                        : null,
+                  ),
                   SizedBox(height: tokens.itemGap + 2),
                   Text(
-                      "${(updateService.downloadProgress * 100).toStringAsFixed(0)}%"),
+                    updateService.downloadProgress > 0
+                        ? "${(updateService.downloadProgress * 100).toStringAsFixed(0)}%"
+                        : "다운로드 준비 중...",
+                  ),
                 ] else if (updateService.downloadedFilePath != null) ...[
                   Row(
                     children: [
@@ -104,8 +147,9 @@ class UpdateDialog extends StatelessWidget {
           ),
           actions: [
             TextButton(
-              onPressed: () {
-                updateService.ignoreUpdateFor3Days();
+              onPressed: () async {
+                await updateService.ignoreUpdateFor3Days();
+                if (!context.mounted) return;
                 Navigator.pop(context);
               },
               child: const Text("3일간 무시"),
@@ -116,10 +160,7 @@ class UpdateDialog extends StatelessWidget {
             ),
             if (updateService.downloadedFilePath != null)
               ElevatedButton(
-                onPressed: () {
-                  updateService.installUpdate();
-                  Navigator.pop(context);
-                },
+                onPressed: () => updateService.installUpdate(),
                 child: const Text("설치"),
               )
             else if (!updateService.isDownloading)
