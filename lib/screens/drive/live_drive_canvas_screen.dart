@@ -189,6 +189,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   bool _suppressCameraErrors = false;
   Timer? _sidecarTransitionTimer;
   Timer? _sidecarRecoveryTimer;
+  Timer? _overlayDisconnectDebounce;
   DateTime? _sidecarRecoveryNextAt;
   int _sidecarRecoveryBackoffSeconds = 1;
   _SidecarPhase _sidecarPhase = _SidecarPhase.idle;
@@ -838,6 +839,8 @@ fi
     _sidecarTransitionTimer = null;
     _sidecarRecoveryTimer?.cancel();
     _sidecarRecoveryTimer = null;
+    _overlayDisconnectDebounce?.cancel();
+    _overlayDisconnectDebounce = null;
     _hudNoticeTimer?.cancel();
     _hudNoticeTimer = null;
     _stopAdaptiveCameraQualityLoop(resetMode: true);

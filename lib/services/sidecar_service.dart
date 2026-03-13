@@ -19,6 +19,12 @@ class SidecarService {
   static final Map<String, DateTime> _lastLegacyCleanupAttemptAtByHost =
       <String, DateTime>{};
 
+  // Cache for _resolveRemoteBase per host (TTL 60 s) to avoid repeated SSH
+  // round-trips during multi-step operations like deploy or cleanAll.
+  final Map<String, ({String base, DateTime at})> _remoteBaseCache =
+      <String, ({String base, DateTime at})>{};
+  static const Duration _remoteBaseCacheTtl = Duration(seconds: 60);
+
   static const String _sessionName = 'carrotlink_view';
   static const String _pythonFileName = 'sidecar.py';
   static const String _runScriptName = 'sidecar.sh';
@@ -629,10 +635,29 @@ print(f"cfg_removed={removed}")
 ''';
   }
 
+  String _hostKey(SSHService ssh) =>
+      (ssh.connectedIp ?? ssh.targetIp ?? 'connected').trim();
+
+  /// Invalidates the cached remote base path for [ssh].  Call this after any
+  /// operation that may move or delete the sidecar base directory (e.g. reset).
+  void _invalidateRemoteBaseCache(SSHService ssh) {
+    _remoteBaseCache.remove(_hostKey(ssh));
+  }
+
   Future<String> _resolveRemoteBase(
     SSHService ssh, {
     bool strict = true,
   }) async {
+    // Return cached value when it is still fresh and we are not in strict mode
+    // (strict=false callers like stop/status are fine with a cached path).
+    if (!strict) {
+      final key = _hostKey(ssh);
+      final cached = _remoteBaseCache[key];
+      if (cached != null &&
+          DateTime.now().difference(cached.at) < _remoteBaseCacheTtl) {
+        return cached.base;
+      }
+    }
     final result = await ssh.executeCommandResult(
       _bash(
         '''
@@ -701,6 +726,7 @@ echo "\$BASE"
     if (base.isEmpty) {
       throw Exception('사이드카 경로 확인 실패: invalid output ${result.output}');
     }
+    _remoteBaseCache[_hostKey(ssh)] = (base: base, at: DateTime.now());
     return base;
   }
 
@@ -1194,19 +1220,27 @@ fi
     SSHService ssh, {
     int port = defaultPort,
     bool removeManagerRegistration = true,
+    bool skipStop = false,
   }) async {
     if (!ssh.isConnected) {
       throw Exception('기기와 연결되어 있지 않습니다.');
     }
 
     // Best-effort stop first; continue even when stop fails.
-    try {
-      await stop(ssh, port: port);
-    } catch (_) {}
+    // Pass skipStop: true when the caller has already stopped the sidecar to
+    // avoid a redundant SSH round-trip.
+    if (!skipStop) {
+      try {
+        await stop(ssh, port: port);
+      } catch (_) {}
+    }
     if (removeManagerRegistration) {
       await _maybeCleanupLegacyInstall(ssh, force: true);
     }
 
+    // Invalidate the cached base path — the reset deletes sidecar files, so
+    // a subsequent deploy must re-resolve (and re-create) the base directory.
+    _invalidateRemoteBaseCache(ssh);
     final remoteBase = await _resolveRemoteBase(ssh, strict: false);
     final result = await ssh.executeCommandResult(
       _bash(

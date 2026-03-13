@@ -17,6 +17,8 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
       runtime.overlayStreamListenable
           .removeListener(_handleSharedOverlayRuntimeTick);
     }
+    _overlayDisconnectDebounce?.cancel();
+    _overlayDisconnectDebounce = null;
     _sharedRuntimeManager = null;
   }
 
@@ -32,6 +34,8 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
   }) {
     final runtime = _sharedRuntimeManager;
     if (runtime == null) {
+      _overlayDisconnectDebounce?.cancel();
+      _overlayDisconnectDebounce = null;
       _applySidecarConnectionState(false, allowRecovery: false);
       return;
     }
@@ -39,12 +43,34 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
     final sameHost = runtime.overlayHost == _hostIp;
     final effectiveConnected =
         _openpilotOverlayMode && sameHost && runtime.overlayConnected;
-    _applySidecarConnectionState(
-      effectiveConnected,
-      allowRecovery: _openpilotOverlayMode,
-      provisionalReason:
-          seedBufferedFrames ? 'shared_overlay_seed' : 'shared_overlay_update',
-    );
+
+    if (effectiveConnected) {
+      // Connected — cancel any pending disconnect debounce immediately.
+      _overlayDisconnectDebounce?.cancel();
+      _overlayDisconnectDebounce = null;
+      _applySidecarConnectionState(
+        true,
+        allowRecovery: _openpilotOverlayMode,
+        provisionalReason: seedBufferedFrames
+            ? 'shared_overlay_seed'
+            : 'shared_overlay_update',
+      );
+    } else if (_overlayDisconnectDebounce == null) {
+      // Not yet connected — debounce before propagating to avoid flashing
+      // "사이드카 연결 대기" for brief WS reconnects (~350 ms).
+      _overlayDisconnectDebounce = Timer(
+        const Duration(milliseconds: 1200),
+        () {
+          _overlayDisconnectDebounce = null;
+          if (!mounted) return;
+          _applySidecarConnectionState(
+            false,
+            allowRecovery: _openpilotOverlayMode,
+            provisionalReason: 'shared_overlay_disconnect_debounced',
+          );
+        },
+      );
+    }
 
     if (!sameHost) {
       return;
@@ -82,6 +108,8 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
   }
 
   void _stopSidecarLoop({bool resetSession = true}) {
+    _overlayDisconnectDebounce?.cancel();
+    _overlayDisconnectDebounce = null;
     _applySidecarConnectionState(false, allowRecovery: false);
     if (resetSession) {
       _lastConsumedSharedOverlayFrameSequence = 0;

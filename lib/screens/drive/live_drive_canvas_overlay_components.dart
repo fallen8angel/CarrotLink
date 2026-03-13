@@ -26,6 +26,14 @@ class _DriveOverlayPainter extends CustomPainter {
   static const double _baseSourceWidth = 1928.0;
   static const double _baseSourceHeight = 1208.0;
   static const double _clipMargin = 500.0;
+
+  // EMA smoothing for lead box anchor — matches carrot.cc path_fx/fy/fwidth (alpha=0.85).
+  // Two slots: 0 = leadOne, 1 = leadTwo. Static so they persist across painter instances.
+  static const double _leadEmaAlpha = 0.85;
+  static double _emaFx0 = 0.0, _emaFy0 = 0.0, _emaFw0 = 0.0;
+  static int _emaTrackId0 = -99999;
+  static double _emaFx1 = 0.0, _emaFy1 = 0.0, _emaFw1 = 0.0;
+  static int _emaTrackId1 = -99999;
   static const _M3 _viewFromDevice = _M3(
     0.0,
     1.0,
@@ -484,25 +492,68 @@ class _DriveOverlayPainter extends CustomPainter {
       );
       if (okL && okR && lp != null && rp != null) {
         if (!allowInvert && left.isNotEmpty && lp!.dy > left.last.dy) {
-          dist += dist * 0.15;
+          dist += dist * 0.08;
           continue;
         }
         left.add(lp!);
         right.insert(0, rp!);
       }
-      dist += dist * 0.15;
+      dist += dist * 0.08;
     }
     if (left.length < 2 || right.length < 2) return null;
     return <Offset>[...left, ...right];
   }
 
+  /// Builds a closed polygon from [vertices] with quadratic Bezier smoothing
+  /// applied independently to each edge (left: near→far, right: far→near).
+  /// The vertices list is assumed to be [...leftEdge, ...rightEdge] as produced
+  /// by [_mapLineToPolygonVertices] and [_mapTrackToPolygonVertices].
+  /// Using straight lineTo between each vertex produces a visibly jagged polygon;
+  /// the midpoint-Bezier technique rounds the corners at each vertex so the
+  /// resulting path looks smooth like the native openpilot overlay.
   Path _pathFromVertices(List<Offset> vertices) {
-    final path = Path()..moveTo(vertices.first.dx, vertices.first.dy);
-    for (var i = 1; i < vertices.length; i++) {
-      path.lineTo(vertices[i].dx, vertices[i].dy);
+    if (vertices.length < 3) {
+      final path = Path()..moveTo(vertices.first.dx, vertices.first.dy);
+      for (var i = 1; i < vertices.length; i++) {
+        path.lineTo(vertices[i].dx, vertices[i].dy);
+      }
+      path.close();
+      return path;
     }
-    path.close();
+
+    // Split into left edge (near → far) and right edge (far → near).
+    final half = vertices.length ~/ 2;
+    final left = vertices.sublist(0, half);
+    final right = vertices.sublist(half);
+
+    final path = Path()..moveTo(left.first.dx, left.first.dy);
+    _addSmoothedEdge(path, left);
+    // Sharp join at the far end — both sides meet here.
+    path.lineTo(right.first.dx, right.first.dy);
+    _addSmoothedEdge(path, right);
+    path.close(); // Sharp join at the near end.
     return path;
+  }
+
+  /// Appends a quadratic-Bezier–smoothed polyline from [pts][0] to [pts][n-1]
+  /// onto [path].  Caller must have already moved/linked to [pts][0].
+  /// Uses the midpoint technique: for each interior vertex V_i the control point
+  /// is V_i and the anchor is the midpoint of V_i → V_{i+1}, which produces a
+  /// smooth C1-continuous curve through all midpoints.
+  void _addSmoothedEdge(Path path, List<Offset> pts) {
+    if (pts.length < 2) return;
+    if (pts.length == 2) {
+      path.lineTo(pts[1].dx, pts[1].dy);
+      return;
+    }
+    for (var i = 1; i < pts.length - 1; i++) {
+      final mid = Offset(
+        (pts[i].dx + pts[i + 1].dx) * 0.5,
+        (pts[i].dy + pts[i + 1].dy) * 0.5,
+      );
+      path.quadraticBezierTo(pts[i].dx, pts[i].dy, mid.dx, mid.dy);
+    }
+    path.lineTo(pts.last.dx, pts.last.dy);
   }
 
   void _drawTrackPolygon(
@@ -3076,8 +3127,9 @@ class _DriveOverlayPainter extends CustomPainter {
   _ProjectedLeadBox? _projectLeadBox(
     _ProjectionTransform transform,
     Size canvasSize,
-    _RadarLeadSample lead,
-  ) {
+    _RadarLeadSample lead, {
+    int slot = 0,
+  }) {
     if (!lead.status || !lead.dRel.isFinite || lead.dRel <= 0.0) return null;
     const zBase = 1.22;
     final z = _sampleModelZAtDistance(lead.dRel);
@@ -3111,25 +3163,65 @@ class _DriveOverlayPainter extends CustomPainter {
       return null;
     }
 
+    // EMA smoothing — matches carrot.cc path_fx/fy/fwidth with alpha=0.85.
+    // Prevents the anchor from jumping when a vehicle appears or comes close.
+    final int prevTrackId;
+    final double prevFx, prevFy, prevFw;
+    if (slot == 0) {
+      prevTrackId = _emaTrackId0;
+      prevFx = _emaFx0;
+      prevFy = _emaFy0;
+      prevFw = _emaFw0;
+    } else {
+      prevTrackId = _emaTrackId1;
+      prevFx = _emaFx1;
+      prevFy = _emaFy1;
+      prevFw = _emaFw1;
+    }
+    final bool trackChanged =
+        prevTrackId != lead.radarTrackId || !prevFx.isFinite || !prevFy.isFinite;
+    final double smoothX = trackChanged
+        ? rawCenterX
+        : prevFx * _leadEmaAlpha + rawCenterX * (1.0 - _leadEmaAlpha);
+    final double smoothY = trackChanged
+        ? rawCenterY
+        : prevFy * _leadEmaAlpha + rawCenterY * (1.0 - _leadEmaAlpha);
+    final double smoothW = trackChanged
+        ? rawWidth
+        : prevFw * _leadEmaAlpha + rawWidth * (1.0 - _leadEmaAlpha);
+    if (slot == 0) {
+      _emaFx0 = smoothX;
+      _emaFy0 = smoothY;
+      _emaFw0 = smoothW;
+      _emaTrackId0 = lead.radarTrackId;
+    } else {
+      _emaFx1 = smoothX;
+      _emaFy1 = smoothY;
+      _emaFw1 = smoothW;
+      _emaTrackId1 = lead.radarTrackId;
+    }
+
     final sourceScale =
         transform.sourceScale.isFinite && transform.sourceScale > 0.0
             ? transform.sourceScale
             : 1.0;
+    // Clamp margins match carrot.cc: [350, fb_w-350] × [200, fb_h-80] in source pixels.
     final marginX = math.min(canvasSize.width * 0.35, 350.0 * sourceScale);
     final topMargin = math.min(canvasSize.height * 0.28, 200.0 * sourceScale);
-    final bottomMargin = math.min(canvasSize.height * 0.14, 80.0 * sourceScale);
+    // Use max (not min) for bottom margin so it is at least 80 source-px from bottom.
+    final bottomMargin = math.max(canvasSize.height * 0.14, 80.0 * sourceScale);
     final centerX = _clampDouble(
-      rawCenterX,
+      smoothX,
       marginX,
       math.max(marginX, canvasSize.width - marginX),
     );
     final centerY = _clampDouble(
-      rawCenterY,
+      smoothY,
       topMargin,
       math.max(topMargin, canvasSize.height - bottomMargin),
     );
     final width =
-        _clampDouble(rawWidth, 120.0 * sourceScale, 800.0 * sourceScale);
+        _clampDouble(smoothW, 120.0 * sourceScale, 800.0 * sourceScale);
     final sidePad = 10.0 * sourceScale;
     final boxHeight = math.max(width * 0.8, 12.0 * sourceScale);
     final rect = Rect.fromLTRB(
@@ -3224,7 +3316,7 @@ class _DriveOverlayPainter extends CustomPainter {
 
     final leadOne = snapshot.leadOne;
     final leadOneBox = leadOne != null && leadOne.status
-        ? _projectLeadBox(transform, canvasSize, leadOne)
+        ? _projectLeadBox(transform, canvasSize, leadOne, slot: 0)
         : null;
     if (leadOneBox != null && showLead1) {
       final isLeadScc = leadOneBox.radarTrackId < 1;
@@ -3285,7 +3377,7 @@ class _DriveOverlayPainter extends CustomPainter {
         leadTwo.radarTrackId != (leadOne?.radarTrackId ?? -9999);
     final _RadarLeadSample? leadTwoSample = validLeadTwo ? leadTwo : null;
     final leadTwoBox = leadTwoSample != null
-        ? _projectLeadBox(transform, canvasSize, leadTwoSample)
+        ? _projectLeadBox(transform, canvasSize, leadTwoSample, slot: 1)
         : null;
     if (leadTwoBox != null && showLead2) {
       _appendLeadBoxCard(

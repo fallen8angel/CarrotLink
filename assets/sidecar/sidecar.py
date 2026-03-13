@@ -2004,7 +2004,10 @@ class SidecarApp:
             try:
                 sm = self.sm
                 if sm is not None and (self.clients or self.hud_clients):
-                    sm.update(0)
+                    try:
+                        sm.update(0)
+                    except Exception as sm_err:
+                        self.last_error = f"sm update error: {sm_err}"
                 live_send_timeout = 1.0
                 if self.clients:
                     build_started = time.monotonic()
@@ -2090,7 +2093,7 @@ class SidecarApp:
                                     asyncio.create_task(
                                         asyncio.wait_for(
                                             ws.send_str(hud_message),
-                                            timeout=1.0,
+                                            timeout=0.3,
                                         )
                                     ),
                                 )

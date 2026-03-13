@@ -82,12 +82,13 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
         );
       }
 
-      // 3. reset (현재 파일 삭제)
+      // 3. reset (현재 파일 삭제) — stop은 ①에서 이미 완료했으므로 skipStop
       _addStep('현재 파일 초기화', status: _StepStatus.running);
       try {
         final resetOut = await _sidecar.resetForTesting(
           ssh,
           removeManagerRegistration: true,
+          skipStop: true,
         );
         _updateLastStep(
           status: _StepStatus.ok,
@@ -124,19 +125,29 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
         ),
       );
 
-      // 6. health 검증
+      // 6+7. health + revision 검증 — 두 작업은 독립적이므로 병렬 실행
       _addStep('Health 검증', status: _StepStatus.running);
-      final statusOut = await _sidecar.status(ssh);
-      final healthResult = _parseStatusVerification(statusOut);
-      _updateLastStep(
-        status: healthResult.ok ? _StepStatus.ok : _StepStatus.fail,
-        detail: healthResult.summary,
-      );
-
-      // 7. revision 검증
       _addStep('Revision 검증', status: _StepStatus.running);
-      final remoteRev = await _sidecar.remoteRevision(ssh);
+      final verifyResults = await Future.wait([
+        _sidecar.status(ssh),
+        _sidecar.remoteRevision(ssh),
+      ]);
+      final statusOut = verifyResults[0] as String;
+      final remoteRev = verifyResults[1] as String?;
+      final healthResult = _parseStatusVerification(statusOut);
       final revMatch = remoteRev != null && remoteRev == localRev;
+      // update health step (second-to-last)
+      final healthIdx = _steps.length - 2;
+      if (mounted && healthIdx >= 0) {
+        setState(() {
+          _steps[healthIdx] = _StepLog(
+            label: _steps[healthIdx].label,
+            status: healthResult.ok ? _StepStatus.ok : _StepStatus.fail,
+            detail: healthResult.summary,
+          );
+        });
+      }
+      // update revision step (last)
       _updateLastStep(
         status: revMatch ? _StepStatus.ok : _StepStatus.fail,
         detail: revMatch

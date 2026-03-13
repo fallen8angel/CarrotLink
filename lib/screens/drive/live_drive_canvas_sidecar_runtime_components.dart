@@ -591,7 +591,14 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       final running = status['running'] == '1';
       final listening = status['listening'] == '1';
       if (running && listening) {
+        // Sidecar is already up — skip the full ready-wait so a brief WS
+        // reconnect (350 ms) does not trigger a 3-second "verifying" banner.
         _pushSidecarHistory('AUTO_RUNTIME', 'reuse running/listening runtime');
+        _startSidecarLoop();
+        _setSidecarPhase(
+          _SidecarPhase.running,
+          message: '사이드카 실행 중',
+        );
       } else {
         _setSidecarPhase(
           _SidecarPhase.starting,
@@ -642,30 +649,30 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
             rethrow;
           }
         }
-      }
 
-      _startSidecarLoop();
-      _setSidecarPhase(
-        _SidecarPhase.verifying,
-        message: '카메라 스트림 연결 확인 중...',
-      );
-      try {
-        await _waitForSidecarReady(
-          timeout: const Duration(milliseconds: 3000),
-          pollInterval: const Duration(milliseconds: 150),
-          healthTimeout: const Duration(milliseconds: 700),
-          wsTimeout: const Duration(milliseconds: 1200),
-        );
+        _startSidecarLoop();
         _setSidecarPhase(
-          _SidecarPhase.running,
-          message: '사이드카 실행 중',
+          _SidecarPhase.verifying,
+          message: '카메라 스트림 연결 확인 중...',
         );
-      } catch (e) {
-        _pushSidecarHistory('READY_DEFER', '$e');
-        _setSidecarPhase(
-          _SidecarPhase.running,
-          message: '사이드카 연결 대기 중...',
-        );
+        try {
+          await _waitForSidecarReady(
+            timeout: const Duration(milliseconds: 3000),
+            pollInterval: const Duration(milliseconds: 150),
+            healthTimeout: const Duration(milliseconds: 700),
+            wsTimeout: const Duration(milliseconds: 1200),
+          );
+          _setSidecarPhase(
+            _SidecarPhase.running,
+            message: '사이드카 실행 중',
+          );
+        } catch (e) {
+          _pushSidecarHistory('READY_DEFER', '$e');
+          _setSidecarPhase(
+            _SidecarPhase.running,
+            message: '사이드카 연결 대기 중...',
+          );
+        }
       }
       unawaited(_refreshSidecarProcessStatus());
       _clearSidecarRecoverySchedule();

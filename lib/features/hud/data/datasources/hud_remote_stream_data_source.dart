@@ -19,8 +19,10 @@ class HudRemoteStreamDataSource {
     ],
     this.reconnectDelay = const Duration(milliseconds: 250),
     // Healthy HUD relays send an initial snapshot immediately and then keep
-    // emitting at ~10Hz. Multi-second idle waits only delay fallback.
-    this.idleTimeout = const Duration(milliseconds: 1500),
+    // emitting at ~10Hz. Raised to 4 s to absorb transient sidecar-side send
+    // timeouts (sidecar uses 1 s per-client send timeout; live+HUD gathers can
+    // run back-to-back, so worst-case gap is ~2 s before a retry tick arrives).
+    this.idleTimeout = const Duration(milliseconds: 4000),
     this.stickToPrimaryAfterSuccess = true,
     this.clientRole = 'app_hud',
   });
