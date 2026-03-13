@@ -113,12 +113,14 @@ class HudMetaState {
   final bool isPreview;
   final bool isFallbackMetricsApplied;
   final List<String> missingFields;
+  final List<String> staleReasons;
   final String quality;
 
   const HudMetaState({
     this.isPreview = false,
     this.isFallbackMetricsApplied = false,
     this.missingFields = const <String>[],
+    this.staleReasons = const <String>[],
     this.quality = 'live',
   });
 
@@ -128,6 +130,7 @@ class HudMetaState {
     bool? isPreview,
     bool? isFallbackMetricsApplied,
     List<String>? missingFields,
+    List<String>? staleReasons,
     String? quality,
   }) {
     return HudMetaState(
@@ -135,6 +138,7 @@ class HudMetaState {
       isFallbackMetricsApplied:
           isFallbackMetricsApplied ?? this.isFallbackMetricsApplied,
       missingFields: missingFields ?? this.missingFields,
+      staleReasons: staleReasons ?? this.staleReasons,
       quality: quality ?? this.quality,
     );
   }

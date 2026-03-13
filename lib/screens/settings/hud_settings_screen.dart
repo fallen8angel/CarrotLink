@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../features/hud/hud.dart';
+import '../../services/device_action_service.dart';
 import '../../services/hud_feature_settings_service.dart';
 import '../../services/sidecar_service.dart';
 import '../../services/ssh_service.dart';
@@ -19,6 +20,7 @@ class HudSettingsScreen extends StatefulWidget {
 
 class _HudSettingsScreenState extends State<HudSettingsScreen> {
   final SidecarService _sidecar = SidecarService.shared;
+  final DeviceActionService _actionService = DeviceActionService();
   final ScrollController _terminalScrollController = ScrollController();
   static const Duration _installHudBootstrapTimeout = Duration(seconds: 8);
   bool _busy = false;
@@ -120,7 +122,8 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
     final confirmed = await _confirm(
       title: 'Stock 주행모드 설치',
       message: '디바이스에 sidecar를 배포하고 시작한 뒤 상태를 검증합니다.\n\n'
-          '기본 동작은 재부팅 없이 설치/업데이트입니다.',
+          '설치 완료 후 안정적인 반영을 위해 openpilot 기기 재부팅이 필요합니다.\n'
+          '마지막 단계에서 재부팅 여부를 다시 확인합니다.',
       confirmText: '설치',
     );
     if (!confirmed) return;
@@ -207,6 +210,21 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
         detail: _summarizeOutput(verify[0]),
       );
 
+      final shouldPrimeDriveRuntime =
+          _featureSettings.enabled && _supportsDriveRuntime(verify[1]);
+      if (shouldPrimeDriveRuntime) {
+        _addStep('주행 그래픽 예열', status: _StepStatus.running);
+        final driveStartOut = await _sidecar.start(
+          ssh,
+          profile: SidecarService.driveRuntimeProfile,
+        );
+        _appendTerminal('DRIVE_PREWARM', driveStartOut);
+        _updateLastStep(
+          status: _StepStatus.ok,
+          detail: 'p2 런타임을 미리 준비했습니다.',
+        );
+      }
+
       _addStep('새 런타임 재바인드 준비', status: _StepStatus.running);
         await _runtime.resetRuntime(
           clearCachedSnapshots: true,
@@ -258,7 +276,7 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
         );
       }
 
-      _showSnack('Stock 주행모드 설치가 완료되었습니다.');
+      await _handlePostInstallReboot();
     } catch (e) {
       _appendTerminal('INSTALL_FAIL', '$e');
       _updateLastStep(status: _StepStatus.fail, detail: '$e');
@@ -418,6 +436,24 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
     return source.join(' | ');
   }
 
+  bool _supportsDriveRuntime(String raw) {
+    final pairs = <String, String>{};
+    for (final line in raw.split('\n')) {
+      final trimmed = line.trim();
+      if (trimmed.isEmpty) continue;
+      final idx = trimmed.indexOf('=');
+      if (idx <= 0) continue;
+      pairs[trimmed.substring(0, idx).trim()] =
+          trimmed.substring(idx + 1).trim();
+    }
+    bool up(String name) => (pairs[name] ?? '').trim().startsWith('up:');
+    final hasControlCore = up('selfdrived') && (up('controlsd') || up('plannerd'));
+    final hasVisionCore =
+        up('stream_encoderd') && up('modeld') && up('camerad');
+    final hasRadarCore = up('radard');
+    return hasControlCore && hasVisionCore && hasRadarCore;
+  }
+
   void _addStep(String label, {_StepStatus status = _StepStatus.pending}) {
     if (!mounted) return;
     setState(() {
@@ -453,6 +489,7 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
     required String title,
     required String message,
     required String confirmText,
+    String cancelText = '취소',
   }) async {
     return await showDialog<bool>(
           context: context,
@@ -466,7 +503,7 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
               actions: [
                 TextButton(
                   onPressed: () => Navigator.pop(ctx, false),
-                  child: const Text('취소'),
+                  child: Text(cancelText),
                 ),
                 FilledButton(
                   style: FilledButton.styleFrom(
@@ -480,6 +517,71 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
           },
         ) ??
          false;
+  }
+
+  Future<void> _handlePostInstallReboot() async {
+    _addStep('재부팅 안내', status: _StepStatus.running);
+    _appendTerminal(
+      'REBOOT_NOTICE',
+      '설치가 완료되었습니다. 안정적인 반영을 위해 openpilot 기기 재부팅이 필요합니다.',
+    );
+
+    final confirmed = await _confirm(
+      title: '재부팅 필요',
+      message: 'Stock 주행모드 설치가 완료되었습니다.\n\n'
+          '변경사항을 안정적으로 반영하려면 openpilot 기기를 지금 재부팅하는 것을 권장합니다.\n'
+          '지금 재부팅하시겠습니까?',
+      confirmText: '재부팅',
+      cancelText: '나중에',
+    );
+
+    if (!confirmed) {
+      _appendTerminal(
+        'REBOOT_SKIP',
+        '사용자가 재부팅을 보류했습니다. 다음 사용 전 openpilot 기기 재부팅이 필요합니다.',
+      );
+      _updateLastStep(
+        status: _StepStatus.warn,
+        detail: '설치는 완료됨 · 다음 사용 전 기기 재부팅이 필요합니다.',
+      );
+      _showSnack('설치는 완료되었습니다. 사용 전 기기 재부팅이 필요합니다.');
+      return;
+    }
+
+    _updateLastStep(status: _StepStatus.ok, detail: '사용자가 재부팅을 확인했습니다.');
+    _addStep('기기 재부팅', status: _StepStatus.running);
+
+    try {
+      final result = await _actionService.runAction(_ssh, DeviceActionType.reboot);
+      final output = result.output.trim().isEmpty ? result.command : result.output;
+      _appendTerminal('REBOOT', output);
+      if (result.ok) {
+        _updateLastStep(
+          status: _StepStatus.ok,
+          detail: '재부팅 명령을 전송했습니다. 기기 연결이 잠시 끊어질 수 있습니다.',
+        );
+        _showSnack('재부팅 명령을 전송했습니다.');
+      } else {
+        _updateLastStep(
+          status: _StepStatus.fail,
+          detail: '재부팅 명령 실패 (code: ${result.exitCode})',
+        );
+        _showSnack(
+          '설치는 완료됐지만 재부팅 명령 전송에 실패했습니다.',
+          isError: true,
+        );
+      }
+    } catch (e) {
+      _appendTerminal('REBOOT_FAIL', '$e');
+      _updateLastStep(
+        status: _StepStatus.fail,
+        detail: '재부팅 명령 전송 실패: $e',
+      );
+      _showSnack(
+        '설치는 완료됐지만 재부팅 명령 전송에 실패했습니다.',
+        isError: true,
+      );
+    }
   }
 
   Future<OriginalHudSnapshot?> _waitForMeaningfulHudSnapshot({

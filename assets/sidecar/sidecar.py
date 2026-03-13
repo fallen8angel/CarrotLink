@@ -191,7 +191,7 @@ def _extract_h264_codec(payload: bytes) -> str | None:
 
 
 class CameraRelayHub:
-    CAMERA_QUEUE_MAXSIZE = 2
+    CAMERA_QUEUE_MAXSIZE = 3
     CAMERA_SERVICE_CANDIDATES = {
         "road": [
             "livestreamRoadEncodeData",
@@ -276,6 +276,35 @@ class CameraRelayHub:
         self._selected_service = {
             cam: "" for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
         }
+
+    async def reset_runtime_state(self, reason: str = "runtime_reset") -> None:
+        async with self._lock:
+            self._sockets = {
+                cam: {} for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._selected_service = {
+                cam: "" for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._last_codec = {
+                cam: "" for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._last_frame_at_mono = {
+                cam: 0.0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._last_frame_id = {
+                cam: -1 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._last_send_batch_ms = {
+                cam: 0.0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._ws_send_failures = {}
+            for queue in self._queues.values():
+                while not queue.empty():
+                    try:
+                        queue.get_nowait()
+                    except Exception:
+                        break
+        print(f"[sidecar] camera runtime reset reason={reason}")
 
     def _ordered_camera_services(self, camera: str) -> list[str]:
         base = list(self.CAMERA_SERVICE_CANDIDATES.get(camera, []))
@@ -633,6 +662,38 @@ class SidecarApp:
         ],
     }
 
+    PROFILE_SM_UPDATE_INTERVAL = {
+        "p0": 0.08,
+        "p1": 0.06,
+        "p2": 0.04,
+        "p3": 0.04,
+        "p4": 0.03,
+    }
+
+    PROFILE_LIVE_INTERVAL = {
+        "p0": 0.16,
+        "p1": 0.12,
+        "p2": 0.04,
+        "p3": 0.04,
+        "p4": 0.03,
+    }
+
+    PROFILE_LIVE_CACHE_INTERVAL = {
+        "p0": 0.12,
+        "p1": 0.08,
+        "p2": 0.04,
+        "p3": 0.04,
+        "p4": 0.03,
+    }
+
+    PROFILE_HUD_INTERVAL = {
+        "p0": 0.10,
+        "p1": 0.08,
+        "p2": 0.08,
+        "p3": 0.08,
+        "p4": 0.08,
+    }
+
 
     def __init__(self, profile: str):
         self.profile = profile if profile in self.PROFILE_SERVICES else "p2"
@@ -688,11 +749,91 @@ class SidecarApp:
         self._hud_metric_show_volt = False
         self._last_sm_update_mono = 0.0
         self._sm_update_min_interval = 0.02
+        self._cached_live_payload: dict[str, Any] | None = None
+        self._cached_live_json: str | None = None
+        self._cached_live_zlib_json: bytes | None = None
+        self._cached_live_msgpack: bytes | None = None
+        self._cached_live_last_built = 0.0
+        self._cached_hud_payload: dict[str, Any] | None = None
+        self._cached_hud_json: str | None = None
+        self._cached_hud_last_built = 0.0
+        self._profile_generation = 0
+        self._service_last_alive_mono: dict[str, float] = {}
+        self._service_last_updated_mono: dict[str, float] = {}
 
         self._init_messaging()
         self._init_params()
 
+    def _invalidate_broadcast_caches(self) -> None:
+        self._cached_live_payload = None
+        self._cached_live_json = None
+        self._cached_live_zlib_json = None
+        self._cached_live_msgpack = None
+        self._cached_live_last_built = 0.0
+        self._cached_hud_payload = None
+        self._cached_hud_json = None
+        self._cached_hud_last_built = 0.0
+
+    def _sm_update_loop_interval(self) -> float:
+        return self.PROFILE_SM_UPDATE_INTERVAL.get(self.profile, 0.05)
+
+    def _live_broadcast_interval(self) -> float:
+        return self.PROFILE_LIVE_INTERVAL.get(self.profile, 0.05)
+
+    def _live_cache_interval(self) -> float:
+        return self.PROFILE_LIVE_CACHE_INTERVAL.get(
+            self.profile,
+            self._live_broadcast_interval(),
+        )
+
+    def _hud_interval(self) -> float:
+        return self.PROFILE_HUD_INTERVAL.get(self.profile, 0.10)
+
+    def _payload_cache_loop_interval(self) -> float:
+        if self.clients and self.hud_clients:
+            return min(self._live_cache_interval(), self._hud_interval())
+        if self.clients:
+            return self._live_cache_interval()
+        if self.hud_clients:
+            return self._hud_interval()
+        return 0.10
+
+    def _reset_profile_runtime_state(self, reason: str = "profile_switch") -> None:
+        self._invalidate_broadcast_caches()
+        self._live_optional_cache = None
+        self._live_optional_last_built = 0.0
+        self._last_optional_build_ms = 0.0
+        self._cached_calibration_last_read = 0.0
+        self._cached_calibration_cache = None
+        self._debug_plot_last_built = 0.0
+        self._debug_plot_cache = None
+        self._plot_mode_last_read = 0.0
+        self._path_style_last_read = 0.0
+        self._hud_params_last_read = 0.0
+        self._hud_metric_toggle_last = 0.0
+        self._last_live_build_ms = 0.0
+        self._last_live_send_batch_ms = 0.0
+        self._last_hud_build_ms = 0.0
+        self._last_hud_send_batch_ms = 0.0
+        self._live_send_failures.clear()
+        self._hud_send_failures.clear()
+        self._last_sm_update_mono = 0.0
+        self._service_last_alive_mono = {}
+        self._service_last_updated_mono = {}
+        self._profile_generation += 1
+        if hasattr(self, "_calib_cache"):
+            delattr(self, "_calib_cache")
+        if hasattr(self, "_calib_cache_tick"):
+            delattr(self, "_calib_cache_tick")
+        print(
+            f"[sidecar] profile runtime reset reason={reason} generation={self._profile_generation}"
+        )
+
     def _init_messaging(self) -> None:
+        self._invalidate_broadcast_caches()
+        self._live_optional_cache = None
+        self._live_optional_last_built = 0.0
+        self._last_sm_update_mono = 0.0
         try:
             _ensure_pythonpath(self.repo)
             from cereal import messaging  # type: ignore
@@ -707,6 +848,8 @@ class SidecarApp:
             ]:
                 if s not in services:
                     services.append(s)
+            self._service_last_alive_mono = {name: 0.0 for name in services}
+            self._service_last_updated_mono = {name: 0.0 for name in services}
             self.sm = messaging.SubMaster(services)
             if self._camera_hub is None:
                 self._camera_hub = CameraRelayHub(messaging)
@@ -780,12 +923,27 @@ class SidecarApp:
         alive_map = getattr(sm_ref, "alive", {}) if sm_ref is not None else {}
         valid_map = getattr(sm_ref, "valid", {}) if sm_ref is not None else {}
         updated_map = getattr(sm_ref, "updated", {}) if sm_ref is not None else {}
+        now = time.monotonic()
+        last_alive = self._service_last_alive_mono.get(name, 0.0)
+        last_updated = self._service_last_updated_mono.get(name, 0.0)
+        freshness_ms = self._service_freshness_limit_ms(name)
         diag: dict[str, Any] = {
             "subscribed": name in alive_map,
             "alive": bool(alive_map.get(name, False)),
             "updated": bool(updated_map.get(name, False)),
             "valid": bool(valid_map.get(name, False)),
+            "aliveAgeMs": int(max(0.0, (now - last_alive) * 1000.0))
+            if last_alive > 0.0
+            else None,
+            "updatedAgeMs": int(max(0.0, (now - last_updated) * 1000.0))
+            if last_updated > 0.0
+            else None,
+            "freshnessLimitMs": freshness_ms,
         }
+        diag["isFresh"] = (
+            diag["updatedAgeMs"] is not None
+            and diag["updatedAgeMs"] <= freshness_ms
+        )
         if sm_ref is None or not diag["alive"]:
             return diag
         try:
@@ -803,6 +961,27 @@ class SidecarApp:
             pass
         return diag
 
+    def _service_freshness_limit_ms(self, name: str) -> int:
+        limits = {
+            "carState": 1200,
+            "selfdriveState": 1200,
+            "controlsState": 1200,
+            "longitudinalPlan": 1200,
+            "carrotMan": 1500,
+            "navInstructionCarrot": 2000,
+            "modelV2": 500,
+            "radarState": 800,
+            "roadCameraState": 500,
+            "wideRoadCameraState": 700,
+            "liveCalibration": 2500,
+            "deviceState": 3000,
+            "peripheralState": 3000,
+            "gpsLocationExternal": 3000,
+            "gpsLocation": 3000,
+            "lateralPlan": 1500,
+        }
+        return limits.get(name, 1500)
+
     def _service_ready(
         self,
         name: str,
@@ -815,11 +994,34 @@ class SidecarApp:
             return False
         if not diag.get("alive", False):
             return False
-        if require_updated and not diag.get("updated", False):
+        if require_updated and not diag.get("isFresh", False):
             return False
         if require_frame and diag.get("frameId") is None:
             return False
         return True
+
+    def _hud_stale_reasons(self) -> list[str]:
+        reasons: list[str] = []
+
+        def append_if_stale(service: str, code: str) -> None:
+            diag = self._service_health(service)
+            if diag.get("alive", False) and not diag.get("isFresh", False):
+                reasons.append(code)
+
+        append_if_stale("carState", "vehicle.carState.stale")
+        append_if_stale("selfdriveState", "vehicle.selfdriveState.stale")
+        append_if_stale("deviceState", "device.deviceState.stale")
+        append_if_stale("peripheralState", "device.peripheralState.stale")
+        append_if_stale("longitudinalPlan", "assist.longitudinalPlan.stale")
+        append_if_stale("carrotMan", "assist.carrotMan.stale")
+        append_if_stale("navInstructionCarrot", "nav.instruction.stale")
+
+        if (
+            self._last_sm_update_mono > 0.0
+            and (time.monotonic() - self._last_sm_update_mono) * 1000.0 > 2500.0
+        ):
+            reasons.append("transport.smUpdate.stale")
+        return reasons
 
     def _runtime_health_flags(
         self,
@@ -827,14 +1029,15 @@ class SidecarApp:
     ) -> dict[str, Any]:
         process_ready = self.sm is not None and self.messaging is not None
         hud_ready = process_ready and self._service_ready(
-            "carState"
-        ) and self._service_ready("selfdriveState")
-        carrot_ready = self._service_ready("carrotMan")
+            "carState",
+            require_updated=True,
+        ) and self._service_ready("selfdriveState", require_updated=True)
+        carrot_ready = self._service_ready("carrotMan", require_updated=True)
         plan_ready = self._service_ready(
             "longitudinalPlan",
             require_updated=True,
         )
-        nav_ready = self._service_ready("navInstructionCarrot")
+        nav_ready = self._service_ready("navInstructionCarrot", require_updated=True)
         live_ready = hud_ready and self._service_ready(
             "modelV2",
             require_updated=True,
@@ -1141,7 +1344,15 @@ class SidecarApp:
             return
         try:
             sm.update(0)
-            self._last_sm_update_mono = time.monotonic()
+            updated_at = time.monotonic()
+            self._last_sm_update_mono = updated_at
+            alive_map = getattr(sm, "alive", {})
+            updated_map = getattr(sm, "updated", {})
+            for name in alive_map.keys():
+                if bool(alive_map.get(name, False)):
+                    self._service_last_alive_mono[name] = updated_at
+                if bool(updated_map.get(name, False)):
+                    self._service_last_updated_mono[name] = updated_at
         except Exception as sm_err:
             self.last_error = f"sm update error: {sm_err}"
 
@@ -1151,17 +1362,23 @@ class SidecarApp:
         sm_ref: Any = None,
     ) -> dict[str, Any]:
         missing_fields: list[str] = []
+        stale_reasons: list[str] = []
         payload: dict[str, Any] = {
             "version": 1,
             "tsMonoMs": int(time.monotonic() * 1000.0),
             "source": {"transport": "sidecar_hud"},
-            "meta": {"quality": "semantic", "missingFields": missing_fields},
+            "meta": {
+                "quality": "semantic",
+                "missingFields": missing_fields,
+                "staleReasons": stale_reasons,
+            },
         }
         sm = sm_ref if sm_ref is not None else self.sm
         if sm is None:
             payload["meta"] = {
                 "quality": "degraded",
                 "missingFields": ["remote.unavailable"],
+                "staleReasons": ["remote.unavailable"],
             }
             payload["error"] = self.last_error or "messaging unavailable"
             return payload
@@ -1183,7 +1400,8 @@ class SidecarApp:
             missing_fields.append("vehicle.selfdriveState")
         if cs is None and ss is None:
             missing_fields.append("vehicle.core")
-        if missing_fields:
+        stale_reasons.extend(self._hud_stale_reasons())
+        if missing_fields or stale_reasons:
             payload["meta"]["quality"] = "degraded"
 
         raw_speed_cluster = None
@@ -1948,13 +2166,15 @@ class SidecarApp:
         self,
         safe_mode: bool = False,
         payload_mode: str = "full",
+        do_update: bool = True,
     ) -> dict[str, Any]:
         now = time.monotonic()
         started = time.monotonic()
         optional: dict[str, Any] = {}
         sm = self.sm
         if payload_mode == "full" and sm is not None:
-            self._refresh_sm_if_needed()
+            if do_update:
+                self._refresh_sm_if_needed()
             try:
                 if sm.alive.get("deviceState", False):
                     optional["deviceState"] = self._payload_device_state(
@@ -2024,6 +2244,7 @@ class SidecarApp:
         self,
         safe_mode: bool = False,
         payload_mode: str = "full",
+        do_update: bool = True,
     ) -> dict[str, Any]:
         now = time.monotonic()
         min_interval = self._optional_payload_min_interval(safe_mode, payload_mode)
@@ -2035,6 +2256,7 @@ class SidecarApp:
         return self._refresh_live_optional_cache(
             safe_mode=safe_mode,
             payload_mode=payload_mode,
+            do_update=do_update,
         )
 
     def _build_live_payload(
@@ -2132,27 +2354,104 @@ class SidecarApp:
             self._build_live_optional_payload(
                 safe_mode=safe_mode,
                 payload_mode=payload_mode,
+                do_update=do_update,
             )
         )
         return payload
 
+    def _refresh_live_broadcast_cache(self) -> None:
+        build_started = time.monotonic()
+        live_payload = self._build_live_payload(do_update=False)
+        live_json = json.dumps(
+            live_payload, separators=(",", ":"), ensure_ascii=False
+        )
+        has_zlib_client = any(
+            encoding == "zlib-json"
+            for encoding, _camera_mode, _role, _session in self.clients.values()
+        )
+        has_msgpack_client = any(
+            encoding == "msgpack"
+            for encoding, _camera_mode, _role, _session in self.clients.values()
+        )
+        self._cached_live_payload = live_payload
+        self._cached_live_json = live_json
+        self._cached_live_zlib_json = (
+            zlib.compress(live_json.encode("utf-8"), level=1)
+            if has_zlib_client
+            else None
+        )
+        self._cached_live_msgpack = (
+            _msgpack.packb(live_payload, use_bin_type=True)
+            if has_msgpack_client and _msgpack is not None
+            else None
+        )
+        self._cached_live_last_built = time.monotonic()
+        self._last_live_build_ms = max(
+            0.0,
+            (self._cached_live_last_built - build_started) * 1000.0,
+        )
+
+    def _refresh_hud_broadcast_cache(self) -> None:
+        build_started = time.monotonic()
+        hud_payload = self._build_hud_snapshot(do_update=False)
+        self._cached_hud_payload = hud_payload
+        self._cached_hud_json = json.dumps(
+            hud_payload, separators=(",", ":"), ensure_ascii=False
+        )
+        self._cached_hud_last_built = time.monotonic()
+        self._last_hud_build_ms = max(
+            0.0,
+            (self._cached_hud_last_built - build_started) * 1000.0,
+        )
+
+    async def _sm_update_loop(self, app: web.Application) -> None:
+        while True:
+            try:
+                if self.sm is not None:
+                    self._refresh_sm_if_needed(force=True)
+                await asyncio.sleep(self._sm_update_loop_interval())
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.last_error = f"sm updater error: {e}"
+                await asyncio.sleep(0.25)
+
+    async def _payload_cache_loop(self, app: web.Application) -> None:
+        while True:
+            try:
+                if self.sm is not None:
+                    now = time.monotonic()
+                    if self.clients and (
+                        self._cached_live_json is None
+                        or (now - self._cached_live_last_built)
+                        >= self._live_cache_interval()
+                    ):
+                        self._refresh_live_broadcast_cache()
+                    if self.hud_clients and (
+                        self._cached_hud_json is None
+                        or (now - self._cached_hud_last_built) >= self._hud_interval()
+                    ):
+                        self._refresh_hud_broadcast_cache()
+                await asyncio.sleep(self._payload_cache_loop_interval())
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.last_error = f"payload cache error: {e}"
+                await asyncio.sleep(0.25)
+
     async def _live_broadcast_loop(self, app: web.Application) -> None:
-        base_interval = 0.05
         live_send_timeout = 1.0
         live_fail_limit = 3
         while True:
             try:
+                base_interval = self._live_broadcast_interval()
                 if self.clients:
-                    self._refresh_sm_if_needed()
-                    build_started = time.monotonic()
-                    live_payload = self._build_live_payload(do_update=False)
-                    message = json.dumps(
-                        live_payload, separators=(",", ":"), ensure_ascii=False
-                    )
-                    self._last_live_build_ms = max(
-                        0.0, (time.monotonic() - build_started) * 1000.0,
-                    )
-                    compressed: bytes | None = None
+                    if self._cached_live_json is None:
+                        self._refresh_live_broadcast_cache()
+                    message = self._cached_live_json
+                    if message is None:
+                        await asyncio.sleep(base_interval)
+                        continue
                     send_jobs: list[
                         tuple[web.WebSocketResponse, asyncio.Task[Any]]
                     ] = []
@@ -2161,14 +2460,36 @@ class SidecarApp:
                         encoding, _camera_mode, _role, _session = entry
                         try:
                             if encoding == "zlib-json":
+                                compressed = self._cached_live_zlib_json
                                 if compressed is None:
-                                    compressed = zlib.compress(message.encode("utf-8"), level=1)
+                                    compressed = zlib.compress(
+                                        message.encode("utf-8"),
+                                        level=1,
+                                    )
                                 send_jobs.append(
                                     (
                                         ws,
                                         asyncio.create_task(
                                             asyncio.wait_for(
                                                 ws.send_bytes(compressed),
+                                                timeout=live_send_timeout,
+                                            )
+                                        ),
+                                    )
+                                )
+                            elif encoding == "msgpack" and _msgpack is not None:
+                                packed = self._cached_live_msgpack
+                                if packed is None:
+                                    packed = _msgpack.packb(
+                                        self._cached_live_payload or {},
+                                        use_bin_type=True,
+                                    )
+                                send_jobs.append(
+                                    (
+                                        ws,
+                                        asyncio.create_task(
+                                            asyncio.wait_for(
+                                                ws.send_bytes(packed),
                                                 timeout=live_send_timeout,
                                             )
                                         ),
@@ -2222,27 +2543,21 @@ class SidecarApp:
                 await asyncio.sleep(0.25)
 
     async def _hud_broadcast_loop(self, app: web.Application) -> None:
-        base_interval = 0.10
         hud_send_timeout = 0.3
         hud_fail_limit = 3
         while True:
             try:
+                base_interval = self._hud_interval()
                 if self.hud_clients:
-                    self._refresh_sm_if_needed()
+                    if self._cached_hud_json is None:
+                        self._refresh_hud_broadcast_cache()
+                    hud_message = self._cached_hud_json
+                    if hud_message is None:
+                        await asyncio.sleep(base_interval)
+                        continue
                     hud_send_jobs: list[
                         tuple[web.WebSocketResponse, asyncio.Task[Any]]
                     ] = []
-                    hud_build_started = time.monotonic()
-                    hud_payload = self._build_hud_snapshot(
-                        do_update=False,
-                    )
-                    hud_message = json.dumps(
-                        hud_payload, separators=(",", ":"), ensure_ascii=False
-                    )
-                    self._last_hud_build_ms = max(
-                        0.0,
-                        (time.monotonic() - hud_build_started) * 1000.0,
-                    )
                     hud_batch_started = time.monotonic()
                     for ws in list(self.hud_clients.keys()):
                         try:
@@ -2351,9 +2666,17 @@ class SidecarApp:
         await ws.prepare(request)
         self.hud_clients[ws] = (role, session_id)
         try:
-            initial = self._build_hud_snapshot()
+            if self._cached_hud_json is None:
+                self._refresh_hud_broadcast_cache()
+            initial = self._cached_hud_json
             await ws.send_str(
-                json.dumps(initial, separators=(",", ":"), ensure_ascii=False)
+                initial
+                if initial is not None
+                else json.dumps(
+                    self._build_hud_snapshot(),
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
             )
             async for _ in ws:
                 pass
@@ -2432,6 +2755,7 @@ class SidecarApp:
                 "wideLiveReady": health_flags["wideLiveReady"],
                 "cameraReady": health_flags["cameraReady"],
                 "profile": self.profile,
+                "profileGeneration": self._profile_generation,
                 "clients": len(self.clients),
                 "repo": self.repo,
                 "error": self.last_error,
@@ -2449,6 +2773,14 @@ class SidecarApp:
                     "sendDrops": self._live_send_drop_count,
                     "lastBuildMs": round(self._last_live_build_ms, 1),
                     "lastSendBatchMs": round(self._last_live_send_batch_ms, 1),
+                    "cacheAgeMs": int(
+                        max(
+                            0.0,
+                            (time.monotonic() - self._cached_live_last_built) * 1000.0,
+                        )
+                    )
+                    if self._cached_live_last_built > 0.0
+                    else None,
                     "optionalLastBuildMs": round(self._last_optional_build_ms, 1),
                     "optionalCacheAgeMs": int(
                         max(
@@ -2471,8 +2803,48 @@ class SidecarApp:
                     "sendDrops": self._hud_send_drop_count,
                     "lastBuildMs": round(self._last_hud_build_ms, 1),
                     "lastSendBatchMs": round(self._last_hud_send_batch_ms, 1),
+                    "cacheAgeMs": int(
+                        max(
+                            0.0,
+                            (time.monotonic() - self._cached_hud_last_built) * 1000.0,
+                        )
+                    )
+                    if self._cached_hud_last_built > 0.0
+                    else None,
                 },
                 "cameraRelay": camera_status,
+                "smUpdater": {
+                    "intervalMs": int(self._sm_update_loop_interval() * 1000.0),
+                    "lastUpdateAgeMs": int(
+                        max(
+                            0.0,
+                            (time.monotonic() - self._last_sm_update_mono) * 1000.0,
+                        )
+                    )
+                    if self._last_sm_update_mono > 0.0
+                    else None,
+                },
+                "payloadCache": {
+                    "intervalMs": int(self._payload_cache_loop_interval() * 1000.0),
+                    "liveIntervalMs": int(self._live_cache_interval() * 1000.0),
+                    "hudIntervalMs": int(self._hud_interval() * 1000.0),
+                    "liveAgeMs": int(
+                        max(
+                            0.0,
+                            (time.monotonic() - self._cached_live_last_built) * 1000.0,
+                        )
+                    )
+                    if self._cached_live_last_built > 0.0
+                    else None,
+                    "hudAgeMs": int(
+                        max(
+                            0.0,
+                            (time.monotonic() - self._cached_hud_last_built) * 1000.0,
+                        )
+                    )
+                    if self._cached_hud_last_built > 0.0
+                    else None,
+                },
                 "debug": {
                     "debugPlotMode": self._plot_mode_cache,
                     "debugPlotCached": self._debug_plot_cache is not None,
@@ -2508,11 +2880,31 @@ class SidecarApp:
                 {"ok": False, "error": "invalid profile"}, status=400
             )
         if profile != self.profile:
+            previous = self.profile
+            self._reset_profile_runtime_state(
+                reason=f"profile_switch:{previous}->{profile}"
+            )
+            if self._camera_hub is not None:
+                await self._camera_hub.reset_runtime_state(
+                    reason=f"profile_switch:{previous}->{profile}"
+                )
             self.profile = profile
             self._init_messaging()
-        return web.json_response({"ok": True, "profile": self.profile})
+        return web.json_response(
+            {
+                "ok": True,
+                "profile": self.profile,
+                "profileGeneration": self._profile_generation,
+            }
+        )
 
     async def on_startup(self, app: web.Application) -> None:
+        app["sm_update_task"] = asyncio.create_task(
+            self._sm_update_loop(app)
+        )
+        app["payload_cache_task"] = asyncio.create_task(
+            self._payload_cache_loop(app)
+        )
         app["live_broadcast_task"] = asyncio.create_task(
             self._live_broadcast_loop(app)
         )
@@ -2521,7 +2913,12 @@ class SidecarApp:
         )
 
     async def on_cleanup(self, app: web.Application) -> None:
-        for task_name in ("live_broadcast_task", "hud_broadcast_task"):
+        for task_name in (
+            "sm_update_task",
+            "payload_cache_task",
+            "live_broadcast_task",
+            "hud_broadcast_task",
+        ):
             task = app.get(task_name)
             if task:
                 task.cancel()

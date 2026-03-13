@@ -252,19 +252,6 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
   Future<void> _loadCameraSource({bool force = false}) async {
     if (!_hudModeLoaded) return;
 
-    if (_openpilotOverlayMode && !_nativeCameraAttachReady) {
-      if (mounted) {
-        _safeSetState(() {
-          _cameraLoading = true;
-          _cameraError = null;
-        });
-      } else {
-        _cameraLoading = true;
-        _cameraError = null;
-      }
-      return;
-    }
-
     if (_useNativeLiveCamera) {
       _beginStartupProvisionalSync(reason: 'load_camera_source');
       _startCameraErrorGrace(reason: 'native_camera_attach');
@@ -275,6 +262,19 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
         });
       }
       _cameraSourceKey = 'native-live:$_hostIp:$_liveCameraName';
+      return;
+    }
+
+    if (_openpilotOverlayMode && !_nativeCameraAttachReady) {
+      if (mounted) {
+        _safeSetState(() {
+          _cameraLoading = true;
+          _cameraError = null;
+        });
+      } else {
+        _cameraLoading = true;
+        _cameraError = null;
+      }
       return;
     }
     final key = 'live:$_hostIp:$_liveCameraName';

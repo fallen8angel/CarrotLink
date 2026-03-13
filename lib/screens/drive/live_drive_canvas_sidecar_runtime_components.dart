@@ -594,8 +594,61 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     Duration pollInterval = const Duration(milliseconds: 300),
     Duration healthTimeout = const Duration(seconds: 2),
     Duration wsTimeout = const Duration(seconds: 2),
+    bool allowEarlyCameraAttach = false,
   }) async {
     final requiresLiveRuntime = _profileRequiresLiveRuntime(profile);
+    final expectedProfile = profile.trim().toLowerCase();
+    final expectedCameraService =
+        _liveCameraName == 'wideRoad' ? 'wideRoadCameraState' : 'roadCameraState';
+    var cameraAttachPrimed = false;
+
+    void primeCameraAttach(String reason) {
+      if (!allowEarlyCameraAttach || !requiresLiveRuntime) {
+        return;
+      }
+      if (cameraAttachPrimed || _nativeCameraAttachReady) {
+        return;
+      }
+      cameraAttachPrimed = true;
+      _setNativeCameraAttachReady(true);
+      _startCameraErrorGrace(reason: reason);
+      if (!_cameraSuspendedByLifecycle) {
+        unawaited(_loadCameraSource(force: true));
+      }
+    }
+
+    bool serviceFresh(Map<String, dynamic> health, String name) {
+      final raw = health['serviceHealth'];
+      if (raw is! Map) {
+        return false;
+      }
+      final service = raw[name];
+      if (service is Map<String, dynamic>) {
+        return service['isFresh'] == true;
+      }
+      if (service is Map) {
+        return service['isFresh'] == true;
+      }
+      return false;
+    }
+
+    bool freshnessReady(Map<String, dynamic> health) {
+      final raw = health['serviceHealth'];
+      if (raw is! Map || raw.isEmpty) {
+        return true;
+      }
+      final hudCoreFresh =
+          serviceFresh(health, 'carState') &&
+          serviceFresh(health, 'selfdriveState');
+      if (!hudCoreFresh) {
+        return false;
+      }
+      if (!requiresLiveRuntime) {
+        return true;
+      }
+      return serviceFresh(health, 'modelV2') &&
+          serviceFresh(health, expectedCameraService);
+    }
 
     Future<Map<String, dynamic>> probeHealth() async {
       final client = HttpClient()..connectionTimeout = healthTimeout;
@@ -617,12 +670,22 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
         if (health['ok'] != true) {
           throw Exception('health not ok');
         }
+        final reportedProfile = (health['profile'] ?? '').toString().trim().toLowerCase();
+        if (reportedProfile.isNotEmpty && reportedProfile != expectedProfile) {
+          throw Exception('health profile mismatch: $reportedProfile');
+        }
         final ready = requiresLiveRuntime
             ? (health['ready'] == true ||
                 (health['hudReady'] == true && health['liveReady'] == true))
             : (health['ready'] == true || health['hudReady'] == true);
         if (!ready) {
           throw Exception('health not ready');
+        }
+        if (requiresLiveRuntime && health['cameraReady'] != true) {
+          throw Exception('camera relay not ready');
+        }
+        if (!freshnessReady(health)) {
+          throw Exception('health stale');
         }
         return health;
       } finally {
@@ -716,6 +779,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
           (event) {
             if (firstPacket.isCompleted) return;
             if (event is List<int> && event.isNotEmpty) {
+              primeCameraAttach('camera_probe_ready');
               firstPacket.complete();
             }
           },
@@ -744,8 +808,10 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       try {
         await probeHealth();
         if (requiresLiveRuntime) {
-          await probeLiveWs();
-          await probeCameraWs();
+          await Future.wait<void>(<Future<void>>[
+            probeLiveWs(),
+            probeCameraWs(),
+          ]);
         }
         return;
       } catch (e) {
@@ -823,6 +889,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
             pollInterval: const Duration(milliseconds: 150),
             healthTimeout: const Duration(milliseconds: 700),
             wsTimeout: const Duration(milliseconds: 1000),
+            allowEarlyCameraAttach: requiresLiveRuntime,
           );
           if (requiresLiveRuntime) {
             _setNativeCameraAttachReady(true);
@@ -921,6 +988,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
             pollInterval: const Duration(milliseconds: 150),
             healthTimeout: const Duration(milliseconds: 700),
             wsTimeout: const Duration(milliseconds: 1200),
+            allowEarlyCameraAttach: requiresLiveRuntime,
           );
           if (requiresLiveRuntime) {
             _setNativeCameraAttachReady(true);

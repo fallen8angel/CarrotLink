@@ -231,6 +231,29 @@ class HudAdaptiveDisplayModel {
     if (_isSnapshotStale(snapshot)) {
       return '업데이트 지연';
     }
+    final normalizedStaleReasons = snapshot.meta.staleReasons
+        .map((reason) => reason.trim().toLowerCase())
+        .where((reason) => reason.isNotEmpty)
+        .toSet();
+    if (normalizedStaleReasons.contains('transport.smupdate.stale')) {
+      return '업데이트 지연';
+    }
+    if (normalizedStaleReasons.contains('vehicle.carstate.stale') ||
+        normalizedStaleReasons.contains('vehicle.core.stale')) {
+      return '차량 데이터 지연';
+    }
+    if (normalizedStaleReasons.contains('vehicle.selfdrivestate.stale')) {
+      return '상태 데이터 지연';
+    }
+    if (normalizedStaleReasons.contains('device.devicestate.stale') ||
+        normalizedStaleReasons.contains('device.peripheralstate.stale')) {
+      return '기기 상태 지연';
+    }
+    if (normalizedStaleReasons.contains('assist.longitudinalplan.stale') ||
+        normalizedStaleReasons.contains('assist.carrotman.stale') ||
+        normalizedStaleReasons.contains('nav.instruction.stale')) {
+      return '보조 정보 지연';
+    }
     final normalizedMissingFields = snapshot.meta.missingFields
         .map((field) => field.trim().toLowerCase())
         .where((field) => field.isNotEmpty)
@@ -362,6 +385,29 @@ class HudAdaptiveDisplayModel {
     if (_isSnapshotStale(snapshot)) {
       return '지연';
     }
+    final normalizedStaleReasons = snapshot.meta.staleReasons
+        .map((reason) => reason.trim().toLowerCase())
+        .where((reason) => reason.isNotEmpty)
+        .toSet();
+    if (normalizedStaleReasons.contains('transport.smupdate.stale')) {
+      return '지연';
+    }
+    if (normalizedStaleReasons.contains('vehicle.carstate.stale') ||
+        normalizedStaleReasons.contains('vehicle.core.stale')) {
+      return '차량';
+    }
+    if (normalizedStaleReasons.contains('vehicle.selfdrivestate.stale')) {
+      return '상태';
+    }
+    if (normalizedStaleReasons.contains('device.devicestate.stale') ||
+        normalizedStaleReasons.contains('device.peripheralstate.stale')) {
+      return '기기';
+    }
+    if (normalizedStaleReasons.contains('assist.longitudinalplan.stale') ||
+        normalizedStaleReasons.contains('assist.carrotman.stale') ||
+        normalizedStaleReasons.contains('nav.instruction.stale')) {
+      return '보조';
+    }
     final normalizedMissingFields = snapshot.meta.missingFields
         .map((field) => field.trim().toLowerCase())
         .where((field) => field.isNotEmpty)
@@ -402,6 +448,7 @@ class HudAdaptiveDisplayModel {
     }
 
     return snapshot.meta.missingFields.isNotEmpty ||
+        snapshot.meta.staleReasons.isNotEmpty ||
         snapshot.meta.isFallbackMetricsApplied;
   }
 

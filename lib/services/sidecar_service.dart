@@ -78,6 +78,68 @@ class SidecarService {
     return host;
   }
 
+  Future<Map<String, dynamic>?> _readRemoteHealth(
+    SSHService ssh, {
+    int port = defaultPort,
+  }) async {
+    final result = await ssh.executeCommandResult(
+      _bash(
+        '''
+SIDE_PORT=${_q(port.toString())}
+if ! command -v curl >/dev/null 2>&1; then
+  exit 0
+fi
+curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null || true
+''',
+      ),
+      timeout: const Duration(seconds: 6),
+    );
+    if (!result.isSuccess) {
+      return null;
+    }
+    final body = result.output.trim();
+    if (body.isEmpty) {
+      return null;
+    }
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map<String, dynamic>) {
+        return decoded;
+      }
+      if (decoded is Map) {
+        return Map<String, dynamic>.from(decoded);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  bool _healthMatchesExpected(
+    Map<String, dynamic> health, {
+    String? expectedProfile,
+  }) {
+    if (health['kind'] != 'carrotlink_sidecar_broker_v1') {
+      return false;
+    }
+    if (health['ok'] != true) {
+      return false;
+    }
+    final normalizedExpected = expectedProfile == null
+        ? null
+        : _normalizeProfile(expectedProfile);
+    final profile = _normalizeProfile(
+      (health['profile'] ?? normalizedExpected ?? _defaultProfile).toString(),
+    );
+    if (normalizedExpected != null && profile != normalizedExpected) {
+      return false;
+    }
+    if (profile == hudBootstrapProfile || profile == 'p0') {
+      return health['hudReady'] == true;
+    }
+    return health['hudReady'] == true &&
+        health['liveReady'] == true &&
+        health['cameraReady'] == true;
+  }
+
   Future<bool> _isClientReachable(
     SSHService ssh, {
     int port = defaultPort,
@@ -115,37 +177,17 @@ class SidecarService {
     SSHService ssh, {
     String? expectedProfile,
   }) async {
-    final normalizedProfile = expectedProfile == null
-        ? null
-        : _normalizeProfile(expectedProfile);
-    final result = await ssh.executeCommandResult(
-      _bash(
-        '''
-SIDE_PORT=${_q(defaultPort.toString())}
-EXPECTED_PROFILE=${_q(normalizedProfile ?? '')}
-check_sidecar() {
-  if ! command -v curl >/dev/null 2>&1; then
-    return 1
-  fi
-  HEALTH_JSON=\$(curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null || true)
-  [ -n "\$HEALTH_JSON" ] &&
-    printf '%s' "\$HEALTH_JSON" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' &&
-    printf '%s' "\$HEALTH_JSON" | grep -Fq '"kind":"carrotlink_sidecar_broker_v1"' &&
-    { [ -z "\$EXPECTED_PROFILE" ] || printf '%s' "\$HEALTH_JSON" | grep -Fq '"profile":"'"\$EXPECTED_PROFILE"'"'; }
-}
-if check_sidecar; then
-  echo "SIDECAR_HEALTH_OK"
-else
-  echo "SIDECAR_HEALTH_BAD"
-fi
-''',
-      ),
-      timeout: const Duration(seconds: 6),
+    final health = await _readRemoteHealth(
+      ssh,
+      port: defaultPort,
     );
-    if (!result.isSuccess) {
+    if (health == null) {
       return false;
     }
-    return result.output.contains('SIDECAR_HEALTH_OK');
+    return _healthMatchesExpected(
+      health,
+      expectedProfile: expectedProfile,
+    );
   }
 
   Future<String?> _switchProfileInPlace(
@@ -165,20 +207,52 @@ if ! command -v curl >/dev/null 2>&1; then
   exit 2
 fi
 
+health_ready() {
+  HEALTH_JSON_INPUT="\$1"
+  EXPECT_KIND="\$2"
+  EXPECT_PROFILE="\$3"
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+  python3 - "\$HEALTH_JSON_INPUT" "\$EXPECT_KIND" "\$EXPECT_PROFILE" <<'PY'
+import json
+import sys
+
+try:
+    health = json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+
+expect_kind = sys.argv[2]
+expect_profile = sys.argv[3].strip().lower()
+if health.get("kind") != expect_kind:
+    raise SystemExit(1)
+if health.get("ok") is not True:
+    raise SystemExit(1)
+
+profile = str(health.get("profile") or expect_profile or "").strip().lower()
+if expect_profile and profile != expect_profile:
+    raise SystemExit(1)
+
+hud_ready = health.get("hudReady") is True
+live_ready = health.get("liveReady") is True
+camera_ready = health.get("cameraReady") is True
+
+if profile in ("p2", "p3", "p4"):
+    raise SystemExit(0 if (hud_ready and live_ready and camera_ready) else 1)
+raise SystemExit(0 if hud_ready else 1)
+PY
+}
+
 HEALTH_JSON=\$(curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null || true)
 if [ -z "\$HEALTH_JSON" ]; then
   echo "SIDECAR_PROFILE_SWITCH_SKIPPED reason=no_health"
   exit 3
 fi
-if ! printf '%s' "\$HEALTH_JSON" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then
+if ! health_ready "\$HEALTH_JSON" "carrotlink_sidecar_broker_v1" ""; then
   echo "SIDECAR_PROFILE_SWITCH_SKIPPED reason=health_bad"
   exit 3
 fi
-if ! printf '%s' "\$HEALTH_JSON" | grep -Fq '"kind":"carrotlink_sidecar_broker_v1"'; then
-  echo "SIDECAR_PROFILE_SWITCH_SKIPPED reason=kind_mismatch"
-  exit 3
-fi
-
 CURRENT_PROFILE=\$(printf '%s' "\$HEALTH_JSON" | sed -n 's/.*"profile":"\\([^"]*\\)".*/\\1/p' | head -n 1)
 if [ -z "\$CURRENT_PROFILE" ]; then
   echo "SIDECAR_PROFILE_SWITCH_SKIPPED reason=profile_missing"
@@ -207,10 +281,7 @@ fi
 
 for i in \$(seq 1 20); do
   NEXT_HEALTH=\$(curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null || true)
-  if [ -n "\$NEXT_HEALTH" ] &&
-     printf '%s' "\$NEXT_HEALTH" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' &&
-     printf '%s' "\$NEXT_HEALTH" | grep -Fq '"kind":"carrotlink_sidecar_broker_v1"' &&
-     printf '%s' "\$NEXT_HEALTH" | grep -Fq '"profile":"'"'\$TARGET_PROFILE'"'; then
+  if [ -n "\$NEXT_HEALTH" ] && health_ready "\$NEXT_HEALTH" "carrotlink_sidecar_broker_v1" "\$TARGET_PROFILE"; then
     echo "SIDECAR_PROFILE_SWITCHED profile=\$TARGET_PROFILE port=\$SIDE_PORT"
     exit 0
   fi
@@ -1065,11 +1136,42 @@ port_pids() {
 health_ok() {
   PORT_TO_CHECK="\$1"
   EXPECT_KIND="\$2"
+  EXPECT_PROFILE="\$3"
   if ! command -v curl >/dev/null 2>&1; then
     return 1
   fi
-  curl -fsS --max-time 1 "http://127.0.0.1:\$PORT_TO_CHECK/health" 2>/dev/null | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' &&
-  curl -fsS --max-time 1 "http://127.0.0.1:\$PORT_TO_CHECK/health" 2>/dev/null | grep -Fq '"kind":"'"\$EXPECT_KIND"'"'
+  HEALTH_JSON=\$(curl -fsS --max-time 1 "http://127.0.0.1:\$PORT_TO_CHECK/health" 2>/dev/null || true)
+  if [ -z "\$HEALTH_JSON" ] || ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+  python3 - "\$HEALTH_JSON" "\$EXPECT_KIND" "\$EXPECT_PROFILE" <<'PY'
+import json
+import sys
+
+try:
+    health = json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+
+expect_kind = sys.argv[2]
+expect_profile = sys.argv[3].strip().lower()
+if health.get("kind") != expect_kind:
+    raise SystemExit(1)
+if health.get("ok") is not True:
+    raise SystemExit(1)
+
+profile = str(health.get("profile") or expect_profile or "").strip().lower()
+if expect_profile and profile != expect_profile:
+    raise SystemExit(1)
+
+hud_ready = health.get("hudReady") is True
+live_ready = health.get("liveReady") is True
+camera_ready = health.get("cameraReady") is True
+
+if profile in ("p2", "p3", "p4"):
+    raise SystemExit(0 if (hud_ready and live_ready and camera_ready) else 1)
+raise SystemExit(0 if hud_ready else 1)
+PY
 }
 
 start_service() {
@@ -1123,7 +1225,7 @@ start_service() {
   READY=0
   if command -v curl >/dev/null 2>&1; then
     for i in \$(seq 1 40); do
-      if health_ok "\$TARGET_PORT" "\$EXPECT_KIND"; then
+      if health_ok "\$TARGET_PORT" "\$EXPECT_KIND" "\$PROFILE"; then
         READY=1
         break
       fi
@@ -1157,8 +1259,7 @@ start_service() {
 if command -v curl >/dev/null 2>&1; then
   HEALTH_JSON=\$(curl -fsS --max-time 1 "http://127.0.0.1:\$PORT/health" 2>/dev/null || true)
   if [ -n "\$HEALTH_JSON" ] &&
-     printf '%s' "\$HEALTH_JSON" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' &&
-     printf '%s' "\$HEALTH_JSON" | grep -Fq '"kind":"carrotlink_sidecar_broker_v1"'; then
+     health_ok "\$PORT" "carrotlink_sidecar_broker_v1" "\$PROFILE"; then
     CURRENT_PROFILE=\$(printf '%s' "\$HEALTH_JSON" | sed -n 's/.*"profile":"\\([^"]*\\)".*/\\1/p' | head -n 1)
     if [ "\$CURRENT_PROFILE" = "\$PROFILE" ]; then
       echo "SIDECAR_ALREADY_RUNNING profile=\$PROFILE port=\$PORT base=\$BASE"
