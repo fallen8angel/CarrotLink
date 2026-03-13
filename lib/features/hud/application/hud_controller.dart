@@ -7,6 +7,8 @@ import '../domain/repositories/hud_repository.dart';
 import 'hud_controller_state.dart';
 
 class HudController extends ChangeNotifier {
+  static const Duration _disposeHostTimeout = Duration(seconds: 2);
+
   final HudRepository _repository;
 
   HudController(this._repository);
@@ -16,15 +18,20 @@ class HudController extends ChangeNotifier {
 
   HudControllerState get state => _state;
 
-  Future<void> bindLive(String host) async {
+  Future<void> bindLive(String host, {bool force = false}) async {
     final normalizedHost = host.trim();
     if (normalizedHost.isEmpty) {
       return;
     }
-    if (!_state.isPreview &&
+    if (!force &&
+        !_state.isPreview &&
         _state.host == normalizedHost &&
         _subscription != null) {
       return;
+    }
+    if (force) {
+      await _subscription?.cancel();
+      _subscription = null;
     }
     await _bind(
       isPreview: false,
@@ -83,7 +90,9 @@ class HudController extends ChangeNotifier {
     await _subscription?.cancel();
     _subscription = null;
     if (releaseHost && host != null && host.trim().isNotEmpty) {
-      await _repository.disposeHost(host);
+      try {
+        await _repository.disposeHost(host).timeout(_disposeHostTimeout);
+      } catch (_) {}
     }
     _state = HudControllerState.idle;
     notifyListeners();

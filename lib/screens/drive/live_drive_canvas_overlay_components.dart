@@ -556,6 +556,84 @@ class _DriveOverlayPainter extends CustomPainter {
     path.lineTo(pts.last.dx, pts.last.dy);
   }
 
+  Offset _quadraticPoint(Offset p0, Offset p1, Offset p2, double t) {
+    final mt = 1.0 - t;
+    final x = (mt * mt * p0.dx) + (2.0 * mt * t * p1.dx) + (t * t * p2.dx);
+    final y = (mt * mt * p0.dy) + (2.0 * mt * t * p1.dy) + (t * t * p2.dy);
+    return Offset(x, y);
+  }
+
+  void _appendSampledQuadratic(
+    List<Offset> out, {
+    required Offset start,
+    required Offset control,
+    required Offset end,
+    required int segments,
+  }) {
+    final clampedSegments = segments.clamp(2, 8);
+    for (var i = 1; i <= clampedSegments; i++) {
+      final t = i / clampedSegments;
+      final pt = _quadraticPoint(start, control, end, t);
+      if (out.isEmpty || (pt - out.last).distanceSquared > 0.25) {
+        out.add(pt);
+      }
+    }
+  }
+
+  void _appendSmoothedEdgeVertices(
+    List<Offset> out,
+    List<Offset> pts, {
+    int baseSegments = 3,
+  }) {
+    if (pts.length < 2) return;
+    if (out.isEmpty) {
+      out.add(pts.first);
+    }
+    if (pts.length == 2) {
+      if ((pts.last - out.last).distanceSquared > 0.25) {
+        out.add(pts.last);
+      }
+      return;
+    }
+    for (var i = 1; i < pts.length - 1; i++) {
+      final start = out.last;
+      final control = pts[i];
+      final end = Offset(
+        (pts[i].dx + pts[i + 1].dx) * 0.5,
+        (pts[i].dy + pts[i + 1].dy) * 0.5,
+      );
+      final edgeLength = (end - start).distance;
+      final segments = math.max(baseSegments, (edgeLength / 22.0).round());
+      _appendSampledQuadratic(
+        out,
+        start: start,
+        control: control,
+        end: end,
+        segments: segments,
+      );
+    }
+    if ((pts.last - out.last).distanceSquared > 0.25) {
+      out.add(pts.last);
+    }
+  }
+
+  // Native overlay payload carries polygons only, so approximate the Flutter
+  // quadratic path with extra sampled vertices before serializing.
+  List<Offset> _smoothedPolygonVertices(List<Offset> vertices) {
+    if (vertices.length < 6) return vertices;
+    final half = vertices.length ~/ 2;
+    if (half < 2 || (vertices.length - half) < 2) return vertices;
+    final left = vertices.sublist(0, half);
+    final right = vertices.sublist(half);
+    final out = <Offset>[left.first];
+    _appendSmoothedEdgeVertices(out, left);
+    if ((right.first - out.last).distanceSquared > 0.25) {
+      out.add(right.first);
+    }
+    _appendSmoothedEdgeVertices(out, right);
+    return out;
+  }
+
   void _drawTrackPolygon(
     Canvas canvas,
     List<Offset> vertices,
@@ -1352,7 +1430,7 @@ class _DriveOverlayPainter extends CustomPainter {
             laneColor = const Color(0xFFFFD95E);
           }
           polygons.add(_encodePolygon(
-            poly,
+            _smoothedPolygonVertices(poly),
             laneColor.withValues(alpha: alpha),
           ));
           if (i == 1 && (snapshot.leftLaneLine % 10) == 4) {
@@ -1366,7 +1444,7 @@ class _DriveOverlayPainter extends CustomPainter {
             );
             if (doublePoly != null) {
               polygons.add(_encodePolygon(
-                doublePoly,
+                _smoothedPolygonVertices(doublePoly),
                 laneColor.withValues(alpha: alpha),
               ));
             }
@@ -1384,7 +1462,12 @@ class _DriveOverlayPainter extends CustomPainter {
             laneMaxIdx,
           );
           if (poly == null) continue;
-          polygons.add(_encodePolygon(poly, _roadEdgeColor(edge.std)));
+          polygons.add(
+            _encodePolygon(
+              _smoothedPolygonVertices(poly),
+              _roadEdgeColor(edge.std),
+            ),
+          );
         }
       }
 
@@ -1495,9 +1578,10 @@ class _DriveOverlayPainter extends CustomPainter {
     required Color strokeColor,
   }) {
     if (vertices.length < 3) return;
+    final encodedVertices = _smoothedPolygonVertices(vertices);
     out.add(
       _encodePolygon(
-        vertices,
+        encodedVertices,
         fillColor.withValues(alpha: 0.42),
         strokeColor: strokeEnabled ? strokeColor : null,
         strokeWidth: strokeEnabled ? 2.0 : 0.0,

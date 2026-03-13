@@ -6,6 +6,8 @@ import 'dart:isolate';
 
 import 'package:flutter/foundation.dart';
 
+import '../../../services/hud_feature_settings_service.dart';
+import '../../../services/sidecar_service.dart';
 import '../../../services/ssh_service.dart';
 import 'hud_controller.dart';
 import 'hud_controller_state.dart';
@@ -129,8 +131,11 @@ Future<void> _overlayRuntimeWorkerMain(Map<String, dynamic> config) async {
 class SharedRuntimeManager extends ChangeNotifier {
   static const int _overlayFrameBufferSize = 220;
   static const Duration _overlayBackgroundGrace = Duration(seconds: 15);
+  static const String _bootstrapTransportProfile =
+      SidecarService.hudBootstrapProfile;
 
   SSHService? _sshService;
+  HudFeatureSettingsService? _featureSettings;
   HudControllerLease? _controllerLease;
   HudController? _controller;
   bool _appForeground = true;
@@ -148,6 +153,7 @@ class SharedRuntimeManager extends ChangeNotifier {
   bool _overlayConnected = false;
   String? _overlayHost;
   OverlayStreamFrame? _latestOverlayFrame;
+  bool _forceControllerRebind = false;
   Timer? _overlayBackgroundStopTimer;
   int _transportEnsureGeneration = 0;
   final LinkedHashMap<String, OriginalHudSnapshot> _hudSnapshotByHost =
@@ -179,11 +185,28 @@ class SharedRuntimeManager extends ChangeNotifier {
     _handleSshChanged();
   }
 
+  void attachFeatureSettings(HudFeatureSettingsService featureSettings) {
+    if (identical(_featureSettings, featureSettings)) {
+      return;
+    }
+    _featureSettings?.removeListener(_handleFeatureSettingsChanged);
+    _featureSettings = featureSettings;
+    featureSettings.addListener(_handleFeatureSettingsChanged);
+    _handleFeatureSettingsChanged();
+  }
+
+  bool get _hudFeatureEnabled => _featureSettings?.enabled ?? false;
+
   void setAppForeground(bool value) {
     if (_appForeground == value) {
       return;
     }
     _appForeground = value;
+    if (!_hudFeatureEnabled) {
+      unawaited(resetRuntime(clearCachedSnapshots: false));
+      notifyListeners();
+      return;
+    }
     if (_appForeground) {
       _cancelOverlayBackgroundStopTimer();
       unawaited(_ensureBound());
@@ -193,11 +216,20 @@ class SharedRuntimeManager extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> prewarm() => _ensureBound(forceEnsureRunning: true);
+  Future<void> prewarm() async {
+    if (!_hudFeatureEnabled) {
+      return;
+    }
+    await _ensureBound(forceEnsureRunning: true);
+  }
 
   Future<void> ensureOverlayStream({
     bool forceRestart = false,
   }) async {
+    if (!_hudFeatureEnabled) {
+      _stopOverlayWorker(clearCache: true);
+      return;
+    }
     final host = _resolveConnectedHost();
     if (!_shouldKeepOverlayWorkerAlive) {
       _stopOverlayWorker(clearCache: false);
@@ -277,20 +309,46 @@ class SharedRuntimeManager extends ChangeNotifier {
   }
 
   void _handleSshChanged() {
+    final previousHost = _targetHost;
     _targetHost = _resolveConnectedHost();
+    if (!_hudFeatureEnabled) {
+      _bindingHost = null;
+      _forceControllerRebind = true;
+      _stopOverlayWorker(clearCache: true);
+      notifyListeners();
+      return;
+    }
     if (_targetHost == null) {
       _bindingHost = null;
+      _forceControllerRebind = true;
       _stopOverlayWorker(clearCache: true);
     }
     notifyListeners();
     if (_appForeground) {
-      unawaited(_ensureBound());
+      unawaited(
+        _ensureBound(forceEnsureRunning: previousHost != _targetHost),
+      );
+    }
+  }
+
+  void _handleFeatureSettingsChanged() {
+    if (!_hudFeatureEnabled) {
+      unawaited(resetRuntime(clearCachedSnapshots: true));
+      notifyListeners();
+      return;
+    }
+    notifyListeners();
+    if (_appForeground) {
+      unawaited(_ensureBound(forceEnsureRunning: true));
     }
   }
 
   Future<void> _ensureBound({
     bool forceEnsureRunning = false,
   }) async {
+    if (!_hudFeatureEnabled) {
+      return;
+    }
     final controller = _controller;
     final ssh = _sshService;
     final host = _resolveConnectedHost();
@@ -302,7 +360,8 @@ class SharedRuntimeManager extends ChangeNotifier {
       }
       return;
     }
-    if (_bindingHost == host) {
+    final forceControllerRebind = _forceControllerRebind;
+    if (_bindingHost == host && !forceControllerRebind) {
       if (forceEnsureRunning) {
         _scheduleTransportEnsure(
           host: host,
@@ -315,7 +374,7 @@ class SharedRuntimeManager extends ChangeNotifier {
     }
     final alreadyBound =
         controller.state.host == host && !controller.state.isPreview;
-    if (alreadyBound) {
+    if (alreadyBound && !forceControllerRebind) {
       _seedCachedHudSnapshotIfAvailable(controller, host);
       if (forceEnsureRunning) {
         _scheduleTransportEnsure(
@@ -330,18 +389,42 @@ class SharedRuntimeManager extends ChangeNotifier {
     _bindingHost = host;
     try {
       _seedCachedHudSnapshotIfAvailable(controller, host);
-      await controller.bindLive(host);
-      _scheduleTransportEnsure(
-        host: host,
-        controller: controller,
-        ssh: ssh,
-      );
+      await controller.bindLive(host, force: forceControllerRebind);
+      if (_targetHost == host && identical(_controller, controller)) {
+        _forceControllerRebind = false;
+      }
+      if (forceEnsureRunning || controller.state.snapshot.tsMonoMs <= 0) {
+        _scheduleTransportEnsure(
+          host: host,
+          controller: controller,
+          ssh: ssh,
+        );
+      }
     } finally {
       if (identical(_bindingHost, host)) {
         _bindingHost = null;
       }
     }
     await ensureOverlayStream();
+  }
+
+  Future<void> resetRuntime({
+    bool clearCachedSnapshots = true,
+    bool releaseHostSession = false,
+  }) async {
+    _targetHost = null;
+    _bindingHost = null;
+    _forceControllerRebind = true;
+    _transportEnsureGeneration += 1;
+    _stopOverlayWorker(clearCache: true);
+    if (clearCachedSnapshots) {
+      _hudSnapshotByHost.clear();
+    }
+    final controller = _controller;
+    if (controller != null) {
+      await controller.clear(releaseHost: releaseHostSession);
+    }
+    notifyListeners();
   }
 
   void _handleControllerChanged() {
@@ -397,7 +480,10 @@ class SharedRuntimeManager extends ChangeNotifier {
     required HudController controller,
     required SSHService ssh,
   }) async {
-    final ensureResult = await HudModule.ensureLiveTransport(ssh);
+    final ensureResult = await HudModule.ensureLiveTransport(
+      ssh,
+      profile: _bootstrapTransportProfile,
+    );
     if (generation != _transportEnsureGeneration) {
       return;
     }
@@ -545,6 +631,7 @@ class SharedRuntimeManager extends ChangeNotifier {
   @override
   void dispose() {
     _sshService?.removeListener(_handleSshChanged);
+    _featureSettings?.removeListener(_handleFeatureSettingsChanged);
     _transportEnsureGeneration += 1;
     _cancelOverlayBackgroundStopTimer();
     _stopOverlayWorker(clearCache: false);

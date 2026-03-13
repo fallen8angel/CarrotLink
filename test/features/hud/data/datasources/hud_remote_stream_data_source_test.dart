@@ -8,8 +8,8 @@ void main() {
     expect(
       dataSource.candidates,
       const <({int port, String path})>[
-        (port: 7767, path: '/ws/hud'),
         (port: 7766, path: '/ws/hud'),
+        (port: 7767, path: '/ws/hud'),
       ],
     );
   });

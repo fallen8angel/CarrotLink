@@ -85,20 +85,23 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     if (referenceUs <= 0) {
       return false;
     }
-    final ageUs = nowUs - referenceUs;
-    if (ageUs <= _LiveDriveCanvasScreenState._overlayStaleKeepAliveUs) {
-      _renderInterpActive = false;
-      _markOverlayStale(reason: reason);
-      return true;
+    if ((nowUs - referenceUs) < 0) {
+      return false;
     }
     _renderInterpActive = false;
+    _markOverlayStale(reason: reason);
     _applyOverlaySnapshot(
       const _DriveOverlaySnapshot.empty(),
       forceNativePush: true,
     );
     _lastPublishedModelFrameId = null;
     _lastOverlayPublishUs = 0;
-    _clearOverlayStaleState();
+    if (_openpilotOverlayMode &&
+        _sidecarConnected &&
+        !_cameraSuspendedByLifecycle &&
+        !_startupProvisionalSyncActive) {
+      _scheduleSidecarRuntimeRecovery(reason: 'overlay_stalled');
+    }
     return false;
   }
 
@@ -184,52 +187,6 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     return next;
   }
 
-  Map<String, dynamic>? _mergeSidecarOverlay2dTrackVerticesImpl({
-    required Map<String, dynamic>? current,
-    required Map<String, dynamic>? previous,
-  }) {
-    if (current == null || previous == null) return current;
-    final currentCamerasRaw = current['cameras'];
-    final previousCamerasRaw = previous['cameras'];
-    if (currentCamerasRaw is! Map || previousCamerasRaw is! Map) return current;
-
-    final currentCameras = Map<String, dynamic>.from(currentCamerasRaw);
-    final previousCameras = Map<String, dynamic>.from(previousCamerasRaw);
-    var changed = false;
-
-    for (final entry in currentCameras.entries.toList(growable: false)) {
-      final key = entry.key;
-      final currentCamRaw = entry.value;
-      final previousCamRaw = previousCameras[key];
-      if (currentCamRaw is! Map || previousCamRaw is! Map) continue;
-
-      final currentCam = Map<String, dynamic>.from(currentCamRaw);
-      final previousCam = Map<String, dynamic>.from(previousCamRaw);
-      final currentTrack = currentCam['pathTrackVertices'];
-      final previousTrack = previousCam['pathTrackVertices'];
-      final currentLen = currentTrack is List ? currentTrack.length : 0;
-      final previousLen = previousTrack is List ? previousTrack.length : 0;
-      final needTrackFallback = currentLen < 6 && previousLen >= 6;
-      if (!needTrackFallback) continue;
-
-      currentCam['pathTrackVertices'] =
-          List<dynamic>.from(previousTrack as List);
-      final metaRaw = currentCam['meta'];
-      final meta = metaRaw is Map<String, dynamic>
-          ? Map<String, dynamic>.from(metaRaw)
-          : <String, dynamic>{};
-      meta['pathTrackFallback'] = 'previous_frame';
-      currentCam['meta'] = meta;
-      currentCameras[key] = currentCam;
-      changed = true;
-    }
-
-    if (!changed) return current;
-    final merged = Map<String, dynamic>.from(current);
-    merged['cameras'] = currentCameras;
-    return merged;
-  }
-
   void _applyHudModeRuntimeImpl() {
     if (_openpilotOverlayMode) {
       _clearSidecarRecoverySchedule();
@@ -239,6 +196,8 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       );
       _startAdaptiveCameraQualityLoop();
       _suppressCameraErrors = true;
+      _setNativeCameraAttachReady(false);
+      _startCameraErrorGrace(reason: 'mode_apply');
       if (mounted) {
         _safeSetState(() {
           _cameraLoading = true;

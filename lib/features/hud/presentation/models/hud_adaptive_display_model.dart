@@ -116,12 +116,10 @@ class HudAdaptiveDisplayModel {
         .toLowerCase();
     final limitLabel =
         (snapshot.limits.label ?? snapshot.limits.mode).trim().toUpperCase();
-    final showTempControl = semanticLive &&
-        assistContext &&
-        snapshot.tempControl.mode != 'hidden' &&
-        ((_safeHasText(snapshot.tempControl.label)) ||
-            snapshot.tempControl.speedKph != null);
-    final showLimit = semanticLive && _hasMeaningfulLimit(snapshot);
+    final showTempControl =
+        semanticLive && snapshot.tempControl.mode != 'hidden';
+    final showLimit =
+        semanticLive && snapshot.limits.mode.trim().toLowerCase() != 'hidden';
     final showGpsBadge = snapshot.gps.hasFix;
     final gapValue =
         snapshot.gap.displayValue > 0 ? '${snapshot.gap.displayValue}' : '--';
@@ -129,11 +127,7 @@ class HudAdaptiveDisplayModel {
         semanticLive && assistContext && snapshot.gap.displayValue > 0;
     final normalizedSignalState =
         snapshot.signals.visualState.trim().toLowerCase();
-    final showSignalState = semanticLive &&
-        assistContext &&
-        (normalizedSignalState == 'red' ||
-            normalizedSignalState == 'green' ||
-            normalizedSignalState == 'yellow');
+    const showSignalState = true;
     final sourceText = _buildSourceText(snapshot);
     final qualityText = _buildQualityText(snapshot);
     final compatibilityHint = _buildCompatibilityHint(snapshot);
@@ -144,8 +138,10 @@ class HudAdaptiveDisplayModel {
         isCameraLimit &&
         _isCameraAlertBlinkOn(snapshot.tsMonoMs);
     final showDriveMode = semanticLive && _hasMeaningfulDriveMode(snapshot);
-    final showConnectivity = semanticLive && connectivityText.isNotEmpty;
+    final showConnectivity = semanticLive;
     final limitDisplayText = _buildLimitDisplayText(snapshot);
+    final connectivityDisplayText =
+        connectivityText.isEmpty ? '--' : connectivityText;
     final signalDisplayText = _buildSignalDisplayText(snapshot);
     return HudAdaptiveDisplayModel(
       speedText: _formatInt(snapshot.vehicle.speedClusterKph),
@@ -170,7 +166,7 @@ class HudAdaptiveDisplayModel {
       isCameraLimit: isCameraLimit,
       cameraAlertBlinkOn: cameraAlertBlinkOn,
       connectivityText: connectivityText,
-      connectivityDisplayText: connectivityText,
+      connectivityDisplayText: connectivityDisplayText,
       showConnectivity: showConnectivity,
       hasGpsFix: snapshot.gps.hasFix,
       gpsText: snapshot.gps.hasFix ? 'GPS' : '',
@@ -178,7 +174,7 @@ class HudAdaptiveDisplayModel {
       gapBarCount: snapshot.gap.barCount.clamp(0, 4),
       gapText: gapValue,
       showGap: showGap,
-      signalState: snapshot.signals.visualState,
+      signalState: normalizedSignalState.isEmpty ? 'off' : normalizedSignalState,
       signalDisplayText: signalDisplayText,
       showSignalState: showSignalState,
       redDot: semanticLive && assistContext && snapshot.signals.redDot,
@@ -232,6 +228,23 @@ class HudAdaptiveDisplayModel {
   }
 
   static String _buildCompatibilityHint(OriginalHudSnapshot snapshot) {
+    if (_isSnapshotStale(snapshot)) {
+      return '업데이트 지연';
+    }
+    final normalizedMissingFields = snapshot.meta.missingFields
+        .map((field) => field.trim().toLowerCase())
+        .where((field) => field.isNotEmpty)
+        .toSet();
+    if (normalizedMissingFields.contains('remote.unavailable')) {
+      return '연결 대기';
+    }
+    if (normalizedMissingFields.contains('vehicle.core') ||
+        normalizedMissingFields.contains('vehicle.carstate')) {
+      return '차량 데이터 대기';
+    }
+    if (normalizedMissingFields.contains('vehicle.selfdrivestate')) {
+      return '상태 데이터 대기';
+    }
     final missingCount = snapshot.meta.missingFields.length;
     if (missingCount > 0) {
       return '$missingCount missing';
@@ -307,22 +320,6 @@ class HudAdaptiveDisplayModel {
     return true;
   }
 
-  static bool _hasMeaningfulLimit(OriginalHudSnapshot snapshot) {
-    if (!_shouldShowAssistContext(snapshot)) return false;
-    if (snapshot.limits.mode == 'hidden' ||
-        snapshot.limits.displaySpeedKph == null) {
-      return false;
-    }
-    final speedClusterKph = snapshot.vehicle.speedClusterKph ?? 0.0;
-    final hasActiveAssist =
-        snapshot.vehicle.longActive || snapshot.vehicle.latActive;
-    final hasMotionContext = speedClusterKph > 1.0;
-    final urgentLimitContext = snapshot.limits.isOverLimit ||
-        snapshot.limits.shouldBlink ||
-        snapshot.limits.mode == 'camera';
-    return hasActiveAssist || hasMotionContext || urgentLimitContext;
-  }
-
   static String _buildLimitDisplayText(OriginalHudSnapshot snapshot) {
     final speedText = _formatInt(snapshot.limits.displaySpeedKph);
     final rawLabel = (snapshot.limits.label ?? '').trim();
@@ -338,7 +335,7 @@ class HudAdaptiveDisplayModel {
                 ? 'CAM'
                 : 'LIMIT';
     if (snapshot.limits.displaySpeedKph == null) {
-      return '$baseLabel --';
+      return snapshot.limits.mode == 'hidden' ? '--' : '$baseLabel --';
     }
     return '$baseLabel $speedText';
   }
@@ -357,11 +354,28 @@ class HudAdaptiveDisplayModel {
       'red' => '적색',
       'green' => '녹색',
       'yellow' => '황색',
-      _ => '없음',
+      _ => 'off',
     };
   }
 
   static String _buildCompatibilityBadgeText(OriginalHudSnapshot snapshot) {
+    if (_isSnapshotStale(snapshot)) {
+      return '지연';
+    }
+    final normalizedMissingFields = snapshot.meta.missingFields
+        .map((field) => field.trim().toLowerCase())
+        .where((field) => field.isNotEmpty)
+        .toSet();
+    if (normalizedMissingFields.contains('remote.unavailable')) {
+      return '연결';
+    }
+    if (normalizedMissingFields.contains('vehicle.core') ||
+        normalizedMissingFields.contains('vehicle.carstate')) {
+      return '차량';
+    }
+    if (normalizedMissingFields.contains('vehicle.selfdrivestate')) {
+      return '상태';
+    }
     final missingCount = snapshot.meta.missingFields.length;
     if (missingCount > 0) {
       return '$missingCount miss';
@@ -411,5 +425,11 @@ class HudAdaptiveDisplayModel {
     return '${value.toStringAsFixed(1)}V';
   }
 
-  static bool _safeHasText(String? value) => (value ?? '').trim().isNotEmpty;
+  static bool _isSnapshotStale(OriginalHudSnapshot snapshot) {
+    if (snapshot.meta.isPreview) return false;
+    final receivedAtMs = snapshot.source.receivedAtMs;
+    if (receivedAtMs == null) return false;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    return (nowMs - receivedAtMs).abs() > _assistFreshnessMs;
+  }
 }

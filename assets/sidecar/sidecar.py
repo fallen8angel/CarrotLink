@@ -86,16 +86,22 @@ def _safe_int(v: Any) -> int | None:
         return None
 
 
-def _downsample(values: list[float], max_points: int = 24) -> list[float]:
+_MODEL_GEOMETRY_POINTS = 48
+_MODEL_GEOMETRY_PRECISION = 3
+
+
+def _downsample(
+    values: list[float], max_points: int = 24, precision: int = 1
+) -> list[float]:
     if len(values) <= max_points:
-        return [round(v, 1) for v in values]
+        return [round(v, precision) for v in values]
     if max_points <= 1:
-        return [round(values[0], 1)]
+        return [round(values[0], precision)]
     step = (len(values) - 1) / float(max_points - 1)
     out = []
     for i in range(max_points):
         idx = int(round(i * step))
-        out.append(round(values[idx], 1))
+        out.append(round(values[idx], precision))
     return out
 
 
@@ -261,6 +267,15 @@ class CameraRelayHub:
 
     def get_quality_mode(self) -> str:
         return self._quality_mode
+
+    def rebind_messaging(self, messaging: Any) -> None:
+        self.messaging = messaging
+        self._sockets = {
+            cam: {} for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+        }
+        self._selected_service = {
+            cam: "" for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+        }
 
     def _ordered_camera_services(self, camera: str) -> list[str]:
         base = list(self.CAMERA_SERVICE_CANDIDATES.get(camera, []))
@@ -671,6 +686,8 @@ class SidecarApp:
         }
         self._hud_metric_toggle_last = 0.0
         self._hud_metric_show_volt = False
+        self._last_sm_update_mono = 0.0
+        self._sm_update_min_interval = 0.02
 
         self._init_messaging()
         self._init_params()
@@ -691,7 +708,10 @@ class SidecarApp:
                 if s not in services:
                     services.append(s)
             self.sm = messaging.SubMaster(services)
-            self._camera_hub = CameraRelayHub(messaging)
+            if self._camera_hub is None:
+                self._camera_hub = CameraRelayHub(messaging)
+            else:
+                self._camera_hub.rebind_messaging(messaging)
             self.last_error = ""
             print(
                 f"[sidecar] messaging ready profile={self.profile} "
@@ -782,6 +802,78 @@ class SidecarApp:
         except Exception:
             pass
         return diag
+
+    def _service_ready(
+        self,
+        name: str,
+        *,
+        require_updated: bool = False,
+        require_frame: bool = False,
+    ) -> bool:
+        diag = self._service_health(name)
+        if not diag.get("subscribed", False):
+            return False
+        if not diag.get("alive", False):
+            return False
+        if require_updated and not diag.get("updated", False):
+            return False
+        if require_frame and diag.get("frameId") is None:
+            return False
+        return True
+
+    def _runtime_health_flags(
+        self,
+        camera_status: dict[str, Any],
+    ) -> dict[str, Any]:
+        process_ready = self.sm is not None and self.messaging is not None
+        hud_ready = process_ready and self._service_ready(
+            "carState"
+        ) and self._service_ready("selfdriveState")
+        carrot_ready = self._service_ready("carrotMan")
+        plan_ready = self._service_ready(
+            "longitudinalPlan",
+            require_updated=True,
+        )
+        nav_ready = self._service_ready("navInstructionCarrot")
+        live_ready = hud_ready and self._service_ready(
+            "modelV2",
+            require_updated=True,
+            require_frame=True,
+        ) and self._service_ready(
+            "roadCameraState",
+            require_updated=True,
+            require_frame=True,
+        )
+        wide_ready = self._service_ready(
+            "wideRoadCameraState",
+            require_updated=True,
+            require_frame=True,
+        )
+        road_camera = camera_status.get("cameras", {}).get("road", {})
+        camera_ready = (
+            live_ready
+            and isinstance(road_camera, dict)
+            and bool(str(road_camera.get("service", "")).strip())
+        )
+        semantic_ready = hud_ready and carrot_ready
+        assist_ready = hud_ready and (carrot_ready or plan_ready)
+        signal_ready = hud_ready and (plan_ready or carrot_ready)
+        ready = hud_ready if self.profile in ("p0", "p1") else live_ready
+        return {
+            "processReady": process_ready,
+            "transportReady": process_ready and self._camera_hub is not None,
+            "hudReady": hud_ready,
+            "semanticHudReady": semantic_ready,
+            "assistReady": assist_ready,
+            "signalReady": signal_ready,
+            "carrotReady": carrot_ready,
+            "planReady": plan_ready,
+            "navReady": nav_ready,
+            "liveReady": live_ready,
+            "wideLiveReady": wide_ready,
+            "cameraReady": camera_ready,
+            "ready": ready,
+        }
 
     def _normalize_client_role(self, raw: Any, fallback: str) -> str:
         value = str(raw or "").strip().lower().replace(" ", "_")
@@ -1036,16 +1128,34 @@ class SidecarApp:
                 continue
         return (False, None)
 
+    def _refresh_sm_if_needed(self, force: bool = False) -> None:
+        sm = self.sm
+        if sm is None:
+            return
+        now = time.monotonic()
+        if (
+            not force
+            and self._last_sm_update_mono > 0.0
+            and (now - self._last_sm_update_mono) < self._sm_update_min_interval
+        ):
+            return
+        try:
+            sm.update(0)
+            self._last_sm_update_mono = time.monotonic()
+        except Exception as sm_err:
+            self.last_error = f"sm update error: {sm_err}"
+
     def _build_hud_snapshot(
         self,
         do_update: bool = True,
         sm_ref: Any = None,
     ) -> dict[str, Any]:
+        missing_fields: list[str] = []
         payload: dict[str, Any] = {
             "version": 1,
             "tsMonoMs": int(time.monotonic() * 1000.0),
             "source": {"transport": "sidecar_hud"},
-            "meta": {"quality": "semantic"},
+            "meta": {"quality": "semantic", "missingFields": missing_fields},
         }
         sm = sm_ref if sm_ref is not None else self.sm
         if sm is None:
@@ -1057,7 +1167,7 @@ class SidecarApp:
             return payload
 
         if do_update:
-            sm.update(0)
+            self._refresh_sm_if_needed()
         hud_params = self._read_hud_params()
 
         cs = sm["carState"] if sm.alive.get("carState", False) else None
@@ -1066,6 +1176,15 @@ class SidecarApp:
         ps = sm["peripheralState"] if sm.alive.get("peripheralState", False) else None
         lp = sm["longitudinalPlan"] if sm.alive.get("longitudinalPlan", False) else None
         cm = sm["carrotMan"] if sm.alive.get("carrotMan", False) else None
+
+        if cs is None:
+            missing_fields.append("vehicle.carState")
+        if ss is None:
+            missing_fields.append("vehicle.selfdriveState")
+        if cs is None and ss is None:
+            missing_fields.append("vehicle.core")
+        if missing_fields:
+            payload["meta"]["quality"] = "degraded"
 
         raw_speed_cluster = None
         speed_cluster_kph = None
@@ -1458,13 +1577,19 @@ class SidecarApp:
             if pos is not None:
                 out["position"] = {
                     "x": _downsample(
-                        [float(v) for v in list(getattr(pos, "x", []))], 33
+                        [float(v) for v in list(getattr(pos, "x", []))],
+                        _MODEL_GEOMETRY_POINTS,
+                        _MODEL_GEOMETRY_PRECISION,
                     ),
                     "y": _downsample(
-                        [float(v) for v in list(getattr(pos, "y", []))], 33
+                        [float(v) for v in list(getattr(pos, "y", []))],
+                        _MODEL_GEOMETRY_POINTS,
+                        _MODEL_GEOMETRY_PRECISION,
                     ),
                     "z": _downsample(
-                        [float(v) for v in list(getattr(pos, "z", []))], 33
+                        [float(v) for v in list(getattr(pos, "z", []))],
+                        _MODEL_GEOMETRY_POINTS,
+                        _MODEL_GEOMETRY_PRECISION,
                     ),
                 }
         except Exception:
@@ -1600,13 +1725,19 @@ class SidecarApp:
             pos = getattr(mv2, "position", None)
             if pos is not None:
                 out["pathX"] = _downsample(
-                    [float(v) for v in list(getattr(pos, "x", []))], 24
+                    [float(v) for v in list(getattr(pos, "x", []))],
+                    _MODEL_GEOMETRY_POINTS,
+                    _MODEL_GEOMETRY_PRECISION,
                 )
                 out["pathY"] = _downsample(
-                    [float(v) for v in list(getattr(pos, "y", []))], 24
+                    [float(v) for v in list(getattr(pos, "y", []))],
+                    _MODEL_GEOMETRY_POINTS,
+                    _MODEL_GEOMETRY_PRECISION,
                 )
                 out["pathZ"] = _downsample(
-                    [float(v) for v in list(getattr(pos, "z", []))], 24
+                    [float(v) for v in list(getattr(pos, "z", []))],
+                    _MODEL_GEOMETRY_POINTS,
+                    _MODEL_GEOMETRY_PRECISION,
                 )
         except Exception:
             pass
@@ -1642,13 +1773,19 @@ class SidecarApp:
                 packed.append(
                     {
                         "x": _downsample(
-                            [float(v) for v in list(getattr(ln, "x", []))], 24
+                            [float(v) for v in list(getattr(ln, "x", []))],
+                            _MODEL_GEOMETRY_POINTS,
+                            _MODEL_GEOMETRY_PRECISION,
                         ),
                         "y": _downsample(
-                            [float(v) for v in list(getattr(ln, "y", []))], 24
+                            [float(v) for v in list(getattr(ln, "y", []))],
+                            _MODEL_GEOMETRY_POINTS,
+                            _MODEL_GEOMETRY_PRECISION,
                         ),
                         "z": _downsample(
-                            [float(v) for v in list(getattr(ln, "z", []))], 24
+                            [float(v) for v in list(getattr(ln, "z", []))],
+                            _MODEL_GEOMETRY_POINTS,
+                            _MODEL_GEOMETRY_PRECISION,
                         ),
                     }
                 )
@@ -1663,13 +1800,19 @@ class SidecarApp:
                 packed_edges.append(
                     {
                         "x": _downsample(
-                            [float(v) for v in list(getattr(edge, "x", []))], 24
+                            [float(v) for v in list(getattr(edge, "x", []))],
+                            _MODEL_GEOMETRY_POINTS,
+                            _MODEL_GEOMETRY_PRECISION,
                         ),
                         "y": _downsample(
-                            [float(v) for v in list(getattr(edge, "y", []))], 24
+                            [float(v) for v in list(getattr(edge, "y", []))],
+                            _MODEL_GEOMETRY_POINTS,
+                            _MODEL_GEOMETRY_PRECISION,
                         ),
                         "z": _downsample(
-                            [float(v) for v in list(getattr(edge, "z", []))], 24
+                            [float(v) for v in list(getattr(edge, "z", []))],
+                            _MODEL_GEOMETRY_POINTS,
+                            _MODEL_GEOMETRY_PRECISION,
                         ),
                     }
                 )
@@ -1811,7 +1954,7 @@ class SidecarApp:
         optional: dict[str, Any] = {}
         sm = self.sm
         if payload_mode == "full" and sm is not None:
-            sm.update(0)
+            self._refresh_sm_if_needed()
             try:
                 if sm.alive.get("deviceState", False):
                     optional["deviceState"] = self._payload_device_state(
@@ -1911,7 +2054,7 @@ class SidecarApp:
             return payload
 
         if do_update:
-            self.sm.update(0)
+            self._refresh_sm_if_needed()
         try:
             if self.sm.alive.get("carState", False):
                 payload["carState"] = self._payload_car_state(self.sm["carState"])
@@ -1993,23 +2136,14 @@ class SidecarApp:
         )
         return payload
 
-
-
-    async def _broadcast_loop(self, app: web.Application) -> None:
+    async def _live_broadcast_loop(self, app: web.Application) -> None:
         base_interval = 0.05
-        # HUD broadcasts every hud_every ticks (~10Hz when base is 20Hz).
-        hud_every = 2
-        tick = 0
+        live_send_timeout = 1.0
+        live_fail_limit = 3
         while True:
             try:
-                sm = self.sm
-                if sm is not None and (self.clients or self.hud_clients):
-                    try:
-                        sm.update(0)
-                    except Exception as sm_err:
-                        self.last_error = f"sm update error: {sm_err}"
-                live_send_timeout = 1.0
                 if self.clients:
+                    self._refresh_sm_if_needed()
                     build_started = time.monotonic()
                     live_payload = self._build_live_payload(do_update=False)
                     message = json.dumps(
@@ -2059,17 +2193,42 @@ class SidecarApp:
                             *[task for _, task in send_jobs],
                             return_exceptions=True,
                         )
+                        stale: list[web.WebSocketResponse] = []
                         self._last_live_send_batch_ms = max(
                             0.0,
                             (time.monotonic() - batch_started) * 1000.0,
                         )
-                        # Live clients are never kicked on send failure.
-                        # Dead connections are cleaned up by aiohttp's
-                        # heartbeat=20 ping/pong mechanism instead.
                         for (ws, _), result in zip(send_jobs, results):
                             if isinstance(result, Exception):
                                 self._live_send_drop_count += 1
-                if self.hud_clients and tick % hud_every == 0:
+                                fail_count = self._live_send_failures.get(ws, 0) + 1
+                                self._live_send_failures[ws] = fail_count
+                                if fail_count >= live_fail_limit:
+                                    stale.append(ws)
+                            else:
+                                self._live_send_failures.pop(ws, None)
+                        for ws in stale:
+                            self.clients.pop(ws, None)
+                            self._live_send_failures.pop(ws, None)
+                            try:
+                                await ws.close(code=1011, message=b"live_send_timeout")
+                            except Exception:
+                                pass
+                await asyncio.sleep(base_interval)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.last_error = f"live broadcast error: {e}"
+                await asyncio.sleep(0.25)
+
+    async def _hud_broadcast_loop(self, app: web.Application) -> None:
+        base_interval = 0.10
+        hud_send_timeout = 0.3
+        hud_fail_limit = 3
+        while True:
+            try:
+                if self.hud_clients:
+                    self._refresh_sm_if_needed()
                     hud_send_jobs: list[
                         tuple[web.WebSocketResponse, asyncio.Task[Any]]
                     ] = []
@@ -2093,7 +2252,7 @@ class SidecarApp:
                                     asyncio.create_task(
                                         asyncio.wait_for(
                                             ws.send_str(hud_message),
-                                            timeout=0.3,
+                                            timeout=hud_send_timeout,
                                         )
                                     ),
                                 )
@@ -2105,22 +2264,32 @@ class SidecarApp:
                             *[task for _, task in hud_send_jobs],
                             return_exceptions=True,
                         )
+                        stale: list[web.WebSocketResponse] = []
                         self._last_hud_send_batch_ms = max(
                             0.0,
                             (time.monotonic() - hud_batch_started) * 1000.0,
                         )
-                        # HUD clients are never kicked on send failure.
-                        # Dead connections are cleaned up by aiohttp's
-                        # heartbeat=20 ping/pong mechanism instead.
                         for (ws, _), result in zip(hud_send_jobs, hud_results):
                             if isinstance(result, Exception):
                                 self._hud_send_drop_count += 1
-                tick += 1
+                                fail_count = self._hud_send_failures.get(ws, 0) + 1
+                                self._hud_send_failures[ws] = fail_count
+                                if fail_count >= hud_fail_limit:
+                                    stale.append(ws)
+                            else:
+                                self._hud_send_failures.pop(ws, None)
+                        for ws in stale:
+                            self.hud_clients.pop(ws, None)
+                            self._hud_send_failures.pop(ws, None)
+                            try:
+                                await ws.close(code=1011, message=b"hud_send_timeout")
+                            except Exception:
+                                pass
                 await asyncio.sleep(base_interval)
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self.last_error = f"broadcast error: {e}"
+                self.last_error = f"hud broadcast error: {e}"
                 await asyncio.sleep(0.25)
 
     async def ws_live(self, request: web.Request) -> web.WebSocketResponse:
@@ -2162,6 +2331,7 @@ class SidecarApp:
                 pass
         finally:
             self.clients.pop(ws, None)
+            self._live_send_failures.pop(ws, None)
             try:
                 await ws.close()
             except Exception:
@@ -2244,10 +2414,23 @@ class SidecarApp:
             "transport": "internal",
             "port": int(os.environ.get("CARROTLINK_SIDECAR_PORT", "7766")),
         }
+        health_flags = self._runtime_health_flags(camera_status)
         return web.json_response(
             {
                 "kind": "carrotlink_sidecar_broker_v1",
-                "ok": self.sm is not None,
+                "ok": health_flags["processReady"],
+                "ready": health_flags["ready"],
+                "transportReady": health_flags["transportReady"],
+                "hudReady": health_flags["hudReady"],
+                "semanticHudReady": health_flags["semanticHudReady"],
+                "assistReady": health_flags["assistReady"],
+                "signalReady": health_flags["signalReady"],
+                "carrotReady": health_flags["carrotReady"],
+                "planReady": health_flags["planReady"],
+                "navReady": health_flags["navReady"],
+                "liveReady": health_flags["liveReady"],
+                "wideLiveReady": health_flags["wideLiveReady"],
+                "cameraReady": health_flags["cameraReady"],
                 "profile": self.profile,
                 "clients": len(self.clients),
                 "repo": self.repo,
@@ -2299,6 +2482,8 @@ class SidecarApp:
                         "selfdriveState", "carState", "liveCalibration",
                         "modelV2", "radarState", "roadCameraState",
                         "wideRoadCameraState", "gpsLocationExternal",
+                        "longitudinalPlan", "carrotMan",
+                        "navInstructionCarrot",
                     )
                 },
             }
@@ -2328,16 +2513,22 @@ class SidecarApp:
         return web.json_response({"ok": True, "profile": self.profile})
 
     async def on_startup(self, app: web.Application) -> None:
-        app["broadcast_task"] = asyncio.create_task(self._broadcast_loop(app))
+        app["live_broadcast_task"] = asyncio.create_task(
+            self._live_broadcast_loop(app)
+        )
+        app["hud_broadcast_task"] = asyncio.create_task(
+            self._hud_broadcast_loop(app)
+        )
 
     async def on_cleanup(self, app: web.Application) -> None:
-        task = app.get("broadcast_task")
-        if task:
-            task.cancel()
-            try:
-                await task
-            except Exception:
-                pass
+        for task_name in ("live_broadcast_task", "hud_broadcast_task"):
+            task = app.get(task_name)
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except Exception:
+                    pass
         if self._camera_hub is not None:
             await self._camera_hub.stop_all()
 

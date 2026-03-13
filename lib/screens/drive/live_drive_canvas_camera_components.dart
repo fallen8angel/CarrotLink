@@ -1,6 +1,20 @@
 part of 'live_drive_canvas_screen.dart';
 
 extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
+  bool get _cameraErrorGraceActive =>
+      _renderClock.elapsedMicroseconds <= _cameraErrorGraceUntilUs;
+
+  void _startCameraErrorGrace({
+    required String reason,
+    int windowUs = 2500000,
+  }) {
+    final nowUs = _renderClock.elapsedMicroseconds;
+    _cameraErrorGraceUntilUs = math.max(_cameraErrorGraceUntilUs, nowUs + windowUs);
+    debugPrint(
+      '[DriveCanvas][native] error-grace on reason=$reason window=${(windowUs / 1000).round()}ms',
+    );
+  }
+
   _DriveCameraKind _cameraKindFromLabel(
     String? raw,
     _DriveCameraKind fallback,
@@ -131,7 +145,10 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
       if (reason.isEmpty) return;
       final unsupported = reason.contains('invalid_ws_url') ||
           reason.contains('decoder_init_failed');
-      if ((_sidecarTransitioning || _suppressCameraErrors) && !unsupported) {
+      if ((_sidecarTransitioning ||
+              _suppressCameraErrors ||
+              _cameraErrorGraceActive) &&
+          !unsupported) {
         debugPrint('[DriveCanvas][native] suppressed error=$reason');
         return;
       }
@@ -211,7 +228,9 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     if (type == 'camera_error') {
       final reason = map['reason']?.toString().trim() ?? '';
       if (reason.isEmpty || !mounted) return;
-      if (_sidecarTransitioning || _suppressCameraErrors) {
+      if (_sidecarTransitioning ||
+          _suppressCameraErrors ||
+          _cameraErrorGraceActive) {
         debugPrint('[DriveCanvas] suppressed camera_error reason=$reason');
         return;
       }
@@ -233,8 +252,22 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
   Future<void> _loadCameraSource({bool force = false}) async {
     if (!_hudModeLoaded) return;
 
+    if (_openpilotOverlayMode && !_nativeCameraAttachReady) {
+      if (mounted) {
+        _safeSetState(() {
+          _cameraLoading = true;
+          _cameraError = null;
+        });
+      } else {
+        _cameraLoading = true;
+        _cameraError = null;
+      }
+      return;
+    }
+
     if (_useNativeLiveCamera) {
       _beginStartupProvisionalSync(reason: 'load_camera_source');
+      _startCameraErrorGrace(reason: 'native_camera_attach');
       if (mounted) {
         _safeSetState(() {
           _cameraLoading = true;

@@ -5,8 +5,8 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:provider/provider.dart';
 import '../../services/ssh_service.dart';
 import '../../services/github_service.dart';
+import '../../services/hud_feature_settings_service.dart';
 import '../../services/native_overlay_hud_service.dart';
-import '../../services/sidecar_service.dart';
 import '../../widgets/custom_toast.dart';
 import '../../features/hud/hud.dart';
 import '../drive/live_drive_canvas_screen.dart';
@@ -23,7 +23,6 @@ class HomeTab extends StatefulWidget {
 }
 
 class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
-  static final SidecarService _sidecarService = SidecarService();
   String _branch = "--";
   String _commit = "--";
   String _dongleId = "--";
@@ -115,7 +114,6 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
 
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (ssh.isConnected) {
-      unawaited(_sidecarService.ensureRunning(ssh));
       try {
         final results = await Future.wait([
           ssh.getBranch(),
@@ -214,13 +212,17 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   }
 
   Future<void> _openDriveView(SSHService ssh) async {
+    final featureSettings =
+        Provider.of<HudFeatureSettingsService>(context, listen: false);
+    if (!featureSettings.enabled) {
+      CustomToast.show(context, 'HUD/Stock 기능이 비활성화되어 있습니다.', isError: true);
+      return;
+    }
     final host = (ssh.connectedIp ?? '').trim();
     if (host.isEmpty) {
       CustomToast.show(context, 'SSH 연결이 완료된 뒤 열 수 있습니다.', isError: true);
       return;
     }
-    unawaited(_sidecarService.ensureRunning(ssh));
-
     if (!mounted) return;
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -233,8 +235,9 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final tokens = UiLayoutTokens.of(context);
     final window = UiWindowInfo.of(context);
-    return Consumer<SSHService>(
-      builder: (context, ssh, child) {
+    return Consumer2<SSHService, HudFeatureSettingsService>(
+      builder: (context, ssh, featureSettings, child) {
+        final hudFeatureEnabled = featureSettings.enabled;
         final media = MediaQuery.of(context);
         final compactStatusStack = window.windowClass == UiWindowClass.compact;
         final statusFontSize = switch (window.windowClass) {
@@ -554,14 +557,19 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
                 onTap: () => _openDriveView(ssh),
-                child: SizedBox(
+                child: _buildHudPreviewSurface(
+                  context,
                   width: hudPreviewMaxWidth,
-                                  child: AdaptiveHudHost(
-                                    enabled: _hudKeepAliveEnabled,
-                                    deviceIp: ssh.connectedIp,
-                                    surface: HudSurfaceVariant.homePreview,
-                                    matchParentWidth: true,
-                    syncNativeOverlay: false,
+                  enabled: hudFeatureEnabled,
+                  child: SizedBox(
+                    width: hudPreviewMaxWidth,
+                    child: AdaptiveHudHost(
+                      enabled: hudFeatureEnabled && _hudKeepAliveEnabled,
+                      deviceIp: ssh.connectedIp,
+                      surface: HudSurfaceVariant.homePreview,
+                      matchParentWidth: true,
+                      syncNativeOverlay: false,
+                    ),
                   ),
                 ),
               ),
@@ -623,15 +631,22 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                               child: GestureDetector(
                                 behavior: HitTestBehavior.opaque,
                                 onTap: () => _openDriveView(ssh),
-                                child: SizedBox(
+                                child: _buildHudPreviewSurface(
+                                  context,
                                   width: pinnedWidth,
                                   height: math.max(220.0, pinnedHeight),
-                                  child: AdaptiveHudHost(
-                                    enabled: _hudKeepAliveEnabled,
-                                    deviceIp: ssh.connectedIp,
-                                    surface: HudSurfaceVariant.homePreview,
-                                    fillParent: true,
-                                    syncNativeOverlay: false,
+                                  enabled: hudFeatureEnabled,
+                                  child: SizedBox(
+                                    width: pinnedWidth,
+                                    height: math.max(220.0, pinnedHeight),
+                                    child: AdaptiveHudHost(
+                                      enabled:
+                                          hudFeatureEnabled && _hudKeepAliveEnabled,
+                                      deviceIp: ssh.connectedIp,
+                                      surface: HudSurfaceVariant.homePreview,
+                                      fillParent: true,
+                                      syncNativeOverlay: false,
+                                    ),
                                   ),
                                 ),
                               ),
@@ -657,6 +672,70 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
           },
         );
       },
+    );
+  }
+
+  Widget _buildHudPreviewSurface(
+    BuildContext context, {
+    required Widget child,
+    required bool enabled,
+    double? width,
+    double? height,
+  }) {
+    if (enabled) {
+      return child;
+    }
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    return Stack(
+      children: [
+        child,
+        Positioned.fill(
+          child: Container(
+            width: width,
+            height: height,
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.44),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(
+                color: scheme.outlineVariant.withValues(alpha: 0.5),
+              ),
+            ),
+            alignment: Alignment.center,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.lock_outline_rounded,
+                    color: scheme.onSurface,
+                    size: 28,
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'HUD/Stock 비활성화',
+                    textAlign: TextAlign.center,
+                    style: textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w800,
+                      color: scheme.onSurface,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'HUD 설정에서 기능을 활성화하면 Home HUD와 Stock 주행모드를 사용할 수 있습니다.',
+                    textAlign: TextAlign.center,
+                    style: textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                      height: 1.4,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 

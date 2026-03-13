@@ -168,7 +168,7 @@ extension _LiveDriveCanvasDebugActionsComponents
 
   Future<void> _debugActionWsProbeImpl() async {
     try {
-      await _waitForSidecarReady();
+      await _waitForSidecarReady(profile: _currentSidecarProfile);
       _pushSidecarHistory('CHECK', 'ws probe ok');
       _toast('WS 프로브 성공');
     } catch (e) {
@@ -260,7 +260,7 @@ extension _LiveDriveCanvasDebugActionsComponents
       _setSidecarPhase(_SidecarPhase.starting, message: '서비스 시작 중...');
       await _sidecarService.start(ssh);
       _sidecarLastStartAt = DateTime.now();
-      await _waitForSidecarReady();
+      await _waitForSidecarReady(profile: SidecarService.driveRuntimeProfile);
       _startSidecarLoop();
       if (mounted) {
         await Provider.of<SharedRuntimeManager>(context, listen: false)
@@ -305,7 +305,7 @@ extension _LiveDriveCanvasDebugActionsComponents
       _setSidecarPhase(_SidecarPhase.starting, message: '수동 재시작(시작)...');
       await _sidecarService.start(ssh);
       _sidecarLastStartAt = DateTime.now();
-      await _waitForSidecarReady();
+      await _waitForSidecarReady(profile: SidecarService.driveRuntimeProfile);
       _startSidecarLoop();
       _pushSidecarHistory('MANUAL_RESTART', 'ok');
       await _refreshSidecarProcessStatus();

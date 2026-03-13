@@ -11,6 +11,8 @@ import '../models/hud_fallback_metrics_sample.dart';
 import '../models/hud_remote_stream_event.dart';
 
 class HudRepositoryImpl implements HudRepository {
+  static const int _vehicleCoreCarryForwardLimitMs = 1500;
+
   final HudRemoteStreamDataSource remoteStreamDataSource;
   final HudFallbackMetricsDataSource? fallbackMetricsDataSource;
   final HudPreviewDataSource previewDataSource;
@@ -114,9 +116,13 @@ class HudRepositoryImpl implements HudRepository {
           endpointPath: event.path,
           receivedAtMs: event.receivedAtMs,
         );
+        if (_hasVehicleCore(mappedSnapshot.vehicle)) {
+          session.lastVehicleCoreSourceTsMonoMs = mappedSnapshot.tsMonoMs;
+        }
         final remoteSnapshot = _carryForwardVehicleCore(
           incoming: mappedSnapshot,
           previous: session.latestMerged ?? session.latestRemote,
+          lastVehicleCoreSourceTsMonoMs: session.lastVehicleCoreSourceTsMonoMs,
         );
         session.latestRemote = remoteSnapshot;
         final mergedSnapshot = snapshotAssembler.applyFallback(
@@ -197,8 +203,18 @@ class HudRepositoryImpl implements HudRepository {
 OriginalHudSnapshot _carryForwardVehicleCore({
   required OriginalHudSnapshot incoming,
   required OriginalHudSnapshot? previous,
+  required int? lastVehicleCoreSourceTsMonoMs,
 }) {
   if (previous == null) {
+    return incoming;
+  }
+
+  final canCarryForwardVehicleCore =
+      lastVehicleCoreSourceTsMonoMs != null &&
+      incoming.tsMonoMs >= lastVehicleCoreSourceTsMonoMs &&
+      (incoming.tsMonoMs - lastVehicleCoreSourceTsMonoMs) <=
+          HudRepositoryImpl._vehicleCoreCarryForwardLimitMs;
+  if (!canCarryForwardVehicleCore) {
     return incoming;
   }
 
@@ -245,7 +261,15 @@ bool _isUnknownGear(String value) {
   return normalized.isEmpty || normalized == 'U' || normalized == 'X';
 }
 
+bool _hasVehicleCore(HudVehicleState vehicle) {
+  return vehicle.speedClusterKph != null ||
+      vehicle.setSpeedClusterKph != null ||
+      !_isUnknownGear(vehicle.gearText);
+}
+
 class _HudLiveSession {
+  static const Duration _disposeTimeout = Duration(milliseconds: 900);
+
   final StreamController<OriginalHudSnapshot> controller;
   StreamSubscription<HudRemoteStreamEvent>? remoteSubscription;
   HudStreamLogWriter? logWriter;
@@ -253,15 +277,24 @@ class _HudLiveSession {
   OriginalHudSnapshot? latestRemote;
   OriginalHudSnapshot? latestMerged;
   HudFallbackMetricsSample? latestFallback;
+  int? lastVehicleCoreSourceTsMonoMs;
 
   _HudLiveSession({
     required this.controller,
   });
 
   Future<void> dispose() async {
-    await remoteSubscription?.cancel();
-    await fallbackSubscription?.cancel();
-    await logWriter?.dispose();
-    await controller.close();
+    try {
+      await remoteSubscription?.cancel().timeout(_disposeTimeout);
+    } catch (_) {}
+    try {
+      await fallbackSubscription?.cancel().timeout(_disposeTimeout);
+    } catch (_) {}
+    try {
+      await logWriter?.dispose().timeout(_disposeTimeout);
+    } catch (_) {}
+    try {
+      await controller.close().timeout(_disposeTimeout);
+    } catch (_) {}
   }
 }

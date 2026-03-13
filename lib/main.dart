@@ -13,6 +13,7 @@ import 'services/backup_service.dart';
 import 'services/background_service.dart';
 import 'services/update_service.dart';
 import 'services/diagnostics_service.dart';
+import 'services/hud_feature_settings_service.dart';
 import 'services/storage_layout_service.dart';
 import 'features/hud/hud.dart';
 import 'theme/app_theme.dart';
@@ -30,11 +31,14 @@ void main() {
     MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => SSHService()),
-        ChangeNotifierProxyProvider<SSHService, SharedRuntimeManager>(
+        ChangeNotifierProvider(create: (_) => HudFeatureSettingsService()),
+        ChangeNotifierProxyProvider2<SSHService, HudFeatureSettingsService,
+            SharedRuntimeManager>(
           create: (_) => SharedRuntimeManager(),
-          update: (_, ssh, manager) {
+          update: (_, ssh, featureSettings, manager) {
             final runtime = manager ?? SharedRuntimeManager();
             runtime.attachSshService(ssh);
+            runtime.attachFeatureSettings(featureSettings);
             return runtime;
           },
         ),

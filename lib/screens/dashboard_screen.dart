@@ -14,8 +14,8 @@ import '../../services/google_drive_service.dart';
 import '../../services/update_service.dart';
 import '../../services/diagnostics_service.dart';
 import '../../services/github_service.dart';
+import '../../services/hud_feature_settings_service.dart';
 import '../../services/native_overlay_hud_service.dart';
-import '../../services/sidecar_service.dart';
 import '../../features/hud/hud.dart';
 import '../../widgets/custom_toast.dart';
 import '../../widgets/update_dialog.dart';
@@ -53,11 +53,8 @@ class _DashboardScreenState extends State<DashboardScreen>
   bool _overlayLifecycleBusy = false;
   String? _lastDiscoveryLogIp;
   final DiagnosticsService _diag = DiagnosticsService.instance;
-  final SidecarService _sidecarService = SidecarService();
   final GlobalKey<TerminalTabState> _terminalTabKey =
       GlobalKey<TerminalTabState>();
-  SSHService? _observedSsh;
-  String? _lastPrewarmedSidecarHost;
 
   void _dismissKeyboard() {
     FocusManager.instance.primaryFocus?.unfocus();
@@ -89,9 +86,13 @@ class _DashboardScreenState extends State<DashboardScreen>
     _setServiceAppVisibility(true, source: 'dashboard_init');
     Provider.of<SharedRuntimeManager>(context, listen: false)
         .setAppForeground(true);
-    unawaited(
-      Provider.of<SharedRuntimeManager>(context, listen: false).prewarm(),
-    );
+    final hudFeatureSettings =
+        Provider.of<HudFeatureSettingsService>(context, listen: false);
+    if (hudFeatureSettings.enabled) {
+      unawaited(
+        Provider.of<SharedRuntimeManager>(context, listen: false).prewarm(),
+      );
+    }
     unawaited(
       _syncOverlayForAppVisibility(
         appForeground: true,
@@ -157,24 +158,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   }
 
   @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final ssh = Provider.of<SSHService>(context, listen: false);
-    if (identical(_observedSsh, ssh)) {
-      return;
-    }
-    _observedSsh?.removeListener(_handleSshChanged);
-    _observedSsh = ssh;
-    ssh.addListener(_handleSshChanged);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _handleSshChanged();
-    });
-  }
-
-  @override
   void dispose() {
-    _observedSsh?.removeListener(_handleSshChanged);
     _setServiceAppVisibility(false, source: 'dashboard_dispose');
     WidgetsBinding.instance.removeObserver(this);
     _reconnectTimer?.cancel();
@@ -182,28 +166,6 @@ class _DashboardScreenState extends State<DashboardScreen>
     _discoverySubscription?.cancel();
     _connectivitySubscription?.cancel();
     super.dispose();
-  }
-
-  void _handleSshChanged() {
-    if (!mounted) return;
-    final ssh = _observedSsh;
-    if (ssh == null || !ssh.isConnected) {
-      _lastPrewarmedSidecarHost = null;
-      return;
-    }
-    final host = (ssh.connectedIp ?? ssh.targetIp ?? '').trim();
-    if (host.isEmpty) {
-      return;
-    }
-    if (_lastPrewarmedSidecarHost == host) {
-      return;
-    }
-    _lastPrewarmedSidecarHost = host;
-    _diag.info('sidecar', 'Dashboard prewarm host=$host');
-    unawaited(_sidecarService.ensureRunning(ssh));
-    unawaited(
-      Provider.of<SharedRuntimeManager>(context, listen: false).prewarm(),
-    );
   }
 
   void _setupConnectivityListener() {
@@ -381,9 +343,6 @@ class _DashboardScreenState extends State<DashboardScreen>
         reason: 'app_resume',
         debounce: const Duration(seconds: 2),
       );
-      if (ssh.isConnected) {
-        unawaited(_sidecarService.ensureRunning(ssh));
-      }
       if (!ssh.isConnected) {
         print("App resumed: Connection lost, trying to reconnect...");
         _tryAutoConnect(reason: 'resume');
@@ -583,6 +542,12 @@ class _DashboardScreenState extends State<DashboardScreen>
 
       // Broadcast-first: do not use persisted IP.
       ssh.resumeAutoReconnect();
+      unawaited(ssh.tryFastReconnect(source: 'dashboard_$reason'));
+      _diag.info(
+        'autoconnect',
+        'Fast reconnect kicked reason=$reason '
+            'candidate=${ssh.serviceCandidateIp} last=${ssh.serviceLastSuccessfulIp}',
+      );
       _diag.info('autoconnect',
           'Broadcast sync reason=$reason candidate=${ssh.serviceCandidateIp}');
       final fastStart = reason == 'app_start';

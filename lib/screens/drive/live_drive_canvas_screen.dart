@@ -14,6 +14,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../../services/hud_drive_settings_service.dart';
+import '../../services/hud_feature_settings_service.dart';
 
 import '../../services/sidecar_service.dart';
 import '../../services/ssh_service.dart';
@@ -156,9 +157,10 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   );
 
   late final WebViewController _cameraController;
-  final SidecarService _sidecarService = SidecarService();
+  final SidecarService _sidecarService = SidecarService.shared;
 
   SSHService? _sshService;
+  bool _driveFeatureGuardHandled = false;
   SSHService? _observedSshService;
   SharedRuntimeManager? _sharedRuntimeManager;
   late String _activeHostIp;
@@ -167,6 +169,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   bool _cameraLoading = true;
   String? _cameraError;
   String? _cameraSourceKey;
+  bool _nativeCameraAttachReady = false;
   Size _cameraSourceSize = const Size(1928, 1208);
   final Map<_DriveCameraKind, Size> _sourceSizeByKind =
       <_DriveCameraKind, Size>{
@@ -208,7 +211,6 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const int _overlaySyncMaxDeltaLive = 8;
   static const bool _strictFrameLock = true;
   static const int _strictFrameHoldUs = 120000;
-  static const int _overlayStaleKeepAliveUs = 1800000;
   static const int _cameraFrameStaleUs = 350000;
   static const int _startupProvisionalSyncWindowUs = 4000000;
   static const int _startupProvisionalNativeSettleFrames = 3;
@@ -239,6 +241,7 @@ fi
   DateTime? _lastCameraDiagCapturedAt;
   int? _lastCameraFrameId;
   int _lastCameraFrameEventUs = 0;
+  int _cameraErrorGraceUntilUs = 0;
   int? _lastPublishedModelFrameId;
   int _lastSyncHitUs = 0;
   int _lastOverlayPublishUs = 0;
@@ -489,6 +492,17 @@ fi
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final featureSettings =
+        Provider.of<HudFeatureSettingsService>(context, listen: false);
+    if (!featureSettings.enabled && !_driveFeatureGuardHandled) {
+      _driveFeatureGuardHandled = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _toast('HUD/Stock 기능이 비활성화되어 있습니다.', isError: true);
+        Navigator.of(context).maybePop();
+      });
+      return;
+    }
     final ssh = Provider.of<SSHService>(context, listen: false);
     final sharedRuntime =
         Provider.of<SharedRuntimeManager>(context, listen: false);
@@ -591,6 +605,7 @@ fi
         _cameraSourceKey = null;
         _nativeCameraViewId = null;
         _nativeCameraUnsupported = false;
+        _nativeCameraAttachReady = false;
         _liveCameraKind = _DriveCameraKind.road;
         _cameraSourceSize = const Size(1928, 1208);
         _wideCamRequested = false;
@@ -601,6 +616,7 @@ fi
       _cameraSourceKey = null;
       _nativeCameraViewId = null;
       _nativeCameraUnsupported = false;
+      _nativeCameraAttachReady = false;
       _liveCameraKind = _DriveCameraKind.road;
       _cameraSourceSize = const Size(1928, 1208);
       _wideCamRequested = false;
@@ -618,6 +634,7 @@ fi
     _lastPathAnimationTickUs = 0;
     _lastCameraFrameId = null;
     _lastCameraFrameEventUs = 0;
+    _cameraErrorGraceUntilUs = 0;
     _lastPublishedModelFrameId = null;
     _lastSyncHitUs = 0;
     _lastOverlayPublishUs = 0;
@@ -899,15 +916,6 @@ fi
     _DriveOverlaySnapshot snapshot,
   ) =>
       _stabilizeOverlaySnapshotImpl(snapshot);
-
-  Map<String, dynamic>? _mergeSidecarOverlay2dTrackVertices({
-    required Map<String, dynamic>? current,
-    required Map<String, dynamic>? previous,
-  }) =>
-      _mergeSidecarOverlay2dTrackVerticesImpl(
-        current: current,
-        previous: previous,
-      );
 
   Uri _sidecarHttpUri(String path, [Map<String, String>? query]) =>
       _sidecarHttpUriImpl(path, query);

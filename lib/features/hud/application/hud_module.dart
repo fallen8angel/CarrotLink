@@ -57,7 +57,7 @@ class HudModule {
   static final Object _nullSshKey = Object();
   static const Duration _repositoryDisposeGrace = Duration(seconds: 30);
   static const Duration _controllerDisposeGrace = Duration(seconds: 45);
-  static final SidecarService _sidecarService = SidecarService();
+  static final SidecarService _sidecarService = SidecarService.shared;
   static final Map<Object, _HudRepositoryPoolEntry> _repositoryPool =
       <Object, _HudRepositoryPoolEntry>{};
   static final Map<Object, _HudControllerPoolEntry> _controllerPool =
@@ -65,6 +65,7 @@ class HudModule {
 
   static Future<HudTransportBootstrapResult> ensureLiveTransport(
     SSHService sshService,
+    {String profile = SidecarService.hudBootstrapProfile}
   ) async {
     if (!sshService.isConnected) {
       return (component: null, error: null, stackTrace: null);
@@ -85,7 +86,7 @@ class HudModule {
     }
 
     try {
-      await _sidecarService.ensureRunning(sshService);
+      await _sidecarService.ensureRunning(sshService, profile: profile);
     } catch (e, s) {
       capture('sidecar', e, s);
     }

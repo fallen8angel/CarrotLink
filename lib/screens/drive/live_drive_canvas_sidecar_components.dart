@@ -55,10 +55,10 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
             ? 'shared_overlay_seed'
             : 'shared_overlay_update',
       );
-    } else if (_overlayDisconnectDebounce == null) {
+    } else {
       // Not yet connected — debounce before propagating to avoid flashing
       // "사이드카 연결 대기" for brief WS reconnects (~350 ms).
-      _overlayDisconnectDebounce = Timer(
+      _overlayDisconnectDebounce ??= Timer(
         const Duration(milliseconds: 1200),
         () {
           _overlayDisconnectDebounce = null;
@@ -156,6 +156,12 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
     if (next) {
       _clearSidecarRecoverySchedule();
       _beginStartupProvisionalSync(reason: provisionalReason);
+      if (_openpilotOverlayMode &&
+          _profileRequiresLiveRuntime(_currentSidecarProfile) &&
+          !_nativeCameraAttachReady) {
+        _setNativeCameraAttachReady(true);
+        _startCameraErrorGrace(reason: 'shared_runtime_connected');
+      }
       _setSidecarPhase(
         _SidecarPhase.running,
         message: '사이드카 연결이 복구되었습니다.',
@@ -171,6 +177,7 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
       }
       if (_openpilotOverlayMode &&
           !_cameraSuspendedByLifecycle &&
+          _nativeCameraAttachReady &&
           _cameraSourceKey == null) {
         unawaited(_loadCameraSource(force: false));
       }
@@ -178,6 +185,7 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
     }
 
     if (_openpilotOverlayMode && !_cameraSuspendedByLifecycle) {
+      _setNativeCameraAttachReady(false);
       if (allowRecovery) {
         _setSidecarPhase(
           _SidecarPhase.verifying,

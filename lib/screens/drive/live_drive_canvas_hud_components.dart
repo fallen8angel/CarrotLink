@@ -34,6 +34,9 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
     if (!_hudModeLoaded) {
       return const ColoredBox(color: Colors.black);
     }
+    if (_openpilotOverlayMode && !_nativeCameraAttachReady) {
+      return const ColoredBox(color: Colors.black);
+    }
     if (_useNativeLiveCamera) {
       return AndroidView(
         key: ValueKey<String>(
@@ -71,8 +74,14 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
   String? _cameraCenterNoticeMessageImpl() {
     if (_debugOverlayPreviewMode) return null;
     if (!_hudModeLoaded) return 'HUD 모드 설정을 불러오는 중입니다.';
+    if (_openpilotOverlayMode && !_profileRequiresLiveRuntime(_currentSidecarProfile)) {
+      return '주행 대기 중입니다. HUD 전용 모드를 유지합니다.';
+    }
     if (_openpilotOverlayMode && !_sidecarConnected) {
       return '사이드카 연결 대기 중입니다.';
+    }
+    if (_openpilotOverlayMode && !_nativeCameraAttachReady) {
+      return '카메라/그래픽 연결 대기 중입니다.';
     }
     final err = _cameraError?.trim();
     if (err != null && err.isNotEmpty) {

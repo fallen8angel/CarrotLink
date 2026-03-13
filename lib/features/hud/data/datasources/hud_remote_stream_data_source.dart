@@ -20,8 +20,8 @@ class HudRemoteStreamDataSource {
     this.reconnectDelay = const Duration(milliseconds: 250),
     // Healthy HUD relays send an initial snapshot immediately and then keep
     // emitting at ~10Hz. Raised to 4 s to absorb transient sidecar-side send
-    // timeouts (sidecar uses 1 s per-client send timeout; live+HUD gathers can
-    // run back-to-back, so worst-case gap is ~2 s before a retry tick arrives).
+    // timeouts and recovery jitter while the broker switches between primary
+    // and fallback HUD relays.
     this.idleTimeout = const Duration(milliseconds: 4000),
     this.stickToPrimaryAfterSuccess = true,
     this.clientRole = 'app_hud',
@@ -55,7 +55,10 @@ class HudRemoteStreamDataSource {
         final activeCandidates = primaryDeliveredOnce &&
                 primaryCandidate != null &&
                 stickToPrimaryAfterSuccess
-            ? <({int port, String path})>[primaryCandidate]
+            ? <({int port, String path})>[
+                primaryCandidate,
+                ...candidates.where((candidate) => !isPrimary(candidate)),
+              ]
             : candidates;
         for (final candidate in activeCandidates) {
           if (disposed) break;
@@ -72,6 +75,7 @@ class HudRemoteStreamDataSource {
               },
             );
             channel = WebSocketChannel.connect(uri);
+            await channel!.ready;
             await for (final event in channel!.stream.timeout(idleTimeout)) {
               if (disposed) {
                 break;
@@ -103,9 +107,7 @@ class HudRemoteStreamDataSource {
             // Ignore connection-refused and other transient startup races.
             // The reconnect loop below will retry shortly.
           } finally {
-            try {
-              await channel?.sink.close();
-            } catch (_) {}
+            await _closeChannel(channel);
             channel = null;
           }
 
@@ -145,13 +147,20 @@ class HudRemoteStreamDataSource {
       },
       onCancel: () async {
         disposed = true;
-        try {
-          await channel?.sink.close();
-        } catch (_) {}
+        await _closeChannel(channel);
       },
     );
 
     return controller.stream;
+  }
+
+  Future<void> _closeChannel(WebSocketChannel? channel) async {
+    if (channel == null) {
+      return;
+    }
+    try {
+      await channel.sink.close().timeout(const Duration(milliseconds: 700));
+    } catch (_) {}
   }
 
   Map<String, dynamic>? _decodePayload(dynamic event) {

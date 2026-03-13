@@ -427,7 +427,7 @@ class AdaptiveHudSetSpeedPanel extends StatelessWidget {
     // - TEMP label area is the apply-source/apply-speed slot (eco/cam/section/road/vturn/model)
     // - the last row is gap + gear
     // Do not replace these with debug/meta labels.
-    final hasGear = model.gearText.trim().toUpperCase() != 'U';
+    final gearText = _isUnknownGearText(model.gearText) ? '' : model.gearText;
     return LayoutBuilder(
       builder: (context, constraints) {
         final width =
@@ -518,7 +518,7 @@ class AdaptiveHudSetSpeedPanel extends StatelessWidget {
               _AdaptiveHudSupportDetailArea(
                 count: model.showGap ? model.gapBarCount : 0,
                 gapLabel: model.showGap ? model.gapText : '--',
-                gearText: hasGear ? model.gearText : '',
+                gearText: gearText,
                 profile: profile,
                 compact: supportCompact,
                 veryCompact: veryCompact,
@@ -591,28 +591,30 @@ class AdaptiveHudSignalIndicator extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final normalized = signalState.trim().toLowerCase();
-    if (normalized.isEmpty || normalized == 'off') {
-      return const SizedBox.shrink();
-    }
     final color = switch (normalized) {
       'red' => const Color(0xFFFF5C5C),
       'green' => _hudAccentGreen,
       'yellow' => _hudAccentAmber,
-      _ => Colors.white38,
+      _ => Colors.white.withValues(alpha: 0.22),
     };
+    final hasActiveSignal = normalized == 'red' ||
+        normalized == 'green' ||
+        normalized == 'yellow';
     return Container(
       width: profile.labelFontSize + 8,
       height: profile.labelFontSize + 8,
       decoration: BoxDecoration(
         color: color,
         shape: BoxShape.circle,
-        boxShadow: <BoxShadow>[
-          BoxShadow(
-            color: color.withValues(alpha: 0.32),
-            blurRadius: 8,
-            spreadRadius: 0.3,
-          ),
-        ],
+        boxShadow: hasActiveSignal
+            ? <BoxShadow>[
+                BoxShadow(
+                  color: color.withValues(alpha: 0.32),
+                  blurRadius: 8,
+                  spreadRadius: 0.3,
+                ),
+              ]
+            : const <BoxShadow>[],
       ),
     );
   }
@@ -693,14 +695,20 @@ class AdaptiveHudInfoRow extends StatelessWidget {
       children: <Widget>[
         AdaptiveHudInfoPill(
           label: model.limitDisplayText,
-          color: model.limitCritical ? const Color(0xFFFF6357) : Colors.white,
+          color: model.showLimit
+              ? (model.limitCritical
+                  ? const Color(0xFFFF6357)
+                  : Colors.white)
+              : Colors.white.withValues(alpha: 0.42),
           profile: profile,
-          blinking: model.limitBlink,
+          blinking: model.showLimit && model.limitBlink,
           dense: dense,
         ),
         AdaptiveHudInfoPill(
           label: model.connectivityDisplayText,
-          color: Colors.white,
+          color: model.showConnectivity
+              ? Colors.white
+              : Colors.white.withValues(alpha: 0.42),
           profile: profile,
           dense: dense,
         ),
@@ -798,21 +806,20 @@ class AdaptiveHudBottomStrip extends StatelessWidget {
             : Colors.transparent,
       ),
       (
-        text: model.showLimit ? model.limitDisplayText.trim() : '',
+        text: model.limitDisplayText.trim(),
         color: model.showLimit
             ? (model.isCameraLimit
                 ? (model.cameraAlertBlinkOn
                     ? const Color(0xFFFF6961)
                     : const Color(0xFFFFD25E))
                 : Colors.white)
-            : Colors.transparent,
+            : Colors.white.withValues(alpha: 0.42),
       ),
       (
-        text:
-            model.showConnectivity ? model.connectivityDisplayText.trim() : '',
+        text: model.connectivityDisplayText.trim(),
         color: model.showConnectivity
             ? Colors.white.withValues(alpha: 0.92)
-            : Colors.transparent,
+            : Colors.white.withValues(alpha: 0.42),
       ),
     ];
   }
@@ -1189,7 +1196,7 @@ class _AdaptiveHudMiniGearStatus extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hasGear = gearText.trim().isNotEmpty;
+    final hasGear = !_isUnknownGearText(gearText);
     final value = hasGear ? gearText.trim().toUpperCase() : '–';
     if (veryCompact) {
       return ConstrainedBox(
@@ -1252,6 +1259,11 @@ class _AdaptiveHudMiniGearStatus extends StatelessWidget {
       ),
     );
   }
+}
+
+bool _isUnknownGearText(String value) {
+  final normalized = value.trim().toUpperCase();
+  return normalized.isEmpty || normalized == 'U' || normalized == 'X';
 }
 
 class _AdaptiveHudInlineSectionDivider extends StatelessWidget {

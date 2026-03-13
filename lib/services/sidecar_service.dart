@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:pointycastle/digests/sha256.dart';
@@ -7,6 +8,10 @@ import 'diagnostics_service.dart';
 import 'ssh_service.dart';
 
 class SidecarService {
+  static final SidecarService shared = SidecarService();
+  static const String hudBootstrapProfile = 'p1';
+  static const String driveRuntimeProfile = 'p2';
+
   SidecarService({DiagnosticsService? diagnostics})
       : _diag = diagnostics ?? DiagnosticsService.instance;
 
@@ -43,7 +48,7 @@ class SidecarService {
   static const String _legacySidecarBasePath =
       '/data/media/0/carrotlink_sidecar';
   static const String _legacyManagedModule = 'selfdrive.carrot.carrot_linkview';
-  static const String _defaultProfile = 'p2';
+  static const String _defaultProfile = driveRuntimeProfile;
   static const Set<String> _supportedProfiles = <String>{
     'p0',
     'p1',
@@ -53,20 +58,80 @@ class SidecarService {
   };
   static const int defaultPort = 7766;
   static const Duration _recentEnsureCooldown = Duration(seconds: 20);
+  static const Duration _postStartHealthGrace = Duration(seconds: 6);
+  static const Duration _postStartHealthPollInterval =
+      Duration(milliseconds: 350);
+  static const Duration _clientReachabilityTimeout =
+      Duration(milliseconds: 800);
+  static const Duration _clientReachabilityGrace = Duration(seconds: 2);
   static const Duration _legacyCleanupCooldown = Duration(seconds: 45);
   static const bool _autoLegacyCleanupEnabled = false;
 
-  Future<bool> _isHealthy(SSHService ssh) async {
+  String _normalizeProfile(String profile) =>
+      _supportedProfiles.contains(profile) ? profile : _defaultProfile;
+
+  String? _resolveClientProbeHost(SSHService ssh) {
+    final host = (ssh.connectedIp ?? ssh.targetIp ?? '').trim();
+    if (host.isEmpty) {
+      return null;
+    }
+    return host;
+  }
+
+  Future<bool> _isClientReachable(
+    SSHService ssh, {
+    int port = defaultPort,
+  }) async {
+    final host = _resolveClientProbeHost(ssh);
+    if (host == null) {
+      return false;
+    }
+    Socket? socket;
+    try {
+      socket = await Socket.connect(
+        host,
+        port,
+        timeout: _clientReachabilityTimeout,
+      );
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      socket?.destroy();
+    }
+  }
+
+  Future<bool> _isEndToEndHealthy(
+    SSHService ssh, {
+    String? expectedProfile,
+  }) async {
+    if (!await _isHealthy(ssh, expectedProfile: expectedProfile)) {
+      return false;
+    }
+    return _isClientReachable(ssh);
+  }
+
+  Future<bool> _isHealthy(
+    SSHService ssh, {
+    String? expectedProfile,
+  }) async {
+    final normalizedProfile = expectedProfile == null
+        ? null
+        : _normalizeProfile(expectedProfile);
     final result = await ssh.executeCommandResult(
       _bash(
         '''
 SIDE_PORT=${_q(defaultPort.toString())}
+EXPECTED_PROFILE=${_q(normalizedProfile ?? '')}
 check_sidecar() {
   if ! command -v curl >/dev/null 2>&1; then
     return 1
   fi
-  curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' &&
-    curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null | grep -Fq '"kind":"carrotlink_sidecar_broker_v1"'
+  HEALTH_JSON=\$(curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null || true)
+  [ -n "\$HEALTH_JSON" ] &&
+    printf '%s' "\$HEALTH_JSON" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' &&
+    printf '%s' "\$HEALTH_JSON" | grep -Fq '"kind":"carrotlink_sidecar_broker_v1"' &&
+    { [ -z "\$EXPECTED_PROFILE" ] || printf '%s' "\$HEALTH_JSON" | grep -Fq '"profile":"'"\$EXPECTED_PROFILE"'"'; }
 }
 if check_sidecar; then
   echo "SIDECAR_HEALTH_OK"
@@ -81,6 +146,92 @@ fi
       return false;
     }
     return result.output.contains('SIDECAR_HEALTH_OK');
+  }
+
+  Future<String?> _switchProfileInPlace(
+    SSHService ssh, {
+    required int port,
+    required String profile,
+  }) async {
+    final normalizedProfile = _normalizeProfile(profile);
+    final result = await ssh.executeCommandResult(
+      _bash(
+        '''
+SIDE_PORT=${_q(port.toString())}
+TARGET_PROFILE=${_q(normalizedProfile)}
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "SIDECAR_PROFILE_SWITCH_UNAVAILABLE"
+  exit 2
+fi
+
+HEALTH_JSON=\$(curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null || true)
+if [ -z "\$HEALTH_JSON" ]; then
+  echo "SIDECAR_PROFILE_SWITCH_SKIPPED reason=no_health"
+  exit 3
+fi
+if ! printf '%s' "\$HEALTH_JSON" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then
+  echo "SIDECAR_PROFILE_SWITCH_SKIPPED reason=health_bad"
+  exit 3
+fi
+if ! printf '%s' "\$HEALTH_JSON" | grep -Fq '"kind":"carrotlink_sidecar_broker_v1"'; then
+  echo "SIDECAR_PROFILE_SWITCH_SKIPPED reason=kind_mismatch"
+  exit 3
+fi
+
+CURRENT_PROFILE=\$(printf '%s' "\$HEALTH_JSON" | sed -n 's/.*"profile":"\\([^"]*\\)".*/\\1/p' | head -n 1)
+if [ -z "\$CURRENT_PROFILE" ]; then
+  echo "SIDECAR_PROFILE_SWITCH_SKIPPED reason=profile_missing"
+  exit 3
+fi
+if [ "\$CURRENT_PROFILE" = "\$TARGET_PROFILE" ]; then
+  echo "SIDECAR_PROFILE_ALREADY profile=\$TARGET_PROFILE port=\$SIDE_PORT"
+  exit 0
+fi
+
+SWITCH_JSON=\$(curl -fsS --max-time 2 -X POST -H 'Content-Type: application/json' -d '{"profile":"'"'\$TARGET_PROFILE'"'"}' "http://127.0.0.1:\$SIDE_PORT/profile" 2>/dev/null || true)
+if [ -z "\$SWITCH_JSON" ]; then
+  echo "SIDECAR_PROFILE_SWITCH_FAILED reason=empty_response"
+  exit 4
+fi
+if ! printf '%s' "\$SWITCH_JSON" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then
+  echo "SIDECAR_PROFILE_SWITCH_FAILED reason=switch_not_ok"
+  echo "\$SWITCH_JSON"
+  exit 4
+fi
+if ! printf '%s' "\$SWITCH_JSON" | grep -Fq '"profile":"'"'\$TARGET_PROFILE'"'; then
+  echo "SIDECAR_PROFILE_SWITCH_FAILED reason=target_not_applied"
+  echo "\$SWITCH_JSON"
+  exit 4
+fi
+
+for i in \$(seq 1 20); do
+  NEXT_HEALTH=\$(curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null || true)
+  if [ -n "\$NEXT_HEALTH" ] &&
+     printf '%s' "\$NEXT_HEALTH" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' &&
+     printf '%s' "\$NEXT_HEALTH" | grep -Fq '"kind":"carrotlink_sidecar_broker_v1"' &&
+     printf '%s' "\$NEXT_HEALTH" | grep -Fq '"profile":"'"'\$TARGET_PROFILE'"'; then
+    echo "SIDECAR_PROFILE_SWITCHED profile=\$TARGET_PROFILE port=\$SIDE_PORT"
+    exit 0
+  fi
+  sleep 0.2
+done
+
+echo "SIDECAR_PROFILE_SWITCH_FAILED reason=health_timeout"
+exit 5
+''',
+      ),
+      timeout: const Duration(seconds: 10),
+    );
+    if (!result.isSuccess) {
+      return null;
+    }
+    final output = result.output.trim();
+    if (output.startsWith('SIDECAR_PROFILE_SWITCHED') ||
+        output.startsWith('SIDECAR_PROFILE_ALREADY')) {
+      return output;
+    }
+    return null;
   }
 
   String _bash(String script) {
@@ -136,8 +287,7 @@ fi
   }) {
     final pyHash = _sha256Hex(sidecarPy);
     final shHash = _sha256Hex(runScript);
-    final schema =
-        'carrotlink-sidecar-rev-v4\npy=$pyHash\nsh=$shHash\n';
+    final schema = 'carrotlink-sidecar-rev-v4\npy=$pyHash\nsh=$shHash\n';
     return _sha256Hex(schema);
   }
 
@@ -191,10 +341,14 @@ fi
     return rev;
   }
 
-  Future<void> ensureRunning(SSHService ssh) {
+  Future<void> ensureRunning(
+    SSHService ssh, {
+    String profile = _defaultProfile,
+  }) {
     if (!ssh.isConnected) {
       return Future<void>.value();
     }
+    final normalizedProfile = _normalizeProfile(profile);
     final hostKey = (ssh.connectedIp ?? ssh.targetIp ?? 'connected').trim();
     final inFlight = _inFlightEnsureByHost[hostKey];
     if (inFlight != null) {
@@ -203,12 +357,30 @@ fi
     final now = DateTime.now();
     final lastOk = _lastEnsureSucceededAtByHost[hostKey];
     if (lastOk != null && now.difference(lastOk) < _recentEnsureCooldown) {
-      final future = _isHealthy(ssh).then<Future<void>>((healthy) {
+      final future = () async {
+        final healthy = await _isEndToEndHealthy(
+          ssh,
+          expectedProfile: normalizedProfile,
+        );
         if (healthy) {
-          return Future<void>.value();
+          _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
+          return;
         }
-        return _ensureRunningInternal(ssh, hostKey: hostKey);
-      }).then((_) {});
+        final warmedUp = await _waitUntilEndToEndHealthy(
+          ssh,
+          timeout: _postStartHealthGrace,
+          expectedProfile: normalizedProfile,
+        );
+        if (warmedUp) {
+          _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
+          return;
+        }
+        await _ensureRunningInternal(
+          ssh,
+          hostKey: hostKey,
+          profile: normalizedProfile,
+        );
+      }();
       _inFlightEnsureByHost[hostKey] = future;
       return future.whenComplete(() {
         if (identical(_inFlightEnsureByHost[hostKey], future)) {
@@ -216,7 +388,11 @@ fi
         }
       });
     }
-    final future = _ensureRunningInternal(ssh, hostKey: hostKey);
+    final future = _ensureRunningInternal(
+      ssh,
+      hostKey: hostKey,
+      profile: normalizedProfile,
+    );
     _inFlightEnsureByHost[hostKey] = future;
     return future.whenComplete(() {
       if (identical(_inFlightEnsureByHost[hostKey], future)) {
@@ -225,9 +401,27 @@ fi
     });
   }
 
+  Future<bool> _waitUntilEndToEndHealthy(
+    SSHService ssh, {
+    required Duration timeout,
+    String? expectedProfile,
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (true) {
+      if (await _isEndToEndHealthy(ssh, expectedProfile: expectedProfile)) {
+        return true;
+      }
+      if (DateTime.now().isAfter(deadline)) {
+        return false;
+      }
+      await Future<void>.delayed(_postStartHealthPollInterval);
+    }
+  }
+
   Future<void> _ensureRunningInternal(
     SSHService ssh, {
     required String hostKey,
+    required String profile,
   }) async {
     // Always check revision even if healthy — a running old sidecar must be
     // replaced when our bundled assets have changed.
@@ -235,38 +429,61 @@ fi
     final remoteRev = await remoteRevision(ssh).catchError((_) => null);
     final revisionMatch = remoteRev != null && remoteRev == localRev;
 
-    if (revisionMatch && await _isHealthy(ssh)) {
-      _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
-      return;
+    if (revisionMatch) {
+      if (await _isEndToEndHealthy(ssh, expectedProfile: profile)) {
+        _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
+        return;
+      }
+      final remoteHealthy = await _isHealthy(ssh, expectedProfile: profile);
+      if (remoteHealthy) {
+        final becameReachable = await _waitUntilEndToEndHealthy(
+          ssh,
+          timeout: _clientReachabilityGrace,
+          expectedProfile: profile,
+        );
+        if (becameReachable) {
+          _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
+          return;
+        }
+        final probeHost = _resolveClientProbeHost(ssh) ?? hostKey;
+        _diag.warn(
+          'sidecar',
+          'Remote health ok but client reachability failed '
+              'host=$probeHost port=$defaultPort profile=$profile — '
+              'forcing runtime restart',
+        );
+        try {
+          await stop(ssh);
+        } catch (_) {}
+        await start(ssh, profile: profile);
+        _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
+        return;
+      }
     }
 
     if (!revisionMatch) {
-      _diag.info(
+      _diag.warn(
         'sidecar',
         'Revision mismatch local=${shortRevision(localRev)} '
-            'remote=${shortRevision(remoteRev ?? "-")} — stop+deploy+start',
+            'remote=${shortRevision(remoteRev ?? "-")} '
+            'profile=$profile — manual install required',
       );
-      try {
-        await stop(ssh);
-      } catch (_) {}
-      await deploy(ssh);
-      await start(ssh);
-      _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
-      return;
+      throw Exception(
+        'SIDECAR_INSTALL_REQUIRED '
+        'local=${shortRevision(localRev)} '
+        'remote=${shortRevision(remoteRev ?? "-")}',
+      );
     }
 
     try {
-      await start(ssh);
+      await start(ssh, profile: profile);
       _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
       return;
     } catch (e) {
       final message = e.toString();
       if (message.contains('SIDECAR_ARTIFACTS_NOT_DEPLOYED') ||
           message.contains('SIDECAR_NOT_DEPLOYED')) {
-        await deploy(ssh);
-        await start(ssh);
-        _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
-        return;
+        throw Exception('SIDECAR_NOT_INSTALLED');
       }
       rethrow;
     }
@@ -692,11 +909,6 @@ if [ -n "\$REPO" ]; then
 else
   BASE="$_legacySidecarBasePath"
 fi
-mkdir -p "\$BASE" "\$BASE/logs" >/dev/null 2>&1 || true
-if [ ! -d "\$BASE" ]; then
-  echo "SIDECAR_BASE_NOT_FOUND"
-  exit 3
-fi
 echo "\$BASE"
 ''',
       ),
@@ -715,9 +927,6 @@ echo "\$BASE"
     }
     if (lines.contains('OPENPILOT_REPO_NOT_FOUND')) {
       throw Exception('openpilot repo를 찾지 못했습니다.');
-    }
-    if (lines.contains('SIDECAR_BASE_NOT_FOUND')) {
-      throw Exception('사이드카 경로를 만들지 못했습니다.');
     }
     final base = lines.lastWhere(
       (e) => e.contains('/'),
@@ -793,6 +1002,15 @@ chmod 755 "\$BASE/$_runScriptName" "\$BASE/$_pythonFileName"
     final remoteBase = await _resolveRemoteBase(ssh);
     final normalizedProfile =
         _supportedProfiles.contains(profile) ? profile : _defaultProfile;
+    final switched = await _switchProfileInPlace(
+      ssh,
+      port: port,
+      profile: normalizedProfile,
+    );
+    if (switched != null) {
+      _diag.info('sidecar', 'Start reused output=$switched');
+      return switched;
+    }
     _diag.info(
       'sidecar',
       'Start request profile=$normalizedProfile port=$port',
@@ -936,9 +1154,17 @@ start_service() {
   fi
 }
 
-if health_ok "\$PORT" "carrotlink_sidecar_broker_v1"; then
-  echo "SIDECAR_ALREADY_RUNNING profile=\$PROFILE port=\$PORT base=\$BASE"
-  exit 0
+if command -v curl >/dev/null 2>&1; then
+  HEALTH_JSON=\$(curl -fsS --max-time 1 "http://127.0.0.1:\$PORT/health" 2>/dev/null || true)
+  if [ -n "\$HEALTH_JSON" ] &&
+     printf '%s' "\$HEALTH_JSON" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' &&
+     printf '%s' "\$HEALTH_JSON" | grep -Fq '"kind":"carrotlink_sidecar_broker_v1"'; then
+    CURRENT_PROFILE=\$(printf '%s' "\$HEALTH_JSON" | sed -n 's/.*"profile":"\\([^"]*\\)".*/\\1/p' | head -n 1)
+    if [ "\$CURRENT_PROFILE" = "\$PROFILE" ]; then
+      echo "SIDECAR_ALREADY_RUNNING profile=\$PROFILE port=\$PORT base=\$BASE"
+      exit 0
+    fi
+  fi
 fi
 
 start_service "SIDECAR" "\$SESSION" "$_runScriptName" "\$SIDE_PIDFILE" "\$SIDE_LOGFILE" "\$PORT" "carrotlink_sidecar_broker_v1" "CARROTLINK_SIDECAR_HOST=0.0.0.0"
@@ -1172,9 +1398,12 @@ emit_proc() {
 }
 
 emit_proc "locationd" "selfdrive.locationd.locationd"
+emit_proc "modeld" "selfdrive.modeld.modeld"
 emit_proc "controlsd" "selfdrive.controls.controlsd"
 emit_proc "plannerd" "selfdrive.controls.plannerd"
 emit_proc "selfdrived" "selfdrive.selfdrived.selfdrived"
+emit_proc "radard" "selfdrive.controls.radard"
+emit_proc "camerad" "./camerad"
 emit_proc "stream_encoderd" "encoderd --stream"
 emit_proc "webrtcd" "system.webrtc.webrtcd"
 ''',
@@ -1248,9 +1477,6 @@ fi
 BASE=${_q(remoteBase)}
 PORT=${_q(port.toString())}
 
-# Remove current and legacy sidecar artifacts
-rm -f "\$BASE/$_pythonFileName" "\$BASE/$_runScriptName" "\$BASE/$_revisionFileName" "\$BASE/$_pidFileName" "\$BASE/logs/$_logFileName" "\$BASE/$_legacyPythonFileName" "\$BASE/$_legacyRunScriptName" "\$BASE/$_olderLegacyPythonFileName" "\$BASE/$_olderLegacyRunScriptName" "\$BASE/$_legacyRevisionFileName" "\$BASE/logs/$_legacyLogFileName"
-
 # Cleanup any lingering listeners
 if command -v ss >/dev/null 2>&1; then
   PORT_PIDS="\$(ss -ltnp 2>/dev/null | awk -v p=":\$PORT" '
@@ -1266,7 +1492,16 @@ if command -v ss >/dev/null 2>&1; then
   done
 fi
 
-echo "SIDECAR_RESET_DONE base=\$BASE"
+if [ -e "\$BASE" ]; then
+  rm -rf -- "\$BASE" 2>/dev/null || true
+fi
+
+if [ -e "\$BASE" ]; then
+  echo "SIDECAR_RESET_FAILED base=\$BASE"
+  exit 4
+fi
+
+echo "SIDECAR_RESET_DONE base=\$BASE removed=1"
 ''',
       ),
       timeout: const Duration(seconds: 40),
