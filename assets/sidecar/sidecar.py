@@ -191,7 +191,7 @@ def _extract_h264_codec(payload: bytes) -> str | None:
 
 
 class CameraRelayHub:
-    CAMERA_QUEUE_MAXSIZE = 3
+    CAMERA_QUEUE_MAXSIZE = 2
     CAMERA_SERVICE_CANDIDATES = {
         "road": [
             "livestreamRoadEncodeData",
@@ -482,6 +482,15 @@ class CameraRelayHub:
                 except asyncio.TimeoutError:
                     continue
 
+                # Low-latency mode prefers the freshest frame over guaranteed
+                # delivery of every queued frame.
+                while not queue.empty():
+                    try:
+                        packet = queue.get_nowait()
+                        self._queue_drop_count[camera] += 1
+                    except Exception:
+                        break
+
                 stale: list[web.WebSocketResponse] = []
                 clients = list(self.clients.get(camera, set()))
                 send_started = time.monotonic()
@@ -665,25 +674,25 @@ class SidecarApp:
     PROFILE_SM_UPDATE_INTERVAL = {
         "p0": 0.08,
         "p1": 0.06,
-        "p2": 0.04,
-        "p3": 0.04,
-        "p4": 0.03,
+        "p2": 0.033,
+        "p3": 0.033,
+        "p4": 0.025,
     }
 
     PROFILE_LIVE_INTERVAL = {
         "p0": 0.16,
         "p1": 0.12,
-        "p2": 0.04,
-        "p3": 0.04,
-        "p4": 0.03,
+        "p2": 0.033,
+        "p3": 0.033,
+        "p4": 0.025,
     }
 
     PROFILE_LIVE_CACHE_INTERVAL = {
         "p0": 0.12,
         "p1": 0.08,
-        "p2": 0.04,
-        "p3": 0.04,
-        "p4": 0.03,
+        "p2": 0.033,
+        "p3": 0.033,
+        "p4": 0.025,
     }
 
     PROFILE_HUD_INTERVAL = {
@@ -698,7 +707,7 @@ class SidecarApp:
     def __init__(self, profile: str):
         self.profile = profile if profile in self.PROFILE_SERVICES else "p2"
         self.clients: dict[web.WebSocketResponse, tuple[str, str, str, str]] = {}
-        self.hud_clients: dict[web.WebSocketResponse, tuple[str, str]] = {}
+        self.hud_clients: dict[web.WebSocketResponse, tuple[str, str, str]] = {}
         self.repo = _detect_repo()
         self.base_dir = _detect_base_dir()
         self.messaging = None
@@ -756,6 +765,7 @@ class SidecarApp:
         self._cached_live_last_built = 0.0
         self._cached_hud_payload: dict[str, Any] | None = None
         self._cached_hud_json: str | None = None
+        self._cached_hud_msgpack: bytes | None = None
         self._cached_hud_last_built = 0.0
         self._profile_generation = 0
         self._service_last_alive_mono: dict[str, float] = {}
@@ -772,6 +782,7 @@ class SidecarApp:
         self._cached_live_last_built = 0.0
         self._cached_hud_payload = None
         self._cached_hud_json = None
+        self._cached_hud_msgpack = None
         self._cached_hud_last_built = 0.0
 
     def _sm_update_loop_interval(self) -> float:
@@ -1094,11 +1105,24 @@ class SidecarApp:
 
     def _client_role_counts(
         self,
-        entries: list[tuple[str, str]],
+        entries: list[tuple[str, ...]],
     ) -> dict[str, int]:
         counts: dict[str, int] = {}
-        for role, _session in entries:
+        for entry in entries:
+            if not entry:
+                continue
+            role = entry[0]
             counts[role] = counts.get(role, 0) + 1
+        return counts
+
+    def _client_encoding_counts(
+        self,
+        encodings: list[str],
+    ) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for encoding in encodings:
+            value = str(encoding or "").strip().lower() or "json"
+            counts[value] = counts.get(value, 0) + 1
         return counts
 
     def _build_debug_plot(self, safe_mode: bool = False) -> dict[str, Any] | None:
@@ -2398,6 +2422,15 @@ class SidecarApp:
         self._cached_hud_json = json.dumps(
             hud_payload, separators=(",", ":"), ensure_ascii=False
         )
+        has_msgpack_client = any(
+            encoding == "msgpack"
+            for _role, _session, encoding in self.hud_clients.values()
+        )
+        self._cached_hud_msgpack = (
+            _msgpack.packb(hud_payload, use_bin_type=True)
+            if has_msgpack_client and _msgpack is not None
+            else None
+        )
         self._cached_hud_last_built = time.monotonic()
         self._last_hud_build_ms = max(
             0.0,
@@ -2551,8 +2584,8 @@ class SidecarApp:
                 if self.hud_clients:
                     if self._cached_hud_json is None:
                         self._refresh_hud_broadcast_cache()
-                    hud_message = self._cached_hud_json
-                    if hud_message is None:
+                    hud_message_json = self._cached_hud_json
+                    if hud_message_json is None:
                         await asyncio.sleep(base_interval)
                         continue
                     hud_send_jobs: list[
@@ -2561,12 +2594,25 @@ class SidecarApp:
                     hud_batch_started = time.monotonic()
                     for ws in list(self.hud_clients.keys()):
                         try:
+                            _role, _session, encoding = self.hud_clients.get(
+                                ws, ("app_hud", "hud", "json")
+                            )
+                            if encoding == "msgpack" and _msgpack is not None:
+                                packed = self._cached_hud_msgpack
+                                if packed is None:
+                                    packed = _msgpack.packb(
+                                        self._cached_hud_payload or {},
+                                        use_bin_type=True,
+                                    )
+                                send_coro = ws.send_bytes(packed)
+                            else:
+                                send_coro = ws.send_str(hud_message_json)
                             hud_send_jobs.append(
                                 (
                                     ws,
                                     asyncio.create_task(
                                         asyncio.wait_for(
-                                            ws.send_str(hud_message),
+                                            send_coro,
                                             timeout=hud_send_timeout,
                                         )
                                     ),
@@ -2654,6 +2700,11 @@ class SidecarApp:
         return ws
 
     async def ws_hud(self, request: web.Request) -> web.WebSocketResponse:
+        encoding = request.query.get("encoding", "json").strip().lower()
+        if encoding not in {"json", "msgpack"}:
+            encoding = "json"
+        if encoding == "msgpack" and _msgpack is None:
+            encoding = "json"
         role = self._normalize_client_role(
             request.query.get("role"),
             "app_hud",
@@ -2664,20 +2715,41 @@ class SidecarApp:
         )
         ws = web.WebSocketResponse(heartbeat=20)
         await ws.prepare(request)
-        self.hud_clients[ws] = (role, session_id)
+        self.hud_clients[ws] = (role, session_id, encoding)
         try:
             if self._cached_hud_json is None:
                 self._refresh_hud_broadcast_cache()
-            initial = self._cached_hud_json
             await ws.send_str(
-                initial
-                if initial is not None
-                else json.dumps(
-                    self._build_hud_snapshot(),
+                json.dumps(
+                    {
+                        "type": "hello",
+                        "profile": self.profile,
+                        "source": "hud",
+                        "encoding": encoding,
+                        "role": role,
+                        "session": session_id,
+                    }
+                )
+            )
+            initial_json = self._cached_hud_json
+            initial_payload = self._cached_hud_payload
+            if initial_json is None or initial_payload is None:
+                initial_payload = self._build_hud_snapshot()
+                initial_json = json.dumps(
+                    initial_payload,
                     separators=(",", ":"),
                     ensure_ascii=False,
                 )
-            )
+            if encoding == "msgpack" and _msgpack is not None:
+                initial_msgpack = self._cached_hud_msgpack
+                if initial_msgpack is None:
+                    initial_msgpack = _msgpack.packb(
+                        initial_payload,
+                        use_bin_type=True,
+                    )
+                await ws.send_bytes(initial_msgpack)
+            else:
+                await ws.send_str(initial_json)
             async for _ in ws:
                 pass
         finally:
@@ -2767,6 +2839,14 @@ class SidecarApp:
                             for _, _, role, session in self.clients.values()
                         ]
                     ),
+                    "encodings": self._client_encoding_counts(
+                        [encoding for encoding, _camera_mode, _role, _session in self.clients.values()]
+                    ),
+                    "msgpackAvailable": _msgpack is not None,
+                    "msgpackActive": any(
+                        encoding == "msgpack"
+                        for encoding, _camera_mode, _role, _session in self.clients.values()
+                    ),
                     "clientSessions": sorted(
                         {session for _, _, _role, session in self.clients.values()}
                     ),
@@ -2797,8 +2877,20 @@ class SidecarApp:
                     "clientRoles": self._client_role_counts(
                         list(self.hud_clients.values())
                     ),
+                    "encodings": self._client_encoding_counts(
+                        [encoding for _role, _session, encoding in self.hud_clients.values()]
+                    ),
+                    "msgpackAvailable": _msgpack is not None,
+                    "msgpackActive": any(
+                        encoding == "msgpack"
+                        for _role, _session, encoding in self.hud_clients.values()
+                    ),
                     "clientSessions": sorted(
-                        {session for _role, session in self.hud_clients.values()}
+                        {
+                            session
+                            for _role, session, _encoding
+                            in self.hud_clients.values()
+                        }
                     ),
                     "sendDrops": self._hud_send_drop_count,
                     "lastBuildMs": round(self._last_hud_build_ms, 1),

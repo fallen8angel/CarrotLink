@@ -43,9 +43,9 @@ if [ ! -f "${BASE}/sidecar.py" ]; then
   exit 3
 fi
 
-mkdir -p "${BASE}/logs"
+mkdir -p "${BASE}/logs" "${BASE}/pydeps"
 
-export PYTHONPATH="${REPO}${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTHONPATH="${BASE}/pydeps:${REPO}${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTHONUNBUFFERED=1
 export CARROTLINK_OPENPILOT_REPO="${REPO}"
 export CARROTLINK_SIDECAR_BASE="${BASE}"

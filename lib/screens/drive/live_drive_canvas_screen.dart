@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
+import 'package:msgpack_dart/msgpack_dart.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -42,6 +43,7 @@ part 'live_drive_canvas_overlay_preview_components.dart';
 part 'live_drive_canvas_camera_components.dart';
 part 'live_drive_canvas_camera_html_components.dart';
 part 'live_drive_canvas_camera_diag_components.dart';
+part 'live_drive_canvas_diag_logging_components.dart';
 part 'live_drive_canvas_sidecar_components.dart';
 part 'live_drive_canvas_sidecar_bootstrap_components.dart';
 part 'live_drive_canvas_sidecar_transport_components.dart';
@@ -185,6 +187,9 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   Rect _nativeOverlayVisibleViewportRect = Rect.zero;
   int _lastNativeOverlayPushUs = 0;
   static const int _nativeOverlayPushIntervalUs = 16666;
+  bool _nativeOverlayPushBusy = false;
+  _DriveOverlaySnapshot? _pendingNativeOverlaySnapshot;
+  bool _pendingNativeOverlayForce = false;
 
   bool _sidecarConnected = false;
   bool _sidecarAutoManaging = false;
@@ -214,8 +219,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const int _cameraFrameStaleUs = 350000;
   static const int _startupProvisionalSyncWindowUs = 4000000;
   static const int _startupProvisionalNativeSettleFrames = 3;
-  static const int _interpMinUs = 12000;
-  static const int _interpMaxUs = 90000;
+  static const int _interpMinUs = 6000;
+  static const int _interpMaxUs = 50000;
   static const Duration _cameraDiagCaptureCooldown = Duration(seconds: 12);
   static const Duration _lifecycleSuspendDelay = Duration(milliseconds: 3200);
   static const Duration _sidecarWarmProcessKeepAlive = Duration(seconds: 35);
@@ -239,6 +244,30 @@ fi
   bool _cameraSuspendedByLifecycle = false;
   bool _cameraDiagCaptureInFlight = false;
   DateTime? _lastCameraDiagCapturedAt;
+  IOSink? _driveDiagSink;
+  String? _driveDiagFilePath;
+  bool _driveDiagInitInFlight = false;
+  Timer? _driveDiagSummaryTimer;
+  DateTime? _driveDiagSessionStartedAt;
+  Map<String, dynamic>? _lastNativeCameraDiag;
+  int _driveDiagOverlayPushCallsWindow = 0;
+  int _driveDiagOverlayPushSentWindow = 0;
+  int _driveDiagOverlayPushCoalescedWindow = 0;
+  int _driveDiagOverlayPushSkippedWindow = 0;
+  int _driveDiagOverlayPushDuplicateWindow = 0;
+  int _driveDiagOverlayPushNoSurfaceWindow = 0;
+  int _driveDiagOverlayPayloadFramesWindow = 0;
+  int _driveDiagCameraFrameEventsWindow = 0;
+  int _driveDiagSyncGapSamplesWindow = 0;
+  int _driveDiagSyncGapSumWindow = 0;
+  int _driveDiagSyncGapMaxWindow = 0;
+  int _driveDiagInterpSamplesWindow = 0;
+  int _driveDiagInterpSumUsWindow = 0;
+  int _driveDiagInterpMaxUsWindow = 0;
+  int _driveDiagStaleEnterWindow = 0;
+  int _driveDiagStaleAccumulatedUsWindow = 0;
+  int? _driveDiagStaleStartedUs;
+  int? _driveDiagLastOverlayPushModelFrameId;
   int? _lastCameraFrameId;
   int _lastCameraFrameEventUs = 0;
   int _cameraErrorGraceUntilUs = 0;
@@ -246,14 +275,14 @@ fi
   int _lastSyncHitUs = 0;
   int _lastOverlayPublishUs = 0;
   int _lastSyncedArrivalUs = 0;
-  double _smoothedSyncIntervalUs = 50000.0;
+  double _smoothedSyncIntervalUs = 33333.0;
   late final Stopwatch _renderClock;
   Ticker? _renderTicker;
   _DriveOverlaySnapshot _renderFromSnapshot =
       const _DriveOverlaySnapshot.empty();
   _DriveOverlaySnapshot _renderToSnapshot = const _DriveOverlaySnapshot.empty();
   int _renderInterpStartUs = 0;
-  int _renderInterpDurationUs = 50000;
+  int _renderInterpDurationUs = 24000;
   bool _renderInterpActive = false;
   _DriveOverlaySnapshot _latestOverlaySnapshot =
       const _DriveOverlaySnapshot.empty();
@@ -487,6 +516,7 @@ fi
     unawaited(_loadAndApplyLandscapeOrientation());
     unawaited(_loadHudDebugLayerToggles());
     unawaited(_loadHudDefaultMode());
+    unawaited(_startDriveDiagnosticsLogging());
   }
 
   @override
@@ -661,6 +691,14 @@ fi
       'HOST_CHANGE',
       '$previousHost -> $normalizedHost reason=$reason',
     );
+    _appendDriveDiagEvent(
+      'host_transition',
+      <String, dynamic>{
+        'from': previousHost,
+        'to': normalizedHost,
+        'reason': reason,
+      },
+    );
     _clearSidecarRecoverySchedule();
     _cancelDelayedSidecarStop();
     _stopAdaptiveCameraQualityLoop(resetMode: true);
@@ -678,6 +716,10 @@ fi
     required String reason,
   }) async {
     _pushSidecarHistory('SSH_LOST', reason);
+    _appendDriveDiagEvent(
+      'connection_lost',
+      <String, dynamic>{'reason': reason},
+    );
     _clearSidecarRecoverySchedule();
     _cancelDelayedSidecarStop();
     _stopAdaptiveCameraQualityLoop(resetMode: true);
@@ -864,6 +906,7 @@ fi
     _cancelLifecycleSuspendTimer();
     _cancelDelayedSidecarStop();
     _cancelBackgroundUiResetTimer();
+    unawaited(_stopDriveDiagnosticsLogging(reason: 'dispose'));
     _renderTicker?.dispose();
     _renderTicker = null;
     unawaited(_clearNativeOverlay());

@@ -223,19 +223,29 @@ class NativeDriveVideoView(
   private var reconnectRunnable: Runnable? = null
   private var frameWatchdogRunnable: Runnable? = null
   private val cameraName: String = parseCameraName(wsUrl)
-  private val frameWatchdogIntervalMs = 1000L
+  private val frameWatchdogIntervalMs = 700L
   private val frameStallTimeoutMs = 7000L
   private val frameDecodeStallTimeoutMs = 6500L
   private val frameStallStrikeLimit = 4
   private val frameHardReconnectMs = 24000L
   private val frameDecodeHardReconnectMs = 18000L
   private val frameStallStateEmitEvery = 2
-  private val decodeTaskBacklogLimit = 2
-  private val codecBacklogLimit = 2
+  private val decodeTaskBacklogLimit = 1
+  private val codecBacklogLimit = 1
   private val decodeBacklogStateEmitEvery = 24
+  private val diagIntervalMs = 1000L
   @Volatile private var hintedFrameRate = 30f
   @Volatile private var performanceHintTargetNs = 33_333_333L
   @Volatile private var performanceHintSession: PerformanceHintManager.Session? = null
+  @Volatile private var currentStateLabel = "init"
+  @Volatile private var stateEnteredAtMs = System.currentTimeMillis()
+  @Volatile private var lastErrorReason: String? = null
+  @Volatile private var lastErrorAtMs = 0L
+  @Volatile private var packetsWindow = 0
+  @Volatile private var decodedWindow = 0
+  @Volatile private var dropsWindow = 0
+  @Volatile private var packetBytesWindow = 0L
+  private var diagRunnable: Runnable? = null
 
   private data class PendingFrame(
       val yoloFrameId: Int,
@@ -260,6 +270,7 @@ class NativeDriveVideoView(
     surfaceView.holder.addCallback(this)
     ensurePerformanceHintSession()
     NativeDriveVideoPlugin.registerView(viewId, this)
+    startDiagSummary()
     emitState("init")
   }
 
@@ -269,6 +280,7 @@ class NativeDriveVideoView(
     closed = true
     clearReconnect()
     stopFrameWatchdog()
+    stopDiagSummary()
     closeSocket()
     clearSurfaceFrameRateHint()
     closePerformanceHintSession()
@@ -333,6 +345,8 @@ class NativeDriveVideoView(
                 lastPacketAtMs = System.currentTimeMillis()
                 frameStallStrikes = 0
                 val copy = bytes.toByteArray()
+                packetsWindow += 1
+                packetBytesWindow += copy.size.toLong()
                 val queued = pendingDecodeTasks.incrementAndGet()
                 decodeHandler.post {
                   try {
@@ -361,7 +375,7 @@ class NativeDriveVideoView(
                 this@NativeDriveVideoView.webSocket = null
                 emitError("socket_failure:${t.message ?: "unknown"}")
                 releaseDecoder()
-                scheduleReconnect(900)
+                scheduleReconnect(450)
               }
 
               override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
@@ -369,7 +383,7 @@ class NativeDriveVideoView(
                 stopFrameWatchdog()
                 this@NativeDriveVideoView.webSocket = null
                 emitState("closed:$code")
-                scheduleReconnect(900)
+                scheduleReconnect(450)
               }
             },
         )
@@ -527,6 +541,7 @@ class NativeDriveVideoView(
 
   private fun noteBacklogDrop(reason: String, backlog: Int) {
     decodeBacklogDropCount += 1
+    dropsWindow += 1
     if (decodeBacklogDropCount == 1 || decodeBacklogDropCount % decodeBacklogStateEmitEvery == 0) {
       emitState("drop_${reason}_n${decodeBacklogDropCount}_b$backlog")
     }
@@ -664,6 +679,7 @@ class NativeDriveVideoView(
       when {
         outIndex >= 0 -> {
           lastDecodedAtMs = System.currentTimeMillis()
+          decodedWindow += 1
           reportPerformanceActualWork((System.nanoTime() - decodeStartNs).coerceAtLeast(1_000_000L))
           val renderedFrame =
               if (pendingFrames.isEmpty()) null else pendingFrames.removeFirst()
@@ -826,6 +842,8 @@ class NativeDriveVideoView(
   }
 
   private fun emitError(reason: String) {
+    lastErrorReason = reason
+    lastErrorAtMs = System.currentTimeMillis()
     NativeDriveVideoPlugin.emit(
         mapOf(
             "viewId" to viewId,
@@ -836,6 +854,8 @@ class NativeDriveVideoView(
   }
 
   private fun emitState(state: String) {
+    currentStateLabel = state
+    stateEnteredAtMs = System.currentTimeMillis()
     NativeDriveVideoPlugin.emit(
         mapOf(
             "viewId" to viewId,
@@ -843,6 +863,62 @@ class NativeDriveVideoView(
             "camera" to cameraName,
             "state" to state,
             "attempt" to connectAttempts,
+        ))
+  }
+
+  private fun startDiagSummary() {
+    stopDiagSummary()
+    diagRunnable =
+        object : Runnable {
+          override fun run() {
+            if (closed) return
+            emitDiagSummary()
+            reconnectHandler.postDelayed(this, diagIntervalMs)
+          }
+        }
+    reconnectHandler.postDelayed(diagRunnable!!, diagIntervalMs)
+  }
+
+  private fun stopDiagSummary() {
+    diagRunnable?.let { reconnectHandler.removeCallbacks(it) }
+    diagRunnable = null
+  }
+
+  private fun emitDiagSummary() {
+    val now = System.currentTimeMillis()
+    val packetAgeMs = if (lastPacketAtMs <= 0L) -1L else (now - lastPacketAtMs)
+    val decodeAgeMs = if (lastDecodedAtMs <= 0L) -1L else (now - lastDecodedAtMs)
+    val stateAgeMs = (now - stateEnteredAtMs).coerceAtLeast(0L)
+    val errorAgeMs = if (lastErrorAtMs <= 0L) -1L else (now - lastErrorAtMs)
+    val packets = packetsWindow
+    val decoded = decodedWindow
+    val drops = dropsWindow
+    val packetBytes = packetBytesWindow
+    packetsWindow = 0
+    decodedWindow = 0
+    dropsWindow = 0
+    packetBytesWindow = 0L
+    NativeDriveVideoPlugin.emit(
+        mapOf(
+            "viewId" to viewId,
+            "type" to "camera_diag",
+            "camera" to cameraName,
+            "state" to currentStateLabel,
+            "stateAgeMs" to stateAgeMs,
+            "packetAgeMs" to packetAgeMs,
+            "decodeAgeMs" to decodeAgeMs,
+            "decodeBacklog" to pendingDecodeTasks.get(),
+            "codecBacklog" to pendingSyncFrameCount,
+            "dropsTotal" to decodeBacklogDropCount,
+            "dropsWindow" to drops,
+            "packetsWindow" to packets,
+            "decodedWindow" to decoded,
+            "packetBytesWindow" to packetBytes,
+            "connectAttempts" to connectAttempts,
+            "codecConfigured" to codecConfigured,
+            "waitingKeyFrame" to waitingKeyFrame,
+            "lastError" to lastErrorReason,
+            "lastErrorAgeMs" to errorAgeMs,
         ))
   }
 

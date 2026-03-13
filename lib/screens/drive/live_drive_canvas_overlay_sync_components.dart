@@ -47,6 +47,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     if (_overlayStaleActive && _overlayStaleReason == reason) {
       return;
     }
+    _recordOverlayStaleEnter(reason);
     if (mounted) {
       _safeSetState(() {
         _overlayStaleActive = true;
@@ -62,6 +63,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     if (!_overlayStaleActive && _overlayStaleReason.isEmpty) {
       return;
     }
+    _recordOverlayStaleExit();
     if (mounted) {
       _safeSetState(() {
         _overlayStaleActive = false;
@@ -96,10 +98,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     );
     _lastPublishedModelFrameId = null;
     _lastOverlayPublishUs = 0;
-    if (_openpilotOverlayMode &&
-        _sidecarConnected &&
-        !_cameraSuspendedByLifecycle &&
-        !_startupProvisionalSyncActive) {
+    if (_shouldRecoverSidecarForOverlayStall()) {
       _scheduleSidecarRuntimeRecovery(reason: 'overlay_stalled');
     }
     return false;
@@ -189,6 +188,11 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
 
   void _applyHudModeRuntimeImpl() {
     if (_openpilotOverlayMode) {
+      final preserveVisibleNativeCamera =
+          _useNativeLiveCamera &&
+          _nativeCameraViewId != null &&
+          _cameraError == null &&
+          !_cameraSuspendedByLifecycle;
       _clearSidecarRecoverySchedule();
       _setSidecarPhase(
         _SidecarPhase.verifying,
@@ -196,18 +200,24 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       );
       _startAdaptiveCameraQualityLoop();
       _suppressCameraErrors = true;
-      _setNativeCameraAttachReady(false);
+      if (!preserveVisibleNativeCamera) {
+        _setNativeCameraAttachReady(false);
+      }
       _startCameraErrorGrace(reason: 'mode_apply');
       if (mounted) {
         _safeSetState(() {
-          _cameraLoading = true;
+          _cameraLoading = !preserveVisibleNativeCamera;
           _cameraError = null;
-          _nativeCameraViewId = null;
+          if (!preserveVisibleNativeCamera) {
+            _nativeCameraViewId = null;
+          }
         });
       } else {
-        _cameraLoading = true;
+        _cameraLoading = !preserveVisibleNativeCamera;
         _cameraError = null;
-        _nativeCameraViewId = null;
+        if (!preserveVisibleNativeCamera) {
+          _nativeCameraViewId = null;
+        }
       }
       unawaited(_loadCameraSource(force: true));
       unawaited(_ensureSidecarRuntime(reason: 'mode_apply'));
@@ -562,6 +572,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
   }
 
   void _tickOverlayDebugMetrics(_DriveOverlaySnapshot next, DateTime now) {
+    _recordOverlayPayloadArrival();
     final nowMs = now.millisecondsSinceEpoch;
     if (_overlayDebugWindowStartMs <= 0) {
       _overlayDebugWindowStartMs = nowMs;
@@ -774,6 +785,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     _DriveOverlaySnapshot snapshot, {
     bool force = false,
   }) async {
+    _recordOverlayPushCall();
     if (!_openpilotOverlayMode) {
       await _clearNativeOverlay();
       _lastNativeOverlaySignature = null;
@@ -792,14 +804,30 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       _lastNativeArSceneHadPayload = false;
       return;
     }
-    if (!_useNativeOverlayRenderer) return;
+    if (!_useNativeOverlayRenderer) {
+      _recordOverlayPushSkipped(duplicate: false, noSurface: true);
+      return;
+    }
     final viewId = _nativeCameraViewId;
-    if (viewId == null) return;
-    if (_nativeOverlaySize.width <= 1 || _nativeOverlaySize.height <= 1) return;
+    if (viewId == null) {
+      _recordOverlayPushSkipped(duplicate: false, noSurface: true);
+      return;
+    }
+    if (_nativeOverlaySize.width <= 1 || _nativeOverlaySize.height <= 1) {
+      _recordOverlayPushSkipped(duplicate: false, noSurface: true);
+      return;
+    }
+    if (_nativeOverlayPushBusy) {
+      _recordOverlayPushCoalesced();
+      _pendingNativeOverlaySnapshot = snapshot;
+      _pendingNativeOverlayForce = _pendingNativeOverlayForce || force;
+      return;
+    }
     final nowUs = _renderClock.elapsedMicroseconds;
     if (!force &&
         (nowUs - _lastNativeOverlayPushUs) <
             _LiveDriveCanvasScreenState._nativeOverlayPushIntervalUs) {
+      _recordOverlayPushSkipped(duplicate: false, noSurface: false);
       return;
     }
     final signature = _buildOverlaySignature(snapshot);
@@ -825,6 +853,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
         !_isAnimatedPathMode(snapshot.pathMode) &&
         _lastNativeOverlaySignature == signature &&
         _lastNativeArSceneSignature == arSceneSignature) {
+      _recordOverlayPushSkipped(duplicate: true, noSurface: false);
       return;
     }
     final payload = _DriveOverlayPainter.buildNativeOverlayPayload(
@@ -853,9 +882,11 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
         _lastNativeOverlayHadPayload == overlayHadPayload &&
         _lastNativeArSceneSignature == arSceneSignature &&
         _lastNativeArSceneHadPayload == arSceneHadPayload) {
+      _recordOverlayPushSkipped(duplicate: true, noSurface: false);
       return;
     }
     _lastNativeOverlayPushUs = nowUs;
+    _nativeOverlayPushBusy = true;
     try {
       if (payload == null) {
         await _LiveDriveCanvasScreenState._nativeCameraControlChannel
@@ -878,6 +909,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       _lastNativeOverlayHadPayload = overlayHadPayload;
       _lastNativeArSceneSignature = arSceneSignature;
       _lastNativeArSceneHadPayload = arSceneHadPayload;
+      _recordOverlayPushSent(snapshot);
       if (!_debugArReplayMode &&
           _debugArCaptureEnabled &&
           liveArScenePayload != null) {
@@ -887,6 +919,16 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
         );
       }
     } catch (_) {}
+    finally {
+      _nativeOverlayPushBusy = false;
+      final pending = _pendingNativeOverlaySnapshot;
+      final pendingForce = _pendingNativeOverlayForce;
+      _pendingNativeOverlaySnapshot = null;
+      _pendingNativeOverlayForce = false;
+      if (pending != null) {
+        unawaited(_pushNativeOverlay(pending, force: pendingForce));
+      }
+    }
   }
 
   void _publishOverlaySynced() {
@@ -979,9 +1021,10 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     _renderFromSnapshot = _overlayNotifier.value;
     _renderToSnapshot = next;
     _renderInterpStartUs = nowUs;
-    _renderInterpDurationUs = (_smoothedSyncIntervalUs * 0.8).round().clamp(
+    _renderInterpDurationUs = (_smoothedSyncIntervalUs * 0.45).round().clamp(
         _LiveDriveCanvasScreenState._interpMinUs,
         _LiveDriveCanvasScreenState._interpMaxUs);
+    _recordFrameSyncRenderTarget(next);
     _renderInterpActive = true;
     _renderTicker ??= createTicker(_onRenderTick)..start();
   }
@@ -1099,6 +1142,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     }
     _lastCameraFrameId = frameId;
     _lastCameraFrameEventUs = _renderClock.elapsedMicroseconds;
+    _recordCameraFrameForDiag(frameId: frameId, source: source);
     if (mounted && _cameraLoading) {
       _safeSetState(() {
         _cameraLoading = false;

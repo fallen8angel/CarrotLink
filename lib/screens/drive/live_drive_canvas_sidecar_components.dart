@@ -103,7 +103,12 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
       _applySidecarConnectionState(false, allowRecovery: false);
       return;
     }
-    unawaited(runtime.ensureOverlayStream(forceRestart: false));
+    unawaited(
+      runtime.ensureOverlayStream(
+        forceRestart: false,
+        camera: _liveCameraName,
+      ),
+    );
     _syncSharedOverlayRuntime(seedBufferedFrames: true);
   }
 
@@ -213,11 +218,25 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
     final next = _stabilizeOverlaySnapshot(
       _DriveOverlaySnapshot.fromSidecar(payload),
     );
+    final hasOverlayFrames = next.modelFrameId != null ||
+        next.roadFrameId != null ||
+        next.wideRoadFrameId != null;
     _syncLiveCameraKind(next);
     _cacheOverlaySnapshot(next);
     _overlayDiagFrames++;
     final now = DateTime.now();
     _sidecarLastFrameAt = now;
+    if (hasOverlayFrames) {
+      if (mounted && (_cameraLoading || (_cameraError?.isNotEmpty ?? false))) {
+        _safeSetState(() {
+          _cameraLoading = false;
+          _cameraError = null;
+        });
+      } else if (!mounted) {
+        _cameraLoading = false;
+        _cameraError = null;
+      }
+    }
     _tickOverlayDebugMetrics(next, now);
     if (now.difference(_overlayDiagLastLogAt).inSeconds >= 2) {
       final frameGap = (next.modelFrameId != null && next.roadFrameId != null)

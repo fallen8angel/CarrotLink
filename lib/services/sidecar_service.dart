@@ -36,6 +36,7 @@ class SidecarService {
   static const String _pidFileName = 'sidecar.pid';
   static const String _logFileName = 'sidecar.log';
   static const String _revisionFileName = '.sidecar.rev';
+  static const String _pythonDepsFolderName = 'pydeps';
   static const String _legacyCleanupMarkerName = '.sidecar.legacy_cleanup_v2';
   static const String _legacyPythonFileName = 'carrot_linkview.py';
   static const String _legacyRunScriptName = 'run_carrot_linkview.sh';
@@ -117,15 +118,29 @@ curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null || true
     Map<String, dynamic> health, {
     String? expectedProfile,
   }) {
+    bool serviceFresh(String name) {
+      final raw = health['serviceHealth'];
+      if (raw is! Map) {
+        return false;
+      }
+      final service = raw[name];
+      if (service is Map<String, dynamic>) {
+        return service['isFresh'] == true;
+      }
+      if (service is Map) {
+        return service['isFresh'] == true;
+      }
+      return false;
+    }
+
     if (health['kind'] != 'carrotlink_sidecar_broker_v1') {
       return false;
     }
     if (health['ok'] != true) {
       return false;
     }
-    final normalizedExpected = expectedProfile == null
-        ? null
-        : _normalizeProfile(expectedProfile);
+    final normalizedExpected =
+        expectedProfile == null ? null : _normalizeProfile(expectedProfile);
     final profile = _normalizeProfile(
       (health['profile'] ?? normalizedExpected ?? _defaultProfile).toString(),
     );
@@ -135,9 +150,11 @@ curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null || true
     if (profile == hudBootstrapProfile || profile == 'p0') {
       return health['hudReady'] == true;
     }
+    final freshVisionCore = serviceFresh('modelV2') &&
+        (serviceFresh('roadCameraState') || serviceFresh('wideRoadCameraState'));
     return health['hudReady'] == true &&
         health['liveReady'] == true &&
-        health['cameraReady'] == true;
+        (health['cameraReady'] == true || freshVisionCore);
   }
 
   Future<bool> _isClientReachable(
@@ -237,9 +254,20 @@ if expect_profile and profile != expect_profile:
 hud_ready = health.get("hudReady") is True
 live_ready = health.get("liveReady") is True
 camera_ready = health.get("cameraReady") is True
+service_health = health.get("serviceHealth") or {}
+
+def service_fresh(name: str) -> bool:
+    raw = service_health.get(name)
+    return isinstance(raw, dict) and raw.get("isFresh") is True
+
+fresh_vision_core = service_fresh("modelV2") and (
+    service_fresh("roadCameraState") or service_fresh("wideRoadCameraState")
+)
 
 if profile in ("p2", "p3", "p4"):
-    raise SystemExit(0 if (hud_ready and live_ready and camera_ready) else 1)
+    raise SystemExit(
+        0 if (hud_ready and live_ready and (camera_ready or fresh_vision_core)) else 1
+    )
 raise SystemExit(0 if hud_ready else 1)
 PY
 }
@@ -1031,7 +1059,7 @@ echo "\$BASE"
       _bash(
         '''
 BASE=${_q(remoteBase)}
-mkdir -p "\$BASE" "\$BASE/logs"
+mkdir -p "\$BASE" "\$BASE/logs" "\$BASE/$_pythonDepsFolderName"
 ''',
       ),
       timeout: const Duration(seconds: 30),
@@ -1057,8 +1085,55 @@ chmod 755 "\$BASE/$_runScriptName" "\$BASE/$_pythonFileName"
       throw Exception('실행 권한 설정 실패: ${chmod.output}');
     }
 
+    final msgpackInstall = await ssh.executeCommandResult(
+      _bash(
+        '''
+BASE=${_q(remoteBase)}
+PYDEPS="\$BASE/$_pythonDepsFolderName"
+mkdir -p "\$PYDEPS"
+
+check_msgpack() {
+  TARGET_DIR="\$1"
+  PYTHONPATH="\$TARGET_DIR" python3 - "\$TARGET_DIR" <<'PY'
+import os
+import sys
+
+try:
+    import msgpack
+except Exception:
+    raise SystemExit(1)
+
+target_dir = os.path.abspath(sys.argv[1])
+module_path = os.path.abspath(getattr(msgpack, "__file__", ""))
+if not module_path.startswith(target_dir + os.sep):
+    raise SystemExit(1)
+
+print(f"MSGPACK_OK version={getattr(msgpack, '__version__', '?')} path={module_path}")
+PY
+}
+
+if check_msgpack "\$PYDEPS"; then
+  echo "MSGPACK_STATUS already_ready"
+else
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "MSGPACK_STATUS python3_missing"
+    exit 21
+  fi
+  python3 -m pip install --disable-pip-version-check --no-input --target "\$PYDEPS" --upgrade msgpack
+  check_msgpack "\$PYDEPS"
+  echo "MSGPACK_STATUS installed"
+fi
+''',
+      ),
+      timeout: const Duration(minutes: 3),
+    );
+    if (!msgpackInstall.isSuccess) {
+      throw Exception('msgpack 설치 실패: ${msgpackInstall.output}');
+    }
+
     _diag.info('sidecar', 'Deploy success base=$remoteBase');
-    return '배포 완료: $remoteBase (rev=${shortRevision(revision)})';
+    return '배포 완료: $remoteBase (rev=${shortRevision(revision)})\n'
+        '${msgpackInstall.output.trim()}';
   }
 
   Future<String> start(
@@ -1167,9 +1242,20 @@ if expect_profile and profile != expect_profile:
 hud_ready = health.get("hudReady") is True
 live_ready = health.get("liveReady") is True
 camera_ready = health.get("cameraReady") is True
+service_health = health.get("serviceHealth") or {}
+
+def service_fresh(name: str) -> bool:
+    raw = service_health.get(name)
+    return isinstance(raw, dict) and raw.get("isFresh") is True
+
+fresh_vision_core = service_fresh("modelV2") and (
+    service_fresh("roadCameraState") or service_fresh("wideRoadCameraState")
+)
 
 if profile in ("p2", "p3", "p4"):
-    raise SystemExit(0 if (hud_ready and live_ready and camera_ready) else 1)
+    raise SystemExit(
+        0 if (hud_ready and live_ready and (camera_ready or fresh_vision_core)) else 1
+    )
 raise SystemExit(0 if hud_ready else 1)
 PY
 }

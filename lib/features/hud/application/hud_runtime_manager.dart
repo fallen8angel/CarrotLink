@@ -5,6 +5,7 @@ import 'dart:io';
 import 'dart:isolate';
 
 import 'package:flutter/foundation.dart';
+import 'package:msgpack_dart/msgpack_dart.dart';
 
 import '../../../services/hud_feature_settings_service.dart';
 import '../../../services/sidecar_service.dart';
@@ -87,12 +88,22 @@ Future<void> _overlayRuntimeWorkerMain(Map<String, dynamic> config) async {
         } catch (_) {
           // Sidecar may still send plain UTF-8 frames during fallback paths.
         }
-        final decoded = jsonDecode(utf8.decode(bytes, allowMalformed: true));
-        if (decoded is Map<String, dynamic>) {
-          return decoded;
-        }
-        if (decoded is Map) {
-          return Map<String, dynamic>.from(decoded);
+        try {
+          final decoded = jsonDecode(utf8.decode(bytes, allowMalformed: true));
+          if (decoded is Map<String, dynamic>) {
+            return decoded;
+          }
+          if (decoded is Map) {
+            return Map<String, dynamic>.from(decoded);
+          }
+        } catch (_) {
+          final decoded = deserialize(Uint8List.fromList(bytes));
+          if (decoded is Map<String, dynamic>) {
+            return decoded;
+          }
+          if (decoded is Map) {
+            return Map<String, dynamic>.from(decoded);
+          }
         }
       }
     } catch (_) {}
@@ -152,6 +163,7 @@ class SharedRuntimeManager extends ChangeNotifier {
   int _overlaySequence = 0;
   bool _overlayConnected = false;
   String? _overlayHost;
+  String _overlayCamera = 'road';
   OverlayStreamFrame? _latestOverlayFrame;
   bool _forceControllerRebind = false;
   Timer? _overlayBackgroundStopTimer;
@@ -225,6 +237,7 @@ class SharedRuntimeManager extends ChangeNotifier {
 
   Future<void> ensureOverlayStream({
     bool forceRestart = false,
+    String camera = 'road',
   }) async {
     if (!_hudFeatureEnabled) {
       _stopOverlayWorker(clearCache: true);
@@ -240,15 +253,22 @@ class SharedRuntimeManager extends ChangeNotifier {
       return;
     }
 
+    final normalizedCamera =
+        camera.trim().isEmpty ? 'road' : camera.trim();
     final hostChanged = _overlayHost != host;
+    final cameraChanged = _overlayCamera != normalizedCamera;
     final needsRestart =
-        forceRestart || hostChanged || _overlayWorkerIsolate == null;
+        forceRestart ||
+        hostChanged ||
+        cameraChanged ||
+        _overlayWorkerIsolate == null;
     if (!needsRestart) {
       return;
     }
 
     _stopOverlayWorker(clearCache: hostChanged);
     _overlayHost = host;
+    _overlayCamera = normalizedCamera;
     final generation = ++_overlayWorkerGeneration;
     final receivePort = ReceivePort();
     _overlayWorkerReceivePort = receivePort;
@@ -263,7 +283,7 @@ class SharedRuntimeManager extends ChangeNotifier {
       final isolate = await Isolate.spawn<Map<String, dynamic>>(
         _overlayRuntimeWorkerMain,
         <String, dynamic>{
-          'wsUrl': _overlayWsUrl(host, generation),
+          'wsUrl': _overlayWsUrl(host, normalizedCamera, generation),
           'sendPort': receivePort.sendPort,
         },
         debugName: 'app_overlay_runtime_$host',
@@ -557,10 +577,10 @@ class SharedRuntimeManager extends ChangeNotifier {
     _publishOverlayTick();
   }
 
-  String _overlayWsUrl(String host, int generation) {
+  String _overlayWsUrl(String host, String camera, int generation) {
     return 'ws://$host:7766/ws/live'
-        '?encoding=json'
-        '&camera=road'
+        '?encoding=msgpack'
+        '&camera=$camera'
         '&role=drive_overlay'
         '&session=app_overlay_$generation';
   }
