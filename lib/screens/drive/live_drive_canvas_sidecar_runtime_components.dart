@@ -12,16 +12,20 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
   void _scheduleSidecarRuntimeRecoveryImpl({
     required String reason,
     Duration minDelay = const Duration(milliseconds: 600),
+    bool preferSooner = false,
   }) {
     if (!_openpilotOverlayMode || _cameraSuspendedByLifecycle) return;
     final now = DateTime.now();
+    final backoff = Duration(seconds: _sidecarRecoveryBackoffSeconds);
+    final delay =
+        preferSooner ? minDelay : (backoff > minDelay ? backoff : minDelay);
+    final nextAt = now.add(delay);
     if (_sidecarRecoveryNextAt != null &&
-        now.isBefore(_sidecarRecoveryNextAt!)) {
+        now.isBefore(_sidecarRecoveryNextAt!) &&
+        !nextAt.isBefore(_sidecarRecoveryNextAt!)) {
       return;
     }
-    final backoff = Duration(seconds: _sidecarRecoveryBackoffSeconds);
-    final delay = backoff > minDelay ? backoff : minDelay;
-    _sidecarRecoveryNextAt = now.add(delay);
+    _sidecarRecoveryNextAt = nextAt;
     _sidecarRecoveryTimer?.cancel();
     _pushSidecarHistory(
       'AUTO_RECOVER',
@@ -32,8 +36,10 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       _sidecarRecoveryNextAt = null;
       unawaited(_ensureSidecarRuntime(reason: 'recover:$reason'));
     });
-    _sidecarRecoveryBackoffSeconds =
-        math.min(_sidecarRecoveryBackoffSeconds * 2, 8);
+    if (!preferSooner) {
+      _sidecarRecoveryBackoffSeconds =
+          math.min(_sidecarRecoveryBackoffSeconds * 2, 8);
+    }
   }
 
   String _adaptiveCameraQualityLabel(_AdaptiveCameraQualityMode mode) {
@@ -180,15 +186,6 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     return 'ready';
   }
 
-  int? get _sidecarCameraAgeMs =>
-      (_activeCameraRelayStatus['lastFrameAgeMs'] as num?)?.toInt();
-
-  String get _sidecarCameraAgeLabel {
-    final ageMs = _sidecarCameraAgeMs;
-    if (ageMs == null || ageMs < 0) return '-';
-    return '${ageMs}ms';
-  }
-
   bool _profileRequiresLiveRuntime(String? profile) {
     switch ((profile ?? '').trim().toLowerCase()) {
       case 'p2':
@@ -198,6 +195,169 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       default:
         return false;
     }
+  }
+
+  String _normalizeSidecarVariant(String? variant) {
+    final normalized = (variant ?? '').trim().toLowerCase();
+    switch (normalized) {
+      case SidecarService.c4SafeVariant:
+        return SidecarService.c4SafeVariant;
+      case SidecarService.defaultVariant:
+      default:
+        return SidecarService.defaultVariant;
+    }
+  }
+
+  String _normalizeSidecarRepoFlavor(String? flavor) {
+    final normalized = (flavor ?? '').trim().toLowerCase();
+    switch (normalized) {
+      case SidecarService.repoFlavorC3:
+        return SidecarService.repoFlavorC3;
+      case SidecarService.repoFlavorC4:
+        return SidecarService.repoFlavorC4;
+      case SidecarService.repoFlavorUnknown:
+      default:
+        return SidecarService.repoFlavorUnknown;
+    }
+  }
+
+  void _applyResolvedSidecarFlavorHints({
+    String? repoFlavor,
+    String? variant,
+  }) {
+    final normalizedFlavor = _normalizeSidecarRepoFlavor(repoFlavor);
+    final normalizedVariant = _normalizeSidecarVariant(variant);
+    if (_sidecarRepoFlavorHint == normalizedFlavor &&
+        _sidecarVariantHint == normalizedVariant) {
+      return;
+    }
+    if (!mounted) {
+      _sidecarRepoFlavorHint = normalizedFlavor;
+      _sidecarVariantHint = normalizedVariant;
+      return;
+    }
+    _safeSetState(() {
+      _sidecarRepoFlavorHint = normalizedFlavor;
+      _sidecarVariantHint = normalizedVariant;
+    });
+  }
+
+  Future<void> _primeSidecarFlavorHintsImpl({
+    bool forceRefresh = false,
+  }) async {
+    if (!_openpilotOverlayMode) {
+      return;
+    }
+    final ssh = _sshService ??
+        (mounted ? Provider.of<SSHService>(context, listen: false) : null);
+    if (ssh == null || !ssh.isConnected) {
+      return;
+    }
+    if (!forceRefresh &&
+        _sidecarRepoFlavorOf() != SidecarService.repoFlavorUnknown) {
+      return;
+    }
+    if (_sidecarFlavorHintResolving) {
+      return;
+    }
+    _sidecarFlavorHintResolving = true;
+    try {
+      final resolvedVariant = await _sidecarService.resolveRemoteVariant(
+        ssh,
+        forceRefresh: forceRefresh,
+      );
+      final resolvedRepoFlavor = await _sidecarService.resolveRemoteRepoFlavor(
+        ssh,
+        forceRefresh: forceRefresh,
+      );
+      _applyResolvedSidecarFlavorHints(
+        repoFlavor: resolvedRepoFlavor,
+        variant: resolvedVariant,
+      );
+    } catch (_) {
+      // Ignore flavor-hint priming failures; runtime bootstrap will retry.
+    } finally {
+      _sidecarFlavorHintResolving = false;
+    }
+  }
+
+  String _sidecarVariantOf([Map<String, dynamic>? snapshot]) {
+    final candidates = <dynamic>[
+      snapshot?['variant'],
+      _sidecarHealthSnapshot['variant'],
+      _sidecarProfileSnapshot['variant'],
+      _sidecarVariantHint,
+    ];
+    for (final raw in candidates) {
+      final text = raw?.toString().trim();
+      if (text == null || text.isEmpty) {
+        continue;
+      }
+      final normalized = _normalizeSidecarVariant(text);
+      if (normalized.isNotEmpty) {
+        return normalized;
+      }
+    }
+    return SidecarService.defaultVariant;
+  }
+
+  String _sidecarRepoFlavorOf([Map<String, dynamic>? snapshot]) {
+    final candidates = <dynamic>[
+      snapshot?['repoFlavor'],
+      _sidecarHealthSnapshot['repoFlavor'],
+      _sidecarProfileSnapshot['repoFlavor'],
+      _sidecarRepoFlavorHint,
+    ];
+    for (final raw in candidates) {
+      final text = raw?.toString().trim();
+      if (text == null || text.isEmpty) {
+        continue;
+      }
+      final normalized = _normalizeSidecarRepoFlavor(text);
+      if (normalized != SidecarService.repoFlavorUnknown) {
+        return normalized;
+      }
+    }
+    return SidecarService.repoFlavorUnknown;
+  }
+
+  bool _healthUsesC4SafeBootstrap([Map<String, dynamic>? health]) {
+    final snapshot = health ?? _sidecarHealthSnapshot;
+    if (_sidecarVariantOf(snapshot) != SidecarService.c4SafeVariant ||
+        _sidecarRepoFlavorOf(snapshot) != SidecarService.repoFlavorC4) {
+      return false;
+    }
+    if (snapshot.isEmpty) {
+      return true;
+    }
+    if (snapshot['startupProtectionActive'] == true) {
+      return true;
+    }
+    return snapshot['radarFreshStable'] != true ||
+        snapshot['radarReady'] != true;
+  }
+
+  bool _healthRequiresC4SafeLiveStability([Map<String, dynamic>? health]) =>
+      _sidecarVariantOf(health) == SidecarService.c4SafeVariant &&
+      _sidecarRepoFlavorOf(health) == SidecarService.repoFlavorC4;
+
+  bool _shouldDowngradeLiveRuntimeForC4Safe([Map<String, dynamic>? health]) {
+    final snapshot = health ?? _sidecarHealthSnapshot;
+    if (!_healthRequiresC4SafeLiveStability(snapshot)) {
+      return false;
+    }
+    final profile =
+        (snapshot['profile'] ?? _currentSidecarProfile).toString().trim();
+    if (!_profileRequiresLiveRuntime(profile)) {
+      return false;
+    }
+    if (snapshot.isEmpty) {
+      return false;
+    }
+    return snapshot['startupProtectionActive'] == true ||
+        snapshot['radarFreshStable'] != true ||
+        snapshot['radarReady'] != true ||
+        snapshot['liveReady'] != true;
   }
 
   String get _currentSidecarProfile =>
@@ -235,6 +395,12 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     final modelFresh = _sidecarHealthServiceFresh(snapshot, 'modelV2');
     final cameraFresh =
         _sidecarHealthServiceFresh(snapshot, expectedCameraService);
+    if (_healthRequiresC4SafeLiveStability(snapshot) &&
+        (snapshot['startupProtectionActive'] == true ||
+            snapshot['radarReady'] != true ||
+            snapshot['radarFreshStable'] != true)) {
+      return false;
+    }
     return hudReady && liveReady && modelFresh && cameraFresh;
   }
 
@@ -286,11 +452,15 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
   String _selectDriveRuntimeProfile(
     Map<String, String> procs, {
     Map<String, dynamic>? health,
-  }) =>
-      (_hasDriveRuntimeProcesses(procs) ||
-              _sidecarHealthIndicatesLiveRuntimeReady(health))
-          ? SidecarService.driveRuntimeProfile
-          : SidecarService.hudBootstrapProfile;
+  }) {
+    if (_healthUsesC4SafeBootstrap(health)) {
+      return SidecarService.hudBootstrapProfile;
+    }
+    return (_hasDriveRuntimeProcesses(procs) ||
+            _sidecarHealthIndicatesLiveRuntimeReady(health))
+        ? SidecarService.driveRuntimeProfile
+        : SidecarService.hudBootstrapProfile;
+  }
 
   Future<Map<String, String>> _loadDriveRuntimeCriticalProcStatus(
     SSHService ssh,
@@ -441,6 +611,8 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
         _sidecarHealthSnapshot = <String, dynamic>{};
         _sidecarProfileSnapshot = <String, dynamic>{};
         _sidecarCameraQualitySnapshot = <String, dynamic>{};
+        _sidecarRepoFlavorHint = SidecarService.repoFlavorUnknown;
+        _sidecarVariantHint = SidecarService.defaultVariant;
         _sidecarProcessCheckedAt = DateTime.now();
         _sidecarProcessStatusError = 'SSH 연결 안 됨';
         return;
@@ -451,6 +623,8 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
         _sidecarHealthSnapshot = <String, dynamic>{};
         _sidecarProfileSnapshot = <String, dynamic>{};
         _sidecarCameraQualitySnapshot = <String, dynamic>{};
+        _sidecarRepoFlavorHint = SidecarService.repoFlavorUnknown;
+        _sidecarVariantHint = SidecarService.defaultVariant;
         _sidecarProcessCheckedAt = DateTime.now();
         _sidecarProcessStatusError = 'SSH 연결 안 됨';
       });
@@ -615,6 +789,12 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
         phase == _SidecarPhase.starting ||
         phase == _SidecarPhase.verifying ||
         phase == _SidecarPhase.stopping;
+    if (_isDisposing) {
+      _sidecarPhase = phase;
+      _sidecarPhaseMessage = message;
+      _sidecarTransitioning = busy;
+      return;
+    }
     if (_sidecarPhase != phase || _sidecarPhaseMessage != message) {
       _appendDriveDiagEvent(
         'sidecar_phase',
@@ -702,6 +882,12 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       if (!requiresLiveRuntime) {
         return true;
       }
+      if (_healthRequiresC4SafeLiveStability(health) &&
+          (health['startupProtectionActive'] == true ||
+              health['radarReady'] != true ||
+              health['radarFreshStable'] != true)) {
+        return false;
+      }
       return serviceFresh(health, 'modelV2') &&
           serviceFresh(health, expectedCameraService);
     }
@@ -723,6 +909,10 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
           throw Exception('health invalid');
         }
         final health = Map<String, dynamic>.from(decoded);
+        _applyResolvedSidecarFlavorHints(
+          repoFlavor: health['repoFlavor']?.toString(),
+          variant: health['variant']?.toString(),
+        );
         if (health['ok'] != true) {
           throw Exception('health not ok');
         }
@@ -932,8 +1122,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     if (!_openpilotOverlayMode || _cameraSuspendedByLifecycle) return;
     if (_debugOverlayPreviewMode) return;
     if (_sidecarAutoManaging) return;
-    final preserveVisibleNativeCamera =
-        _useNativeLiveCamera &&
+    final preserveVisibleNativeCamera = _useNativeLiveCamera &&
         _nativeCameraViewId != null &&
         _cameraError == null &&
         !_cameraSuspendedByLifecycle;
@@ -963,6 +1152,13 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     }
     try {
       await _ensureSidecarRevisionUpToDate(ssh);
+      final resolvedVariant = await _sidecarService.resolveRemoteVariant(ssh);
+      final resolvedRepoFlavor =
+          await _sidecarService.resolveRemoteRepoFlavor(ssh);
+      _applyResolvedSidecarFlavorHints(
+        repoFlavor: resolvedRepoFlavor,
+        variant: resolvedVariant,
+      );
       final statusRaw = await _sidecarService.status(ssh);
       final status = _parseStatusPairs(statusRaw);
       final running = status['running'] == '1';
@@ -1038,7 +1234,12 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
             reason: 'sidecar_start',
             windowUs: 7000000,
           );
-          await _sidecarService.start(ssh, profile: desiredProfile);
+          await _sidecarService.start(
+            ssh,
+            profile: desiredProfile,
+            variant: resolvedVariant,
+            repoFlavor: resolvedRepoFlavor,
+          );
           _sidecarLastStartAt = DateTime.now();
           _pushSidecarHistory('AUTO_START', 'start ok profile=$desiredProfile');
         } catch (startError) {
@@ -1056,7 +1257,12 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
                     ? '주행 대기 중: HUD 전용 모드 유지 중...'
                     : '사이드카 시작 중...',
               );
-              await _sidecarService.start(ssh, profile: desiredProfile);
+              await _sidecarService.start(
+                ssh,
+                profile: desiredProfile,
+                variant: resolvedVariant,
+                repoFlavor: resolvedRepoFlavor,
+              );
               _sidecarLastStartAt = DateTime.now();
               _pushSidecarHistory(
                 'AUTO_START',
@@ -1081,7 +1287,12 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
                   ? '주행 대기 중: HUD 전용 모드 유지 중...'
                   : '사이드카 시작 중...',
             );
-            await _sidecarService.start(ssh, profile: desiredProfile);
+            await _sidecarService.start(
+              ssh,
+              profile: desiredProfile,
+              variant: resolvedVariant,
+              repoFlavor: resolvedRepoFlavor,
+            );
             _sidecarLastStartAt = DateTime.now();
             _pushSidecarHistory(
               'AUTO_RESTART',
@@ -1138,8 +1349,47 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
           }
         }
       }
-      unawaited(_refreshSidecarProcessStatus());
-      _clearSidecarRecoverySchedule();
+      await _refreshSidecarProcessStatus();
+      final keepBootstrapForC4 =
+          desiredProfile == SidecarService.hudBootstrapProfile &&
+              _healthUsesC4SafeBootstrap(_sidecarHealthSnapshot);
+      final downgradeLiveForC4 =
+          _shouldDowngradeLiveRuntimeForC4Safe(_sidecarHealthSnapshot);
+      if (keepBootstrapForC4) {
+        _pushSidecarHistory(
+          'C4_SAFE_HOLD',
+          'profile=p1 waiting radar startupProtection='
+              '${_sidecarHealthSnapshot['startupProtectionActive']} '
+              'radarFreshStable=${_sidecarHealthSnapshot['radarFreshStable']}',
+        );
+        _setSidecarPhase(
+          _SidecarPhase.running,
+          message: 'c4 안정화 대기 중: HUD 전용 모드 유지 중',
+        );
+        _scheduleSidecarRuntimeRecovery(
+          reason: 'c4_safe_bootstrap_hold',
+          minDelay: const Duration(milliseconds: 1200),
+          preferSooner: true,
+        );
+      } else if (downgradeLiveForC4) {
+        _pushSidecarHistory(
+          'C4_SAFE_DOWNGRADE',
+          'profile=$_currentSidecarProfile startupProtection='
+              '${_sidecarHealthSnapshot['startupProtectionActive']} '
+              'radarFreshStable=${_sidecarHealthSnapshot['radarFreshStable']}',
+        );
+        _setSidecarPhase(
+          _SidecarPhase.running,
+          message: 'c4 런타임 안정화 재시도 중...',
+        );
+        _scheduleSidecarRuntimeRecovery(
+          reason: 'c4_safe_live_unstable',
+          minDelay: const Duration(milliseconds: 900),
+          preferSooner: true,
+        );
+      } else {
+        _clearSidecarRecoverySchedule();
+      }
       _suppressCameraErrors = false;
     } catch (e) {
       if (_LiveDriveCanvasScreenState._autoDeployDuringHudRuntime) {
@@ -1148,16 +1398,9 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       _pushSidecarHistory('FAIL', 'auto runtime: $e');
       _setSidecarPhase(
         _SidecarPhase.failed,
-        message: e.toString(),
+        message: '사이드카 준비가 지연되어 자동 복구를 재시도하는 중입니다.',
       );
       _scheduleSidecarRuntimeRecovery(reason: 'runtime_failed');
-      if (mounted) {
-        _toast(
-          '사이드카 자동 준비 실패: $e',
-          isError: true,
-          duration: const Duration(seconds: 5),
-        );
-      }
     } finally {
       _sidecarAutoManaging = false;
     }

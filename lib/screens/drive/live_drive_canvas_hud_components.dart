@@ -22,6 +22,9 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
       _hudModeLoaded = true;
     });
     _applyHudModeRuntime();
+    if (_openpilotOverlayMode) {
+      unawaited(_primeSidecarFlavorHints());
+    }
   }
 
   Widget _buildDriveCameraSurfaceImpl() {
@@ -118,6 +121,9 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
       UiWindowClass.large || UiWindowClass.extraLarge => 6.5,
     };
     final label = _modeTagLabel;
+    if (label.isEmpty) {
+      return const SizedBox.shrink();
+    }
     final isOpenpilot = _openpilotOverlayMode;
     final tagBorderColor = isOpenpilot ? _debugSelectedBorder : Colors.white12;
     final tagFillColor = isOpenpilot ? _debugSelectedBg : _debugNavBg;
@@ -159,160 +165,6 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
     );
   }
 
-  Widget _buildSidecarRevisionBadgeImpl(UiWindowInfo window) {
-    if (!_openpilotOverlayMode) {
-      return const SizedBox.shrink();
-    }
-    final pyName = _sidecarRemotePyName;
-    final revision = _sidecarRemoteRevisionLabel;
-    final updated = _sidecarRemoteUpdatedLabel;
-    final procStatus = _sidecarProcessStatusLabel;
-    final camStatus = _sidecarCameraReadyLabel;
-    final fpsLabel = _overlayDebugFps.toStringAsFixed(1);
-    final ageLabel = _sidecarCameraAgeLabel;
-    final titleFontSize = switch (window.windowClass) {
-      UiWindowClass.compact => 10.0,
-      UiWindowClass.medium => 10.5,
-      UiWindowClass.expanded => 11.0,
-      UiWindowClass.large || UiWindowClass.extraLarge => 11.5,
-    };
-    final bodyFontSize = switch (window.windowClass) {
-      UiWindowClass.compact => 9.0,
-      UiWindowClass.medium => 9.5,
-      UiWindowClass.expanded => 10.0,
-      UiWindowClass.large || UiWindowClass.extraLarge => 10.5,
-    };
-    final metaFontSize = bodyFontSize - 0.2;
-    final collapsed = !_sidecarRevisionBadgeExpanded;
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 180),
-      switchInCurve: Curves.easeOutCubic,
-      switchOutCurve: Curves.easeInCubic,
-      child: collapsed
-          ? Material(
-              key: const ValueKey<String>('sidecar-badge-collapsed'),
-              color: Colors.transparent,
-              child: InkWell(
-                borderRadius: BorderRadius.circular(999),
-                onTap: () => _safeSetState(
-                  () => _sidecarRevisionBadgeExpanded = true,
-                ),
-                child: Ink(
-                  width: 34,
-                  height: 34,
-                  decoration: BoxDecoration(
-                    color: _debugCardBg.withValues(alpha: 0.90),
-                    shape: BoxShape.circle,
-                    border: Border.all(color: Colors.white12),
-                    boxShadow: const <BoxShadow>[
-                      BoxShadow(
-                        color: Color(0x33000000),
-                        blurRadius: 10,
-                        offset: Offset(0, 4),
-                      ),
-                    ],
-                  ),
-                  child: const Icon(
-                    Icons.memory_rounded,
-                    size: 18,
-                    color: Colors.white70,
-                  ),
-                ),
-              ),
-            )
-          : Material(
-              key: const ValueKey<String>('sidecar-badge-expanded'),
-              color: Colors.transparent,
-              child: InkWell(
-                borderRadius: BorderRadius.circular(12),
-                onTap: () => _safeSetState(
-                  () => _sidecarRevisionBadgeExpanded = false,
-                ),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 320),
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: _debugCardBg.withValues(alpha: 0.92),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: Colors.white12),
-                      boxShadow: const <BoxShadow>[
-                        BoxShadow(
-                          color: Color(0x33000000),
-                          blurRadius: 10,
-                          offset: Offset(0, 4),
-                        ),
-                      ],
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 7,
-                      ),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.center,
-                        children: [
-                          Text(
-                            pyName,
-                            textAlign: TextAlign.center,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: titleFontSize,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 0.1,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            'sha $revision · $updated',
-                            textAlign: TextAlign.center,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: Colors.white70,
-                              fontSize: bodyFontSize,
-                              fontWeight: FontWeight.w600,
-                              letterSpacing: 0.05,
-                            ),
-                          ),
-                          const SizedBox(height: 1),
-                          Text(
-                            'proc $procStatus · cam $camStatus',
-                            textAlign: TextAlign.center,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: Colors.white70,
-                              fontSize: metaFontSize,
-                              fontWeight: FontWeight.w600,
-                              letterSpacing: 0.04,
-                            ),
-                          ),
-                          const SizedBox(height: 1),
-                          Text(
-                            'fps $fpsLabel · age $ageLabel',
-                            textAlign: TextAlign.center,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: Colors.white60,
-                              fontSize: metaFontSize,
-                              fontWeight: FontWeight.w600,
-                              letterSpacing: 0.04,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-    );
-  }
-
   double _computePortraitHudHeightImpl(
       UiWindowInfo window, BoxConstraints constraints) {
     final width = constraints.maxWidth;
@@ -346,30 +198,15 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
   }
 
   Widget _buildPortraitHudPanelImpl(UiWindowInfo window) {
-    final panelPadding = switch (window.windowClass) {
-      UiWindowClass.compact => 6.0,
-      UiWindowClass.medium => 8.0,
-      UiWindowClass.expanded => 10.0,
-      UiWindowClass.large || UiWindowClass.extraLarge => 12.0,
-    };
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: const Color(0xFF0A0E16),
-        border:
-            Border(top: BorderSide(color: Colors.white.withValues(alpha: 0.2))),
-      ),
-      child: Padding(
-        padding:
-            EdgeInsets.fromLTRB(panelPadding, panelPadding, panelPadding, 0),
-        child: AdaptiveHudHost(
-          deviceIp: _hostIp,
-          enabled: true,
-          surface: HudSurfaceVariant.driveInline,
-          fillParent: true,
-          syncNativeOverlay: true,
-          key: ValueKey<String>(
-              'drive_hud_panel_${window.windowClass.name}_$_hostIp'),
-        ),
+    return AdaptiveHudHost(
+      deviceIp: _hostIp,
+      enabled: true,
+      surface: HudSurfaceVariant.driveInline,
+      fillParent: true,
+      edgeToEdge: true,
+      syncNativeOverlay: true,
+      key: ValueKey<String>(
+        'drive_hud_panel_${window.windowClass.name}_$_hostIp',
       ),
     );
   }

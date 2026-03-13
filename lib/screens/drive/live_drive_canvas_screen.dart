@@ -247,6 +247,7 @@ fi
   IOSink? _driveDiagSink;
   String? _driveDiagFilePath;
   bool _driveDiagInitInFlight = false;
+  bool _driveDiagClosing = false;
   Timer? _driveDiagSummaryTimer;
   DateTime? _driveDiagSessionStartedAt;
   Map<String, dynamic>? _lastNativeCameraDiag;
@@ -347,6 +348,9 @@ fi
   Map<String, dynamic> _sidecarHealthSnapshot = <String, dynamic>{};
   Map<String, dynamic> _sidecarProfileSnapshot = <String, dynamic>{};
   Map<String, dynamic> _sidecarCameraQualitySnapshot = <String, dynamic>{};
+  String _sidecarRepoFlavorHint = SidecarService.repoFlavorUnknown;
+  String _sidecarVariantHint = SidecarService.defaultVariant;
+  bool _sidecarFlavorHintResolving = false;
   DateTime? _sidecarProcessCheckedAt;
   DateTime? _sidecarLastDeployAt;
   DateTime? _sidecarLastStartAt;
@@ -397,7 +401,6 @@ fi
       _OverlayPreviewScenario.highwayStraight;
   int _debugOverlayPreviewPlotMode = 6;
   double _debugOverlayPreviewSpeed = 1.0;
-  bool _sidecarRevisionBadgeExpanded = false;
   Timer? _overlayPreviewTimer;
   int _overlayPreviewFrameSeq = 0;
   int _lastDebugPlotSampleUs = 0;
@@ -442,7 +445,25 @@ fi
   bool get _openpilotOverlayMode =>
       HudDriveSettingsService.isOpenpilotOverlay(_hudDefaultMode);
 
-  String get _modeTagLabel => 'Stock';
+  String get _modeTagLabel {
+    if (!_openpilotOverlayMode) {
+      return 'Stock';
+    }
+    final flavor = (_sidecarHealthSnapshot['repoFlavor'] ??
+            _sidecarProfileSnapshot['repoFlavor'] ??
+            _sidecarRepoFlavorHint)
+        .toString()
+        .trim()
+        .toLowerCase();
+    switch (flavor) {
+      case SidecarService.repoFlavorC3:
+        return 'c3';
+      case SidecarService.repoFlavorC4:
+        return 'c4';
+      default:
+        return '';
+    }
+  }
 
   bool get _canUseNativeCamera => !kIsWeb && Platform.isAndroid;
 
@@ -541,6 +562,9 @@ fi
     }
     _attachSshListener(ssh);
     _attachSharedOverlayRuntime(sharedRuntime);
+    if (_hudModeLoaded && _openpilotOverlayMode && ssh.isConnected) {
+      unawaited(_primeSidecarFlavorHints());
+    }
     unawaited(_syncViewportZoomPresetForOrientation());
   }
 
@@ -619,7 +643,9 @@ fi
           forceRestart: true,
         ),
       );
+      return;
     }
+    unawaited(_primeSidecarFlavorHints());
   }
 
   void _resetDriveRuntimeState({
@@ -687,6 +713,10 @@ fi
     }
     final previousHost = _hostIp;
     _activeHostIp = normalizedHost;
+    _applyResolvedSidecarFlavorHints(
+      repoFlavor: SidecarService.repoFlavorUnknown,
+      variant: SidecarService.defaultVariant,
+    );
     _pushSidecarHistory(
       'HOST_CHANGE',
       '$previousHost -> $normalizedHost reason=$reason',
@@ -710,6 +740,7 @@ fi
       return;
     }
     _applyHudModeRuntime();
+    unawaited(_primeSidecarFlavorHints(forceRefresh: true));
   }
 
   Future<void> _handleDriveConnectionLost({
@@ -737,6 +768,9 @@ fi
   }
 
   Future<void> _loadHudDefaultMode() => _loadHudDefaultModeImpl();
+
+  Future<void> _primeSidecarFlavorHints({bool forceRefresh = false}) =>
+      _primeSidecarFlavorHintsImpl(forceRefresh: forceRefresh);
 
   void _applyHudModeRuntime() => _applyHudModeRuntimeImpl();
 
@@ -774,10 +808,12 @@ fi
   void _scheduleSidecarRuntimeRecovery({
     required String reason,
     Duration minDelay = const Duration(milliseconds: 600),
+    bool preferSooner = false,
   }) =>
       _scheduleSidecarRuntimeRecoveryImpl(
         reason: reason,
         minDelay: minDelay,
+        preferSooner: preferSooner,
       );
 
   void _handleCameraJsMessage(String raw) => _handleCameraJsMessageImpl(raw);
@@ -1097,9 +1133,6 @@ fi
 
   Widget _buildDriveModeTag(UiWindowInfo window) =>
       _buildDriveModeTagImpl(window);
-
-  Widget _buildSidecarRevisionBadge(UiWindowInfo window) =>
-      _buildSidecarRevisionBadgeImpl(window);
 
   double _hudPreferredAspectRatioForWindow(
     UiWindowInfo window, {

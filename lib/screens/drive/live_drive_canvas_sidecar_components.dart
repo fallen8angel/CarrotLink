@@ -7,7 +7,8 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
     }
     _detachSharedOverlayRuntime();
     _sharedRuntimeManager = runtime;
-    runtime.overlayStreamListenable.addListener(_handleSharedOverlayRuntimeTick);
+    runtime.overlayStreamListenable
+        .addListener(_handleSharedOverlayRuntimeTick);
     _syncSharedOverlayRuntime(seedBufferedFrames: true);
   }
 
@@ -23,7 +24,7 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
   }
 
   void _handleSharedOverlayRuntimeTick() {
-    if (!mounted) {
+    if (!mounted || _isDisposing) {
       return;
     }
     _syncSharedOverlayRuntime(seedBufferedFrames: false);
@@ -32,6 +33,9 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
   void _syncSharedOverlayRuntime({
     required bool seedBufferedFrames,
   }) {
+    if (_isDisposing) {
+      return;
+    }
     final runtime = _sharedRuntimeManager;
     if (runtime == null) {
       _overlayDisconnectDebounce?.cancel();
@@ -126,6 +130,10 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
     required bool allowRecovery,
     String provisionalReason = 'sidecar_ws_connected',
   }) {
+    if (_isDisposing) {
+      _sidecarConnected = next;
+      return;
+    }
     final changed = _sidecarConnected != next;
     if (changed) {
       _pushSidecarHistory('WS', next ? 'connected' : 'disconnected');
@@ -197,7 +205,8 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
           message: '사이드카 재연결을 시도합니다.',
         );
         if (!_isSidecarBusy) {
-          _scheduleSidecarRuntimeRecovery(reason: 'shared_runtime_disconnected');
+          _scheduleSidecarRuntimeRecovery(
+              reason: 'shared_runtime_disconnected');
         }
       } else {
         _setSidecarPhase(_SidecarPhase.idle);

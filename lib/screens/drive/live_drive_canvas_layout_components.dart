@@ -570,15 +570,6 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
               ),
               Positioned(
                 top: overlayInset * 0.7,
-                left: overlayInset,
-                right: overlayInset,
-                child: Align(
-                  alignment: Alignment.topCenter,
-                  child: _buildSidecarRevisionBadge(window),
-                ),
-              ),
-              Positioned(
-                top: overlayInset * 0.7,
                 right: overlayInset * 0.7,
                 child: _buildDriveModeTag(window),
               ),

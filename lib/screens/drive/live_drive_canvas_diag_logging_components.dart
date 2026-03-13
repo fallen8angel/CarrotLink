@@ -17,8 +17,8 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
       }
       return preferred;
     } catch (_) {
-      final fallback =
-          Directory('${Directory.systemTemp.path}/carrotlink_drive_diagnostics');
+      final fallback = Directory(
+          '${Directory.systemTemp.path}/carrotlink_drive_diagnostics');
       if (!await fallback.exists()) {
         await fallback.create(recursive: true);
       }
@@ -27,7 +27,12 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
   }
 
   Future<void> _startDriveDiagnosticsLogging() async {
-    if (_driveDiagSink != null || _driveDiagInitInFlight) return;
+    if (_isDisposing ||
+        _driveDiagClosing ||
+        _driveDiagSink != null ||
+        _driveDiagInitInFlight) {
+      return;
+    }
     _driveDiagInitInFlight = true;
     try {
       final now = DateTime.now();
@@ -49,8 +54,8 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
         },
       );
       _driveDiagSummaryTimer?.cancel();
-      _driveDiagSummaryTimer =
-          Timer.periodic(const Duration(seconds: 1), (_) => _emitDriveDiagSummary());
+      _driveDiagSummaryTimer = Timer.periodic(
+          const Duration(seconds: 1), (_) => _emitDriveDiagSummary());
       debugPrint('[DriveCanvas][diag] drive summary log: ${file.path}');
     } catch (e) {
       debugPrint('[DriveCanvas][diag] failed to start drive summary log: $e');
@@ -64,21 +69,24 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
   }) async {
     _driveDiagSummaryTimer?.cancel();
     _driveDiagSummaryTimer = null;
+    _driveDiagClosing = true;
     final sink = _driveDiagSink;
     if (sink == null) {
+      _driveDiagClosing = false;
       _driveDiagFilePath = null;
       _driveDiagSessionStartedAt = null;
       return;
     }
+    _driveDiagSink = null;
     try {
       _rollDriveDiagStaleWindow(_renderClock.elapsedMicroseconds);
-      _appendDriveDiagEvent(
-        'session_end',
-        <String, dynamic>{
-          'reason': reason,
-          'hostIp': _hostIp,
-        },
-      );
+      final event = <String, dynamic>{
+        'ts': DateTime.now().toIso8601String(),
+        'type': 'session_end',
+        'reason': reason,
+        'hostIp': _hostIp,
+      };
+      sink.writeln(jsonEncode(event));
       await sink.flush();
       await sink.close();
     } catch (_) {
@@ -86,13 +94,16 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
         await sink.close();
       } catch (_) {}
     } finally {
-      _driveDiagSink = null;
+      _driveDiagClosing = false;
       _driveDiagFilePath = null;
       _driveDiagSessionStartedAt = null;
     }
   }
 
   void _appendDriveDiagEvent(String type, Map<String, dynamic> payload) {
+    if (_isDisposing || _driveDiagClosing) {
+      return;
+    }
     final sink = _driveDiagSink;
     if (sink == null) return;
     final event = <String, dynamic>{
@@ -100,7 +111,13 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
       'type': type,
       ...payload,
     };
-    sink.writeln(jsonEncode(event));
+    try {
+      sink.writeln(jsonEncode(event));
+    } catch (_) {
+      if (identical(_driveDiagSink, sink)) {
+        _driveDiagSink = null;
+      }
+    }
   }
 
   void _recordNativeCameraDiag(Map<String, dynamic> payload) {
@@ -169,7 +186,8 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
   void _recordOverlayPushSent(_DriveOverlaySnapshot snapshot) {
     _driveDiagOverlayPushSentWindow += 1;
     final modelFrame = snapshot.modelFrameId;
-    if (modelFrame != null && _driveDiagLastOverlayPushModelFrameId == modelFrame) {
+    if (modelFrame != null &&
+        _driveDiagLastOverlayPushModelFrameId == modelFrame) {
       _driveDiagOverlayPushDuplicateWindow += 1;
     }
     _driveDiagLastOverlayPushModelFrameId = modelFrame;
@@ -238,9 +256,7 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
       <String, dynamic>{
         'sessionAgeSec': _driveDiagSessionStartedAt == null
             ? null
-            : DateTime.now()
-                .difference(_driveDiagSessionStartedAt!)
-                .inSeconds,
+            : DateTime.now().difference(_driveDiagSessionStartedAt!).inSeconds,
         'hostIp': _hostIp,
         'camera': <String, dynamic>{
           'cameraName': _liveCameraName,
@@ -275,7 +291,8 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
                   (_driveDiagSyncGapSumWindow / syncGapSamples)
                       .toStringAsFixed(2),
                 ),
-          'gapMaxWindow': syncGapSamples <= 0 ? null : _driveDiagSyncGapMaxWindow,
+          'gapMaxWindow':
+              syncGapSamples <= 0 ? null : _driveDiagSyncGapMaxWindow,
           'interpAvgMsWindow': interpSamples <= 0
               ? null
               : double.parse(

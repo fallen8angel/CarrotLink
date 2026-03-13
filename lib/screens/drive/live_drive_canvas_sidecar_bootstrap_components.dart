@@ -51,9 +51,9 @@ extension _LiveDriveCanvasSidecarBootstrapComponents
       }
     } catch (_) {}
     if (!shouldNotify) return;
-    _toast(
-      '사이드카 업데이트됨 (sha256:${_shortSidecarRevision(normalized)})',
-      duration: const Duration(seconds: 4),
+    _pushSidecarHistory(
+      'AUTO_REV_NOTICE',
+      'updated rev=${_shortSidecarRevision(normalized)}',
     );
   }
 

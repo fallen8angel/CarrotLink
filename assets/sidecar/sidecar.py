@@ -3,6 +3,7 @@ import asyncio
 import json
 import math
 import os
+import subprocess
 import struct
 import sys
 import time
@@ -62,6 +63,70 @@ def _detect_base_dir() -> str:
         return os.path.dirname(os.path.abspath(__file__))
     except Exception:
         return ""
+
+
+def _detect_repo_flavor(repo: str, base_dir: str = "") -> str:
+    env_flavor = os.environ.get("CARROTLINK_OPENPILOT_FLAVOR", "").strip().lower()
+    if env_flavor in ("c3", "c4"):
+        return env_flavor
+
+    candidates: list[str] = []
+    if repo:
+        candidates.append(repo)
+    if base_dir:
+        try:
+            repo_from_base = os.path.abspath(os.path.join(base_dir, "..", ".."))
+            if (
+                repo_from_base
+                and repo_from_base not in candidates
+                and os.path.isdir(os.path.join(repo_from_base, "selfdrive"))
+            ):
+                candidates.append(repo_from_base)
+        except Exception:
+            pass
+
+    def _flavor_from_branch(path: str) -> str:
+        try:
+            completed = subprocess.run(
+                ["git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+            )
+            branch = (completed.stdout or "").strip().lower()
+        except Exception:
+            branch = ""
+        if not branch:
+            return ""
+        tokens = branch.replace("_", "-").replace("/", "-").split("-")
+        if "c4" in tokens:
+            return "c4"
+        if "c3" in tokens:
+            return "c3"
+        return ""
+
+    for path in candidates:
+        branch_flavor = _flavor_from_branch(path)
+        if branch_flavor:
+            return branch_flavor
+        cfg = os.path.join(path, "system", "manager", "process_config.py")
+        if not os.path.isfile(cfg):
+            continue
+        try:
+            with open(cfg, "r", encoding="utf-8") as fp:
+                text = fp.read()
+        except Exception:
+            try:
+                with open(cfg, "r", errors="ignore") as fp:
+                    text = fp.read()
+            except Exception:
+                text = ""
+        if 'PythonProcess("ui"' in text or "PythonProcess('ui'" in text:
+            return "c4"
+        if 'NativeProcess("ui"' in text or "NativeProcess('ui'" in text:
+            return "c3"
+    return "unknown"
 
 
 def _safe_float(v: Any) -> float | None:
@@ -703,13 +768,41 @@ class SidecarApp:
         "p4": 0.08,
     }
 
+    SUPPORTED_VARIANTS = {"default", "c4_safe"}
+    C4_SAFE_LIVE_PROFILES = ("p2", "p3", "p4")
+    C4_SAFE_RADAR_MONITOR_PROFILES = ("p1", "p2", "p3", "p4")
+    C4_SAFE_STARTUP_GRACE_SEC = 12.0
+    C4_SAFE_RADAR_STABLE_SEC = 1.5
+    C4_SAFE_SM_UPDATE_INTERVAL = {
+        "p2": 0.06,
+        "p3": 0.06,
+        "p4": 0.05,
+    }
+    C4_SAFE_LIVE_INTERVAL = {
+        "p2": 0.06,
+        "p3": 0.06,
+        "p4": 0.05,
+    }
+    C4_SAFE_LIVE_CACHE_INTERVAL = {
+        "p2": 0.06,
+        "p3": 0.06,
+        "p4": 0.05,
+    }
 
-    def __init__(self, profile: str):
+
+    def __init__(self, profile: str, variant: str = "default"):
         self.profile = profile if profile in self.PROFILE_SERVICES else "p2"
+        normalized_variant = str(variant or "").strip().lower()
+        self.variant = (
+            normalized_variant
+            if normalized_variant in self.SUPPORTED_VARIANTS
+            else "default"
+        )
+        self.base_dir = _detect_base_dir()
+        self.repo = _detect_repo()
+        self.repo_flavor = _detect_repo_flavor(self.repo, self.base_dir)
         self.clients: dict[web.WebSocketResponse, tuple[str, str, str, str]] = {}
         self.hud_clients: dict[web.WebSocketResponse, tuple[str, str, str]] = {}
-        self.repo = _detect_repo()
-        self.base_dir = _detect_base_dir()
         self.messaging = None
         self.sm = None
         self._camera_hub: CameraRelayHub | None = None
@@ -770,6 +863,8 @@ class SidecarApp:
         self._profile_generation = 0
         self._service_last_alive_mono: dict[str, float] = {}
         self._service_last_updated_mono: dict[str, float] = {}
+        self._profile_started_mono = time.monotonic()
+        self._radar_fresh_since_mono = 0.0
 
         self._init_messaging()
         self._init_params()
@@ -786,16 +881,26 @@ class SidecarApp:
         self._cached_hud_last_built = 0.0
 
     def _sm_update_loop_interval(self) -> float:
-        return self.PROFILE_SM_UPDATE_INTERVAL.get(self.profile, 0.05)
+        base = self.PROFILE_SM_UPDATE_INTERVAL.get(self.profile, 0.05)
+        override = self._variant_interval_override(
+            self.C4_SAFE_SM_UPDATE_INTERVAL
+        )
+        return max(base, override) if override is not None else base
 
     def _live_broadcast_interval(self) -> float:
-        return self.PROFILE_LIVE_INTERVAL.get(self.profile, 0.05)
+        base = self.PROFILE_LIVE_INTERVAL.get(self.profile, 0.05)
+        override = self._variant_interval_override(self.C4_SAFE_LIVE_INTERVAL)
+        return max(base, override) if override is not None else base
 
     def _live_cache_interval(self) -> float:
-        return self.PROFILE_LIVE_CACHE_INTERVAL.get(
+        base = self.PROFILE_LIVE_CACHE_INTERVAL.get(
             self.profile,
             self._live_broadcast_interval(),
         )
+        override = self._variant_interval_override(
+            self.C4_SAFE_LIVE_CACHE_INTERVAL
+        )
+        return max(base, override) if override is not None else base
 
     def _hud_interval(self) -> float:
         return self.PROFILE_HUD_INTERVAL.get(self.profile, 0.10)
@@ -831,6 +936,8 @@ class SidecarApp:
         self._last_sm_update_mono = 0.0
         self._service_last_alive_mono = {}
         self._service_last_updated_mono = {}
+        self._profile_started_mono = time.monotonic()
+        self._radar_fresh_since_mono = 0.0
         self._profile_generation += 1
         if hasattr(self, "_calib_cache"):
             delattr(self, "_calib_cache")
@@ -839,6 +946,55 @@ class SidecarApp:
         print(
             f"[sidecar] profile runtime reset reason={reason} generation={self._profile_generation}"
         )
+
+    def _radar_stable_for_variant(self, now: float | None = None) -> bool:
+        if (
+            self.variant != "c4_safe"
+            or self.profile not in self.C4_SAFE_RADAR_MONITOR_PROFILES
+        ):
+            return False
+        current = time.monotonic() if now is None else now
+        radar_ready = self._service_ready("radarState", require_updated=True)
+        if not radar_ready:
+            self._radar_fresh_since_mono = 0.0
+            return False
+        if self._radar_fresh_since_mono <= 0.0:
+            self._radar_fresh_since_mono = current
+            return False
+        return (
+            current - self._radar_fresh_since_mono
+        ) >= self.C4_SAFE_RADAR_STABLE_SEC
+
+    def _variant_soft_mode_active(self, now: float | None = None) -> bool:
+        if (
+            self.variant != "c4_safe"
+            or self.profile not in self.C4_SAFE_RADAR_MONITOR_PROFILES
+        ):
+            return False
+        current = time.monotonic() if now is None else now
+        if (current - self._profile_started_mono) >= self.C4_SAFE_STARTUP_GRACE_SEC:
+            return False
+        return not self._radar_stable_for_variant(now=current)
+
+    def _services_for_profile(self, profile: str) -> list[str]:
+        services = list(self.PROFILE_SERVICES.get(profile, []))
+        if (
+            self.variant == "c4_safe"
+            and profile == "p1"
+            and "radarState" not in services
+        ):
+            services.append("radarState")
+        return services
+
+    def _variant_interval_override(
+        self,
+        interval_table: dict[str, float],
+    ) -> float | None:
+        if self.profile not in self.C4_SAFE_LIVE_PROFILES:
+            return None
+        if not self._variant_soft_mode_active():
+            return None
+        return interval_table.get(self.profile)
 
     def _init_messaging(self) -> None:
         self._invalidate_broadcast_caches()
@@ -850,7 +1006,7 @@ class SidecarApp:
             from cereal import messaging  # type: ignore
 
             self.messaging = messaging
-            services = list(self.PROFILE_SERVICES.get(self.profile, []))
+            services = self._services_for_profile(self.profile)
             # Merge optional/hud services that Flutter still consumes.
             for s in [
                 "deviceState", "peripheralState",
@@ -2293,6 +2449,7 @@ class SidecarApp:
             "ts": time.time(),
             "profile": self.profile,
             "repo": self.repo,
+            "repoFlavor": self.repo_flavor,
             "source": "live",
         }
         if self.sm is None:
@@ -2385,7 +2542,10 @@ class SidecarApp:
 
     def _refresh_live_broadcast_cache(self) -> None:
         build_started = time.monotonic()
-        live_payload = self._build_live_payload(do_update=False)
+        live_payload = self._build_live_payload(
+            do_update=False,
+            safe_mode=self._variant_soft_mode_active(),
+        )
         live_json = json.dumps(
             live_payload, separators=(",", ":"), ensure_ascii=False
         )
@@ -2680,6 +2840,8 @@ class SidecarApp:
                     {
                         "type": "hello",
                         "profile": self.profile,
+                        "variant": self.variant,
+                        "repoFlavor": self.repo_flavor,
                         "source": "live",
                         "encoding": encoding,
                         "cameraMode": camera_mode,
@@ -2724,6 +2886,8 @@ class SidecarApp:
                     {
                         "type": "hello",
                         "profile": self.profile,
+                        "variant": self.variant,
+                        "repoFlavor": self.repo_flavor,
                         "source": "hud",
                         "encoding": encoding,
                         "role": role,
@@ -2810,6 +2974,10 @@ class SidecarApp:
             "port": int(os.environ.get("CARROTLINK_SIDECAR_PORT", "7766")),
         }
         health_flags = self._runtime_health_flags(camera_status)
+        now = time.monotonic()
+        radar_ready = self._service_ready("radarState", require_updated=True)
+        radar_stable = self._radar_stable_for_variant(now=now)
+        startup_protection_active = self._variant_soft_mode_active(now=now)
         return web.json_response(
             {
                 "kind": "carrotlink_sidecar_broker_v1",
@@ -2827,6 +2995,11 @@ class SidecarApp:
                 "wideLiveReady": health_flags["wideLiveReady"],
                 "cameraReady": health_flags["cameraReady"],
                 "profile": self.profile,
+                "variant": self.variant,
+                "repoFlavor": self.repo_flavor,
+                "startupProtectionActive": startup_protection_active,
+                "radarReady": radar_ready,
+                "radarFreshStable": radar_stable,
                 "profileGeneration": self._profile_generation,
                 "clients": len(self.clients),
                 "repo": self.repo,
@@ -2957,7 +3130,10 @@ class SidecarApp:
         return web.json_response(
             {
                 "profile": self.profile,
+                "variant": self.variant,
+                "repoFlavor": self.repo_flavor,
                 "profiles": list(self.PROFILE_SERVICES.keys()),
+                "variants": sorted(self.SUPPORTED_VARIANTS),
             }
         )
 
@@ -2986,6 +3162,8 @@ class SidecarApp:
             {
                 "ok": True,
                 "profile": self.profile,
+                "variant": self.variant,
+                "repoFlavor": self.repo_flavor,
                 "profileGeneration": self._profile_generation,
             }
         )
@@ -3024,10 +3202,11 @@ class SidecarApp:
 
 def main() -> None:
     profile = os.environ.get("CARROTLINK_SIDECAR_PROFILE", "p2").strip().lower()
+    variant = os.environ.get("CARROTLINK_SIDECAR_VARIANT", "default").strip().lower()
     port = int(os.environ.get("CARROTLINK_SIDECAR_PORT", "7766"))
     host = os.environ.get("CARROTLINK_SIDECAR_HOST", "0.0.0.0").strip() or "0.0.0.0"
 
-    app_state = SidecarApp(profile)
+    app_state = SidecarApp(profile, variant=variant)
     app = web.Application()
     app.router.add_get("/health", app_state.get_health)
     app.router.add_get("/profile", app_state.get_profile)
@@ -3040,7 +3219,11 @@ def main() -> None:
     app.on_startup.append(app_state.on_startup)
     app.on_cleanup.append(app_state.on_cleanup)
 
-    print(f"[sidecar] starting host={host} port={port} profile={app_state.profile}")
+    print(
+        f"[sidecar] starting host={host} port={port} "
+        f"profile={app_state.profile} variant={app_state.variant} "
+        f"repoFlavor={app_state.repo_flavor}"
+    )
     web.run_app(app, host=host, port=port)
 
 

@@ -16,6 +16,7 @@ class AdaptiveHudHost extends StatelessWidget {
   final String? deviceIp;
   final bool enabled;
   final bool fillParent;
+  final bool edgeToEdge;
   final bool matchParentWidth;
   final HudSurfaceVariant surface;
   final bool preview;
@@ -28,6 +29,7 @@ class AdaptiveHudHost extends StatelessWidget {
     this.deviceIp,
     this.enabled = true,
     this.fillParent = false,
+    this.edgeToEdge = false,
     this.matchParentWidth = false,
     this.surface = HudSurfaceVariant.homePreview,
     this.preview = false,
@@ -44,6 +46,7 @@ class AdaptiveHudHost extends StatelessWidget {
         snapshot: OriginalHudSnapshot.empty,
         surface: surface,
         fillParent: fillParent,
+        edgeToEdge: edgeToEdge,
         matchParentWidth: matchParentWidth,
         preferStateShell: false,
       );
@@ -60,6 +63,7 @@ class AdaptiveHudHost extends StatelessWidget {
               snapshot: OriginalHudSnapshot.empty,
               surface: surface,
               fillParent: fillParent,
+              edgeToEdge: edgeToEdge,
               matchParentWidth: matchParentWidth,
               preferStateShell: false,
             );
@@ -82,6 +86,7 @@ class AdaptiveHudHost extends StatelessWidget {
                   snapshot: snapshot,
                   surface: surface,
                   fillParent: fillParent,
+                  edgeToEdge: edgeToEdge,
                   matchParentWidth: matchParentWidth,
                   preferStateShell: viewState.preferStateShell,
                 ),
@@ -112,6 +117,7 @@ class AdaptiveHudHost extends StatelessWidget {
             snapshot: snapshot,
             surface: surface,
             fillParent: fillParent,
+            edgeToEdge: edgeToEdge,
             matchParentWidth: matchParentWidth,
             preferStateShell: viewState.preferStateShell,
           ),
