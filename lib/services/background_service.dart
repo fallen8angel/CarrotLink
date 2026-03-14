@@ -288,6 +288,59 @@ void onStart(ServiceInstance service) async {
     }
   }
 
+  String? pickNotificationIp({
+    String? explicitIp,
+    bool allowCandidate = true,
+    bool allowLastSuccessful = true,
+  }) {
+    final candidates = <String?>[
+      explicitIp,
+      connectedIp,
+      if (allowCandidate) candidateIp,
+      if (allowLastSuccessful) lastSuccessfulIp,
+    ];
+    for (final candidate in candidates) {
+      if (candidate != null && candidate.isNotEmpty) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  String buildConnectionNotificationContent({
+    required String status,
+    String? ip,
+    bool allowCandidate = true,
+    bool allowLastSuccessful = true,
+  }) {
+    final displayIp = pickNotificationIp(
+      explicitIp: ip,
+      allowCandidate: allowCandidate,
+      allowLastSuccessful: allowLastSuccessful,
+    );
+    if (displayIp == null) {
+      return status;
+    }
+    return '$status · $displayIp';
+  }
+
+  Future<void> updateConnectionNotification({
+    required String status,
+    String? ip,
+    bool allowCandidate = true,
+    bool allowLastSuccessful = true,
+  }) async {
+    await updateNotification(
+      title: 'CarrotLink',
+      content: buildConnectionNotificationContent(
+        status: status,
+        ip: ip,
+        allowCandidate: allowCandidate,
+        allowLastSuccessful: allowLastSuccessful,
+      ),
+    );
+  }
+
   Future<void> closeClient() async {
     heartbeatTimer?.cancel();
     heartbeatTimer = null;
@@ -314,13 +367,18 @@ void onStart(ServiceInstance service) async {
     emitConnectionState(isConnected: false, reason: reason);
     emitDiscoveryState(source: reason);
     if (manual) {
-      await updateNotification(title: 'CarrotLink: 연결 해제됨', content: '대기 중...');
+      await updateConnectionNotification(
+        status: '연결 해제',
+        allowCandidate: false,
+        allowLastSuccessful: false,
+      );
       return;
     }
     if (wasConnected) {
-      await updateNotification(
-          title: 'CarrotLink: 연결 끊김', content: '재연결 대기 중...');
+      await updateConnectionNotification(status: '재연결 대기');
+      return;
     }
+    await updateConnectionNotification(status: '연결 대기');
   }
 
   void scheduleReconnect(String reason) {
@@ -407,9 +465,6 @@ void onStart(ServiceInstance service) async {
           ? 'profile_foreground_$source'
           : 'profile_background_$source',
     );
-    await updateNotification(
-      content: foreground ? '연결 감시(빠름)' : '연결 감시(절전)',
-    );
   }
 
   connectTo = (String ip, {required String reason}) async {
@@ -420,7 +475,12 @@ void onStart(ServiceInstance service) async {
     clearReconnectTimer();
     await closeClient();
 
-    await updateNotification(title: 'CarrotLink: 연결 중...', content: 'IP: $ip');
+    await updateConnectionNotification(
+      status: '연결 중',
+      ip: ip,
+      allowCandidate: false,
+      allowLastSuccessful: false,
+    );
 
     try {
       final username = profileUsername!;
@@ -462,7 +522,11 @@ void onStart(ServiceInstance service) async {
       );
       emitDiscoveryState(source: reason);
 
-      await updateNotification(title: 'IP: $ip', content: '백업 확인 준비 중...');
+      await updateConnectionNotification(
+        status: '연결됨',
+        ip: ip,
+        allowCandidate: false,
+      );
       startHeartbeatLoop();
     } catch (e) {
       await handleDisconnected('connect_failed');
@@ -472,8 +536,12 @@ void onStart(ServiceInstance service) async {
           error: e.toString(),
           ip: ip,
           port: profilePort);
-      await updateNotification(
-          title: 'CarrotLink: 연결 실패', content: '오류: ${e.toString()}');
+      await updateConnectionNotification(
+        status: '연결 실패',
+        ip: ip,
+        allowCandidate: false,
+        allowLastSuccessful: false,
+      );
       scheduleReconnect('connect_failed');
     } finally {
       connectInFlight = false;
@@ -557,6 +625,14 @@ void onStart(ServiceInstance service) async {
     if ((sshClient == null || sshClient!.isClosed) &&
         canAutoReconnect() &&
         hasConnectProfile()) {
+      unawaited(
+        updateConnectionNotification(
+          status: '연결 대기',
+          ip: ip,
+          allowCandidate: false,
+          allowLastSuccessful: false,
+        ),
+      );
       unawaited(connectTo(ip, reason: 'candidate_udp'));
     }
   }
@@ -618,7 +694,7 @@ void onStart(ServiceInstance service) async {
     }
   };
 
-  await updateNotification(title: 'CarrotLink', content: '연결 대기 중...');
+  await updateConnectionNotification(status: '연결 대기');
   await startDiscoveryListener();
   emitDiscoveryState(source: 'service_start');
 

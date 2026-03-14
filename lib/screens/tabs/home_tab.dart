@@ -167,6 +167,9 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     if (!_hasGitHubLogin) return "GitHub 연동 필요";
     if (!_hasActiveSshKey) return "SSH 개인키 적용 필요";
     if (ssh.isConnected) return "연결됨";
+    if ((ssh.serviceConnectedIp ?? '').trim().isNotEmpty) {
+      return "백그라운드 연결됨";
+    }
     if (ssh.connectionStatus.startsWith("Connecting")) return "연결 중...";
     if (ssh.connectionStatus.contains("Error")) return "연결 실패";
     return "연결 대기";
@@ -174,12 +177,17 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
 
   Color _statusColor(BuildContext context, SSHService ssh) {
     if (!_hasGitHubLogin || !_hasActiveSshKey) return Colors.grey;
+    if ((ssh.serviceConnectedIp ?? '').trim().isNotEmpty) {
+      return Theme.of(context).colorScheme.primary;
+    }
     if (ssh.connectionStatus.contains("Error")) return Colors.grey;
     return Theme.of(context).colorScheme.primary;
   }
 
   String? _currentDeviceHost(SSHService ssh) {
-    return NativeOverlayHudService.normalizeHost(ssh.connectedIp);
+    return NativeOverlayHudService.normalizeHost(
+      ssh.connectedIp ?? ssh.serviceConnectedIp,
+    );
   }
 
   Future<void> _syncOverlayEndpoint({bool forceProbe = false}) async {
@@ -267,10 +275,18 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
           UiWindowClass.large || UiWindowClass.extraLarge => 40.0,
         };
         final hasIp = ssh.isConnected ||
+            (ssh.serviceConnectedIp ?? '').trim().isNotEmpty ||
             ssh.connectionStatus.startsWith("Connecting") ||
-            ssh.targetIp != null;
+            ssh.targetIp != null ||
+            ssh.serviceCandidateIp != null;
         final ipFieldText =
-            hasIp ? (ssh.connectedIp ?? ssh.targetIp ?? "Unknown") : "연동 필요";
+            hasIp
+                ? (ssh.connectedIp ??
+                    ssh.serviceConnectedIp ??
+                    ssh.targetIp ??
+                    ssh.serviceCandidateIp ??
+                    "Unknown")
+                : "연동 필요";
         final isLandscape = window.isLandscape;
         final homeContentMaxWidth = switch (window.windowClass) {
           UiWindowClass.compact => double.infinity,

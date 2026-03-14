@@ -3,6 +3,7 @@ package id.flutter.flutter_background_service;
 import static android.os.Build.VERSION.SDK_INT;
 
 import android.annotation.SuppressLint;
+import android.app.ActivityManager;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
@@ -40,6 +41,8 @@ public class BackgroundService extends Service implements MethodChannel.MethodCa
     private static final String TAG = "BackgroundService";
     private static final String LOCK_NAME = BackgroundService.class.getName()
             + ".Lock";
+    private static final String ACTION_STOP_FROM_NOTIFICATION =
+            "id.flutter.flutter_background_service.action.STOP_FROM_NOTIFICATION";
     public static volatile WakeLock lockStatic = null; // notice static
     AtomicBoolean isRunning = new AtomicBoolean(false);
     private FlutterEngine backgroundEngine;
@@ -134,6 +137,42 @@ public class BackgroundService extends Service implements MethodChannel.MethodCa
         stopSelf();
     }
 
+    private void stopForUserRequest() {
+        isManuallyStopped = true;
+        config.setManuallyStopped(true);
+        WatchdogReceiver.remove(this);
+        stopForeground(true);
+        stopSelf();
+    }
+
+    private void stopOverlayServiceIfRunning() {
+        try {
+            Intent overlayStopIntent = new Intent();
+            overlayStopIntent.setClassName(
+                    getPackageName(),
+                    getPackageName() + ".OverlayHudService"
+            );
+            overlayStopIntent.setAction("carrot.overlay.STOP");
+            startService(overlayStopIntent);
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to stop overlay service: " + e.getMessage());
+        }
+    }
+
+    private void finishAndRemoveAppTasks() {
+        try {
+            ActivityManager activityManager =
+                    (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            if (activityManager == null) return;
+            List<ActivityManager.AppTask> appTasks = activityManager.getAppTasks();
+            for (ActivityManager.AppTask appTask : appTasks) {
+                appTask.finishAndRemoveTask();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to finish app tasks: " + e.getMessage());
+        }
+    }
+
     private final Pipe.PipeListener listener = new Pipe.PipeListener() {
         @Override
         public void onReceived(JSONObject object) {
@@ -166,13 +205,24 @@ public class BackgroundService extends Service implements MethodChannel.MethodCa
             }
 
             PendingIntent pi = PendingIntent.getActivity(BackgroundService.this, 11, i, flags);
+            Intent stopIntent = new Intent(this, BackgroundService.class);
+            stopIntent.setAction(ACTION_STOP_FROM_NOTIFICATION);
+
+            int actionFlags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (SDK_INT >= Build.VERSION_CODES.M) {
+                actionFlags |= PendingIntent.FLAG_IMMUTABLE;
+            }
+
+            PendingIntent stopPendingIntent =
+                    PendingIntent.getService(this, 12, stopIntent, actionFlags);
             NotificationCompat.Builder mBuilder = new NotificationCompat.Builder(this, notificationChannelId)
                     .setSmallIcon(R.drawable.ic_bg_service_small)
                     .setAutoCancel(true)
                     .setOngoing(true)
                     .setContentTitle(notificationTitle)
                     .setContentText(notificationContent)
-                    .setContentIntent(pi);
+                    .setContentIntent(pi)
+                    .addAction(R.drawable.ic_bg_service_small, "종료", stopPendingIntent);
 
             try {
                 foregroundTypes = null;
@@ -189,6 +239,13 @@ public class BackgroundService extends Service implements MethodChannel.MethodCa
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && ACTION_STOP_FROM_NOTIFICATION.equals(intent.getAction())) {
+            Log.i(TAG, "Stopping background service from notification action");
+            stopOverlayServiceIfRunning();
+            finishAndRemoveAppTasks();
+            stopForUserRequest();
+            return START_NOT_STICKY;
+        }
         config.setManuallyStopped(false);
         WatchdogReceiver.enqueue(this);
         runService();

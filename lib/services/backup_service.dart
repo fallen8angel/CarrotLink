@@ -6,7 +6,6 @@ import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import '../models/carrot_settings_models.dart';
 import 'carrot_server_settings_service.dart';
@@ -103,29 +102,6 @@ class BackupService extends ChangeNotifier {
     }
   }
 
-  void _updateNotification(String content) {
-    final service = FlutterBackgroundService();
-
-    String checkTime = _lastCheckTime != null
-        ? DateFormat('HH:mm:ss').format(_lastCheckTime!)
-        : "--:--:--";
-    String backupTime = _lastBackupTime != null
-        ? DateFormat('MM/dd HH:mm').format(_lastBackupTime!)
-        : "--/-- --:--";
-
-    // Format: 백업 확인:확인 시간 l 최근 백업: 시간
-    // Use the passed content as prefix if it's specific (like "백업 진행 중..."), otherwise default to "백업 확인"
-    String prefix = "백업 확인";
-    if (content.contains("백업 진행 중") || content.contains("업로드")) {
-      prefix = content;
-    }
-
-    String fullContent = "$prefix: $checkTime | 최근 백업: $backupTime";
-
-    // Use 'updateContent' as defined in background_service.dart
-    service.invoke("updateContent", {"content": fullContent});
-  }
-
   Future<void> _performCheck() async {
     final ssh = _sshService;
     final driveService = _driveService;
@@ -137,7 +113,6 @@ class BackupService extends ChangeNotifier {
       _lastCheckTime = DateTime.now();
       await _savePersistedState();
       notifyListeners();
-      _updateNotification("모니터링 중");
 
       final now = DateTime.now();
       if (_lastBackupTime != null &&
@@ -166,8 +141,6 @@ class BackupService extends ChangeNotifier {
     _driveService = driveService;
 
     await _loadPersistedState(); // Load state on start
-
-    _updateNotification("모니터링 시작됨");
 
     _intervalMinutes = _fixedIntervalMinutes;
     print(
@@ -282,7 +255,6 @@ class BackupService extends ChangeNotifier {
     _progress = 0.0;
     _statusMessage = "파라미터 목록 가져오는 중...";
     notifyListeners();
-    _updateNotification("백업 진행 중...");
 
     try {
       if (!ssh.isConnected) {
@@ -335,7 +307,6 @@ class BackupService extends ChangeNotifier {
       _progress = 0.0;
       _statusMessage = "";
       notifyListeners();
-      _updateNotification("대기 중");
       if (backupSucceeded) {
         requestEventSync(
           reason: 'backup_created',

@@ -20,7 +20,7 @@ extension _ConnectionSettingsAuth on _ConnectionSettingsScreenState {
           loggedIn = false;
           await _githubService.clearToken();
           _diag.warn('github',
-              'Saved token missing required scopes(admin:public_key + gist). forcing re-login');
+              'Saved token missing required scopes(admin:public_key + gist + repo). forcing re-login');
           break;
         case GitHubTokenValidationStatus.transientError:
           final token = await _githubService.getToken();
