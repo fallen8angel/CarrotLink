@@ -18,6 +18,7 @@ enum GitHubTokenValidationStatus {
 
 class GitHubService {
   static const String _baseUrl = 'https://api.github.com';
+  static const String _oauthScopes = 'admin:public_key gist repo';
   // Homepage URL: http://localhost
   // Authorization callback URL: http://localhost
   static const String _clientId = 'Ov23lis2qk24z3GryKlt';
@@ -36,7 +37,7 @@ class GitHubService {
       headers: {'Accept': 'application/json'},
       body: {
         'client_id': _clientId,
-        'scope': 'admin:public_key gist',
+        'scope': _oauthScopes,
       },
     ).timeout(const Duration(seconds: 15));
 
@@ -193,7 +194,7 @@ class GitHubService {
         if (!_hasRequiredScope(response.headers)) {
           _diag.warn(
             'github',
-            'Saved token missing required scopes admin:public_key + gist '
+            'Saved token missing required scopes admin:public_key + gist + repo '
                 'scopes=${response.headers['x-oauth-scopes'] ?? ''}',
           );
           return GitHubTokenValidationStatus.insufficientScope;
@@ -624,7 +625,9 @@ class GitHubService {
         .split(',')
         .map((e) => e.trim().toLowerCase())
         .where((e) => e.isNotEmpty);
-    return scopes.contains('admin:public_key') && scopes.contains('gist');
+    return scopes.contains('admin:public_key') &&
+        scopes.contains('gist') &&
+        scopes.contains('repo');
   }
 
   String _normalizePublicKeyForCompare(String key) {
@@ -800,8 +803,10 @@ class GitHubService {
       final lower = bodyMessage.toLowerCase();
       if (lower.contains('admin:public_key') ||
           lower.contains('gist') ||
+          lower.contains('repo') ||
           lower.contains('resource not accessible')) {
-        friendly = '토큰 권한이 부족합니다. admin:public_key, gist 권한이 필요합니다.';
+        friendly =
+            '토큰 권한이 부족합니다. admin:public_key, gist, repo 권한이 필요합니다.';
       } else {
         friendly = '$action 권한이 거부되었습니다.';
       }

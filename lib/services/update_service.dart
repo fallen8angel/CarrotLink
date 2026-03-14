@@ -6,10 +6,15 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:open_filex/open_filex.dart';
+import 'github_service.dart';
 
 class UpdateService extends ChangeNotifier {
   static const String _ignoreUpdateUntilKey = 'ignore_update_until';
   static const String _ignoreUpdateTagKey = 'ignore_update_tag';
+  static const String _repoOwner = 'jominki354';
+  static const String _repoName = 'CarrotLink';
+  static const String _gitHubApiBase =
+      'https://api.github.com/repos/$_repoOwner/$_repoName';
 
   bool _isChecking = false;
   bool _isDownloading = false;
@@ -25,6 +30,7 @@ class UpdateService extends ChangeNotifier {
   late final Future<void> _ignoredStateLoadFuture;
   DateTime? _ignoredUntil;
   String? _ignoredTag;
+  final GitHubService _githubService = GitHubService();
 
   bool get isChecking => _isChecking;
   bool get isDownloading => _isDownloading;
@@ -138,31 +144,7 @@ class UpdateService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      Map<String, dynamic>? releaseData;
-
-      if (_channel == 'stable') {
-        final url = Uri.parse(
-            'https://api.github.com/repos/jominki354/CarrotLink/releases/latest');
-        final response = await http.get(url);
-        if (response.statusCode == 200) {
-          releaseData = jsonDecode(response.body);
-        } else if (!silent) {
-          _statusMessage = "업데이트 확인 실패: HTTP ${response.statusCode}";
-        }
-      } else {
-        // Dev channel: Get list of releases and pick the first one (latest by date)
-        final url = Uri.parse(
-            'https://api.github.com/repos/jominki354/CarrotLink/releases?per_page=1');
-        final response = await http.get(url);
-        if (response.statusCode == 200) {
-          final List list = jsonDecode(response.body);
-          if (list.isNotEmpty) {
-            releaseData = list.first;
-          }
-        } else if (!silent) {
-          _statusMessage = "업데이트 확인 실패: HTTP ${response.statusCode}";
-        }
-      }
+      final releaseData = await _fetchLatestRelease(silent: silent);
 
       if (releaseData != null) {
         final String tagName = releaseData['tag_name'] ?? "";
@@ -243,6 +225,102 @@ class UpdateService extends ChangeNotifier {
     }
   }
 
+  Future<Map<String, dynamic>?> _fetchLatestRelease({
+    required bool silent,
+  }) async {
+    final token = await _githubService.getToken();
+    final response = await _requestReleaseEndpoint(token: token);
+    if (response.statusCode != 200) {
+      if (!silent) {
+        _statusMessage = _buildReleaseErrorMessage(
+          response.statusCode,
+          usedToken: token != null && token.isNotEmpty,
+        );
+      }
+      return null;
+    }
+
+    final decoded = jsonDecode(response.body);
+    if (_channel == 'stable') {
+      if (decoded is Map<String, dynamic>) {
+        return decoded;
+      }
+      return null;
+    }
+
+    if (decoded is List && decoded.isNotEmpty) {
+      final first = decoded.first;
+      if (first is Map<String, dynamic>) {
+        return first;
+      }
+      if (first is Map) {
+        return Map<String, dynamic>.from(first.cast<String, dynamic>());
+      }
+    }
+    return null;
+  }
+
+  Future<http.Response> _requestReleaseEndpoint({String? token}) {
+    final path = _channel == 'stable'
+        ? '$_gitHubApiBase/releases/latest'
+        : '$_gitHubApiBase/releases?per_page=1';
+    return http
+        .get(
+          Uri.parse(path),
+          headers: _buildGitHubHeaders(token: token),
+        )
+        .timeout(const Duration(seconds: 20));
+  }
+
+  Map<String, String> _buildGitHubHeaders({
+    String? token,
+    bool binaryAsset = false,
+  }) {
+    final headers = <String, String>{
+      'Accept': binaryAsset
+          ? 'application/octet-stream'
+          : 'application/vnd.github+json',
+    };
+    if (token != null && token.isNotEmpty) {
+      headers['Authorization'] = 'token $token';
+    }
+    return headers;
+  }
+
+  String _buildReleaseErrorMessage(
+    int statusCode, {
+    required bool usedToken,
+  }) {
+    switch (statusCode) {
+      case 401:
+        return '업데이트 확인 실패: GitHub 인증이 만료되었습니다. 다시 로그인하세요.';
+      case 403:
+        return usedToken
+            ? '업데이트 확인 실패: GitHub 권한이 부족합니다. 다시 로그인하세요.'
+            : '업데이트 확인 실패: GitHub API 접근이 제한되었습니다.';
+      case 404:
+        return usedToken
+            ? '업데이트 확인 실패: private 릴리즈 접근 권한이 없습니다. GitHub를 다시 로그인하세요.'
+            : '업데이트 확인 실패: 릴리즈를 찾을 수 없습니다.';
+      default:
+        return '업데이트 확인 실패: HTTP $statusCode';
+    }
+  }
+
+  Map<String, dynamic>? _findApkAsset(Map<String, dynamic> releaseData) {
+    final assets = releaseData['assets'];
+    if (assets is! List) return null;
+    for (final asset in assets) {
+      if (asset is! Map) continue;
+      final map = Map<String, dynamic>.from(asset.cast<String, dynamic>());
+      final name = map['name']?.toString() ?? '';
+      if (name.endsWith('.apk')) {
+        return map;
+      }
+    }
+    return null;
+  }
+
   Future<void> _checkExistingFile(Map<String, dynamic> releaseData) async {
     final tagName = releaseData['tag_name'];
     final dir = await getExternalStorageDirectory() ??
@@ -269,16 +347,11 @@ class UpdateService extends ChangeNotifier {
     }
     await clearIgnoredUpdate(notify: false);
 
-    final List assets = _latestRelease!['assets'] ?? [];
-    String? downloadUrl;
-    for (var asset in assets) {
-      if (asset['name'].toString().endsWith('.apk')) {
-        downloadUrl = asset['browser_download_url'];
-        break;
-      }
-    }
+    final asset = _findApkAsset(_latestRelease!);
+    final downloadUrl = asset?['browser_download_url']?.toString();
+    final assetApiUrl = asset?['url']?.toString();
 
-    if (downloadUrl == null) {
+    if (downloadUrl == null && assetApiUrl == null) {
       _statusMessage = "릴리즈에 APK 자산이 없습니다.";
       notifyListeners();
       return;
@@ -304,11 +377,26 @@ class UpdateService extends ChangeNotifier {
       }
 
       client = http.Client();
-      final request = http.Request('GET', Uri.parse(downloadUrl));
+      final token = await _githubService.getToken();
+      final requestUri = Uri.parse(
+        (token != null && token.isNotEmpty && assetApiUrl != null)
+            ? assetApiUrl
+            : (downloadUrl ?? assetApiUrl!),
+      );
+      final request = http.Request('GET', requestUri)
+        ..headers.addAll(
+          _buildGitHubHeaders(
+            token: (assetApiUrl != null) ? token : null,
+            binaryAsset: assetApiUrl != null,
+          ),
+        );
       final response = await client.send(request);
       if (response.statusCode != 200) {
         _isDownloading = false;
-        _statusMessage = "다운로드 실패: HTTP ${response.statusCode}";
+        _statusMessage = _buildDownloadErrorMessage(
+          response.statusCode,
+          usedToken: token != null && token.isNotEmpty,
+        );
         notifyListeners();
         return;
       }
@@ -385,6 +473,26 @@ class UpdateService extends ChangeNotifier {
     _ignoredTag = null;
     if (notify) {
       notifyListeners();
+    }
+  }
+
+  String _buildDownloadErrorMessage(
+    int statusCode, {
+    required bool usedToken,
+  }) {
+    switch (statusCode) {
+      case 401:
+        return '다운로드 실패: GitHub 인증이 만료되었습니다. 다시 로그인하세요.';
+      case 403:
+        return usedToken
+            ? '다운로드 실패: GitHub 권한이 부족합니다. 다시 로그인하세요.'
+            : '다운로드 실패: GitHub 접근이 제한되었습니다.';
+      case 404:
+        return usedToken
+            ? '다운로드 실패: private 릴리즈 자산 접근 권한이 없습니다. GitHub를 다시 로그인하세요.'
+            : '다운로드 실패: 릴리즈 자산을 찾을 수 없습니다.';
+      default:
+        return '다운로드 실패: HTTP $statusCode';
     }
   }
 

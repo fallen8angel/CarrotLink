@@ -152,13 +152,14 @@ class _DashboardScreenState extends State<DashboardScreen>
 
     await initializeService();
     final service = FlutterBackgroundService();
-    if (!await service.isRunning()) {
+    final wasRunning = await service.isRunning();
+    if (!wasRunning) {
       await service.startService();
+      service.invoke('updateContent', {
+        'title': 'CarrotLink',
+        'content': '연결 대기 중...',
+      });
     }
-    service.invoke('updateContent', {
-      'title': 'CarrotLink',
-      'content': '연결 대기 중...',
-    });
     _setServiceAppVisibility(foreground, source: source);
   }
 
