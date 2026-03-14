@@ -229,6 +229,14 @@ class OverlayHudService : Service() {
     super.onDestroy()
   }
 
+  override fun onTaskRemoved(rootIntent: Intent?) {
+    // CarrotLink policy:
+    // Swiping the app away from recents should also remove the persistent HUD notification.
+    Log.i(TAG, "Task removed, stopping overlay service")
+    stopSelf()
+    super.onTaskRemoved(rootIntent)
+  }
+
   private fun canDrawOverlay(): Boolean {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
     return Settings.canDrawOverlays(this)

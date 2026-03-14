@@ -89,6 +89,16 @@ class _UpdateDialogState extends State<UpdateDialog> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text("현재 버전: ${updateService.currentVersion}"),
+                if (updateService.ignoredUpdateMessage != null) ...[
+                  SizedBox(height: tokens.itemGap),
+                  Text(
+                    updateService.ignoredUpdateMessage!,
+                    style: TextStyle(
+                      color: scheme.onSurfaceVariant,
+                      fontSize: window.isCompact ? 11.5 : 12,
+                    ),
+                  ),
+                ],
                 SizedBox(height: tokens.itemGap + 2),
                 if (body.isNotEmpty) ...[
                   const Divider(),

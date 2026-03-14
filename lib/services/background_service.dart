@@ -11,7 +11,14 @@ const String notificationChannelId = 'carrot_link_service';
 const int notificationId = 888;
 const String actionDisconnect = 'disconnect';
 
+Future<void>? _initializeServiceFuture;
+
 Future<void> initializeService() async {
+  _initializeServiceFuture ??= _initializeServiceInternal();
+  return _initializeServiceFuture!;
+}
+
+Future<void> _initializeServiceInternal() async {
   final service = FlutterBackgroundService();
 
   const AndroidNotificationChannel channel = AndroidNotificationChannel(
@@ -49,7 +56,7 @@ Future<void> initializeService() async {
   await service.configure(
     androidConfiguration: AndroidConfiguration(
       onStart: onStart,
-      autoStart: true,
+      autoStart: false,
       isForegroundMode: true,
       notificationChannelId: notificationChannelId,
       initialNotificationTitle: 'CarrotLink',
@@ -57,7 +64,7 @@ Future<void> initializeService() async {
       foregroundServiceNotificationId: notificationId,
     ),
     iosConfiguration: IosConfiguration(
-      autoStart: true,
+      autoStart: false,
       onForeground: onStart,
       onBackground: onIosBackground,
     ),
@@ -103,7 +110,6 @@ void onStart(ServiceInstance service) async {
   int profilePort = 22;
 
   bool manualDisconnectRequested = false;
-  DateTime? manualDisconnectUntil;
   int reconnectAttempt = 0;
   int noBroadcastWaitAttempt = 0;
   late Future<void> Function(
@@ -130,12 +136,7 @@ void onStart(ServiceInstance service) async {
 
   bool canAutoReconnect() {
     if (!autoReconnectEnabled) return false;
-    if (!manualDisconnectRequested) return true;
-    final until = manualDisconnectUntil;
-    if (until == null) return false;
-    if (DateTime.now().isBefore(until)) return false;
-    manualDisconnectRequested = false;
-    manualDisconnectUntil = null;
+    if (manualDisconnectRequested) return false;
     return true;
   }
 
@@ -241,6 +242,7 @@ void onStart(ServiceInstance service) async {
       'error': error ?? '',
       'ip': ip ?? connectedIp,
       'port': port ?? connectedPort,
+      'manualDisconnectRequested': manualDisconnectRequested,
     });
   }
 
@@ -308,7 +310,6 @@ void onStart(ServiceInstance service) async {
     await closeClient();
     if (manual) {
       manualDisconnectRequested = true;
-      manualDisconnectUntil = DateTime.now().add(const Duration(minutes: 2));
     }
     emitConnectionState(isConnected: false, reason: reason);
     emitDiscoveryState(source: reason);
@@ -636,7 +637,6 @@ void onStart(ServiceInstance service) async {
     profilePort = port;
     autoReconnectEnabled = true;
     manualDisconnectRequested = false;
-    manualDisconnectUntil = null;
     emitDiscoveryState(source: 'manual_connect');
     if (isValidIpv4(ip)) {
       await connectTo(ip, reason: 'manual_connect');
@@ -667,7 +667,6 @@ void onStart(ServiceInstance service) async {
     }
     if (event['resumeAutoReconnect'] == true) {
       manualDisconnectRequested = false;
-      manualDisconnectUntil = null;
     }
 
     emitDiscoveryState(source: 'configure');
@@ -685,7 +684,6 @@ void onStart(ServiceInstance service) async {
 
   service.on('resumeAutoReconnect').listen((event) {
     manualDisconnectRequested = false;
-    manualDisconnectUntil = null;
     autoReconnectEnabled = true;
     emitDiscoveryState(source: 'resume_auto_reconnect');
     if ((sshClient == null || sshClient!.isClosed) && hasConnectProfile()) {

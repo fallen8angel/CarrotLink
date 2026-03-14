@@ -72,6 +72,10 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
       _liveCameraKind,
     );
     if (_cameraSuspendedByLifecycle && type != 'camera_state') return;
+    if (type == 'camera_diag') {
+      _recordNativeCameraDiag(map);
+      return;
+    }
     if (type == 'camera_frame') {
       final frameId = _DriveOverlaySnapshot._asInt(map['frameId']);
       if (frameId != null) {
@@ -80,6 +84,16 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
           source: 'native',
           cameraKind: eventCameraKind,
         );
+        if (mounted && (_cameraLoading || (_cameraError?.isNotEmpty ?? false))) {
+          _safeSetState(() {
+            _cameraLoading = false;
+            _cameraError = null;
+          });
+        } else {
+          _cameraLoading = false;
+          _cameraError = null;
+        }
+        _beginStartupProvisionalSync(reason: 'camera_frame:native');
       }
       return;
     }
@@ -196,6 +210,15 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
           source: 'web',
           cameraKind: eventCameraKind,
         );
+        if (mounted && (_cameraLoading || (_cameraError?.isNotEmpty ?? false))) {
+          _safeSetState(() {
+            _cameraLoading = false;
+            _cameraError = null;
+          });
+        } else {
+          _cameraLoading = false;
+          _cameraError = null;
+        }
       }
       return;
     }
@@ -252,6 +275,26 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
   Future<void> _loadCameraSource({bool force = false}) async {
     if (!_hudModeLoaded) return;
 
+    if (_useNativeLiveCamera) {
+      final preserveVisibleNativeCamera =
+          _nativeCameraViewId != null &&
+          _cameraError == null &&
+          !_cameraSuspendedByLifecycle;
+      _beginStartupProvisionalSync(reason: 'load_camera_source');
+      _startCameraErrorGrace(reason: 'native_camera_attach');
+      if (mounted) {
+        _safeSetState(() {
+          _cameraLoading = !preserveVisibleNativeCamera;
+          _cameraError = null;
+        });
+      } else {
+        _cameraLoading = !preserveVisibleNativeCamera;
+        _cameraError = null;
+      }
+      _cameraSourceKey = 'native-live:$_hostIp:$_liveCameraName';
+      return;
+    }
+
     if (_openpilotOverlayMode && !_nativeCameraAttachReady) {
       if (mounted) {
         _safeSetState(() {
@@ -262,19 +305,6 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
         _cameraLoading = true;
         _cameraError = null;
       }
-      return;
-    }
-
-    if (_useNativeLiveCamera) {
-      _beginStartupProvisionalSync(reason: 'load_camera_source');
-      _startCameraErrorGrace(reason: 'native_camera_attach');
-      if (mounted) {
-        _safeSetState(() {
-          _cameraLoading = true;
-          _cameraError = null;
-        });
-      }
-      _cameraSourceKey = 'native-live:$_hostIp:$_liveCameraName';
       return;
     }
     final key = 'live:$_hostIp:$_liveCameraName';

@@ -148,6 +148,7 @@ class HudRemotePayloadMapper {
         isPreview: _asBool(meta?['isPreview']),
         isFallbackMetricsApplied: _asBool(meta?['isFallbackMetricsApplied']),
         missingFields: _stringList(meta?['missingFields']),
+        staleReasons: _stringList(meta?['staleReasons']),
         quality: _asString(meta?['quality']) ?? 'live',
       ),
     );
@@ -276,6 +277,7 @@ class HudRemotePayloadMapper {
       ),
       meta: HudMetaState(
         missingFields: missingFields.toList()..sort(),
+        staleReasons: const <String>[],
         quality: 'compat',
       ),
     );

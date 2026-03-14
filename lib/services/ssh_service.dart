@@ -65,6 +65,7 @@ class SSHService extends ChangeNotifier {
 
     service.on('connectionState').listen((event) async {
       if (event == null) return;
+      _syncManualDisconnectState(event['manualDisconnectRequested']);
       final isServiceConnected = event['isConnected'] == true;
       final serviceIp = event['ip']?.toString();
       _serviceConnectedIp =
@@ -109,6 +110,7 @@ class SSHService extends ChangeNotifier {
 
     service.on('discoveryState').listen((event) {
       if (event == null) return;
+      _syncManualDisconnectState(event['manualDisconnectRequested']);
       _serviceDiscoveryListening = event['listening'] == true;
       final source = event['source']?.toString();
       if (source != null && source.isNotEmpty) {
@@ -144,6 +146,7 @@ class SSHService extends ChangeNotifier {
 
     service.on('status').listen((event) async {
       if (event == null) return;
+      _syncManualDisconnectState(event['manualDisconnectRequested']);
       _serviceDiscoveryListening = event['listening'] == true;
       final candidate = event['candidateIp']?.toString();
       if (candidate != null && _isValidIpv4(candidate)) {
@@ -208,6 +211,18 @@ class SSHService extends ChangeNotifier {
       'autoReconnectEnabled': true,
       'resumeAutoReconnect': resumeAutoReconnect,
     });
+  }
+
+  Future<void> syncAutoConnectProfile({
+    bool resumeAutoReconnect = false,
+  }) async {
+    if (resumeAutoReconnect) {
+      _manualDisconnectRequested = false;
+    }
+    await _syncAutoConnectProfileToService(
+      resumeAutoReconnect: resumeAutoReconnect,
+    );
+    notifyListeners();
   }
 
   Future<void> _reconnectFromStorage({String? preferredIp}) async {
@@ -302,6 +317,11 @@ class SSHService extends ChangeNotifier {
   DateTime? _serviceLastSuccessfulSeenAt;
   DateTime? get serviceLastSuccessfulSeenAt => _serviceLastSuccessfulSeenAt;
 
+  void _syncManualDisconnectState(dynamic value) {
+    if (value is! bool) return;
+    _manualDisconnectRequested = value;
+  }
+
   // IP Discovery
   StreamController<String>? _ipDiscoveryController;
   Stream<String> get ipDiscoveryStream {
@@ -332,17 +352,7 @@ class SSHService extends ChangeNotifier {
   bool _heartbeatInFlight = false;
   int _heartbeatFailureCount = 0;
   bool _manualDisconnectRequested = false;
-  DateTime? _manualDisconnectUntil;
-  static const Duration _manualDisconnectCooldown = Duration(seconds: 20);
-  bool get manualDisconnectRequested {
-    if (!_manualDisconnectRequested) return false;
-    final until = _manualDisconnectUntil;
-    if (until == null) return true;
-    if (DateTime.now().isBefore(until)) return true;
-    _manualDisconnectRequested = false;
-    _manualDisconnectUntil = null;
-    return false;
-  }
+  bool get manualDisconnectRequested => _manualDisconnectRequested;
 
   Future<void> connect(
     String ip,
@@ -356,7 +366,6 @@ class SSHService extends ChangeNotifier {
     if (_isConnecting) return;
 
     _manualDisconnectRequested = false;
-    _manualDisconnectUntil = null;
     _isConnecting = true;
     _targetIp = ip; // Set target IP immediately
     _targetPort = port;
@@ -596,8 +605,6 @@ class SSHService extends ChangeNotifier {
           "Connection lost - updating state immediately (reason: $reason)");
       _diag.warn('ssh', 'Disconnected reason=$reason manual=$manual');
       _manualDisconnectRequested = manual;
-      _manualDisconnectUntil =
-          manual ? DateTime.now().add(_manualDisconnectCooldown) : null;
       _isConnecting = false;
       _heartbeatTimer?.cancel();
       _heartbeatTimer = null;
@@ -973,11 +980,8 @@ class SSHService extends ChangeNotifier {
   }
 
   void resumeAutoReconnect() {
-    _manualDisconnectRequested = false;
-    _manualDisconnectUntil = null;
     FlutterBackgroundService().invoke('resumeAutoReconnect');
-    unawaited(_syncAutoConnectProfileToService(resumeAutoReconnect: true));
-    notifyListeners();
+    unawaited(syncAutoConnectProfile(resumeAutoReconnect: true));
   }
 
   void notifyNetworkChanged({String source = 'ui'}) {

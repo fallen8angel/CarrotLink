@@ -29,6 +29,12 @@ class SidecarService {
   final Map<String, ({String base, DateTime at})> _remoteBaseCache =
       <String, ({String base, DateTime at})>{};
   static const Duration _remoteBaseCacheTtl = Duration(seconds: 60);
+  final Map<String, ({String variant, DateTime at})> _sidecarVariantCache =
+      <String, ({String variant, DateTime at})>{};
+  static const Duration _sidecarVariantCacheTtl = Duration(seconds: 60);
+  final Map<String, ({String flavor, DateTime at})> _repoFlavorCache =
+      <String, ({String flavor, DateTime at})>{};
+  static const Duration _repoFlavorCacheTtl = Duration(seconds: 60);
 
   static const String _sessionName = 'carrotlink_view';
   static const String _pythonFileName = 'sidecar.py';
@@ -36,6 +42,7 @@ class SidecarService {
   static const String _pidFileName = 'sidecar.pid';
   static const String _logFileName = 'sidecar.log';
   static const String _revisionFileName = '.sidecar.rev';
+  static const String _pythonDepsFolderName = 'pydeps';
   static const String _legacyCleanupMarkerName = '.sidecar.legacy_cleanup_v2';
   static const String _legacyPythonFileName = 'carrot_linkview.py';
   static const String _legacyRunScriptName = 'run_carrot_linkview.sh';
@@ -49,12 +56,26 @@ class SidecarService {
       '/data/media/0/carrotlink_sidecar';
   static const String _legacyManagedModule = 'selfdrive.carrot.carrot_linkview';
   static const String _defaultProfile = driveRuntimeProfile;
+  static const String defaultVariant = 'default';
+  static const String c4SafeVariant = 'c4_safe';
+  static const String repoFlavorUnknown = 'unknown';
+  static const String repoFlavorC3 = 'c3';
+  static const String repoFlavorC4 = 'c4';
   static const Set<String> _supportedProfiles = <String>{
     'p0',
     'p1',
     'p2',
     'p3',
     'p4',
+  };
+  static const Set<String> _supportedVariants = <String>{
+    defaultVariant,
+    c4SafeVariant,
+  };
+  static const Set<String> _supportedRepoFlavors = <String>{
+    repoFlavorUnknown,
+    repoFlavorC3,
+    repoFlavorC4,
   };
   static const int defaultPort = 7766;
   static const Duration _recentEnsureCooldown = Duration(seconds: 20);
@@ -70,12 +91,137 @@ class SidecarService {
   String _normalizeProfile(String profile) =>
       _supportedProfiles.contains(profile) ? profile : _defaultProfile;
 
+  String _normalizeVariant(String? variant) {
+    final normalized = (variant ?? '').trim().toLowerCase();
+    return _supportedVariants.contains(normalized)
+        ? normalized
+        : defaultVariant;
+  }
+
+  String _normalizeRepoFlavor(String? flavor) {
+    final normalized = (flavor ?? '').trim().toLowerCase();
+    return _supportedRepoFlavors.contains(normalized)
+        ? normalized
+        : repoFlavorUnknown;
+  }
+
+  Future<String> resolveRemoteVariant(
+    SSHService ssh, {
+    bool forceRefresh = false,
+  }) =>
+      _resolveSidecarVariant(ssh, forceRefresh: forceRefresh);
+
+  Future<String> resolveRemoteRepoFlavor(
+    SSHService ssh, {
+    bool forceRefresh = false,
+  }) =>
+      _resolveRemoteRepoFlavor(ssh, forceRefresh: forceRefresh);
+
   String? _resolveClientProbeHost(SSHService ssh) {
     final host = (ssh.connectedIp ?? ssh.targetIp ?? '').trim();
     if (host.isEmpty) {
       return null;
     }
     return host;
+  }
+
+  Future<Map<String, dynamic>?> _readRemoteHealth(
+    SSHService ssh, {
+    int port = defaultPort,
+  }) async {
+    final result = await ssh.executeCommandResult(
+      _bash(
+        '''
+SIDE_PORT=${_q(port.toString())}
+if ! command -v curl >/dev/null 2>&1; then
+  exit 0
+fi
+curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null || true
+''',
+      ),
+      timeout: const Duration(seconds: 6),
+    );
+    if (!result.isSuccess) {
+      return null;
+    }
+    final body = result.output.trim();
+    if (body.isEmpty) {
+      return null;
+    }
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map<String, dynamic>) {
+        return decoded;
+      }
+      if (decoded is Map) {
+        return Map<String, dynamic>.from(decoded);
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  bool _healthMatchesExpected(
+    Map<String, dynamic> health, {
+    String? expectedProfile,
+    String? expectedVariant,
+  }) {
+    bool serviceFresh(String name) {
+      final raw = health['serviceHealth'];
+      if (raw is! Map) {
+        return false;
+      }
+      final service = raw[name];
+      if (service is Map<String, dynamic>) {
+        return service['isFresh'] == true;
+      }
+      if (service is Map) {
+        return service['isFresh'] == true;
+      }
+      return false;
+    }
+
+    if (health['kind'] != 'carrotlink_sidecar_broker_v1') {
+      return false;
+    }
+    if (health['ok'] != true) {
+      return false;
+    }
+    final normalizedExpected =
+        expectedProfile == null ? null : _normalizeProfile(expectedProfile);
+    final normalizedExpectedVariant =
+        expectedVariant == null ? null : _normalizeVariant(expectedVariant);
+    final profile = _normalizeProfile(
+      (health['profile'] ?? normalizedExpected ?? _defaultProfile).toString(),
+    );
+    final variant = _normalizeVariant(
+      (health['variant'] ?? normalizedExpectedVariant ?? defaultVariant)
+          .toString(),
+    );
+    final repoFlavor = _normalizeRepoFlavor(health['repoFlavor']?.toString());
+    if (normalizedExpected != null && profile != normalizedExpected) {
+      return false;
+    }
+    if (normalizedExpectedVariant != null &&
+        variant != normalizedExpectedVariant) {
+      return false;
+    }
+    if (profile == hudBootstrapProfile || profile == 'p0') {
+      return health['hudReady'] == true;
+    }
+    final requiresC4SafeRadarStability =
+        variant == c4SafeVariant && repoFlavor == repoFlavorC4;
+    if (requiresC4SafeRadarStability &&
+        (health['startupProtectionActive'] == true ||
+            health['radarReady'] != true ||
+            health['radarFreshStable'] != true)) {
+      return false;
+    }
+    final freshVisionCore = serviceFresh('modelV2') &&
+        (serviceFresh('roadCameraState') ||
+            serviceFresh('wideRoadCameraState'));
+    return health['hudReady'] == true &&
+        health['liveReady'] == true &&
+        (health['cameraReady'] == true || freshVisionCore);
   }
 
   Future<bool> _isClientReachable(
@@ -104,8 +250,13 @@ class SidecarService {
   Future<bool> _isEndToEndHealthy(
     SSHService ssh, {
     String? expectedProfile,
+    String? expectedVariant,
   }) async {
-    if (!await _isHealthy(ssh, expectedProfile: expectedProfile)) {
+    if (!await _isHealthy(
+      ssh,
+      expectedProfile: expectedProfile,
+      expectedVariant: expectedVariant,
+    )) {
       return false;
     }
     return _isClientReachable(ssh);
@@ -114,78 +265,125 @@ class SidecarService {
   Future<bool> _isHealthy(
     SSHService ssh, {
     String? expectedProfile,
+    String? expectedVariant,
   }) async {
-    final normalizedProfile = expectedProfile == null
-        ? null
-        : _normalizeProfile(expectedProfile);
-    final result = await ssh.executeCommandResult(
-      _bash(
-        '''
-SIDE_PORT=${_q(defaultPort.toString())}
-EXPECTED_PROFILE=${_q(normalizedProfile ?? '')}
-check_sidecar() {
-  if ! command -v curl >/dev/null 2>&1; then
-    return 1
-  fi
-  HEALTH_JSON=\$(curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null || true)
-  [ -n "\$HEALTH_JSON" ] &&
-    printf '%s' "\$HEALTH_JSON" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' &&
-    printf '%s' "\$HEALTH_JSON" | grep -Fq '"kind":"carrotlink_sidecar_broker_v1"' &&
-    { [ -z "\$EXPECTED_PROFILE" ] || printf '%s' "\$HEALTH_JSON" | grep -Fq '"profile":"'"\$EXPECTED_PROFILE"'"'; }
-}
-if check_sidecar; then
-  echo "SIDECAR_HEALTH_OK"
-else
-  echo "SIDECAR_HEALTH_BAD"
-fi
-''',
-      ),
-      timeout: const Duration(seconds: 6),
+    final health = await _readRemoteHealth(
+      ssh,
+      port: defaultPort,
     );
-    if (!result.isSuccess) {
+    if (health == null) {
       return false;
     }
-    return result.output.contains('SIDECAR_HEALTH_OK');
+    return _healthMatchesExpected(
+      health,
+      expectedProfile: expectedProfile,
+      expectedVariant: expectedVariant,
+    );
   }
 
   Future<String?> _switchProfileInPlace(
     SSHService ssh, {
     required int port,
     required String profile,
+    required String expectedVariant,
   }) async {
     final normalizedProfile = _normalizeProfile(profile);
+    final normalizedVariant = _normalizeVariant(expectedVariant);
     final result = await ssh.executeCommandResult(
       _bash(
         '''
 SIDE_PORT=${_q(port.toString())}
 TARGET_PROFILE=${_q(normalizedProfile)}
+EXPECT_VARIANT=${_q(normalizedVariant)}
 
 if ! command -v curl >/dev/null 2>&1; then
   echo "SIDECAR_PROFILE_SWITCH_UNAVAILABLE"
   exit 2
 fi
 
+health_ready() {
+  HEALTH_JSON_INPUT="\$1"
+  EXPECT_KIND="\$2"
+  EXPECT_PROFILE="\$3"
+  EXPECT_VARIANT_VALUE="\$4"
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+  python3 - "\$HEALTH_JSON_INPUT" "\$EXPECT_KIND" "\$EXPECT_PROFILE" "\$EXPECT_VARIANT_VALUE" <<'PY'
+import json
+import sys
+
+try:
+    health = json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+
+expect_kind = sys.argv[2]
+expect_profile = sys.argv[3].strip().lower()
+expect_variant = sys.argv[4].strip().lower()
+if health.get("kind") != expect_kind:
+    raise SystemExit(1)
+if health.get("ok") is not True:
+    raise SystemExit(1)
+
+profile = str(health.get("profile") or expect_profile or "").strip().lower()
+if expect_profile and profile != expect_profile:
+    raise SystemExit(1)
+variant = str(health.get("variant") or "default").strip().lower()
+if expect_variant and variant != expect_variant:
+    raise SystemExit(1)
+repo_flavor = str(health.get("repoFlavor") or "unknown").strip().lower()
+
+hud_ready = health.get("hudReady") is True
+live_ready = health.get("liveReady") is True
+camera_ready = health.get("cameraReady") is True
+startup_protection_active = health.get("startupProtectionActive") is True
+radar_ready = health.get("radarReady") is True
+radar_fresh_stable = health.get("radarFreshStable") is True
+service_health = health.get("serviceHealth") or {}
+
+def service_fresh(name: str) -> bool:
+    raw = service_health.get(name)
+    return isinstance(raw, dict) and raw.get("isFresh") is True
+
+fresh_vision_core = service_fresh("modelV2") and (
+    service_fresh("roadCameraState") or service_fresh("wideRoadCameraState")
+)
+
+if profile in ("p2", "p3", "p4"):
+    if (
+        variant == ${jsonEncode(c4SafeVariant)}
+        and repo_flavor == ${jsonEncode(repoFlavorC4)}
+        and (
+            startup_protection_active
+            or not radar_ready
+            or not radar_fresh_stable
+        )
+    ):
+        raise SystemExit(1)
+    raise SystemExit(
+        0 if (hud_ready and live_ready and (camera_ready or fresh_vision_core)) else 1
+    )
+raise SystemExit(0 if hud_ready else 1)
+PY
+}
+
 HEALTH_JSON=\$(curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null || true)
 if [ -z "\$HEALTH_JSON" ]; then
   echo "SIDECAR_PROFILE_SWITCH_SKIPPED reason=no_health"
   exit 3
 fi
-if ! printf '%s' "\$HEALTH_JSON" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then
+if ! health_ready "\$HEALTH_JSON" "carrotlink_sidecar_broker_v1" "" "\$EXPECT_VARIANT"; then
   echo "SIDECAR_PROFILE_SWITCH_SKIPPED reason=health_bad"
   exit 3
 fi
-if ! printf '%s' "\$HEALTH_JSON" | grep -Fq '"kind":"carrotlink_sidecar_broker_v1"'; then
-  echo "SIDECAR_PROFILE_SWITCH_SKIPPED reason=kind_mismatch"
-  exit 3
-fi
-
 CURRENT_PROFILE=\$(printf '%s' "\$HEALTH_JSON" | sed -n 's/.*"profile":"\\([^"]*\\)".*/\\1/p' | head -n 1)
 if [ -z "\$CURRENT_PROFILE" ]; then
   echo "SIDECAR_PROFILE_SWITCH_SKIPPED reason=profile_missing"
   exit 3
 fi
 if [ "\$CURRENT_PROFILE" = "\$TARGET_PROFILE" ]; then
-  echo "SIDECAR_PROFILE_ALREADY profile=\$TARGET_PROFILE port=\$SIDE_PORT"
+  echo "SIDECAR_PROFILE_ALREADY profile=\$TARGET_PROFILE variant=\$EXPECT_VARIANT port=\$SIDE_PORT"
   exit 0
 fi
 
@@ -207,11 +405,8 @@ fi
 
 for i in \$(seq 1 20); do
   NEXT_HEALTH=\$(curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null || true)
-  if [ -n "\$NEXT_HEALTH" ] &&
-     printf '%s' "\$NEXT_HEALTH" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' &&
-     printf '%s' "\$NEXT_HEALTH" | grep -Fq '"kind":"carrotlink_sidecar_broker_v1"' &&
-     printf '%s' "\$NEXT_HEALTH" | grep -Fq '"profile":"'"'\$TARGET_PROFILE'"'; then
-    echo "SIDECAR_PROFILE_SWITCHED profile=\$TARGET_PROFILE port=\$SIDE_PORT"
+  if [ -n "\$NEXT_HEALTH" ] && health_ready "\$NEXT_HEALTH" "carrotlink_sidecar_broker_v1" "\$TARGET_PROFILE" "\$EXPECT_VARIANT"; then
+    echo "SIDECAR_PROFILE_SWITCHED profile=\$TARGET_PROFILE variant=\$EXPECT_VARIANT port=\$SIDE_PORT"
     exit 0
   fi
   sleep 0.2
@@ -232,6 +427,166 @@ exit 5
       return output;
     }
     return null;
+  }
+
+  Future<String> _resolveSidecarVariant(
+    SSHService ssh, {
+    String? remoteBase,
+    bool forceRefresh = false,
+  }) async {
+    final key = _hostKey(ssh);
+    if (!forceRefresh) {
+      final cached = _sidecarVariantCache[key];
+      if (cached != null &&
+          DateTime.now().difference(cached.at) < _sidecarVariantCacheTtl) {
+        return cached.variant;
+      }
+    }
+
+    final resolvedRemoteBase = remoteBase ?? await _resolveRemoteBase(ssh);
+    final repoRoot = _repoRootFromBase(resolvedRemoteBase);
+    final result = await ssh.executeCommandResult(
+      _bash(
+        '''
+BASE=${_q(resolvedRemoteBase)}
+REPO=${_q(repoRoot ?? '')}
+VARIANT_FILE="\$BASE/.variant"
+
+normalize_variant() {
+  case "\$(printf '%s' "\$1" | tr '[:upper:]' '[:lower:]')" in
+    ${_q(c4SafeVariant)}) printf '%s\n' ${_q(c4SafeVariant)} ;;
+    ${_q(defaultVariant)}) printf '%s\n' ${_q(defaultVariant)} ;;
+    *) printf '%s\n' ${_q(defaultVariant)} ;;
+  esac
+}
+
+if [ -f "\$VARIANT_FILE" ]; then
+  RAW_VARIANT=\$(tr -d '\r' < "\$VARIANT_FILE" | head -n 1)
+  printf 'variant=%s\n' "\$(normalize_variant "\$RAW_VARIANT")"
+  exit 0
+fi
+
+if [ -n "\$REPO" ] && command -v git >/dev/null 2>&1; then
+  BRANCH=\$(git -C "\$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  if printf '%s' "\$BRANCH" | grep -qiE '(^|[-_/])c4(\$|[-_/])'; then
+    printf 'variant=%s\n' ${_q(c4SafeVariant)}
+    exit 0
+  fi
+fi
+
+CFG="\$REPO/system/manager/process_config.py"
+if [ -f "\$CFG" ] && command -v python3 >/dev/null 2>&1; then
+  python3 - "\$CFG" <<'PY'
+from pathlib import Path
+import sys
+
+cfg = Path(sys.argv[1])
+try:
+    text = cfg.read_text(encoding="utf-8")
+except Exception:
+    text = cfg.read_text(errors="ignore")
+
+if 'PythonProcess("ui"' in text or "PythonProcess('ui'" in text:
+    print("variant=c4_safe")
+else:
+    print("variant=default")
+PY
+  exit 0
+fi
+
+printf 'variant=%s\n' ${_q(defaultVariant)}
+''',
+      ),
+      timeout: const Duration(seconds: 8),
+    );
+
+    var resolved = defaultVariant;
+    if (result.isSuccess) {
+      for (final line in result.output.split('\n')) {
+        final trimmed = line.trim();
+        if (trimmed.startsWith('variant=')) {
+          resolved = _normalizeVariant(trimmed.substring('variant='.length));
+          break;
+        }
+      }
+    }
+    _sidecarVariantCache[key] = (variant: resolved, at: DateTime.now());
+    return resolved;
+  }
+
+  Future<String> _resolveRemoteRepoFlavor(
+    SSHService ssh, {
+    String? remoteBase,
+    bool forceRefresh = false,
+  }) async {
+    final key = _hostKey(ssh);
+    if (!forceRefresh) {
+      final cached = _repoFlavorCache[key];
+      if (cached != null &&
+          DateTime.now().difference(cached.at) < _repoFlavorCacheTtl) {
+        return cached.flavor;
+      }
+    }
+
+    final resolvedRemoteBase = remoteBase ?? await _resolveRemoteBase(ssh);
+    final repoRoot = _repoRootFromBase(resolvedRemoteBase);
+    final result = await ssh.executeCommandResult(
+      _bash(
+        '''
+REPO=${_q(repoRoot ?? '')}
+
+if [ -n "\$REPO" ] && command -v git >/dev/null 2>&1; then
+  BRANCH=\$(git -C "\$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  if printf '%s' "\$BRANCH" | grep -qiE '(^|[-_/])c4(\$|[-_/])'; then
+    printf 'flavor=%s\n' ${_q(repoFlavorC4)}
+    exit 0
+  fi
+  if printf '%s' "\$BRANCH" | grep -qiE '(^|[-_/])c3(\$|[-_/])'; then
+    printf 'flavor=%s\n' ${_q(repoFlavorC3)}
+    exit 0
+  fi
+fi
+
+CFG="\$REPO/system/manager/process_config.py"
+if [ -f "\$CFG" ] && command -v python3 >/dev/null 2>&1; then
+  python3 - "\$CFG" <<'PY'
+from pathlib import Path
+import sys
+
+cfg = Path(sys.argv[1])
+try:
+    text = cfg.read_text(encoding="utf-8")
+except Exception:
+    text = cfg.read_text(errors="ignore")
+
+if 'PythonProcess("ui"' in text or "PythonProcess('ui'" in text:
+    print("flavor=c4")
+elif 'NativeProcess("ui"' in text or "NativeProcess('ui'" in text:
+    print("flavor=c3")
+else:
+    print("flavor=unknown")
+PY
+  exit 0
+fi
+
+printf 'flavor=%s\n' ${_q(repoFlavorUnknown)}
+''',
+      ),
+      timeout: const Duration(seconds: 8),
+    );
+
+    var resolved = repoFlavorUnknown;
+    if (result.isSuccess) {
+      for (final line in result.output.split('\n')) {
+        final trimmed = line.trim();
+        if (trimmed.startsWith('flavor=')) {
+          resolved = _normalizeRepoFlavor(trimmed.substring('flavor='.length));
+          break;
+        }
+      }
+    }
+    _repoFlavorCache[key] = (flavor: resolved, at: DateTime.now());
+    return resolved;
   }
 
   String _bash(String script) {
@@ -297,6 +652,22 @@ exit 5
     return v.length <= length ? v : v.substring(0, length);
   }
 
+  static final RegExp _revisionHashPattern = RegExp(
+    r'^[0-9a-f]{64}$',
+    caseSensitive: false,
+  );
+
+  String? _extractRevisionHash(String text) {
+    for (final rawLine in _toUnixText(text).split('\n')) {
+      final line = rawLine.trim();
+      if (line.isEmpty) continue;
+      if (_revisionHashPattern.hasMatch(line)) {
+        return line.toLowerCase();
+      }
+    }
+    return null;
+  }
+
   Future<String> localRevision() async {
     final cached = _cachedLocalRevision;
     if (cached != null && cached.isNotEmpty) {
@@ -333,6 +704,17 @@ fi
       ),
       timeout: const Duration(seconds: 8),
     );
+    final stdoutRevision = _extractRevisionHash(result.stdout);
+    if (stdoutRevision != null) {
+      if (!result.isSuccess) {
+        _diag.warn(
+          'sidecar',
+          'Remote revision accepted despite exit=${result.exitCode} '
+              'rev=${shortRevision(stdoutRevision)} stderr=${result.stderr}',
+        );
+      }
+      return stdoutRevision;
+    }
     if (!result.isSuccess) {
       throw Exception('사이드카 리비전 조회 실패: ${result.output}');
     }
@@ -358,9 +740,11 @@ fi
     final lastOk = _lastEnsureSucceededAtByHost[hostKey];
     if (lastOk != null && now.difference(lastOk) < _recentEnsureCooldown) {
       final future = () async {
+        final expectedVariant = await _resolveSidecarVariant(ssh);
         final healthy = await _isEndToEndHealthy(
           ssh,
           expectedProfile: normalizedProfile,
+          expectedVariant: expectedVariant,
         );
         if (healthy) {
           _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
@@ -370,6 +754,7 @@ fi
           ssh,
           timeout: _postStartHealthGrace,
           expectedProfile: normalizedProfile,
+          expectedVariant: expectedVariant,
         );
         if (warmedUp) {
           _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
@@ -379,6 +764,7 @@ fi
           ssh,
           hostKey: hostKey,
           profile: normalizedProfile,
+          variant: expectedVariant,
         );
       }();
       _inFlightEnsureByHost[hostKey] = future;
@@ -388,11 +774,15 @@ fi
         }
       });
     }
-    final future = _ensureRunningInternal(
-      ssh,
-      hostKey: hostKey,
-      profile: normalizedProfile,
-    );
+    final future = () async {
+      final expectedVariant = await _resolveSidecarVariant(ssh);
+      await _ensureRunningInternal(
+        ssh,
+        hostKey: hostKey,
+        profile: normalizedProfile,
+        variant: expectedVariant,
+      );
+    }();
     _inFlightEnsureByHost[hostKey] = future;
     return future.whenComplete(() {
       if (identical(_inFlightEnsureByHost[hostKey], future)) {
@@ -405,10 +795,15 @@ fi
     SSHService ssh, {
     required Duration timeout,
     String? expectedProfile,
+    String? expectedVariant,
   }) async {
     final deadline = DateTime.now().add(timeout);
     while (true) {
-      if (await _isEndToEndHealthy(ssh, expectedProfile: expectedProfile)) {
+      if (await _isEndToEndHealthy(
+        ssh,
+        expectedProfile: expectedProfile,
+        expectedVariant: expectedVariant,
+      )) {
         return true;
       }
       if (DateTime.now().isAfter(deadline)) {
@@ -422,6 +817,7 @@ fi
     SSHService ssh, {
     required String hostKey,
     required String profile,
+    required String variant,
   }) async {
     // Always check revision even if healthy — a running old sidecar must be
     // replaced when our bundled assets have changed.
@@ -430,16 +826,25 @@ fi
     final revisionMatch = remoteRev != null && remoteRev == localRev;
 
     if (revisionMatch) {
-      if (await _isEndToEndHealthy(ssh, expectedProfile: profile)) {
+      if (await _isEndToEndHealthy(
+        ssh,
+        expectedProfile: profile,
+        expectedVariant: variant,
+      )) {
         _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
         return;
       }
-      final remoteHealthy = await _isHealthy(ssh, expectedProfile: profile);
+      final remoteHealthy = await _isHealthy(
+        ssh,
+        expectedProfile: profile,
+        expectedVariant: variant,
+      );
       if (remoteHealthy) {
         final becameReachable = await _waitUntilEndToEndHealthy(
           ssh,
           timeout: _clientReachabilityGrace,
           expectedProfile: profile,
+          expectedVariant: variant,
         );
         if (becameReachable) {
           _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
@@ -449,13 +854,13 @@ fi
         _diag.warn(
           'sidecar',
           'Remote health ok but client reachability failed '
-              'host=$probeHost port=$defaultPort profile=$profile — '
+              'host=$probeHost port=$defaultPort profile=$profile variant=$variant - '
               'forcing runtime restart',
         );
         try {
           await stop(ssh);
         } catch (_) {}
-        await start(ssh, profile: profile);
+        await start(ssh, profile: profile, variant: variant);
         _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
         return;
       }
@@ -466,7 +871,7 @@ fi
         'sidecar',
         'Revision mismatch local=${shortRevision(localRev)} '
             'remote=${shortRevision(remoteRev ?? "-")} '
-            'profile=$profile — manual install required',
+            'profile=$profile variant=$variant - manual install required',
       );
       throw Exception(
         'SIDECAR_INSTALL_REQUIRED '
@@ -476,7 +881,7 @@ fi
     }
 
     try {
-      await start(ssh, profile: profile);
+      await start(ssh, profile: profile, variant: variant);
       _lastEnsureSucceededAtByHost[hostKey] = DateTime.now();
       return;
     } catch (e) {
@@ -858,7 +1263,10 @@ print(f"cfg_removed={removed}")
   /// Invalidates the cached remote base path for [ssh].  Call this after any
   /// operation that may move or delete the sidecar base directory (e.g. reset).
   void _invalidateRemoteBaseCache(SSHService ssh) {
-    _remoteBaseCache.remove(_hostKey(ssh));
+    final key = _hostKey(ssh);
+    _remoteBaseCache.remove(key);
+    _sidecarVariantCache.remove(key);
+    _repoFlavorCache.remove(key);
   }
 
   Future<String> _resolveRemoteBase(
@@ -960,7 +1368,7 @@ echo "\$BASE"
       _bash(
         '''
 BASE=${_q(remoteBase)}
-mkdir -p "\$BASE" "\$BASE/logs"
+mkdir -p "\$BASE" "\$BASE/logs" "\$BASE/$_pythonDepsFolderName"
 ''',
       ),
       timeout: const Duration(seconds: 30),
@@ -986,14 +1394,63 @@ chmod 755 "\$BASE/$_runScriptName" "\$BASE/$_pythonFileName"
       throw Exception('실행 권한 설정 실패: ${chmod.output}');
     }
 
+    final msgpackInstall = await ssh.executeCommandResult(
+      _bash(
+        '''
+BASE=${_q(remoteBase)}
+PYDEPS="\$BASE/$_pythonDepsFolderName"
+mkdir -p "\$PYDEPS"
+
+check_msgpack() {
+  TARGET_DIR="\$1"
+  PYTHONPATH="\$TARGET_DIR" python3 - "\$TARGET_DIR" <<'PY'
+import os
+import sys
+
+try:
+    import msgpack
+except Exception:
+    raise SystemExit(1)
+
+target_dir = os.path.abspath(sys.argv[1])
+module_path = os.path.abspath(getattr(msgpack, "__file__", ""))
+if not module_path.startswith(target_dir + os.sep):
+    raise SystemExit(1)
+
+print(f"MSGPACK_OK version={getattr(msgpack, '__version__', '?')} path={module_path}")
+PY
+}
+
+if check_msgpack "\$PYDEPS"; then
+  echo "MSGPACK_STATUS already_ready"
+else
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "MSGPACK_STATUS python3_missing"
+    exit 21
+  fi
+  python3 -m pip install --disable-pip-version-check --no-input --target "\$PYDEPS" --upgrade msgpack
+  check_msgpack "\$PYDEPS"
+  echo "MSGPACK_STATUS installed"
+fi
+''',
+      ),
+      timeout: const Duration(minutes: 3),
+    );
+    if (!msgpackInstall.isSuccess) {
+      throw Exception('msgpack 설치 실패: ${msgpackInstall.output}');
+    }
+
     _diag.info('sidecar', 'Deploy success base=$remoteBase');
-    return '배포 완료: $remoteBase (rev=${shortRevision(revision)})';
+    return '배포 완료: $remoteBase (rev=${shortRevision(revision)})\n'
+        '${msgpackInstall.output.trim()}';
   }
 
   Future<String> start(
     SSHService ssh, {
     int port = defaultPort,
     String profile = _defaultProfile,
+    String? variant,
+    String? repoFlavor,
   }) async {
     if (!ssh.isConnected) {
       throw Exception('기기와 연결되어 있지 않습니다.');
@@ -1002,10 +1459,17 @@ chmod 755 "\$BASE/$_runScriptName" "\$BASE/$_pythonFileName"
     final remoteBase = await _resolveRemoteBase(ssh);
     final normalizedProfile =
         _supportedProfiles.contains(profile) ? profile : _defaultProfile;
+    final normalizedVariant = _normalizeVariant(
+      variant ?? await _resolveSidecarVariant(ssh, remoteBase: remoteBase),
+    );
+    final normalizedRepoFlavor = _normalizeRepoFlavor(
+      repoFlavor ?? await _resolveRemoteRepoFlavor(ssh, remoteBase: remoteBase),
+    );
     final switched = await _switchProfileInPlace(
       ssh,
       port: port,
       profile: normalizedProfile,
+      expectedVariant: normalizedVariant,
     );
     if (switched != null) {
       _diag.info('sidecar', 'Start reused output=$switched');
@@ -1013,7 +1477,9 @@ chmod 755 "\$BASE/$_runScriptName" "\$BASE/$_pythonFileName"
     }
     _diag.info(
       'sidecar',
-      'Start request profile=$normalizedProfile port=$port',
+      'Start request profile=$normalizedProfile variant=$normalizedVariant '
+          'repoFlavor=$normalizedRepoFlavor '
+          'port=$port',
     );
     final result = await ssh.executeCommandResult(
       _bash(
@@ -1022,6 +1488,8 @@ chmod 755 "\$BASE/$_runScriptName" "\$BASE/$_pythonFileName"
 BASE=${_q(remoteBase)}
 SESSION=${_q(_sessionName)}
 PROFILE=${_q(normalizedProfile)}
+VARIANT=${_q(normalizedVariant)}
+OPENPILOT_FLAVOR=${_q(normalizedRepoFlavor)}
 PORT=${_q(port.toString())}
 SIDE_PIDFILE="\$BASE/$_pidFileName"
 SIDE_LOGFILE="\$BASE/logs/$_logFileName"
@@ -1065,11 +1533,72 @@ port_pids() {
 health_ok() {
   PORT_TO_CHECK="\$1"
   EXPECT_KIND="\$2"
+  EXPECT_PROFILE="\$3"
+  EXPECT_VARIANT="\$4"
   if ! command -v curl >/dev/null 2>&1; then
     return 1
   fi
-  curl -fsS --max-time 1 "http://127.0.0.1:\$PORT_TO_CHECK/health" 2>/dev/null | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' &&
-  curl -fsS --max-time 1 "http://127.0.0.1:\$PORT_TO_CHECK/health" 2>/dev/null | grep -Fq '"kind":"'"\$EXPECT_KIND"'"'
+  HEALTH_JSON=\$(curl -fsS --max-time 1 "http://127.0.0.1:\$PORT_TO_CHECK/health" 2>/dev/null || true)
+  if [ -z "\$HEALTH_JSON" ] || ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+  python3 - "\$HEALTH_JSON" "\$EXPECT_KIND" "\$EXPECT_PROFILE" "\$EXPECT_VARIANT" <<'PY'
+import json
+import sys
+
+try:
+    health = json.loads(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+
+expect_kind = sys.argv[2]
+expect_profile = sys.argv[3].strip().lower()
+expect_variant = sys.argv[4].strip().lower()
+if health.get("kind") != expect_kind:
+    raise SystemExit(1)
+if health.get("ok") is not True:
+    raise SystemExit(1)
+
+profile = str(health.get("profile") or expect_profile or "").strip().lower()
+if expect_profile and profile != expect_profile:
+    raise SystemExit(1)
+variant = str(health.get("variant") or "default").strip().lower()
+if expect_variant and variant != expect_variant:
+    raise SystemExit(1)
+repo_flavor = str(health.get("repoFlavor") or "unknown").strip().lower()
+
+hud_ready = health.get("hudReady") is True
+live_ready = health.get("liveReady") is True
+camera_ready = health.get("cameraReady") is True
+startup_protection_active = health.get("startupProtectionActive") is True
+radar_ready = health.get("radarReady") is True
+radar_fresh_stable = health.get("radarFreshStable") is True
+service_health = health.get("serviceHealth") or {}
+
+def service_fresh(name: str) -> bool:
+    raw = service_health.get(name)
+    return isinstance(raw, dict) and raw.get("isFresh") is True
+
+fresh_vision_core = service_fresh("modelV2") and (
+    service_fresh("roadCameraState") or service_fresh("wideRoadCameraState")
+)
+
+if profile in ("p2", "p3", "p4"):
+    if (
+        variant == ${jsonEncode(c4SafeVariant)}
+        and repo_flavor == ${jsonEncode(repoFlavorC4)}
+        and (
+            startup_protection_active
+            or not radar_ready
+            or not radar_fresh_stable
+        )
+    ):
+        raise SystemExit(1)
+    raise SystemExit(
+        0 if (hud_ready and live_ready and (camera_ready or fresh_vision_core)) else 1
+    )
+raise SystemExit(0 if hud_ready else 1)
+PY
 }
 
 start_service() {
@@ -1109,10 +1638,10 @@ start_service() {
   fi
 
   if command -v tmux >/dev/null 2>&1; then
-    tmux new-session -d -s "\$SESSION_NAME" "env CARROTLINK_SIDECAR_BASE=\$BASE CARROTLINK_SIDECAR_PROFILE=\$PROFILE CARROTLINK_SIDECAR_PORT=\$PORT CARROTLINK_CAMERA_PORT=\$CAMERA_PORT \$EXTRA_ENV bash \$BASE/\$RUN_SCRIPT >> \$LOG_FILE 2>&1"
+    tmux new-session -d -s "\$SESSION_NAME" "env CARROTLINK_SIDECAR_BASE=\$BASE CARROTLINK_SIDECAR_PROFILE=\$PROFILE CARROTLINK_SIDECAR_VARIANT=\$VARIANT CARROTLINK_OPENPILOT_FLAVOR=\$OPENPILOT_FLAVOR CARROTLINK_SIDECAR_PORT=\$PORT CARROTLINK_CAMERA_PORT=\$CAMERA_PORT \$EXTRA_ENV bash \$BASE/\$RUN_SCRIPT >> \$LOG_FILE 2>&1"
     echo "\${KIND}_start_method=tmux"
   else
-    nohup env CARROTLINK_SIDECAR_BASE="\$BASE" CARROTLINK_SIDECAR_PROFILE="\$PROFILE" CARROTLINK_SIDECAR_PORT="\$PORT" CARROTLINK_CAMERA_PORT="\$CAMERA_PORT" \$EXTRA_ENV bash "\$BASE/\$RUN_SCRIPT" >> "\$LOG_FILE" 2>&1 &
+    nohup env CARROTLINK_SIDECAR_BASE="\$BASE" CARROTLINK_SIDECAR_PROFILE="\$PROFILE" CARROTLINK_SIDECAR_VARIANT="\$VARIANT" CARROTLINK_OPENPILOT_FLAVOR="\$OPENPILOT_FLAVOR" CARROTLINK_SIDECAR_PORT="\$PORT" CARROTLINK_CAMERA_PORT="\$CAMERA_PORT" \$EXTRA_ENV bash "\$BASE/\$RUN_SCRIPT" >> "\$LOG_FILE" 2>&1 &
     NEW_PID=\$!
     if [ -n "\$NEW_PID" ]; then
       echo "\$NEW_PID" > "\$PID_FILE"
@@ -1123,7 +1652,7 @@ start_service() {
   READY=0
   if command -v curl >/dev/null 2>&1; then
     for i in \$(seq 1 40); do
-      if health_ok "\$TARGET_PORT" "\$EXPECT_KIND"; then
+      if health_ok "\$TARGET_PORT" "\$EXPECT_KIND" "\$PROFILE" "\$VARIANT"; then
         READY=1
         break
       fi
@@ -1157,11 +1686,10 @@ start_service() {
 if command -v curl >/dev/null 2>&1; then
   HEALTH_JSON=\$(curl -fsS --max-time 1 "http://127.0.0.1:\$PORT/health" 2>/dev/null || true)
   if [ -n "\$HEALTH_JSON" ] &&
-     printf '%s' "\$HEALTH_JSON" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' &&
-     printf '%s' "\$HEALTH_JSON" | grep -Fq '"kind":"carrotlink_sidecar_broker_v1"'; then
+     health_ok "\$PORT" "carrotlink_sidecar_broker_v1" "\$PROFILE" "\$VARIANT"; then
     CURRENT_PROFILE=\$(printf '%s' "\$HEALTH_JSON" | sed -n 's/.*"profile":"\\([^"]*\\)".*/\\1/p' | head -n 1)
     if [ "\$CURRENT_PROFILE" = "\$PROFILE" ]; then
-      echo "SIDECAR_ALREADY_RUNNING profile=\$PROFILE port=\$PORT base=\$BASE"
+      echo "SIDECAR_ALREADY_RUNNING profile=\$PROFILE variant=\$VARIANT port=\$PORT base=\$BASE"
       exit 0
     fi
   fi
@@ -1170,7 +1698,7 @@ fi
 start_service "SIDECAR" "\$SESSION" "$_runScriptName" "\$SIDE_PIDFILE" "\$SIDE_LOGFILE" "\$PORT" "carrotlink_sidecar_broker_v1" "CARROTLINK_SIDECAR_HOST=0.0.0.0"
 
 SIDE_PORT_PIDS=\$(port_pids "\$PORT" | tr '\n' ',' | sed 's/,\$//' || true)
-echo "SIDECAR_STARTED profile=\$PROFILE port=\$PORT base=\$BASE"
+echo "SIDECAR_STARTED profile=\$PROFILE variant=\$VARIANT port=\$PORT base=\$BASE"
 echo "sidecar_port_pids=\$SIDE_PORT_PIDS"
 ''',
       ),

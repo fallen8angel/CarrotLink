@@ -1,7 +1,7 @@
 name: carrot_pilot_manager
 description: A CarrotLink App
 publish_to: 'kooingh354'
-version: 2.0061.0+2006100
+version: 2.0076.0+2007600
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -48,7 +48,13 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^2.0.0
-  flutter_launcher_icons: ^0.13.1
+flutter_launcher_icons: ^0.13.1
+
+# CarrotLink keeps a local override because recent-task removal must fully stop
+# the foreground background-service notification instead of respawning.
+dependency_overrides:
+  flutter_background_service_android:
+    path: third_party/flutter_background_service_android
 
 flutter_icons:
   android: "launcher_icon"

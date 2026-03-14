@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
+import 'package:msgpack_dart/msgpack_dart.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../models/hud_remote_stream_event.dart';
@@ -70,6 +72,7 @@ class HudRemoteStreamDataSource {
               port: candidate.port,
               path: candidate.path,
               queryParameters: <String, String>{
+                'encoding': 'msgpack',
                 'role': clientRole,
                 'session': sessionId,
               },
@@ -164,16 +167,23 @@ class HudRemoteStreamDataSource {
   }
 
   Map<String, dynamic>? _decodePayload(dynamic event) {
-    final rawText = switch (event) {
-      String value => value,
-      List<int> bytes => utf8.decode(bytes, allowMalformed: true),
-      _ => null,
-    };
-    if (rawText == null || rawText.trim().isEmpty) {
+    dynamic decoded;
+    if (event is String) {
+      final rawText = event;
+      if (rawText.trim().isEmpty) {
+        return null;
+      }
+      decoded = jsonDecode(rawText);
+    } else if (event is List<int>) {
+      try {
+        decoded = jsonDecode(utf8.decode(event, allowMalformed: true));
+      } catch (_) {
+        decoded = deserialize(Uint8List.fromList(event));
+      }
+    } else {
       return null;
     }
 
-    final decoded = jsonDecode(rawText);
     if (decoded is Map && decoded['type'] == 'hello') {
       return null;
     }

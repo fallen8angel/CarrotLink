@@ -14,6 +14,7 @@ void main() {
   OriginalHudSnapshot buildSnapshot({
     int? receivedAtMs,
     List<String> missingFields = const <String>[],
+    List<String> staleReasons = const <String>[],
   }) {
     return OriginalHudSnapshot(
       tsMonoMs: 1234,
@@ -47,6 +48,7 @@ void main() {
       meta: HudMetaState(
         quality: 'semantic',
         missingFields: missingFields,
+        staleReasons: staleReasons,
       ),
     );
   }
@@ -77,6 +79,19 @@ void main() {
       expect(model.showCompatibilityHint, isTrue);
       expect(model.compatibilityHint, '차량 데이터 대기');
       expect(model.compatibilityBadgeText, '차량');
+    });
+
+    test('shows stale reason hint when sidecar reports device stall', () {
+      final snapshot = buildSnapshot(
+        receivedAtMs: DateTime.now().millisecondsSinceEpoch,
+        staleReasons: const <String>['device.deviceState.stale'],
+      );
+
+      final model = HudAdaptiveDisplayModel.fromSnapshot(snapshot);
+
+      expect(model.showCompatibilityHint, isTrue);
+      expect(model.compatibilityHint, '기기 상태 지연');
+      expect(model.compatibilityBadgeText, '기기');
     });
   });
 }

@@ -27,9 +27,11 @@ class _DriveOverlayPainter extends CustomPainter {
   static const double _baseSourceHeight = 1208.0;
   static const double _clipMargin = 500.0;
 
-  // EMA smoothing for lead box anchor — matches carrot.cc path_fx/fy/fwidth (alpha=0.85).
+  // Keep some smoothing, but bias closer to live radar movement for lower lag.
   // Two slots: 0 = leadOne, 1 = leadTwo. Static so they persist across painter instances.
-  static const double _leadEmaAlpha = 0.85;
+  static const double _leadEmaAlpha = 0.72;
+  static const double _leadCloseEmaAlpha = 0.62;
+  static const double _leadNearEmaAlpha = 0.68;
   static double _emaFx0 = 0.0, _emaFy0 = 0.0, _emaFw0 = 0.0;
   static int _emaTrackId0 = -99999;
   static double _emaFx1 = 0.0, _emaFy1 = 0.0, _emaFw1 = 0.0;
@@ -3264,15 +3266,23 @@ class _DriveOverlayPainter extends CustomPainter {
     }
     final bool trackChanged =
         prevTrackId != lead.radarTrackId || !prevFx.isFinite || !prevFy.isFinite;
+    final double emaAlpha;
+    if (lead.dRel <= 14.0) {
+      emaAlpha = _leadCloseEmaAlpha;
+    } else if (lead.dRel <= 28.0) {
+      emaAlpha = _leadNearEmaAlpha;
+    } else {
+      emaAlpha = _leadEmaAlpha;
+    }
     final double smoothX = trackChanged
         ? rawCenterX
-        : prevFx * _leadEmaAlpha + rawCenterX * (1.0 - _leadEmaAlpha);
+        : prevFx * emaAlpha + rawCenterX * (1.0 - emaAlpha);
     final double smoothY = trackChanged
         ? rawCenterY
-        : prevFy * _leadEmaAlpha + rawCenterY * (1.0 - _leadEmaAlpha);
+        : prevFy * emaAlpha + rawCenterY * (1.0 - emaAlpha);
     final double smoothW = trackChanged
         ? rawWidth
-        : prevFw * _leadEmaAlpha + rawWidth * (1.0 - _leadEmaAlpha);
+        : prevFw * emaAlpha + rawWidth * (1.0 - emaAlpha);
     if (slot == 0) {
       _emaFx0 = smoothX;
       _emaFy0 = smoothY;

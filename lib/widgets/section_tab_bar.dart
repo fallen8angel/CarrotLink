@@ -23,35 +23,46 @@ class SectionTabBar extends StatelessWidget {
     final colors = theme.colorScheme;
     final window = UiWindowInfo.of(context);
     final tokens = UiLayoutTokens.of(context);
-    final verticalPadding = switch (window.windowClass) {
+    final compactLandscape = window.isConstrainedLandscape;
+    final verticalPadding = compactLandscape
+        ? 6.0
+        : switch (window.windowClass) {
       UiWindowClass.compact => 8.0,
       UiWindowClass.medium => 9.0,
       UiWindowClass.expanded => 10.0,
       UiWindowClass.large => 11.0,
       UiWindowClass.extraLarge => 12.0,
     };
-    final labelSize = switch (window.windowClass) {
+    final labelSize = compactLandscape
+        ? 12.0
+        : switch (window.windowClass) {
       UiWindowClass.compact => 12.5,
       UiWindowClass.medium => 13.0,
       UiWindowClass.expanded => 13.5,
       UiWindowClass.large => 14.0,
       UiWindowClass.extraLarge => 14.0,
     };
-    final labelPadding = switch (window.windowClass) {
+    final labelPadding = compactLandscape
+        ? 8.0
+        : switch (window.windowClass) {
       UiWindowClass.compact => 10.0,
       UiWindowClass.medium => 11.0,
       UiWindowClass.expanded => 12.0,
       UiWindowClass.large => 13.0,
       UiWindowClass.extraLarge => 14.0,
     };
-    final indicatorWeight = switch (window.windowClass) {
+    final indicatorWeight = compactLandscape
+        ? 2.4
+        : switch (window.windowClass) {
       UiWindowClass.compact => 2.5,
       UiWindowClass.medium => 2.6,
       UiWindowClass.expanded => 2.8,
       UiWindowClass.large => 3.0,
       UiWindowClass.extraLarge => 3.0,
     };
-    final indicatorHorizontalInset = switch (window.windowClass) {
+    final indicatorHorizontalInset = compactLandscape
+        ? 6.0
+        : switch (window.windowClass) {
       UiWindowClass.compact => 8.0,
       UiWindowClass.medium => 10.0,
       UiWindowClass.expanded => 12.0,
@@ -61,9 +72,13 @@ class SectionTabBar extends StatelessWidget {
 
     return Container(
       padding: EdgeInsets.fromLTRB(
-        tokens.screenPadding.clamp(8.0, 24.0),
+        compactLandscape
+            ? 8.0
+            : tokens.screenPadding.clamp(8.0, 24.0),
         verticalPadding,
-        tokens.screenPadding.clamp(8.0, 24.0),
+        compactLandscape
+            ? 8.0
+            : tokens.screenPadding.clamp(8.0, 24.0),
         4,
       ),
       decoration: BoxDecoration(

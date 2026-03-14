@@ -132,7 +132,8 @@ extension _ConnectionSettingsPersistence on _ConnectionSettingsScreenState {
     await _storage.write(key: 'key_verified', value: 'false');
     if (mounted) {
       try {
-        Provider.of<SSHService>(context, listen: false).resumeAutoReconnect();
+        await Provider.of<SSHService>(context, listen: false)
+            .syncAutoConnectProfile();
       } catch (_) {}
     }
 

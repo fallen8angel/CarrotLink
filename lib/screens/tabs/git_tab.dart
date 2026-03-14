@@ -1776,36 +1776,76 @@ class _GitTabState extends State<GitTab> {
     final connected = context.watch<SSHService>().isConnected;
     final window = UiWindowInfo.of(context);
     final tokens = UiLayoutTokens.of(context);
-    final outerHorizontal = window.isCompact
-        ? 12.0
-        : tokens.screenPadding.clamp(14.0, 28.0).toDouble();
-    final topPadding = switch (window.windowClass) {
-      UiWindowClass.compact => tokens.sectionGap,
-      UiWindowClass.medium => tokens.itemGap + 4,
-      UiWindowClass.expanded => tokens.itemGap + 2,
-      UiWindowClass.large || UiWindowClass.extraLarge => tokens.itemGap + 2,
-    };
-    final bottomPanelPadding =
-        window.isCompact ? tokens.itemGap + 2 : tokens.sectionGap + 2;
-    final logHeaderGap = window.isCompact ? 12.0 : 14.0;
-    final logContainerPadding = window.isCompact ? 8.0 : 10.0;
-    final logContainerRadius = window.isCompact ? 8.0 : 10.0;
-    final logLineFontSize = window.isCompact ? 12.0 : 13.0;
-    final actionSpacing = window.isCompact ? tokens.itemGap + 2 : 10.0;
-    final actionPaneWidth = switch (window.windowClass) {
-      UiWindowClass.compact => 300.0,
-      UiWindowClass.medium => 320.0,
-      UiWindowClass.expanded => 330.0,
-      UiWindowClass.large => 350.0,
-      UiWindowClass.extraLarge => 370.0,
-    };
-    final actionButtonExtent = switch (window.windowClass) {
-      UiWindowClass.compact => 76.0,
-      UiWindowClass.medium => 74.0,
-      UiWindowClass.expanded => 70.0,
-      UiWindowClass.large => 68.0,
-      UiWindowClass.extraLarge => 66.0,
-    };
+    final fixedTwoPaneLandscape = window.isLandscape &&
+        viewportSize.width >= 700.0 &&
+        (window.isCompact ||
+            window.isConstrainedLandscape ||
+            viewportSize.height < 700.0);
+    final useWideSplit = fixedTwoPaneLandscape ||
+        (!window.isConstrainedLandscape &&
+            window.isLandscape &&
+            (window.isExpandedOrAbove || viewportSize.width >= 680.0));
+    final compactLandscapeLayout =
+        fixedTwoPaneLandscape || (useWideSplit && shortViewport);
+    final outerHorizontal = compactLandscapeLayout
+        ? 10.0
+        : (window.isCompact
+            ? 12.0
+            : tokens.screenPadding.clamp(14.0, 28.0).toDouble());
+    final topPadding = compactLandscapeLayout
+        ? 8.0
+        : switch (window.windowClass) {
+            UiWindowClass.compact => tokens.sectionGap,
+            UiWindowClass.medium => tokens.itemGap + 4,
+            UiWindowClass.expanded => tokens.itemGap + 2,
+            UiWindowClass.large ||
+            UiWindowClass.extraLarge =>
+              tokens.itemGap + 2,
+          };
+    final bottomPanelPadding = compactLandscapeLayout
+        ? 8.0
+        : (window.isCompact ? tokens.itemGap + 2 : tokens.sectionGap + 2);
+    final logHeaderGap =
+        compactLandscapeLayout ? 8.0 : (window.isCompact ? 12.0 : 14.0);
+    final logContainerPadding =
+        compactLandscapeLayout ? 6.0 : (window.isCompact ? 8.0 : 10.0);
+    final logContainerRadius =
+        compactLandscapeLayout ? 8.0 : (window.isCompact ? 8.0 : 10.0);
+    final logLineFontSize =
+        compactLandscapeLayout ? 11.0 : (window.isCompact ? 12.0 : 13.0);
+    final actionSpacing = compactLandscapeLayout
+        ? 8.0
+        : (window.isCompact ? tokens.itemGap + 2 : 10.0);
+    final actionPaneWidth = compactLandscapeLayout
+        ? switch (window.windowClass) {
+            UiWindowClass.compact => 292.0,
+            UiWindowClass.medium => 304.0,
+            UiWindowClass.expanded => 316.0,
+            UiWindowClass.large => 324.0,
+            UiWindowClass.extraLarge => 332.0,
+          }
+        : switch (window.windowClass) {
+            UiWindowClass.compact => 300.0,
+            UiWindowClass.medium => 320.0,
+            UiWindowClass.expanded => 330.0,
+            UiWindowClass.large => 350.0,
+            UiWindowClass.extraLarge => 370.0,
+          };
+    final actionButtonExtent = compactLandscapeLayout
+        ? switch (window.windowClass) {
+            UiWindowClass.compact => 62.0,
+            UiWindowClass.medium => 60.0,
+            UiWindowClass.expanded => 58.0,
+            UiWindowClass.large => 56.0,
+            UiWindowClass.extraLarge => 56.0,
+          }
+        : switch (window.windowClass) {
+            UiWindowClass.compact => 76.0,
+            UiWindowClass.medium => 74.0,
+            UiWindowClass.expanded => 70.0,
+            UiWindowClass.large => 68.0,
+            UiWindowClass.extraLarge => 66.0,
+          };
     final estimatedGridColumns = actionPaneWidth >= 960
         ? 4
         : (actionPaneWidth >= 700 ? 3 : (actionPaneWidth >= 280 ? 2 : 1));
@@ -1833,21 +1873,27 @@ class _GitTabState extends State<GitTab> {
             ? estimatedActionBodyHeight
             : computedActionPanelMaxHeight;
     final veryShortViewport = viewportSize.height < 520;
-    final useWideSplit =
-        window.isExpandedOrAbove && window.isLandscape && !shortViewport;
     final actionPanelMaxHeight = useWideSplit
-        ? wideActionPanelMaxHeight
+        ? (compactLandscapeLayout
+            ? (viewportSize.height - (topPadding + bottomPanelPadding))
+                .clamp(220.0, wideActionPanelMaxHeight)
+                .toDouble()
+            : wideActionPanelMaxHeight)
         : (veryShortViewport
             ? computedActionPanelMaxHeight.clamp(120.0, 210.0).toDouble()
             : computedActionPanelMaxHeight);
     final actionPaneEffectiveMaxWidth =
-        (viewportSize.width * 0.44).clamp(240.0, actionPaneWidth).toDouble();
-    final actionPaneMinWidth = switch (window.windowClass) {
-      UiWindowClass.compact => 200.0,
-      UiWindowClass.medium => 220.0,
-      UiWindowClass.expanded => 228.0,
-      UiWindowClass.large || UiWindowClass.extraLarge => 248.0,
-    };
+        (viewportSize.width * (compactLandscapeLayout ? 0.40 : 0.44))
+            .clamp(compactLandscapeLayout ? 276.0 : 240.0, actionPaneWidth)
+            .toDouble();
+    final actionPaneMinWidth = compactLandscapeLayout
+        ? 276.0
+        : switch (window.windowClass) {
+            UiWindowClass.compact => 200.0,
+            UiWindowClass.medium => 220.0,
+            UiWindowClass.expanded => 228.0,
+            UiWindowClass.large || UiWindowClass.extraLarge => 248.0,
+          };
 
     Widget buildLogCard() {
       return DesignCard(
@@ -1857,25 +1903,33 @@ class _GitTabState extends State<GitTab> {
             LayoutBuilder(
               builder: (context, constraints) {
                 final compactHeader = constraints.maxWidth < 360;
+                final headerIconSize = compactLandscapeLayout ? 16.0 : 18.0;
+                final headerMenuIconSize = compactLandscapeLayout
+                    ? 17.0
+                    : (compactHeader ? 18.0 : 20.0);
                 final title = Text(
                   "Git 로그",
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context)
-                      .textTheme
-                      .titleSmall
-                      ?.copyWith(fontWeight: FontWeight.w700),
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                        fontSize: compactLandscapeLayout ? 15.0 : null,
+                      ),
                 );
                 final menu = PopupMenuButton<_GitToolsMenuAction>(
                   tooltip: "Git 옵션",
                   enabled: !(_isLoading || _isLoadingSourceInfo),
-                  padding: compactHeader
+                  padding: compactLandscapeLayout
                       ? const EdgeInsets.all(2)
-                      : const EdgeInsets.all(8),
-                  constraints: compactHeader
-                      ? const BoxConstraints(minWidth: 34, minHeight: 34)
-                      : const BoxConstraints(minWidth: 40, minHeight: 40),
-                  icon: Icon(Icons.settings, size: compactHeader ? 18 : 20),
+                      : compactHeader
+                          ? const EdgeInsets.all(2)
+                          : const EdgeInsets.all(8),
+                  constraints: compactLandscapeLayout
+                      ? const BoxConstraints(minWidth: 32, minHeight: 32)
+                      : compactHeader
+                          ? const BoxConstraints(minWidth: 34, minHeight: 34)
+                          : const BoxConstraints(minWidth: 40, minHeight: 40),
+                  icon: Icon(Icons.settings, size: headerMenuIconSize),
                   onSelected: _handleGitToolsMenuAction,
                   itemBuilder: (_) => [
                     const PopupMenuItem(
@@ -1901,12 +1955,15 @@ class _GitTabState extends State<GitTab> {
                 );
                 final loading = _isLoading
                     ? Padding(
-                        padding:
-                            EdgeInsets.only(right: compactHeader ? 4.0 : 8.0),
+                        padding: EdgeInsets.only(
+                            right: compactLandscapeLayout
+                                ? 4.0
+                                : (compactHeader ? 4.0 : 8.0)),
                         child: SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
+                          width: compactLandscapeLayout ? 14 : 16,
+                          height: compactLandscapeLayout ? 14 : 16,
+                          child:
+                              const CircularProgressIndicator(strokeWidth: 2),
                         ),
                       )
                     : const SizedBox.shrink();
@@ -1916,10 +1973,12 @@ class _GitTabState extends State<GitTab> {
                   children: [
                     Icon(
                       Icons.terminal,
-                      size: 18,
+                      size: headerIconSize,
                       color: Theme.of(context).colorScheme.primary,
                     ),
-                    SizedBox(width: tokens.itemGap + 2),
+                    SizedBox(
+                        width:
+                            compactLandscapeLayout ? 8.0 : tokens.itemGap + 2),
                     Expanded(child: title),
                     loading,
                     menu,
@@ -1938,39 +1997,55 @@ class _GitTabState extends State<GitTab> {
                         border: Border.all(
                             color: Colors.grey.withValues(alpha: 0.2)),
                       ),
-                      child: ListView.builder(
-                        controller: _scrollController,
-                        itemCount: _logs.length,
-                        itemBuilder: (context, index) {
-                          final log = _logs[index];
-                          final isOld = log['isOld'] == 'true';
-                          return Padding(
-                            padding: EdgeInsets.symmetric(
-                              vertical: window.isCompact ? 2.0 : 3.0,
-                            ),
-                            child: RichText(
-                              text: TextSpan(
+                      child: _logs.isEmpty
+                          ? Center(
+                              child: Text(
+                                _isLoading
+                                    ? 'Git 작업을 진행 중입니다...'
+                                    : '아직 Git 로그가 없습니다.',
+                                textAlign: TextAlign.center,
                                 style: TextStyle(
-                                  fontFamily: 'monospace',
-                                  fontSize: logLineFontSize,
-                                  color: isOld ? Colors.grey : Colors.white,
+                                  color: Colors.grey[400],
+                                  fontSize: compactLandscapeLayout ? 12.0 : 13.0,
+                                  fontWeight: FontWeight.w500,
                                 ),
-                                children: [
-                                  TextSpan(
-                                    text: "[${log['time']}] ",
-                                    style: TextStyle(
-                                      color: isOld
-                                          ? Colors.grey[600]
-                                          : Colors.greenAccent,
+                              ),
+                            )
+                          : ListView.builder(
+                              controller: _scrollController,
+                              itemCount: _logs.length,
+                              itemBuilder: (context, index) {
+                                final log = _logs[index];
+                                final isOld = log['isOld'] == 'true';
+                                return Padding(
+                                  padding: EdgeInsets.symmetric(
+                                    vertical: compactLandscapeLayout
+                                        ? 1.5
+                                        : (window.isCompact ? 2.0 : 3.0),
+                                  ),
+                                  child: RichText(
+                                    text: TextSpan(
+                                      style: TextStyle(
+                                        fontFamily: 'monospace',
+                                        fontSize: logLineFontSize,
+                                        color: isOld ? Colors.grey : Colors.white,
+                                      ),
+                                      children: [
+                                        TextSpan(
+                                          text: "[${log['time']}] ",
+                                          style: TextStyle(
+                                            color: isOld
+                                                ? Colors.grey[600]
+                                                : Colors.greenAccent,
+                                          ),
+                                        ),
+                                        TextSpan(text: log['message']),
+                                      ],
                                     ),
                                   ),
-                                  TextSpan(text: log['message']),
-                                ],
-                              ),
+                                );
+                              },
                             ),
-                          );
-                        },
-                      ),
                     )
                   : const ConnectionRequiredView(
                       description: 'Git 기능을 사용하려면 먼저 기기에 연결하세요.',
@@ -1989,9 +2064,11 @@ class _GitTabState extends State<GitTab> {
           LayoutBuilder(
             builder: (context, constraints) {
               final width = constraints.maxWidth;
-              final crossAxisCount = width >= 960
-                  ? 4
-                  : (width >= 700 ? 3 : (width >= 280 ? 2 : 1));
+              final crossAxisCount = fixedTwoPaneLandscape
+                  ? (width >= 280 ? 2 : 1)
+                  : width >= 960
+                      ? 4
+                      : (width >= 700 ? 3 : (width >= 280 ? 2 : 1));
               final actions = <Widget>[
                 _buildActionButton(
                   context,
@@ -2000,6 +2077,7 @@ class _GitTabState extends State<GitTab> {
                   Colors.blue,
                   _selectBranch,
                   enabled: connected,
+                  dense: compactLandscapeLayout,
                 ),
                 _buildActionButton(
                   context,
@@ -2011,6 +2089,7 @@ class _GitTabState extends State<GitTab> {
                     "Git Pull 완료",
                   ),
                   enabled: connected,
+                  dense: compactLandscapeLayout,
                 ),
                 _buildActionButton(
                   context,
@@ -2022,6 +2101,7 @@ class _GitTabState extends State<GitTab> {
                     "Git Reset 완료",
                   ),
                   enabled: connected,
+                  dense: compactLandscapeLayout,
                 ),
                 _buildActionButton(
                   context,
@@ -2030,6 +2110,7 @@ class _GitTabState extends State<GitTab> {
                   Colors.red,
                   _performGitSync,
                   enabled: connected,
+                  dense: compactLandscapeLayout,
                 ),
               ];
               return GridView.builder(
@@ -2054,8 +2135,59 @@ class _GitTabState extends State<GitTab> {
             Colors.red,
             _rebootDevice,
             enabled: connected,
+            dense: compactLandscapeLayout,
           ),
         ],
+      );
+    }
+
+    if (fixedTwoPaneLandscape) {
+      final fixedActionPaneWidth =
+          (viewportSize.width * 0.40).clamp(280.0, 420.0).toDouble();
+
+      return Padding(
+        padding: EdgeInsets.fromLTRB(
+          outerHorizontal,
+          topPadding,
+          outerHorizontal,
+          bottomPanelPadding,
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: buildLogCard(),
+            ),
+            SizedBox(width: actionSpacing),
+            SizedBox(
+              width: fixedActionPaneWidth,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Theme.of(context).scaffoldBackgroundColor,
+                  borderRadius: BorderRadius.circular(14),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.1),
+                      offset: const Offset(0, 2),
+                      blurRadius: 8,
+                    ),
+                  ],
+                ),
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    bottomPanelPadding,
+                    bottomPanelPadding,
+                    bottomPanelPadding,
+                    0,
+                  ),
+                  child: SingleChildScrollView(
+                    child: buildActionBody(),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       );
     }
 
@@ -2098,7 +2230,14 @@ class _GitTabState extends State<GitTab> {
                       bottomPanelPadding,
                       0,
                     ),
-                    child: buildActionBody(),
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight: actionPanelMaxHeight,
+                      ),
+                      child: SingleChildScrollView(
+                        child: buildActionBody(),
+                      ),
+                    ),
                   ),
                 ),
               ),
@@ -2150,18 +2289,30 @@ class _GitTabState extends State<GitTab> {
 
   Widget _buildActionButton(BuildContext context, String label, IconData icon,
       Color color, VoidCallback onTap,
-      {bool enabled = true}) {
+      {bool enabled = true, bool dense = false}) {
     final window = UiWindowInfo.of(context);
-    final iconSize = window.isCompact ? 18.0 : 20.0;
-    final radius = window.isCompact ? 12.0 : 14.0;
+    final iconSize = dense ? 16.0 : (window.isCompact ? 18.0 : 20.0);
+    final radius = dense ? 10.0 : (window.isCompact ? 12.0 : 14.0);
+    final horizontalPadding = dense ? 10.0 : 14.0;
+    final verticalPadding = dense ? 10.0 : 14.0;
+    final fontSize = dense ? 13.0 : (window.isCompact ? 14.0 : 15.0);
     return FilledButton.icon(
       onPressed: _isLoading || !enabled ? null : onTap,
       icon: Icon(icon, size: iconSize),
-      label: Text(label),
+      label: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(fontSize: fontSize),
+      ),
       style: FilledButton.styleFrom(
         backgroundColor: color.withValues(alpha: 0.15),
         foregroundColor: color,
         elevation: 0,
+        padding: EdgeInsets.symmetric(
+          horizontal: horizontalPadding,
+          vertical: verticalPadding,
+        ),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(radius),
           side: BorderSide(color: color.withValues(alpha: 0.3)),

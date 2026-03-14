@@ -17,6 +17,7 @@ class AdaptiveHudPanel extends StatelessWidget {
   final OriginalHudSnapshot snapshot;
   final HudSurfaceVariant surface;
   final bool fillParent;
+  final bool edgeToEdge;
   final bool matchParentWidth;
   final String? stateTitle;
   final String? stateMessage;
@@ -27,6 +28,7 @@ class AdaptiveHudPanel extends StatelessWidget {
     required this.snapshot,
     this.surface = HudSurfaceVariant.homePreview,
     this.fillParent = false,
+    this.edgeToEdge = false,
     this.matchParentWidth = false,
     this.stateTitle,
     this.stateMessage,
@@ -50,12 +52,15 @@ class AdaptiveHudPanel extends StatelessWidget {
             stateTitle: stateTitle,
             stateMessage: stateMessage,
             showStateShell: showStateShell,
+            edgeToEdge: edgeToEdge,
           ),
         );
-        final dockedChild = Padding(
-          padding: EdgeInsets.all(profile.dockInset),
-          child: child,
-        );
+        final dockedChild = edgeToEdge && fillParent
+            ? child
+            : Padding(
+                padding: EdgeInsets.all(profile.dockInset),
+                child: child,
+              );
         if (fillParent) {
           return SizedBox.expand(child: dockedChild);
         }
@@ -86,6 +91,7 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
   final String? stateTitle;
   final String? stateMessage;
   final bool showStateShell;
+  final bool edgeToEdge;
 
   const _AdaptiveHudPanelBody({
     required this.profile,
@@ -93,6 +99,7 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
     required this.stateTitle,
     required this.stateMessage,
     required this.showStateShell,
+    required this.edgeToEdge,
   });
 
   @override
@@ -105,6 +112,7 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
         : Colors.white.withValues(
             alpha: isOverlay ? 0.12 : 0.18,
           );
+    final borderRadius = edgeToEdge ? 0.0 : profile.borderRadius;
     final decoration = BoxDecoration(
       gradient: LinearGradient(
         begin: Alignment.topLeft,
@@ -120,9 +128,9 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
                 backgroundBottom,
               ],
       ),
-      borderRadius: BorderRadius.circular(profile.borderRadius),
+      borderRadius: BorderRadius.circular(borderRadius),
       border: Border.all(color: borderColor, width: 1.1),
-      boxShadow: isOverlay
+      boxShadow: (isOverlay || edgeToEdge)
           ? const <BoxShadow>[]
           : const <BoxShadow>[
               BoxShadow(
@@ -134,7 +142,7 @@ class _AdaptiveHudPanelBody extends StatelessWidget {
     );
 
     return ClipRRect(
-      borderRadius: BorderRadius.circular(profile.borderRadius),
+      borderRadius: BorderRadius.circular(borderRadius),
       child: DecoratedBox(
         decoration: decoration,
         child: Stack(

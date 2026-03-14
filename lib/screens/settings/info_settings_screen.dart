@@ -67,6 +67,8 @@ class _InfoSettingsScreenState extends State<InfoSettingsScreen> {
     final window = UiWindowInfo.of(context);
     final tokens = UiLayoutTokens.of(context);
     final scheme = Theme.of(context).colorScheme;
+    final hasUpdate = updateService.hasUpdateAvailable;
+    final ignoredMessage = updateService.ignoredUpdateMessage;
 
     return Scaffold(
       appBar: AppBar(title: const Text('정보')),
@@ -96,8 +98,12 @@ class _InfoSettingsScreenState extends State<InfoSettingsScreen> {
             title: const Text('업데이트 확인'),
             subtitle: updateService.isChecking
                 ? const Text('확인 중...')
-                : updateService.latestRelease != null
-                    ? Text('새 버전: ${updateService.latestRelease!['tag_name']}')
+                : hasUpdate
+                    ? Text(
+                        ignoredMessage == null
+                            ? '새 버전: ${updateService.latestReleaseTag}'
+                            : '새 버전: ${updateService.latestReleaseTag}\n$ignoredMessage',
+                      )
                     : const Text('최신 버전입니다'),
             trailing: updateService.isChecking
                 ? const SizedBox(
@@ -105,8 +111,20 @@ class _InfoSettingsScreenState extends State<InfoSettingsScreen> {
                     height: 20,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
-                : updateService.latestRelease != null
-                    ? Icon(Icons.system_update, color: scheme.tertiary)
+                : hasUpdate
+                    ? FilledButton.tonalIcon(
+                        onPressed: () => _showUpdateDialog(context),
+                        icon: Icon(
+                          updateService.downloadedFilePath != null
+                              ? Icons.install_mobile
+                              : Icons.system_update,
+                        ),
+                        label: Text(
+                          updateService.downloadedFilePath != null
+                              ? '설치'
+                              : '업데이트',
+                        ),
+                      )
                     : const Icon(Icons.check_circle, color: Colors.green),
             onTap: () => _showUpdateDialog(context),
           ),

@@ -260,8 +260,9 @@ git -C "\$REPO" for-each-ref --format="%(refname:short)|%(objectname)" refs/head
     var originUrl = meta.length > 7 ? meta[7] : '';
     final primaryRemoteName = meta.length > 8 ? meta[8] : '';
     final upstreamRef = meta.length > 9 ? meta.sublist(9).join('|') : '';
-    if (repoUrl.endsWith('.git'))
+    if (repoUrl.endsWith('.git')) {
       repoUrl = repoUrl.substring(0, repoUrl.length - 4);
+    }
     if (originUrl.endsWith('.git')) {
       originUrl = originUrl.substring(0, originUrl.length - 4);
     }
@@ -596,7 +597,11 @@ else
 fi
 ''';
       case DeviceActionType.reboot:
-        return 'sudo reboot';
+        return '''
+sudo reboot >/dev/null 2>&1 &
+PID=\$!
+echo "REBOOT_REQUESTED pid=\$PID"
+''';
       case DeviceActionType.softRestart:
         return '''
 ${_repoDetectScript(preferredRepoPath: repoPathOverride)}
