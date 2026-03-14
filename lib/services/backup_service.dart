@@ -167,12 +167,6 @@ class BackupService extends ChangeNotifier {
 
     await _loadPersistedState(); // Load state on start
 
-    // Start Background Service to keep app alive
-    // Permission is handled in DashboardScreen
-    final service = FlutterBackgroundService();
-    if (!await service.isRunning()) {
-      await service.startService();
-    }
     _updateNotification("모니터링 시작됨");
 
     _intervalMinutes = _fixedIntervalMinutes;
@@ -235,8 +229,6 @@ class BackupService extends ChangeNotifier {
     _sshService = null;
     _driveService = null;
 
-    final service = FlutterBackgroundService();
-    service.invoke("stopService");
   }
 
   void requestEventSync({

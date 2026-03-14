@@ -50,7 +50,9 @@ class _LogsTabState extends State<LogsTab> with SingleTickerProviderStateMixin {
   Widget build(BuildContext context) {
     final window = UiWindowInfo.of(context);
     final tokens = UiLayoutTokens.of(context);
-    final maxWidth = switch (window.windowClass) {
+    final maxWidth = window.isConstrainedLandscape
+        ? double.infinity
+        : switch (window.windowClass) {
       UiWindowClass.compact => double.infinity,
       UiWindowClass.medium => 1020.0,
       UiWindowClass.expanded => 1220.0,
@@ -64,7 +66,10 @@ class _LogsTabState extends State<LogsTab> with SingleTickerProviderStateMixin {
         constraints: BoxConstraints(maxWidth: maxWidth),
         child: Padding(
           padding: EdgeInsets.symmetric(
-            horizontal: window.isCompact ? 0 : tokens.screenPadding,
+            horizontal:
+                (window.isCompact || window.isConstrainedLandscape)
+                    ? 0
+                    : tokens.screenPadding,
           ),
           child: Column(
             children: [

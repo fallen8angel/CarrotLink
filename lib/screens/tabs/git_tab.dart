@@ -1776,9 +1776,17 @@ class _GitTabState extends State<GitTab> {
     final connected = context.watch<SSHService>().isConnected;
     final window = UiWindowInfo.of(context);
     final tokens = UiLayoutTokens.of(context);
-    final useWideSplit = window.isLandscape &&
-        (window.isExpandedOrAbove || viewportSize.width >= 680.0);
-    final compactLandscapeLayout = useWideSplit && shortViewport;
+    final fixedTwoPaneLandscape = window.isLandscape &&
+        viewportSize.width >= 700.0 &&
+        (window.isCompact ||
+            window.isConstrainedLandscape ||
+            viewportSize.height < 700.0);
+    final useWideSplit = fixedTwoPaneLandscape ||
+        (!window.isConstrainedLandscape &&
+            window.isLandscape &&
+            (window.isExpandedOrAbove || viewportSize.width >= 680.0));
+    final compactLandscapeLayout =
+        fixedTwoPaneLandscape || (useWideSplit && shortViewport);
     final outerHorizontal = compactLandscapeLayout
         ? 10.0
         : (window.isCompact
@@ -1989,41 +1997,55 @@ class _GitTabState extends State<GitTab> {
                         border: Border.all(
                             color: Colors.grey.withValues(alpha: 0.2)),
                       ),
-                      child: ListView.builder(
-                        controller: _scrollController,
-                        itemCount: _logs.length,
-                        itemBuilder: (context, index) {
-                          final log = _logs[index];
-                          final isOld = log['isOld'] == 'true';
-                          return Padding(
-                            padding: EdgeInsets.symmetric(
-                              vertical: compactLandscapeLayout
-                                  ? 1.5
-                                  : (window.isCompact ? 2.0 : 3.0),
-                            ),
-                            child: RichText(
-                              text: TextSpan(
+                      child: _logs.isEmpty
+                          ? Center(
+                              child: Text(
+                                _isLoading
+                                    ? 'Git 작업을 진행 중입니다...'
+                                    : '아직 Git 로그가 없습니다.',
+                                textAlign: TextAlign.center,
                                 style: TextStyle(
-                                  fontFamily: 'monospace',
-                                  fontSize: logLineFontSize,
-                                  color: isOld ? Colors.grey : Colors.white,
+                                  color: Colors.grey[400],
+                                  fontSize: compactLandscapeLayout ? 12.0 : 13.0,
+                                  fontWeight: FontWeight.w500,
                                 ),
-                                children: [
-                                  TextSpan(
-                                    text: "[${log['time']}] ",
-                                    style: TextStyle(
-                                      color: isOld
-                                          ? Colors.grey[600]
-                                          : Colors.greenAccent,
+                              ),
+                            )
+                          : ListView.builder(
+                              controller: _scrollController,
+                              itemCount: _logs.length,
+                              itemBuilder: (context, index) {
+                                final log = _logs[index];
+                                final isOld = log['isOld'] == 'true';
+                                return Padding(
+                                  padding: EdgeInsets.symmetric(
+                                    vertical: compactLandscapeLayout
+                                        ? 1.5
+                                        : (window.isCompact ? 2.0 : 3.0),
+                                  ),
+                                  child: RichText(
+                                    text: TextSpan(
+                                      style: TextStyle(
+                                        fontFamily: 'monospace',
+                                        fontSize: logLineFontSize,
+                                        color: isOld ? Colors.grey : Colors.white,
+                                      ),
+                                      children: [
+                                        TextSpan(
+                                          text: "[${log['time']}] ",
+                                          style: TextStyle(
+                                            color: isOld
+                                                ? Colors.grey[600]
+                                                : Colors.greenAccent,
+                                          ),
+                                        ),
+                                        TextSpan(text: log['message']),
+                                      ],
                                     ),
                                   ),
-                                  TextSpan(text: log['message']),
-                                ],
-                              ),
+                                );
+                              },
                             ),
-                          );
-                        },
-                      ),
                     )
                   : const ConnectionRequiredView(
                       description: 'Git 기능을 사용하려면 먼저 기기에 연결하세요.',
@@ -2042,9 +2064,11 @@ class _GitTabState extends State<GitTab> {
           LayoutBuilder(
             builder: (context, constraints) {
               final width = constraints.maxWidth;
-              final crossAxisCount = width >= 960
-                  ? 4
-                  : (width >= 700 ? 3 : (width >= 280 ? 2 : 1));
+              final crossAxisCount = fixedTwoPaneLandscape
+                  ? (width >= 280 ? 2 : 1)
+                  : width >= 960
+                      ? 4
+                      : (width >= 700 ? 3 : (width >= 280 ? 2 : 1));
               final actions = <Widget>[
                 _buildActionButton(
                   context,
@@ -2114,6 +2138,56 @@ class _GitTabState extends State<GitTab> {
             dense: compactLandscapeLayout,
           ),
         ],
+      );
+    }
+
+    if (fixedTwoPaneLandscape) {
+      final fixedActionPaneWidth =
+          (viewportSize.width * 0.40).clamp(280.0, 420.0).toDouble();
+
+      return Padding(
+        padding: EdgeInsets.fromLTRB(
+          outerHorizontal,
+          topPadding,
+          outerHorizontal,
+          bottomPanelPadding,
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: buildLogCard(),
+            ),
+            SizedBox(width: actionSpacing),
+            SizedBox(
+              width: fixedActionPaneWidth,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Theme.of(context).scaffoldBackgroundColor,
+                  borderRadius: BorderRadius.circular(14),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.1),
+                      offset: const Offset(0, 2),
+                      blurRadius: 8,
+                    ),
+                  ],
+                ),
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    bottomPanelPadding,
+                    bottomPanelPadding,
+                    bottomPanelPadding,
+                    0,
+                  ),
+                  child: SingleChildScrollView(
+                    child: buildActionBody(),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       );
     }
 

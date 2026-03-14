@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -10,6 +9,7 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/ssh_service.dart';
 import '../../services/backup_service.dart';
+import '../../services/background_service.dart';
 import '../../services/google_drive_service.dart';
 import '../../services/update_service.dart';
 import '../../services/diagnostics_service.dart';
@@ -39,15 +39,9 @@ class _DashboardScreenState extends State<DashboardScreen>
   static const String _lastDashboardTabIndexKey = 'dashboard_last_tab_index';
   static const int _tabCount = 5;
   int _currentIndex = 0;
-  Timer? _reconnectTimer;
   StreamSubscription<String>? _discoverySubscription;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
-  Timer? _connectivityDebounceTimer;
-  static const _baseReconnectDelay = Duration(seconds: 2);
-  static const _maxReconnectDelay = Duration(seconds: 45);
   List<ConnectivityResult>? _lastConnectivity;
-  DateTime? _nextReconnectAllowedAt;
-  int _reconnectFailureCount = 0;
   bool _isAutoConnectRunning = false;
   bool _setupPromptShown = false;
   bool _overlayLifecycleBusy = false;
@@ -58,15 +52,6 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   void _dismissKeyboard() {
     FocusManager.instance.primaryFocus?.unfocus();
-  }
-
-  bool _consumeBackForKeyboard(BuildContext context) {
-    final keyboardVisible = MediaQuery.viewInsetsOf(context).bottom > 0.0;
-    if (!keyboardVisible) {
-      return false;
-    }
-    _dismissKeyboard();
-    return true;
   }
 
   void _setServiceAppVisibility(bool foreground,
@@ -82,8 +67,6 @@ class _DashboardScreenState extends State<DashboardScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     unawaited(_restoreLastTabIndex());
-    _requestPermissions();
-    _setServiceAppVisibility(true, source: 'dashboard_init');
     Provider.of<SharedRuntimeManager>(context, listen: false)
         .setAppForeground(true);
     final hudFeatureSettings =
@@ -99,12 +82,7 @@ class _DashboardScreenState extends State<DashboardScreen>
         reason: 'dashboard_init',
       ),
     );
-    _tryAutoConnect(
-      silent: true,
-      force: true,
-      reason: 'app_start',
-    );
-    _startReconnectLoop();
+    unawaited(_bootstrapDashboardRuntime());
     _setupDiscoveryListener();
     _setupConnectivityListener();
 
@@ -138,31 +116,56 @@ class _DashboardScreenState extends State<DashboardScreen>
     }
   }
 
-  Future<void> _requestPermissions() async {
-    if (Platform.isAndroid) {
-      // Request Notification Permission (Android 13+)
-      if (await Permission.notification.isDenied) {
-        await Permission.notification.request();
-      }
+  Future<void> _bootstrapDashboardRuntime() async {
+    await _ensureBackgroundServiceReady(
+      foreground: true,
+      source: 'dashboard_init',
+    );
+    if (!mounted) return;
+    await _tryAutoConnect(
+      silent: true,
+      force: true,
+      reason: 'app_start',
+    );
+  }
 
-      final service = FlutterBackgroundService();
-      // Ensure service is running
-      if (!await service.isRunning()) {
-        service.startService();
-      }
+  Future<bool> _hasBackgroundRuntimePermissions() async {
+    if (!Platform.isAndroid) return true;
+    final notificationGranted = await Permission.notification.status;
+    final batteryGranted = await Permission.ignoreBatteryOptimizations.status;
+    return notificationGranted.isGranted && batteryGranted.isGranted;
+  }
 
-      // Refresh service notification after permission grant
-      service.invoke(
-          'updateContent', {'title': 'CarrotLink', 'content': '연결 대기 중...'});
+  Future<void> _ensureBackgroundServiceReady({
+    required bool foreground,
+    required String source,
+  }) async {
+    if (!Platform.isAndroid) return;
+    final ready = await _hasBackgroundRuntimePermissions();
+    if (!ready) {
+      _diag.info(
+        'background',
+        'Skipped service start source=$source permissions_missing',
+      );
+      return;
     }
+
+    await initializeService();
+    final service = FlutterBackgroundService();
+    if (!await service.isRunning()) {
+      await service.startService();
+    }
+    service.invoke('updateContent', {
+      'title': 'CarrotLink',
+      'content': '연결 대기 중...',
+    });
+    _setServiceAppVisibility(foreground, source: source);
   }
 
   @override
   void dispose() {
     _setServiceAppVisibility(false, source: 'dashboard_dispose');
     WidgetsBinding.instance.removeObserver(this);
-    _reconnectTimer?.cancel();
-    _connectivityDebounceTimer?.cancel();
     _discoverySubscription?.cancel();
     _connectivitySubscription?.cancel();
     super.dispose();
@@ -194,18 +197,6 @@ class _DashboardScreenState extends State<DashboardScreen>
         );
         final ssh = Provider.of<SSHService>(context, listen: false);
         ssh.notifyNetworkChanged(source: 'dashboard_connectivity');
-
-        // 연결이 끊어진 상태면 즉시 재연결 시도
-        if (!ssh.isConnected && !ssh.isConnecting) {
-          debugPrint('[Dashboard] Network changed - attempting reconnect');
-
-          // 네트워크 변경 이벤트 연속 발생에 대비해 debounce 후 재연결
-          _connectivityDebounceTimer?.cancel();
-          _connectivityDebounceTimer =
-              Timer(const Duration(milliseconds: 800), () {
-            unawaited(_tryAutoConnect(force: true, reason: 'connectivity'));
-          });
-        }
       }
 
       _lastConnectivity = results;
@@ -326,7 +317,10 @@ class _DashboardScreenState extends State<DashboardScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      _setServiceAppVisibility(true, source: 'lifecycle_resumed');
+      unawaited(_ensureBackgroundServiceReady(
+        foreground: true,
+        source: 'lifecycle_resumed',
+      ));
       Provider.of<SharedRuntimeManager>(context, listen: false)
           .setAppForeground(true);
       unawaited(
@@ -345,7 +339,7 @@ class _DashboardScreenState extends State<DashboardScreen>
       );
       if (!ssh.isConnected) {
         print("App resumed: Connection lost, trying to reconnect...");
-        _tryAutoConnect(reason: 'resume');
+        unawaited(_tryAutoConnect(reason: 'resume'));
       }
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
@@ -472,33 +466,6 @@ class _DashboardScreenState extends State<DashboardScreen>
     await prefs.setInt(_lastDashboardTabIndexKey, index);
   }
 
-  void _startReconnectLoop() {
-    _reconnectTimer?.cancel();
-    // Discovery/auto reconnect sync loop (broadcast-first).
-    _reconnectTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
-      final ssh = Provider.of<SSHService>(context, listen: false);
-      if (!ssh.isConnected && !ssh.isConnecting) {
-        await _tryAutoConnect(silent: true, reason: 'timer');
-      }
-    });
-  }
-
-  void _markReconnectSuccess() {
-    _reconnectFailureCount = 0;
-    _nextReconnectAllowedAt = null;
-  }
-
-  void _markReconnectFailure() {
-    _reconnectFailureCount += 1;
-    final exponent = math.min(_reconnectFailureCount - 1, 5);
-    final backoffSeconds = math.min(
-      _maxReconnectDelay.inSeconds,
-      _baseReconnectDelay.inSeconds * (1 << exponent),
-    );
-    _nextReconnectAllowedAt =
-        DateTime.now().add(Duration(seconds: backoffSeconds));
-  }
-
   Future<void> _tryAutoConnect({
     bool silent = false,
     bool force = false,
@@ -509,16 +476,9 @@ class _DashboardScreenState extends State<DashboardScreen>
     if (ssh.manualDisconnectRequested) return;
     if (ssh.isConnected || ssh.isConnecting || _isAutoConnectRunning) return;
 
-    final now = DateTime.now();
-    if (!force &&
-        _nextReconnectAllowedAt != null &&
-        now.isBefore(_nextReconnectAllowedAt!)) {
-      return;
-    }
-
     _isAutoConnectRunning = true;
     try {
-      if (!silent && reason != 'app_start' && reason != 'connectivity') {
+      if (!silent && reason != 'app_start') {
         // Small delay to allow UI to settle and user to see initial state
         await Future.delayed(const Duration(milliseconds: 500));
       }
@@ -541,7 +501,6 @@ class _DashboardScreenState extends State<DashboardScreen>
       }
 
       // Broadcast-first: do not use persisted IP.
-      ssh.resumeAutoReconnect();
       unawaited(ssh.tryFastReconnect(source: 'dashboard_$reason'));
       _diag.info(
         'autoconnect',
@@ -563,9 +522,7 @@ class _DashboardScreenState extends State<DashboardScreen>
             ? const Duration(seconds: 60)
             : const Duration(seconds: 45),
       );
-      _markReconnectSuccess();
     } catch (e) {
-      _markReconnectFailure();
       _diag.warn(
           'autoconnect', 'Broadcast sync failed reason=$reason error=$e');
     } finally {
@@ -590,109 +547,78 @@ class _DashboardScreenState extends State<DashboardScreen>
     return true;
   }
 
-  Future<bool> _handleNestedBackStack() async {
-    // UX 단순화를 위해 안드로이드 시스템 뒤로가기는
-    // 내부 파일탭 탐색 히스토리를 소비하지 않고 앱 종료 확인으로 처리한다.
-    return false;
-  }
-
   @override
   Widget build(BuildContext context) {
     final window = UiWindowInfo.of(context);
     final viewport = MediaQuery.sizeOf(context);
-    final useRail = window.isExpandedOrAbove && viewport.height >= 560;
+    final forceRailForWideLandscape =
+        window.isLandscape && viewport.width >= 700 && viewport.height >= 360;
+    final useRail = forceRailForWideLandscape ||
+        (window.isExpandedOrAbove && viewport.height >= 560);
 
-    return WillPopScope(
-      onWillPop: () async {
-        if (_consumeBackForKeyboard(context)) {
-          return false;
-        }
-        if (await _handleNestedBackStack()) {
-          return false;
-        }
-        final shouldExit = await showDialog<bool>(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Text("종료 확인"),
-            content: const Text("앱을 종료하시겠습니까?"),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(false),
-                child: const Text("취소"),
-              ),
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(true),
-                child: const Text("종료"),
-              ),
-            ],
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('CarrotLink'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: () {
+              _dismissKeyboard();
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (context) => const SettingsScreen()),
+              );
+            },
           ),
-        );
-        return shouldExit ?? false;
-      },
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text('CarrotLink'),
-          actions: [
-            IconButton(
-              icon: const Icon(Icons.settings),
-              onPressed: () {
-                _dismissKeyboard();
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (context) => const SettingsScreen()),
+        ],
+      ),
+      body: useRail
+          ? Consumer<SSHService>(
+              builder: (context, ssh, child) {
+                return Row(
+                  children: [
+                    NavigationRail(
+                      selectedIndex: _currentIndex,
+                      useIndicator: true,
+                      labelType: NavigationRailLabelType.all,
+                      onDestinationSelected: (idx) {
+                        _dismissKeyboard();
+                        setState(() => _currentIndex = idx);
+                        unawaited(_persistLastTabIndex(idx));
+                      },
+                      destinations: _buildRailDestinations(ssh),
+                    ),
+                    const VerticalDivider(width: 1),
+                    Expanded(
+                      child: IndexedStack(
+                        index: _currentIndex,
+                        children: _buildTabs(),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            )
+          : IndexedStack(
+              index: _currentIndex,
+              children: _buildTabs(),
+            ),
+      bottomNavigationBar: useRail
+          ? null
+          : Consumer<SSHService>(
+              builder: (context, ssh, child) {
+                return NavigationBar(
+                  selectedIndex: _currentIndex,
+                  onDestinationSelected: (idx) {
+                    _dismissKeyboard();
+                    setState(() => _currentIndex = idx);
+                    unawaited(_persistLastTabIndex(idx));
+                  },
+                  destinations: _buildBottomDestinations(ssh),
                 );
               },
             ),
-          ],
-        ),
-        body: useRail
-            ? Consumer<SSHService>(
-                builder: (context, ssh, child) {
-                  return Row(
-                    children: [
-                      NavigationRail(
-                        selectedIndex: _currentIndex,
-                        useIndicator: true,
-                        labelType: NavigationRailLabelType.all,
-                        onDestinationSelected: (idx) {
-                          _dismissKeyboard();
-                          setState(() => _currentIndex = idx);
-                          unawaited(_persistLastTabIndex(idx));
-                        },
-                        destinations: _buildRailDestinations(ssh),
-                      ),
-                      const VerticalDivider(width: 1),
-                      Expanded(
-                        child: IndexedStack(
-                          index: _currentIndex,
-                          children: _buildTabs(),
-                        ),
-                      ),
-                    ],
-                  );
-                },
-              )
-            : IndexedStack(
-                index: _currentIndex,
-                children: _buildTabs(),
-              ),
-        bottomNavigationBar: useRail
-            ? null
-            : Consumer<SSHService>(
-                builder: (context, ssh, child) {
-                  return NavigationBar(
-                    selectedIndex: _currentIndex,
-                    onDestinationSelected: (idx) {
-                      _dismissKeyboard();
-                      setState(() => _currentIndex = idx);
-                      unawaited(_persistLastTabIndex(idx));
-                    },
-                    destinations: _buildBottomDestinations(ssh),
-                  );
-                },
-              ),
-      ),
     );
   }
 }

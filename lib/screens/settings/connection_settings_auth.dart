@@ -191,9 +191,9 @@ extension _ConnectionSettingsAuth on _ConnectionSettingsScreenState {
       if (!mounted) return;
       final ssh = _sshRef;
       if (ssh != null) {
-        ssh.resumeAutoReconnect();
+        await ssh.syncAutoConnectProfile();
       } else {
-        _getSsh().resumeAutoReconnect();
+        await _getSsh().syncAutoConnectProfile();
       }
       CustomToast.show(context, "GitHub 로그인 성공");
       if (!_hasActiveSshKey) {

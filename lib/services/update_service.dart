@@ -8,6 +8,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:open_filex/open_filex.dart';
 
 class UpdateService extends ChangeNotifier {
+  static const String _ignoreUpdateUntilKey = 'ignore_update_until';
+  static const String _ignoreUpdateTagKey = 'ignore_update_tag';
+
   bool _isChecking = false;
   bool _isDownloading = false;
   double _downloadProgress = 0.0;
@@ -19,26 +22,35 @@ class UpdateService extends ChangeNotifier {
   String _channel = "stable"; // stable or dev
   late final Future<void> _versionLoadFuture;
   late final Future<void> _channelLoadFuture;
+  late final Future<void> _ignoredStateLoadFuture;
+  DateTime? _ignoredUntil;
+  String? _ignoredTag;
 
   bool get isChecking => _isChecking;
   bool get isDownloading => _isDownloading;
   double get downloadProgress => _downloadProgress;
   String? get downloadedFilePath => _downloadedFilePath;
   Map<String, dynamic>? get latestRelease => _latestRelease;
+  bool get hasUpdateAvailable => _latestRelease != null;
   String get currentVersion => _currentVersion;
   String get currentVersionFull => _currentVersionFull;
   String get statusMessage => _statusMessage;
   String get channel => _channel;
+  String? get latestReleaseTag => _latestRelease?['tag_name']?.toString();
+  DateTime? get ignoredUntil => isUpdateIgnored ? _ignoredUntil : null;
+  bool get isUpdateIgnored => _isIgnoredRelease(latestReleaseTag);
 
   UpdateService() {
     _versionLoadFuture = _loadVersion();
     _channelLoadFuture = _loadChannel();
+    _ignoredStateLoadFuture = _loadIgnoredState();
   }
 
   Future<void> _ensureReady() async {
     await Future.wait<void>([
       _versionLoadFuture,
       _channelLoadFuture,
+      _ignoredStateLoadFuture,
     ]);
   }
 
@@ -57,6 +69,50 @@ class UpdateService extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     _channel = prefs.getString('update_channel') ?? "stable";
     notifyListeners();
+  }
+
+  Future<void> _loadIgnoredState() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ignoredUntilRaw = prefs.getString(_ignoreUpdateUntilKey);
+    _ignoredTag = prefs.getString(_ignoreUpdateTagKey);
+    if (ignoredUntilRaw != null && ignoredUntilRaw.isNotEmpty) {
+      _ignoredUntil = DateTime.tryParse(ignoredUntilRaw);
+    }
+    if (_ignoredUntil != null && !_ignoredUntil!.isAfter(DateTime.now())) {
+      await clearIgnoredUpdate(notify: false);
+    } else {
+      notifyListeners();
+    }
+  }
+
+  bool _isIgnoredRelease(String? releaseTag) {
+    if (releaseTag == null || releaseTag.isEmpty) return false;
+    if (_ignoredUntil == null || !_ignoredUntil!.isAfter(DateTime.now())) {
+      return false;
+    }
+    if (_ignoredTag == null || _ignoredTag!.isEmpty) {
+      return true;
+    }
+    return _ignoredTag == releaseTag;
+  }
+
+  Future<void> _clearIgnoredUpdateFromPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_ignoreUpdateUntilKey);
+    await prefs.remove(_ignoreUpdateTagKey);
+  }
+
+  Future<void> _refreshIgnoredStateForRelease(String? releaseTag) async {
+    final expired =
+        _ignoredUntil != null && !_ignoredUntil!.isAfter(DateTime.now());
+    final differentRelease = _ignoredTag != null &&
+        _ignoredTag!.isNotEmpty &&
+        releaseTag != null &&
+        releaseTag.isNotEmpty &&
+        _ignoredTag != releaseTag;
+    if (expired || differentRelease) {
+      await clearIgnoredUpdate(notify: false);
+    }
   }
 
   Future<void> setChannel(String newChannel) async {
@@ -82,20 +138,6 @@ class UpdateService extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // Check "Do not ask" preference if silent check (startup)
-      if (silent) {
-        final prefs = await SharedPreferences.getInstance();
-        final lastIgnored = prefs.getString('ignore_update_until');
-        if (lastIgnored != null) {
-          final date = DateTime.parse(lastIgnored);
-          if (DateTime.now().isBefore(date)) {
-            _isChecking = false;
-            notifyListeners();
-            return false;
-          }
-        }
-      }
-
       Map<String, dynamic>? releaseData;
 
       if (_channel == 'stable') {
@@ -129,6 +171,7 @@ class UpdateService extends ChangeNotifier {
 
         // Compare versions (including build number if present)
         if (_isNewer(latestVersion, _currentVersionFull)) {
+          await _refreshIgnoredStateForRelease(tagName);
           _latestRelease = releaseData;
 
           // Check if file already exists
@@ -139,7 +182,7 @@ class UpdateService extends ChangeNotifier {
 
           _isChecking = false;
           notifyListeners();
-          return true;
+          return !silent || !_isIgnoredRelease(tagName);
         }
       }
     } catch (e) {
@@ -224,6 +267,7 @@ class UpdateService extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    await clearIgnoredUpdate(notify: false);
 
     final List assets = _latestRelease!['assets'] ?? [];
     String? downloadUrl;
@@ -310,6 +354,7 @@ class UpdateService extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    await clearIgnoredUpdate(notify: false);
     final result = await OpenFilex.open(path);
     if (result.type == ResultType.done) {
       _statusMessage = "설치 화면을 열었습니다.";
@@ -320,10 +365,34 @@ class UpdateService extends ChangeNotifier {
   }
 
   Future<void> ignoreUpdateFor3Days() async {
+    final releaseTag = latestReleaseTag;
+    if (releaseTag == null || releaseTag.isEmpty) {
+      return;
+    }
     final prefs = await SharedPreferences.getInstance();
     final date = DateTime.now().add(const Duration(days: 3));
-    await prefs.setString('ignore_update_until', date.toIso8601String());
-    _latestRelease = null; // Hide update for now
+    await prefs.setString(_ignoreUpdateUntilKey, date.toIso8601String());
+    await prefs.setString(_ignoreUpdateTagKey, releaseTag);
+    _ignoredUntil = date;
+    _ignoredTag = releaseTag;
+    _statusMessage = "업데이트 알림을 3일간 숨깁니다.";
     notifyListeners();
+  }
+
+  Future<void> clearIgnoredUpdate({bool notify = true}) async {
+    await _clearIgnoredUpdateFromPrefs();
+    _ignoredUntil = null;
+    _ignoredTag = null;
+    if (notify) {
+      notifyListeners();
+    }
+  }
+
+  String? get ignoredUpdateMessage {
+    if (!isUpdateIgnored || _ignoredUntil == null) return null;
+    final date = _ignoredUntil!;
+    final hh = date.hour.toString().padLeft(2, '0');
+    final mm = date.minute.toString().padLeft(2, '0');
+    return '알림 일시중지: ${date.month}/${date.day} $hh:$mm 까지';
   }
 }

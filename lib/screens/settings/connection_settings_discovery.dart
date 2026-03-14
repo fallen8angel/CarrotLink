@@ -21,7 +21,6 @@ extension _ConnectionSettingsDiscovery on _ConnectionSettingsScreenState {
 
   Future<void> _runGuidedDiscovery() async {
     if (!mounted) return;
-    _getSsh().resumeAutoReconnect();
     _setStateSafe(() {
       _lockDiscoveryIpOverwrite = false;
       _autoFilledIp = null;

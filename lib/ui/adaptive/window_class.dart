@@ -35,6 +35,8 @@ class UiWindowInfo {
       windowClass == UiWindowClass.expanded ||
       windowClass == UiWindowClass.large ||
       windowClass == UiWindowClass.extraLarge;
+  bool get hasTightHeight => size.height < 640;
+  bool get isConstrainedLandscape => isLandscape && hasTightHeight;
 
   static UiWindowInfo of(BuildContext context) {
     final mq = MediaQuery.of(context);

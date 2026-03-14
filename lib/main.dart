@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/date_symbol_data_local.dart';
-import 'package:flutter_background_service/flutter_background_service.dart';
 import 'dart:async';
 
 import 'services/ssh_service.dart';
@@ -10,7 +9,6 @@ import 'screens/splash_screen.dart';
 import 'services/macro_service.dart';
 import 'services/google_drive_service.dart';
 import 'services/backup_service.dart';
-import 'services/background_service.dart';
 import 'services/update_service.dart';
 import 'services/diagnostics_service.dart';
 import 'services/hud_feature_settings_service.dart';
@@ -20,11 +18,6 @@ import 'theme/app_theme.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-
-  // Listen for exit command from background service
-  FlutterBackgroundService().on('exitApp').listen((event) {
-    SystemNavigator.pop();
-  });
   final startupWarmup = _runStartupWarmup();
 
   runApp(
@@ -66,7 +59,6 @@ Future<void> _runStartupWarmup() async {
       DeviceOrientation.portraitUp,
     ]),
   );
-  await _runStartupStep('background_service', initializeService);
   await _runStartupStep(
     'storage_layout',
     () => StorageLayoutService.instance.ensureBaseFolders(),
