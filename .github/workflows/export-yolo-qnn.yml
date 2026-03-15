@@ -40,7 +40,7 @@ jobs:
       run:
         shell: bash
     env:
-      EXECUTORCH_DIR: ${{ github.workspace }}/.cache/executorch-src
+      EXECUTORCH_DIR: ${{ github.workspace }}/.cache/executorch
       EXECUTORCH_BUILD_DIR: ${{ github.workspace }}/.cache/executorch-build-qnn
       QNN_STAGING_DIR: ${{ github.workspace }}/.cache/qnn-staging
       QNN_SDK_ROOT: ${{ github.workspace }}/.cache/qnn-staging/sdk
