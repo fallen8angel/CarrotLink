@@ -40,10 +40,10 @@ jobs:
       run:
         shell: bash
     env:
-      EXECUTORCH_DIR: ${{ runner.temp }}/executorch
-      EXECUTORCH_BUILD_DIR: ${{ runner.temp }}/executorch-build-qnn
-      QNN_STAGING_DIR: ${{ runner.temp }}/qnn-staging
-      QNN_SDK_ROOT: ${{ runner.temp }}/qnn-staging/sdk
+      EXECUTORCH_DIR: ${{ github.workspace }}/.cache/executorch-src
+      EXECUTORCH_BUILD_DIR: ${{ github.workspace }}/.cache/executorch-build-qnn
+      QNN_STAGING_DIR: ${{ github.workspace }}/.cache/qnn-staging
+      QNN_SDK_ROOT: ${{ github.workspace }}/.cache/qnn-staging/sdk
       EXPORT_DIR: ${{ github.workspace }}/build/qnn_export
       PYTHONUNBUFFERED: "1"
     steps:
@@ -85,6 +85,7 @@ jobs:
 
       - name: Clone ExecuTorch
         run: |
+          rm -rf "$EXECUTORCH_DIR"
           git clone --branch "${{ inputs.executorch_ref }}" --depth 1 https://github.com/pytorch/executorch.git "$EXECUTORCH_DIR"
           git -C "$EXECUTORCH_DIR" submodule update --init --recursive
 
