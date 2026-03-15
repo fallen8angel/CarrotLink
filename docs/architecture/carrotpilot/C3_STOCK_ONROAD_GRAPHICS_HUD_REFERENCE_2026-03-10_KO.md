@@ -334,7 +334,7 @@ CarrotLink에서 stock path/lane/lead를 다시 구현하거나 맞출 때는 �
 
 ### 7.3 lead/radar 정합
 
-- `docs/architecture/remote_ar/STOCK_MODE_LEAD_RADAR_ALIGNMENT_CHECKLIST_2026-03-09_KO.md`
+- `docs/architecture/carrotpilot/STOCK_MODE_LEAD_RADAR_ALIGNMENT_CHECKLIST_2026-03-09_KO.md`
 
 ### 7.4 YOLO/object detection처럼 stock video placement를 재사용하는 작업
 

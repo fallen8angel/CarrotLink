@@ -1,0 +1,132 @@
+name: Export YOLO QNN
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_variant:
+        description: YOLO weights to export
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - yolo26n
+          - yolo26s
+      soc:
+        description: Qualcomm SoC target
+        required: true
+        default: SM8750
+        type: choice
+        options:
+          - SM8650
+          - SM8750
+          - SM8850
+      use_fp16:
+        description: Export as HTP FP16 instead of quantized HTP
+        required: true
+        default: true
+        type: boolean
+      executorch_ref:
+        description: ExecuTorch git ref
+        required: true
+        default: v1.1.0
+        type: string
+
+jobs:
+  export:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      EXECUTORCH_DIR: ${{ runner.temp }}/executorch
+      EXECUTORCH_BUILD_DIR: ${{ runner.temp }}/executorch-build-qnn
+      QNN_STAGING_DIR: ${{ runner.temp }}/qnn-staging
+      QNN_SDK_ROOT: ${{ runner.temp }}/qnn-staging/sdk
+      EXPORT_DIR: ${{ github.workspace }}/build/qnn_export
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Cache QNN staging
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.QNN_STAGING_DIR }}
+          key: qnn-staging-${{ runner.os }}-${{ inputs.executorch_ref }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            git \
+            ninja-build \
+            pkg-config \
+            flatbuffers-compiler
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install \
+            cmake \
+            ninja \
+            pydot \
+            tabulate \
+            torch==2.10.0 \
+            "ultralytics>=8.3.0"
+
+      - name: Clone ExecuTorch
+        run: |
+          git clone --branch "${{ inputs.executorch_ref }}" --depth 1 https://github.com/pytorch/executorch.git "$EXECUTORCH_DIR"
+          git -C "$EXECUTORCH_DIR" submodule update --init --recursive
+
+      - name: Build ExecuTorch QNN host adaptor
+        run: |
+          mkdir -p "$EXPORT_DIR/logs"
+          bash "$GITHUB_WORKSPACE/scripts/build_executorch_qnn_host.sh" "$EXECUTORCH_DIR" \
+            2>&1 | tee "$EXPORT_DIR/logs/build_executorch_qnn_host.log"
+
+      - name: Export YOLO to QNN
+        env:
+          PYTHONPATH: ${{ env.EXECUTORCH_DIR }}
+          LD_LIBRARY_PATH: ${{ env.QNN_SDK_ROOT }}/lib/x86_64-linux-clang
+        run: |
+          mkdir -p "$EXPORT_DIR"
+          if [[ "${{ inputs.model_variant }}" == "all" ]]; then
+            models=(yolo26n yolo26s)
+          else
+            models=("${{ inputs.model_variant }}")
+          fi
+
+          for model in "${models[@]}"; do
+            model_path="$GITHUB_WORKSPACE/scripts/${model}.pt"
+            output_name="${model}_qnn"
+            args=(
+              --weights "$model_path"
+              --output-dir "$EXPORT_DIR"
+              --output-name "$output_name"
+              --soc "${{ inputs.soc }}"
+              --imgsz 416
+              --batch 1
+            )
+            if [[ "${{ inputs.use_fp16 }}" == "true" ]]; then
+              args+=(--use-fp16)
+            fi
+            python "$GITHUB_WORKSPACE/scripts/export_yolo_qnn.py" "${args[@]}" \
+              2>&1 | tee "$EXPORT_DIR/logs/export_${model}_qnn.log"
+          done
+
+      - name: Upload export artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qnn-export-${{ inputs.model_variant }}-${{ inputs.soc }}
+          path: ${{ env.EXPORT_DIR }}

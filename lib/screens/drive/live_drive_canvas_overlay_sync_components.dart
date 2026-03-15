@@ -133,7 +133,6 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     var next = snapshot;
     final previous = _latestOverlaySnapshot;
 
-
     // Enforce classic visual style (no blue 3-strip mode).
     var mode = next.pathMode;
     var color = next.pathColor;
@@ -188,8 +187,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
 
   void _applyHudModeRuntimeImpl() {
     if (_openpilotOverlayMode) {
-      final preserveVisibleNativeCamera =
-          _useNativeLiveCamera &&
+      final preserveVisibleNativeCamera = _useNativeLiveCamera &&
           _nativeCameraViewId != null &&
           _cameraError == null &&
           !_cameraSuspendedByLifecycle;
@@ -240,29 +238,6 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     unawaited(_pushNativeYoloConfig(force: true));
     unawaited(_clearNativeOverlay());
     unawaited(_loadCameraSource(force: true));
-  }
-
-  void _setOverlayVerifyModeImpl(bool enabled) {
-    if (!mounted) return;
-    if (_overlayVerifyMode == enabled) return;
-    _safeSetState(() {
-      _overlayVerifyMode = enabled;
-      if (!enabled) {
-        _overlayVerifyText = '';
-      }
-    });
-    _toast(enabled ? '정합 검증 ON' : '정합 검증 OFF');
-    if (enabled && _debugShowVerifyPanel) {
-      _refreshOverlayVerify(_overlayNotifier.value, force: true);
-    }
-  }
-
-  void _setViewportFitModeImpl(bool coverPreferred) {
-    _setViewportZoomPresetImpl(
-      coverPreferred
-          ? _DriveViewportZoomPreset.crop
-          : _DriveViewportZoomPreset.fit,
-    );
   }
 
   String _viewportZoomPresetPrefKey(bool isLandscape) {
@@ -322,44 +297,12 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     _toast('${preset.tooltip} 적용');
   }
 
-  void _setDebugGuidesImpl(bool enabled) {
-    if (!mounted) return;
-    if (_debugShowGuides == enabled) return;
-    _safeSetState(() => _debugShowGuides = enabled);
-    _toast(enabled ? '디버그 가이드 ON' : '디버그 가이드 OFF');
-  }
-
-  void _setDebugVerifyPanelImpl(bool enabled) {
-    if (!mounted) return;
-    if (_debugShowVerifyPanel == enabled) return;
-    _safeSetState(() {
-      _debugShowVerifyPanel = enabled;
-      if (!enabled) {
-        _overlayVerifyText = '';
-      }
-    });
-    _toast(enabled ? '디버그 정보창 ON' : '디버그 정보창 OFF');
-    if (_overlayVerifyMode && enabled) {
-      _refreshOverlayVerify(_overlayNotifier.value, force: true);
-    }
-  }
-
-  void _setDebugViewportFrameImpl(bool enabled) {
-    if (!mounted) return;
-    if (_debugShowViewportFrame == enabled) return;
-    _safeSetState(() => _debugShowViewportFrame = enabled);
-    _toast(enabled ? '레터박스 프레임 ON' : '레터박스 프레임 OFF');
-  }
-
   Future<void> _loadHudDebugLayerTogglesImpl() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       const defaults = <String, bool>{
         // Default policy: keep the core AR/lead/radar overlays visible.
-        // Native AR transport and YOLO diagnostics stay off until requested.
         'arOverlay': true,
-        'nativeArScene': false,
-        'arAutoSave': false,
         'pathFill': true,
         'laneLines': true,
         'roadEdge': true,
@@ -369,11 +312,6 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
         'radarVector': true,
         'stopDistanceTf': true,
         'stateText': true,
-        'yoloEnabled': false,
-        'yoloBoxes': false,
-        'yoloLabels': false,
-        'yoloTrafficLights': false,
-        'yoloStats': false,
       };
 
       bool readBool(Map<String, dynamic> source, String key, bool fallback) {
@@ -392,11 +330,6 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
         if (!mounted) {
           _debugShowArOverlay =
               readBool(map, 'arOverlay', defaults['arOverlay']!);
-          _debugPushNativeArScene =
-              readBool(map, 'nativeArScene', defaults['nativeArScene']!);
-          final autoSave = readBool(map, 'arAutoSave', defaults['arAutoSave']!);
-          _debugArCaptureEnabled = autoSave;
-          _debugArAutoPersistEnabled = autoSave;
           _debugShowPathFill = readBool(map, 'pathFill', defaults['pathFill']!);
           _debugShowLaneLines =
               readBool(map, 'laneLines', defaults['laneLines']!);
@@ -411,28 +344,12 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
               readBool(map, 'stopDistanceTf', defaults['stopDistanceTf']!);
           _debugShowStateText =
               readBool(map, 'stateText', defaults['stateText']!);
-          _debugYoloEnabled =
-              readBool(map, 'yoloEnabled', defaults['yoloEnabled']!);
-          _debugYoloBoxes = readBool(map, 'yoloBoxes', defaults['yoloBoxes']!);
-          _debugYoloLabels =
-              readBool(map, 'yoloLabels', defaults['yoloLabels']!);
-          _debugYoloTrafficLights = readBool(
-            map,
-            'yoloTrafficLights',
-            defaults['yoloTrafficLights']!,
-          );
-          _debugYoloStats = readBool(map, 'yoloStats', defaults['yoloStats']!);
           return;
         }
 
         _safeSetState(() {
           _debugShowArOverlay =
               readBool(map, 'arOverlay', defaults['arOverlay']!);
-          _debugPushNativeArScene =
-              readBool(map, 'nativeArScene', defaults['nativeArScene']!);
-          final autoSave = readBool(map, 'arAutoSave', defaults['arAutoSave']!);
-          _debugArCaptureEnabled = autoSave;
-          _debugArAutoPersistEnabled = autoSave;
           _debugShowPathFill = readBool(map, 'pathFill', defaults['pathFill']!);
           _debugShowLaneLines =
               readBool(map, 'laneLines', defaults['laneLines']!);
@@ -447,17 +364,6 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
               readBool(map, 'stopDistanceTf', defaults['stopDistanceTf']!);
           _debugShowStateText =
               readBool(map, 'stateText', defaults['stateText']!);
-          _debugYoloEnabled =
-              readBool(map, 'yoloEnabled', defaults['yoloEnabled']!);
-          _debugYoloBoxes = readBool(map, 'yoloBoxes', defaults['yoloBoxes']!);
-          _debugYoloLabels =
-              readBool(map, 'yoloLabels', defaults['yoloLabels']!);
-          _debugYoloTrafficLights = readBool(
-            map,
-            'yoloTrafficLights',
-            defaults['yoloTrafficLights']!,
-          );
-          _debugYoloStats = readBool(map, 'yoloStats', defaults['yoloStats']!);
         });
       }
 
@@ -467,7 +373,6 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
           false;
       if (!initialized) {
         applyMap(Map<String, dynamic>.from(defaults));
-        unawaited(_pushNativeYoloConfig(force: true));
         await prefs.setString(
           _LiveDriveCanvasScreenState._hudDebugLayerTogglesPrefKey,
           jsonEncode(defaults),
@@ -484,17 +389,14 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       );
       if (raw == null || raw.trim().isEmpty) {
         applyMap(Map<String, dynamic>.from(defaults));
-        unawaited(_pushNativeYoloConfig(force: true));
         return;
       }
       final decoded = jsonDecode(raw);
       if (decoded is! Map) {
         applyMap(Map<String, dynamic>.from(defaults));
-        unawaited(_pushNativeYoloConfig(force: true));
         return;
       }
       applyMap(Map<String, dynamic>.from(decoded));
-      unawaited(_pushNativeYoloConfig(force: true));
     } catch (_) {}
   }
 
@@ -503,8 +405,6 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       final prefs = await SharedPreferences.getInstance();
       final payload = <String, bool>{
         'arOverlay': _debugShowArOverlay,
-        'nativeArScene': _debugPushNativeArScene,
-        'arAutoSave': _debugArCaptureEnabled && _debugArAutoPersistEnabled,
         'pathFill': _debugShowPathFill,
         'laneLines': _debugShowLaneLines,
         'roadEdge': _debugShowRoadEdge,
@@ -514,11 +414,6 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
         'radarVector': _debugShowRadarVector,
         'stopDistanceTf': _debugShowStopDistanceTf,
         'stateText': _debugShowStateText,
-        'yoloEnabled': _debugYoloEnabled,
-        'yoloBoxes': _debugYoloBoxes,
-        'yoloLabels': _debugYoloLabels,
-        'yoloTrafficLights': _debugYoloTrafficLights,
-        'yoloStats': _debugYoloStats,
       };
       await prefs.setString(
         _LiveDriveCanvasScreenState._hudDebugLayerTogglesPrefKey,
@@ -538,7 +433,6 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     _safeSetState(update);
     setLocalState(() {});
     unawaited(_saveHudDebugLayerToggles());
-    unawaited(_pushNativeYoloConfig(force: true));
   }
 
   void _cacheOverlaySnapshot(_DriveOverlaySnapshot snapshot) {
@@ -638,8 +532,6 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       );
       _lastNativeOverlaySignature = null;
       _lastNativeOverlayHadPayload = false;
-      _lastNativeArSceneSignature = null;
-      _lastNativeArSceneHadPayload = false;
     } catch (_) {}
   }
 
@@ -678,78 +570,6 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     ]);
   }
 
-  int? _buildArSceneSignature(Map<String, dynamic>? payload) {
-    if (payload == null) return null;
-    try {
-      return jsonEncode(payload).hashCode;
-    } catch (_) {
-      return payload.toString().hashCode;
-    }
-  }
-
-  YoloDebugSettings _currentYoloDebugSettings() {
-    return YoloDebugSettings(
-      enabled: _debugYoloEnabled,
-      showBoxes: _debugYoloBoxes,
-      showLabels: _debugYoloLabels,
-      showTrafficLights: _debugYoloTrafficLights,
-      showStats: _debugYoloStats,
-    );
-  }
-
-  Map<String, dynamic> _buildNativeYoloConfigPayload({
-    required YoloDebugSettings settings,
-  }) {
-    return <String, dynamic>{
-      ...settings.toJson(),
-      'runtimeBackend': 'executorch_qnn',
-      'modelVariant': 'yolo26n',
-      'camera': _liveCameraName,
-      'sourceWidth': _cameraSourceSize.width.round(),
-      'sourceHeight': _cameraSourceSize.height.round(),
-      'inputWidth': 416,
-      'inputHeight': 416,
-      'samplePeriodMs': 200,
-    };
-  }
-
-  int _buildYoloConfigSignature(Map<String, dynamic> payload) {
-    try {
-      return jsonEncode(payload).hashCode;
-    } catch (_) {
-      return payload.toString().hashCode;
-    }
-  }
-
-  Future<void> _pushNativeYoloConfig({bool force = false}) async {
-    final viewId = _nativeCameraViewId;
-    if (viewId == null) {
-      _lastNativeYoloConfigSignature = null;
-      return;
-    }
-    final settings = (_openpilotOverlayMode && _useNativeLiveCamera)
-        ? _currentYoloDebugSettings()
-        : YoloDebugSettings.empty;
-    final payload = _buildNativeYoloConfigPayload(settings: settings);
-    final signature = _buildYoloConfigSignature(payload);
-    if (!force && _lastNativeYoloConfigSignature == signature) {
-      return;
-    }
-    try {
-      final ok = await _LiveDriveCanvasScreenState._nativeCameraControlChannel
-          .invokeMethod<bool>(
-        'updateYoloConfig',
-        <String, dynamic>{
-          'viewId': viewId,
-          'yoloConfig': payload,
-        },
-      );
-      if (ok == true) {
-        _lastNativeYoloConfigSignature = signature;
-      }
-    } catch (_) {}
-  }
-
   void _refreshOverlayVerify(
     _DriveOverlaySnapshot snapshot, {
     bool force = false,
@@ -786,12 +606,14 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     bool force = false,
   }) async {
     _recordOverlayPushCall();
+    if (_isDeveloperPlaybackRequested) {
+      _recordOverlayPushSkipped(duplicate: false, noSurface: true);
+      return;
+    }
     if (!_openpilotOverlayMode) {
       await _clearNativeOverlay();
       _lastNativeOverlaySignature = null;
       _lastNativeOverlayHadPayload = false;
-      _lastNativeArSceneSignature = null;
-      _lastNativeArSceneHadPayload = false;
       return;
     }
     if (!_debugShowArOverlay) {
@@ -800,8 +622,6 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       }
       _lastNativeOverlaySignature = null;
       _lastNativeOverlayHadPayload = false;
-      _lastNativeArSceneSignature = null;
-      _lastNativeArSceneHadPayload = false;
       return;
     }
     if (!_useNativeOverlayRenderer) {
@@ -831,28 +651,9 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       return;
     }
     final signature = _buildOverlaySignature(snapshot);
-    final shouldBuildLiveArScenePayload =
-        _debugPushNativeArScene || _debugArCaptureEnabled || _debugArReplayMode;
-    final liveArScenePayload = shouldBuildLiveArScenePayload
-        ? _DriveOverlayPainter.buildArScenePayload(
-            snapshot: snapshot,
-            sourceSize: _cameraSourceSize,
-            cameraKind: _liveCameraKind,
-            canvasSize: _nativeOverlaySize,
-            coverViewport: _coverViewport,
-            viewportZoom: _viewportPlacementZoom,
-            visibleViewportRect: _nativeOverlayVisibleViewportRect,
-          )
-        : null;
-    final arScenePayload = _debugArReplayMode
-        ? (_activeArReplayFrame?.arScenePayload ?? liveArScenePayload)
-        : (_debugPushNativeArScene ? liveArScenePayload : null);
-    final arSceneSignature = _buildArSceneSignature(arScenePayload);
-    final arSceneHadPayload = arScenePayload != null;
     if (!force &&
         !_isAnimatedPathMode(snapshot.pathMode) &&
-        _lastNativeOverlaySignature == signature &&
-        _lastNativeArSceneSignature == arSceneSignature) {
+        _lastNativeOverlaySignature == signature) {
       _recordOverlayPushSkipped(duplicate: true, noSurface: false);
       return;
     }
@@ -879,9 +680,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     final overlayHadPayload = payload != null;
     if (!force &&
         _lastNativeOverlaySignature == signature &&
-        _lastNativeOverlayHadPayload == overlayHadPayload &&
-        _lastNativeArSceneSignature == arSceneSignature &&
-        _lastNativeArSceneHadPayload == arSceneHadPayload) {
+        _lastNativeOverlayHadPayload == overlayHadPayload) {
       _recordOverlayPushSkipped(duplicate: true, noSurface: false);
       return;
     }
@@ -901,25 +700,14 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
           <String, dynamic>{
             'viewId': viewId,
             'overlay': payload,
-            'arScene': arScenePayload,
           },
         );
       }
       _lastNativeOverlaySignature = signature;
       _lastNativeOverlayHadPayload = overlayHadPayload;
-      _lastNativeArSceneSignature = arSceneSignature;
-      _lastNativeArSceneHadPayload = arSceneHadPayload;
       _recordOverlayPushSent(snapshot);
-      if (!_debugArReplayMode &&
-          _debugArCaptureEnabled &&
-          liveArScenePayload != null) {
-        await _captureArReplayFrame(
-          arScenePayload: liveArScenePayload,
-          viewId: viewId,
-        );
-      }
-    } catch (_) {}
-    finally {
+    } catch (_) {
+    } finally {
       _nativeOverlayPushBusy = false;
       final pending = _pendingNativeOverlaySnapshot;
       final pendingForce = _pendingNativeOverlayForce;
@@ -1159,7 +947,8 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       );
       if (synced != null ||
           _startupNativeFrameSettleCount >=
-              _LiveDriveCanvasScreenState._startupProvisionalNativeSettleFrames) {
+              _LiveDriveCanvasScreenState
+                  ._startupProvisionalNativeSettleFrames) {
         _endStartupProvisionalSync(reason: 'native_frame_stable');
       }
     }

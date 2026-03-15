@@ -115,7 +115,7 @@ YOLO box overlay를 위해 새로 만들 필요가 없는 stock 모드 자산도
 - detection도 같은 정책을 따라야 한다.
 - 관련 파일:
   - `lib/screens/drive/live_drive_canvas_overlay_sync_components.dart`
-  - `docs/architecture/remote_ar/STOCK_MODE_LEAD_RADAR_ALIGNMENT_CHECKLIST_2026-03-09_KO.md`
+  - `docs/architecture/carrotpilot/STOCK_MODE_LEAD_RADAR_ALIGNMENT_CHECKLIST_2026-03-09_KO.md`
 
 5. 무엇을 1차에서 재사용하지 않을지
 

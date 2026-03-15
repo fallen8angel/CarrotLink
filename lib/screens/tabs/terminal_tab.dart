@@ -125,8 +125,10 @@ class _TerminalScreenState extends State<TerminalScreen>
   bool _isStartingTerminal = false;
   bool _manualSessionClose = false;
   bool _shouldAutoReattach = false;
-  double _fontSize = 14.0;
+  double _fontSize = 12.0;
   bool _showVirtualKeys = false;
+  bool _virtualCtrlArmed = false;
+  bool _virtualAltArmed = false;
   final StringBuffer _pendingTerminalOutput = StringBuffer();
   Timer? _terminalOutputFlushTimer;
   int _sessionGeneration = 0;
@@ -147,7 +149,7 @@ class _TerminalScreenState extends State<TerminalScreen>
       final session = _session;
       if (session == null) return;
       try {
-        session.write(utf8.encode(data));
+        session.write(utf8.encode(_applyVirtualModifiers(data)));
       } catch (_) {}
     };
     _terminal.onResize = (width, height, pixelWidth, pixelHeight) {
@@ -164,7 +166,7 @@ class _TerminalScreenState extends State<TerminalScreen>
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
-      _fontSize = prefs.getDouble('terminal_font_size') ?? 14.0;
+      _fontSize = prefs.getDouble('terminal_font_size') ?? 12.0;
     });
   }
 
@@ -185,10 +187,86 @@ class _TerminalScreenState extends State<TerminalScreen>
     }
   }
 
-  void _sendKey(String key) {
+  void _sendKey(String key, {bool applyModifiers = true}) {
     final session = _session;
     if (session != null) {
-      session.write(utf8.encode(key));
+      final data = applyModifiers ? _applyVirtualModifiers(key) : key;
+      session.write(utf8.encode(data));
+    }
+  }
+
+  String _applyVirtualModifiers(String data) {
+    final useCtrl = _virtualCtrlArmed;
+    final useAlt = _virtualAltArmed;
+    if (!useCtrl && !useAlt) return data;
+
+    var transformed = data;
+    if (useCtrl) {
+      transformed = _applyCtrlModifier(transformed);
+    }
+    if (useAlt) {
+      transformed = '\x1b$transformed';
+    }
+
+    if (mounted) {
+      setState(() {
+        _virtualCtrlArmed = false;
+        _virtualAltArmed = false;
+      });
+    } else {
+      _virtualCtrlArmed = false;
+      _virtualAltArmed = false;
+    }
+    return transformed;
+  }
+
+  String _applyCtrlModifier(String data) {
+    if (data.length != 1) return data;
+    final code = data.codeUnitAt(0);
+    if ((code >= 0x41 && code <= 0x5A) || (code >= 0x61 && code <= 0x7A)) {
+      return String.fromCharCode(code & 0x1f);
+    }
+    if (code == 0x20 || code == 0x32) {
+      return String.fromCharCode(0);
+    }
+    if (code == 0x33 || code == 0x5b) {
+      return String.fromCharCode(0x1b);
+    }
+    if (code == 0x34 || code == 0x5c) {
+      return String.fromCharCode(0x1c);
+    }
+    if (code == 0x35 || code == 0x5d) {
+      return String.fromCharCode(0x1d);
+    }
+    if (code == 0x36 || code == 0x5e) {
+      return String.fromCharCode(0x1e);
+    }
+    if (code == 0x37 || code == 0x5f) {
+      return String.fromCharCode(0x1f);
+    }
+    if (code == 0x38) {
+      return String.fromCharCode(0x7f);
+    }
+    return data;
+  }
+
+  void _toggleVirtualCtrl() {
+    setState(() => _virtualCtrlArmed = !_virtualCtrlArmed);
+  }
+
+  void _toggleVirtualAlt() {
+    setState(() => _virtualAltArmed = !_virtualAltArmed);
+  }
+
+  void _clearTerminalOutput() {
+    _terminalOutputFlushTimer?.cancel();
+    _terminalOutputFlushTimer = null;
+    _pendingTerminalOutput.clear();
+    _terminalController.clearSelection();
+    _terminal.eraseDisplay();
+    _terminal.eraseScrollbackOnly();
+    if (mounted) {
+      CustomToast.show(context, '터미널 로그를 지웠습니다.');
     }
   }
 
@@ -321,6 +399,7 @@ class _TerminalScreenState extends State<TerminalScreen>
           menuItem('select_all', Icons.select_all, '전체 선택'),
           menuItem('clear_selection', Icons.deselect, '선택 해제',
               enabled: hasSelection),
+          menuItem('clear_output', Icons.delete_sweep, '로그 전체 삭제'),
           const PopupMenuDivider(),
           menuItem('cursor_up', Icons.keyboard_arrow_up, '커서 ↑'),
           menuItem('cursor_down', Icons.keyboard_arrow_down, '커서 ↓'),
@@ -351,6 +430,9 @@ class _TerminalScreenState extends State<TerminalScreen>
           break;
         case 'clear_selection':
           _terminalController.clearSelection();
+          break;
+        case 'clear_output':
+          _clearTerminalOutput();
           break;
         case 'cursor_up':
           _sendKey('\x1b[A');
@@ -635,20 +717,46 @@ class _TerminalScreenState extends State<TerminalScreen>
   }
 
   Widget _buildVirtualKey(String label, String code) {
+    return _buildVirtualKeyButton(
+      label: label,
+      onTap: () => _sendKey(code),
+    );
+  }
+
+  Widget _buildVirtualModifierKey({
+    required String label,
+    required bool active,
+    required VoidCallback onTap,
+  }) {
+    return _buildVirtualKeyButton(
+      label: label,
+      active: active,
+      onTap: onTap,
+    );
+  }
+
+  Widget _buildVirtualKeyButton({
+    required String label,
+    required VoidCallback onTap,
+    bool active = false,
+  }) {
     final scheme = Theme.of(context).colorScheme;
     return InkWell(
-      onTap: () => _sendKey(code),
+      onTap: onTap,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
-          color: scheme.surface,
+          color: active ? scheme.primaryContainer : scheme.surface,
           borderRadius: BorderRadius.circular(8),
           border:
               Border.all(color: scheme.outlineVariant.withValues(alpha: 0.45)),
         ),
         child: Text(
           label,
-          style: const TextStyle(fontWeight: FontWeight.bold),
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+            color: active ? scheme.onPrimaryContainer : null,
+          ),
         ),
       ),
     );
@@ -732,6 +840,11 @@ class _TerminalScreenState extends State<TerminalScreen>
                   icon: const Icon(Icons.paste),
                   onPressed: _paste,
                   tooltip: "붙여넣기",
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_sweep),
+                  onPressed: _clearTerminalOutput,
+                  tooltip: "로그 전체 삭제",
                 ),
                 IconButton(
                   icon: Icon(
@@ -848,11 +961,29 @@ class _TerminalScreenState extends State<TerminalScreen>
                       child: Row(
                         children: [
                           const SizedBox(width: 8),
+                          _buildVirtualModifierKey(
+                            label: "CTRL",
+                            active: _virtualCtrlArmed,
+                            onTap: _toggleVirtualCtrl,
+                          ),
+                          const SizedBox(width: 8),
+                          _buildVirtualModifierKey(
+                            label: "ALT",
+                            active: _virtualAltArmed,
+                            onTap: _toggleVirtualAlt,
+                          ),
+                          const SizedBox(width: 8),
                           _buildVirtualKey("ESC", "\x1b"),
                           const SizedBox(width: 8),
                           _buildVirtualKey("TAB", "\t"),
                           const SizedBox(width: 8),
+                          _buildVirtualKey("CTRL+L", "\x0c"),
+                          const SizedBox(width: 8),
                           _buildVirtualKey("CTRL+C", "\x03"),
+                          const SizedBox(width: 8),
+                          _buildVirtualKey("CTRL+D", "\x04"),
+                          const SizedBox(width: 8),
+                          _buildVirtualKey("BKSP", "\x7f"),
                           const SizedBox(width: 8),
                           _buildVirtualKey("UP", "\x1b[A"),
                           const SizedBox(width: 8),
@@ -861,6 +992,14 @@ class _TerminalScreenState extends State<TerminalScreen>
                           _buildVirtualKey("LEFT", "\x1b[D"),
                           const SizedBox(width: 8),
                           _buildVirtualKey("RIGHT", "\x1b[C"),
+                          const SizedBox(width: 8),
+                          _buildVirtualKey("HOME", "\x1b[H"),
+                          const SizedBox(width: 8),
+                          _buildVirtualKey("END", "\x1b[F"),
+                          const SizedBox(width: 8),
+                          _buildVirtualKey("PGUP", "\x1b[5~"),
+                          const SizedBox(width: 8),
+                          _buildVirtualKey("PGDN", "\x1b[6~"),
                           const SizedBox(width: 8),
                           _buildVirtualKey("ENTER", "\r"),
                           const SizedBox(width: 8),

@@ -73,7 +73,7 @@ class _SplashScreenState extends State<SplashScreen> {
       );
       _setStatus(needsOnboarding ? '권한 확인 화면으로 이동 중...' : '대시보드로 이동 중...');
 
-      final splashMs = needsOnboarding ? 900 : 180;
+      final splashMs = needsOnboarding ? 900 : 60;
       await Future.delayed(Duration(milliseconds: splashMs));
       _navigateFromSplash(needsOnboarding: needsOnboarding);
     } catch (e, st) {

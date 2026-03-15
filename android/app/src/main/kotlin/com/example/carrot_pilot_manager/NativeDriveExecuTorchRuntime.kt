@@ -43,8 +43,10 @@ internal object NativeDriveYoloModelLocator {
 
     val fileNames =
         linkedSetOf<String>().apply {
-          add(if (requested.endsWith(".pte", ignoreCase = true)) requested else "$requested.pte")
-          add(requested)
+          for (baseName in NativeDriveYoloModelCatalog.candidateBaseNamesFor(requested)) {
+            add(if (baseName.endsWith(".pte", ignoreCase = true)) baseName else "$baseName.pte")
+            add(baseName)
+          }
         }
 
     fun addFileCandidates(label: String, dir: File?) {
@@ -132,12 +134,24 @@ internal object NativeDriveYoloModelLocator {
 internal class NativeDriveExecuTorchRuntime(
     context: Context,
 ) : NativeDriveYoloRuntime {
+  private data class NativeDriveYoloBackendSupport(
+      val available: Boolean = false,
+      val reason: String? = null,
+      val nativeLibs: List<String> = emptyList(),
+      val nativeLibDir: String? = null,
+      val packagingMode: String = BuildConfig.EXECUTORCH_PACKAGING_MODE,
+      val assetFiles: List<String> = emptyList(),
+  )
+
   private val appContext = context.applicationContext
   private var config: NativeDriveYoloConfig = NativeDriveYoloConfig.disabled
   private var module: Module? = null
   private var modelPath: String? = null
   private var modelSource: String? = null
   private var candidatePaths: List<String> = emptyList()
+  private var backendSupport = NativeDriveYoloBackendSupport()
+  private var qnnRuntimeDir: String? = null
+  private var qnnEnvReady: Boolean = false
   private var lastError: String? = null
   private var stage: String = "idle"
   private var blocker: String? = "disabled"
@@ -153,7 +167,12 @@ internal class NativeDriveExecuTorchRuntime(
   private var lastOutputPreview: List<String> = emptyList()
   private var parsedCandidateCount = 0
   private var parsedDetectionCount = 0
+  private var parserStrategy: String? = null
+  private var parserScoreThreshold: Double? = null
+  private var parserAboveThresholdCount = 0
+  private var parserMaxClassScore: Double? = null
   private var parsedDetectionsPreview: List<String> = emptyList()
+  private var parsedDetections: List<Map<String, Any?>> = emptyList()
   private var reusableInputBuffer: FloatBuffer? = null
   private var reusablePixels: IntArray? = null
   private var reusableInputShape: LongArray = longArrayOf(1, 3, 0, 0)
@@ -167,7 +186,42 @@ internal class NativeDriveExecuTorchRuntime(
       stage = "idle"
       blocker = "disabled"
       candidatePaths = emptyList()
+      backendSupport = NativeDriveYoloBackendSupport()
+      qnnRuntimeDir = null
+      qnnEnvReady = false
       lastError = null
+      inferenceRequests = 0
+      lastRequestedFrameId = -1
+      pixelFramesConsumed = 0
+      forwardSuccesses = 0
+      forwardFailures = 0
+      lastPreprocessMs = null
+      lastForwardMs = null
+      lastOutputShapes = emptyList()
+      lastOutputDtypes = emptyList()
+    lastOutputPreview = emptyList()
+    parsedCandidateCount = 0
+    parsedDetectionCount = 0
+    parserStrategy = null
+    parserScoreThreshold = null
+    parserAboveThresholdCount = 0
+    parserMaxClassScore = null
+    parsedDetectionsPreview = emptyList()
+    parsedDetections = emptyList()
+    reusableInputBuffer = null
+      reusablePixels = null
+      reusableInputShape = longArrayOf(1, 3, 0, 0)
+      return
+    }
+    backendSupport = probeBackendSupport(config)
+    if (!config.unsafeRuntimeEnabled) {
+      releaseModule()
+      stage = "runtime_disabled"
+      blocker = "unsafe_runtime_disabled"
+      lastError = null
+      candidatePaths = emptyList()
+      qnnRuntimeDir = null
+      qnnEnvReady = false
       inferenceRequests = 0
       lastRequestedFrameId = -1
       pixelFramesConsumed = 0
@@ -180,7 +234,25 @@ internal class NativeDriveExecuTorchRuntime(
       lastOutputPreview = emptyList()
       parsedCandidateCount = 0
       parsedDetectionCount = 0
+      parserStrategy = null
+      parserScoreThreshold = null
+      parserAboveThresholdCount = 0
+      parserMaxClassScore = null
       parsedDetectionsPreview = emptyList()
+      parsedDetections = emptyList()
+      reusableInputBuffer = null
+      reusablePixels = null
+      reusableInputShape = longArrayOf(1, 3, 0, 0)
+      return
+    }
+    if (!backendSupport.available) {
+      releaseModule()
+      stage = "backend_unavailable"
+      blocker = backendSupport.reason ?: "backend_unavailable"
+      lastError = null
+      candidatePaths = emptyList()
+      qnnRuntimeDir = null
+      qnnEnvReady = false
       reusableInputBuffer = null
       reusablePixels = null
       reusableInputShape = longArrayOf(1, 3, 0, 0)
@@ -192,6 +264,16 @@ internal class NativeDriveExecuTorchRuntime(
 
   override fun onSampledFrame(frame: NativeDriveYoloFrame) {
     if (!config.enabled) return
+    if (!config.unsafeRuntimeEnabled) {
+      stage = "runtime_disabled"
+      blocker = "unsafe_runtime_disabled"
+      return
+    }
+    if (!backendSupport.available) {
+      stage = "backend_unavailable"
+      blocker = backendSupport.reason ?: "backend_unavailable"
+      return
+    }
     inferenceRequests += 1
     lastRequestedFrameId = frame.frameId
     if (module == null) {
@@ -204,6 +286,16 @@ internal class NativeDriveExecuTorchRuntime(
 
   override fun onPixelFrame(frame: NativeDriveYoloFrame, bitmap: android.graphics.Bitmap) {
     if (!config.enabled) return
+    if (!config.unsafeRuntimeEnabled) {
+      stage = "runtime_disabled"
+      blocker = "unsafe_runtime_disabled"
+      return
+    }
+    if (!backendSupport.available) {
+      stage = "backend_unavailable"
+      blocker = backendSupport.reason ?: "backend_unavailable"
+      return
+    }
     pixelFramesConsumed += 1
     lastRequestedFrameId = frame.frameId
     if (module == null) {
@@ -217,7 +309,12 @@ internal class NativeDriveExecuTorchRuntime(
     lastOutputPreview = emptyList()
     parsedCandidateCount = 0
     parsedDetectionCount = 0
+    parserStrategy = null
+    parserScoreThreshold = null
+    parserAboveThresholdCount = 0
+    parserMaxClassScore = null
     parsedDetectionsPreview = emptyList()
+    parsedDetections = emptyList()
     var preprocessDone = false
     try {
       val preprocessStartNs = System.nanoTime()
@@ -246,15 +343,48 @@ internal class NativeDriveExecuTorchRuntime(
       if (parseResult != null) {
         parsedCandidateCount = parseResult.candidateCount
         parsedDetectionCount = parseResult.acceptedCount
+        parserStrategy = parseResult.strategy
+        parserScoreThreshold = parseResult.scoreThreshold.toDouble()
+        parserAboveThresholdCount = parseResult.aboveThresholdCount
+        parserMaxClassScore = parseResult.maxClassScore.toDouble()
         parsedDetectionsPreview =
-            parseResult.detections.take(5).map { detection ->
-              "${detection.label}:${"%.2f".format(detection.score)}@" +
-                  "${detection.left.roundDebug()},${detection.top.roundDebug()}," +
-                  "${detection.right.roundDebug()},${detection.bottom.roundDebug()}"
+            buildList {
+              add(
+                  "strategy=${parseResult.strategy} " +
+                      "thr=${"%.2f".format(parseResult.scoreThreshold)} " +
+                      "above=${parseResult.aboveThresholdCount} " +
+                      "max=${"%.3f".format(parseResult.maxClassScore)}",
+              )
+              addAll(
+                  parseResult.detections.take(5).map { detection ->
+                    "${detection.label}:${"%.2f".format(detection.score)}@" +
+                        "${detection.left.roundDebug()},${detection.top.roundDebug()}," +
+                        "${detection.right.roundDebug()},${detection.bottom.roundDebug()}"
+                  },
+              )
             }
-        stage = "awaiting_overlay_projection"
-        blocker = "overlay_draw_missing"
+        parsedDetections =
+            parseResult.detections.map { detection ->
+              detection.toPayload(
+                  sourceWidth = config.sourceWidth,
+                  sourceHeight = config.sourceHeight,
+                  inputWidth = config.inputWidth,
+                  inputHeight = config.inputHeight,
+              )
+            }
+        if (parseResult.acceptedCount > 0) {
+          stage = "overlay_payload_ready"
+          blocker = null
+        } else {
+          stage = "awaiting_detection_payload"
+          blocker = "parser_zero_detections"
+        }
       } else {
+        parserStrategy = null
+        parserScoreThreshold = null
+        parserAboveThresholdCount = 0
+        parserMaxClassScore = null
+        parsedDetections = emptyList()
         stage = "awaiting_output_parser"
         blocker = "parser_shape_unsupported"
       }
@@ -269,6 +399,7 @@ internal class NativeDriveExecuTorchRuntime(
         stage = "inference_failed"
         blocker = "executorch_forward_failed"
       }
+      parsedDetections = emptyList()
     }
   }
 
@@ -279,6 +410,14 @@ internal class NativeDriveExecuTorchRuntime(
         stage = stage,
         blocker = blocker,
         backend = config.runtimeBackend,
+        backendAvailable = backendSupport.available,
+        backendReason = backendSupport.reason,
+        backendNativeLibs = backendSupport.nativeLibs,
+        backendNativeLibDir = backendSupport.nativeLibDir,
+        backendPackagingMode = backendSupport.packagingMode,
+        backendAssetFiles = backendSupport.assetFiles,
+        backendRuntimeDir = qnnRuntimeDir,
+        backendEnvReady = qnnEnvReady,
         modelVariant = config.modelVariant,
         inferenceRequests = inferenceRequests,
         lastRequestedFrameId = lastRequestedFrameId,
@@ -296,7 +435,12 @@ internal class NativeDriveExecuTorchRuntime(
         lastOutputPreview = lastOutputPreview,
         parsedCandidateCount = parsedCandidateCount,
         parsedDetectionCount = parsedDetectionCount,
+        parserStrategy = parserStrategy,
+        parserScoreThreshold = parserScoreThreshold,
+        parserAboveThresholdCount = parserAboveThresholdCount,
+        parserMaxClassScore = parserMaxClassScore,
         parsedDetectionsPreview = parsedDetectionsPreview,
+        parsedDetections = parsedDetections,
     )
   }
 
@@ -306,6 +450,9 @@ internal class NativeDriveExecuTorchRuntime(
     stage = "idle"
     blocker = "disabled"
     candidatePaths = emptyList()
+    backendSupport = NativeDriveYoloBackendSupport()
+    qnnRuntimeDir = null
+    qnnEnvReady = false
     lastError = null
     inferenceRequests = 0
     lastRequestedFrameId = -1
@@ -316,17 +463,52 @@ internal class NativeDriveExecuTorchRuntime(
     lastForwardMs = null
     lastOutputShapes = emptyList()
     lastOutputDtypes = emptyList()
-    lastOutputPreview = emptyList()
-    parsedCandidateCount = 0
-    parsedDetectionCount = 0
-    parsedDetectionsPreview = emptyList()
-    reusableInputBuffer = null
+      lastOutputPreview = emptyList()
+      parsedCandidateCount = 0
+      parsedDetectionCount = 0
+      parserStrategy = null
+      parserScoreThreshold = null
+      parserAboveThresholdCount = 0
+      parserMaxClassScore = null
+      parsedDetectionsPreview = emptyList()
+      parsedDetections = emptyList()
+      reusableInputBuffer = null
     reusablePixels = null
     reusableInputShape = longArrayOf(1, 3, 0, 0)
   }
 
   private fun ensureModuleLoaded(forceReload: Boolean) {
     if (!config.enabled) return
+    backendSupport = probeBackendSupport(config)
+    if (!config.unsafeRuntimeEnabled) {
+      releaseModule()
+      stage = "runtime_disabled"
+      blocker = "unsafe_runtime_disabled"
+      lastError = null
+      return
+    }
+    if (!backendSupport.available) {
+      releaseModule()
+      stage = "backend_unavailable"
+      blocker = backendSupport.reason ?: "backend_unavailable"
+      lastError = null
+      return
+    }
+    if (config.runtimeBackend.contains("qnn", ignoreCase = true)) {
+      val prepared = NativeDriveQnnRuntimeFiles.prepare(appContext, backendSupport.nativeLibDir)
+      qnnRuntimeDir = prepared.runtimeDir
+      qnnEnvReady = prepared.envConfigured
+      if (!prepared.envConfigured) {
+        releaseModule()
+        stage = "backend_environment_unavailable"
+        blocker = prepared.reason ?: "qnn_environment_unavailable"
+        lastError = null
+        return
+      }
+    } else {
+      qnnRuntimeDir = null
+      qnnEnvReady = false
+    }
     if (!forceReload && module != null) return
 
     val resolved = NativeDriveYoloModelLocator.resolve(appContext, config)
@@ -349,9 +531,11 @@ internal class NativeDriveExecuTorchRuntime(
     releaseModule()
     try {
       module = Module.load(resolved.modelPath!!)
-      try {
-        module?.loadMethod("forward")
-      } catch (_: Throwable) {}
+      // Do not eagerly call loadMethod("forward") here. On-device developer
+      // playback can overlap with the stock live runtime during source
+      // transitions, and forcing delegate/method initialization up front has
+      // produced native SIGSEGV crashes in libexecutorch_jni.so. We keep the
+      // module loaded and let the first forward() own method initialization.
       lastError = null
       stage = "awaiting_preprocess_pipeline"
       blocker = "preprocess_missing"
@@ -370,6 +554,7 @@ internal class NativeDriveExecuTorchRuntime(
     if (!previous.enabled && next.enabled) return true
     if (previous.enabled != next.enabled) return true
     if (previous.runtimeBackend != next.runtimeBackend) return true
+    if (previous.unsafeRuntimeEnabled != next.unsafeRuntimeEnabled) return true
     if (previous.modelVariant != next.modelVariant) return true
     if (previous.inputWidth != next.inputWidth) return true
     if (previous.inputHeight != next.inputHeight) return true
@@ -378,6 +563,102 @@ internal class NativeDriveExecuTorchRuntime(
 
   private fun releaseModule() {
     module = null
+  }
+
+  private fun probeBackendSupport(
+      config: NativeDriveYoloConfig,
+  ): NativeDriveYoloBackendSupport {
+    val nativeDirPath = appContext.applicationInfo.nativeLibraryDir
+    val nativeLibs = NativeDriveQnnRuntimeFiles.listPackagedNativeLibs(appContext)
+    val packagingMode = BuildConfig.EXECUTORCH_PACKAGING_MODE
+    val backend = config.runtimeBackend.trim().lowercase()
+    if (backend.isBlank()) {
+      return NativeDriveYoloBackendSupport(
+          available = false,
+          reason = "backend_unspecified",
+          nativeLibs = nativeLibs,
+          nativeLibDir = nativeDirPath,
+          packagingMode = packagingMode,
+      )
+    }
+    if (backend.contains("qnn")) {
+      val normalizedLibs = nativeLibs.map { it.lowercase() }
+      val packagedSkels = NativeDriveQnnRuntimeFiles.listPackagedSkels(appContext)
+      val hasQnnBackendBridge =
+          normalizedLibs.any { name ->
+            name == "libqnn_executorch_backend.so"
+          }
+      val hasQnnHtpLib =
+          normalizedLibs.any { name ->
+            name == "libqnnhtp.so"
+          }
+      val hasQnnSystemLib =
+          normalizedLibs.any { name ->
+            name == "libqnnsystem.so"
+          }
+      val hasQnnStubLib =
+          normalizedLibs.any { name ->
+            name.startsWith("libqnnhtpv") && name.endsWith("stub.so")
+          }
+      return if (
+          hasQnnBackendBridge &&
+              hasQnnHtpLib &&
+              hasQnnSystemLib &&
+              hasQnnStubLib &&
+              packagedSkels.isNotEmpty()) {
+        NativeDriveYoloBackendSupport(
+            available = true,
+            nativeLibs = nativeLibs,
+            nativeLibDir = nativeDirPath,
+            packagingMode = packagingMode,
+            assetFiles = packagedSkels,
+        )
+      } else {
+        NativeDriveYoloBackendSupport(
+            available = false,
+            reason =
+                if (!hasQnnBackendBridge) {
+                  if (BuildConfig.USE_LOCAL_EXECUTORCH_AAR) {
+                    "qnn_backend_bridge_missing"
+                  } else {
+                    "qnn_backend_not_packaged"
+                  }
+                } else if (!hasQnnHtpLib) {
+                  "qnn_htp_runtime_missing"
+                } else if (!hasQnnSystemLib) {
+                  "qnn_system_runtime_missing"
+                } else if (!hasQnnStubLib) {
+                  "qnn_htp_stub_missing"
+                } else if (packagedSkels.isEmpty()) {
+                  "qnn_skel_assets_missing"
+                } else if (BuildConfig.USE_LOCAL_EXECUTORCH_AAR) {
+                  "qnn_runtime_libs_missing"
+                } else {
+                  "qnn_backend_not_packaged"
+                },
+            nativeLibs = nativeLibs,
+            nativeLibDir = nativeDirPath,
+            packagingMode = packagingMode,
+            assetFiles = packagedSkels,
+        )
+      }
+    }
+    if (backend.contains("xnnpack")) {
+      return NativeDriveYoloBackendSupport(
+          available = false,
+          reason = "xnnpack_runtime_not_validated",
+          nativeLibs = nativeLibs,
+          nativeLibDir = nativeDirPath,
+          packagingMode = packagingMode,
+      )
+    }
+    return NativeDriveYoloBackendSupport(
+        available = false,
+        reason = "backend_unimplemented",
+        nativeLibs = nativeLibs,
+        nativeLibDir = nativeDirPath,
+        packagingMode = packagingMode,
+    )
   }
 
   private fun ensureInputBuffers() {

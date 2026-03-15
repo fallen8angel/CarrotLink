@@ -46,11 +46,53 @@ class HudFallbackMetrics {
   });
 }
 
+class DeviceMetadataSnapshot {
+  final String branch;
+  final String commit;
+  final String dongleId;
+  final String serial;
+  final String? ip;
+  final DateTime fetchedAt;
+
+  const DeviceMetadataSnapshot({
+    required this.branch,
+    required this.commit,
+    required this.dongleId,
+    required this.serial,
+    required this.ip,
+    required this.fetchedAt,
+  });
+
+  Map<String, dynamic> toJson() {
+    return {
+      'branch': branch,
+      'commit': commit,
+      'dongleId': dongleId,
+      'serial': serial,
+      'ip': ip,
+      'fetchedAt': fetchedAt.toIso8601String(),
+    };
+  }
+
+  factory DeviceMetadataSnapshot.fromJson(Map<String, dynamic> json) {
+    final fetchedAtRaw = json['fetchedAt']?.toString();
+    return DeviceMetadataSnapshot(
+      branch: (json['branch'] ?? '--').toString(),
+      commit: (json['commit'] ?? '--').toString(),
+      dongleId: (json['dongleId'] ?? '--').toString(),
+      serial: (json['serial'] ?? '--').toString(),
+      ip: json['ip']?.toString(),
+      fetchedAt: DateTime.tryParse(fetchedAtRaw ?? '') ?? DateTime.now(),
+    );
+  }
+}
+
 class SSHService extends ChangeNotifier {
   SSHClient? _client;
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
   final DiagnosticsService _diag = DiagnosticsService.instance;
   static const String _lastConnectedIpStorageKey = 'ssh_last_connected_ip';
+  static const String _deviceMetadataStorageKey = 'ssh_last_device_metadata';
   static const int _defaultSshPort = 22;
   static const int _maxHeartbeatFailures = 5;
   static const Duration _heartbeatInterval = Duration(seconds: 8);
@@ -58,6 +100,7 @@ class SSHService extends ChangeNotifier {
 
   SSHService() {
     _initServiceListener();
+    unawaited(_restoreCachedDeviceMetadata());
   }
 
   void _initServiceListener() {
@@ -269,8 +312,8 @@ class SSHService extends ChangeNotifier {
     final candidates = <String?>[
       preferredIp,
       _serviceConnectedIp,
-      _serviceCandidateIp,
       _serviceLastSuccessfulIp,
+      _serviceCandidateIp,
       storedLastIp,
     ];
     for (final candidate in candidates) {
@@ -353,6 +396,125 @@ class SSHService extends ChangeNotifier {
   int _heartbeatFailureCount = 0;
   bool _manualDisconnectRequested = false;
   bool get manualDisconnectRequested => _manualDisconnectRequested;
+  DeviceMetadataSnapshot? _cachedConnectionMetadata;
+  DeviceMetadataSnapshot? get cachedConnectionMetadata =>
+      _cachedConnectionMetadata;
+  Future<DeviceMetadataSnapshot>? _connectionMetadataInFlight;
+
+  Future<void> _restoreCachedDeviceMetadata() async {
+    try {
+      final raw = await _storage.read(key: _deviceMetadataStorageKey);
+      if (raw == null || raw.trim().isEmpty) return;
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map<String, dynamic>) return;
+      _cachedConnectionMetadata = DeviceMetadataSnapshot.fromJson(decoded);
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  Future<void> _persistCachedDeviceMetadata(
+      DeviceMetadataSnapshot snapshot) async {
+    _cachedConnectionMetadata = snapshot;
+    await _storage.write(
+      key: _deviceMetadataStorageKey,
+      value: jsonEncode(snapshot.toJson()),
+    );
+    notifyListeners();
+  }
+
+  DeviceMetadataSnapshot _parseConnectionMetadata(
+    String output, {
+    String? fallbackIp,
+  }) {
+    String? payload;
+    for (final rawLine in output.split(RegExp(r'[\r\n]+'))) {
+      final line = rawLine.trim();
+      if (line.startsWith('CARROTLINK_META\t')) {
+        payload = line;
+      }
+    }
+
+    if (payload == null || payload.isEmpty) {
+      throw Exception('connection metadata payload missing');
+    }
+
+    final parts = payload.split('\t');
+    if (parts.length < 5) {
+      throw Exception('connection metadata payload malformed');
+    }
+
+    String normalize(String value) {
+      final trimmed = value.trim();
+      return trimmed.isEmpty ? '--' : trimmed;
+    }
+
+    return DeviceMetadataSnapshot(
+      branch: normalize(parts[1]),
+      commit: normalize(parts[2]),
+      dongleId: normalize(parts[3]),
+      serial: normalize(parts[4]),
+      ip: fallbackIp,
+      fetchedAt: DateTime.now(),
+    );
+  }
+
+  Future<DeviceMetadataSnapshot> getConnectionMetadata({
+    bool forceRefresh = false,
+  }) async {
+    final activeHost = (connectedIp ?? '').trim();
+    final cached = _cachedConnectionMetadata;
+    if (!forceRefresh &&
+        activeHost.isNotEmpty &&
+        cached != null &&
+        cached.ip == activeHost) {
+      return cached;
+    }
+
+    final inflight = _connectionMetadataInFlight;
+    if (inflight != null) {
+      return inflight;
+    }
+
+    if (!isConnected) {
+      if (cached != null) {
+        return cached;
+      }
+      throw Exception('Not Connected');
+    }
+
+    final future = () async {
+      final result = await executeCommandResult(
+        CarrotConstants.deviceMetadataCmd,
+        timeout: const Duration(seconds: 12),
+      );
+      final snapshot = _parseConnectionMetadata(
+        result.output,
+        fallbackIp: activeHost.isEmpty ? null : activeHost,
+      );
+      await _persistCachedDeviceMetadata(snapshot);
+      return snapshot;
+    }();
+
+    _connectionMetadataInFlight = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_connectionMetadataInFlight, future)) {
+        _connectionMetadataInFlight = null;
+      }
+    }
+  }
+
+  Future<void> prefetchConnectionMetadata({
+    bool forceRefresh = false,
+  }) async {
+    if (!isConnected) return;
+    try {
+      await getConnectionMetadata(forceRefresh: forceRefresh);
+    } catch (e) {
+      _diag.warn('ssh', 'Metadata prefetch failed error=$e');
+    }
+  }
 
   Future<void> connect(
     String ip,
@@ -386,18 +548,11 @@ class SSHService extends ChangeNotifier {
 
       if (privateKey != null) {
         try {
-          debugPrint("Debug: Attempting to parse PEM key...");
-          debugPrint(
-              "Debug: Key starts with: ${privateKey.substring(0, 50)}...");
-
           final keys = SSHKeyPair.fromPem(privateKey);
-          debugPrint("Debug: Parsed ${keys.length} keys from PEM.");
 
           if (keys.isEmpty) {
             throw Exception("No valid keys found in the provided PEM.");
           }
-
-          debugPrint("Debug: Key type: ${keys.first.type}");
 
           _client = SSHClient(
             socket,
@@ -405,7 +560,6 @@ class SSHService extends ChangeNotifier {
             identities: keys,
           );
         } catch (e) {
-          debugPrint("Debug: Key parsing/auth failed: $e");
           rethrow;
         }
       } else {
@@ -428,10 +582,13 @@ class SSHService extends ChangeNotifier {
       _connectionStatus = "Connected";
       _connectedIp = ip; // Set IP only after successful connection
       _connectedPort = port;
+      _serviceCandidateIp = ip;
+      _serviceCandidateSeenAt = DateTime.now();
       _serviceLastSuccessfulIp = ip;
       _serviceLastSuccessfulSeenAt = DateTime.now();
       await _storage.write(key: _lastConnectedIpStorageKey, value: ip);
       _diag.info('ssh', 'Connected to $ip:$port');
+      stopDiscovery();
 
       // 키 인증 성공 시 key_verified = true 설정
       if (privateKey != null) {
@@ -457,6 +614,7 @@ class SSHService extends ChangeNotifier {
       });
 
       _startHeartbeat();
+      unawaited(prefetchConnectionMetadata(forceRefresh: true));
     } catch (e) {
       debugPrint("Connection failed: $e");
       _connectionStatus = _mapErrorToMessage(e);
@@ -475,6 +633,8 @@ class SSHService extends ChangeNotifier {
 
   Future<bool> tryFastReconnect({
     String source = 'ui',
+    Duration socketTimeout = const Duration(seconds: 2),
+    Duration authTimeout = const Duration(seconds: 3),
   }) async {
     if (_manualDisconnectRequested || isConnected || _isConnecting) {
       return false;
@@ -514,8 +674,8 @@ class SSHService extends ChangeNotifier {
         port: port,
         password: password,
         privateKey: privateKey,
-        socketTimeout: const Duration(seconds: 2),
-        authTimeout: const Duration(seconds: 3),
+        socketTimeout: socketTimeout,
+        authTimeout: authTimeout,
       );
       return true;
     } catch (e) {
@@ -1124,6 +1284,16 @@ printf "%s %s %s\n" "$cpu" "$mem" "$disk"
     String source = 'auto',
     bool manualSession = false,
   }) async {
+    if (_isDiscoveryActive) {
+      final remaining = _discoverySessionEndsAt?.difference(DateTime.now());
+      final sameSession = _discoverySource == source &&
+          _discoveryManualSession == manualSession;
+      final sessionStillFresh =
+          remaining != null && remaining > const Duration(seconds: 5);
+      if (sameSession && sessionStillFresh) {
+        return false;
+      }
+    }
     if (_isDiscoveryActive && !forceRestart) return false; // 중복 실행 방지
     if (_isDiscoveryActive && forceRestart) {
       stopDiscovery();

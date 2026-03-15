@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../ui/adaptive/layout_tokens.dart';
 import '../ui/adaptive/window_class.dart';
 import '../services/storage_layout_service.dart';
+import 'settings/settings_subpage_components.dart';
 import 'dashboard_screen.dart';
 
 class PermissionScreen extends StatefulWidget {
@@ -152,6 +153,45 @@ class _PermissionScreenState extends State<PermissionScreen> {
       UiWindowClass.medium => 74.0,
       _ => 80.0,
     };
+
+    if (widget.fromSettings) {
+      return SettingsSubpageScaffold(
+        title: '권한',
+        children: [
+          SettingsSection(
+            title: '권한',
+            showTopDivider: false,
+            child: SettingsItemGroup(
+              children: [
+                _buildSettingsPermissionItem(
+                  title: '알림',
+                  description: '백그라운드 서비스 상태 표시',
+                  isGranted: _notificationGranted,
+                  onTap: _requestNotification,
+                ),
+                _buildSettingsPermissionItem(
+                  title: '배터리 최적화 제외',
+                  description: '화면이 꺼져도 연결 유지',
+                  isGranted: _batteryGranted,
+                  onTap: _requestBattery,
+                ),
+                _buildSettingsPermissionItem(
+                  title: '저장소 접근',
+                  description: 'SSH 키 백업/복원',
+                  isGranted: _storageGranted,
+                  onTap: _requestStorage,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          ElevatedButton(
+            onPressed: _finish,
+            child: const Text('완료'),
+          ),
+        ],
+      );
+    }
 
     return Scaffold(
       appBar: widget.fromSettings ? AppBar(title: const Text("권한 설정")) : null,
@@ -502,6 +542,24 @@ class _PermissionScreenState extends State<PermissionScreen> {
           );
         },
       ),
+    );
+  }
+
+  Widget _buildSettingsPermissionItem({
+    required String title,
+    required String description,
+    required bool isGranted,
+    required VoidCallback onTap,
+  }) {
+    return SettingsActionRow(
+      title: title,
+      value: isGranted ? '허용됨' : description,
+      trailing: isGranted
+          ? const Icon(Icons.check_circle, color: Colors.green)
+          : FilledButton.tonal(
+              onPressed: onTap,
+              child: const Text('허용'),
+            ),
     );
   }
 }

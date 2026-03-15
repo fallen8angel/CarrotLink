@@ -28,29 +28,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
     UiWindowInfo window,
     BoxConstraints constraints,
   ) {
-    final dockRatio = switch (window.windowClass) {
-      UiWindowClass.compact => 0.14,
-      UiWindowClass.medium => 0.11,
-      UiWindowClass.expanded => 0.09,
-      UiWindowClass.large || UiWindowClass.extraLarge => 0.08,
-    };
-    final dockMin = switch (window.windowClass) {
-      UiWindowClass.compact => 64.0,
-      UiWindowClass.medium => 68.0,
-      UiWindowClass.expanded => 72.0,
-      UiWindowClass.large || UiWindowClass.extraLarge => 76.0,
-    };
-    final dockMax = switch (window.windowClass) {
-      UiWindowClass.compact => 104.0,
-      UiWindowClass.medium => 112.0,
-      UiWindowClass.expanded => 120.0,
-      UiWindowClass.large || UiWindowClass.extraLarge => 128.0,
-    };
-
     final isLandscapeLayout = window.isLandscape;
-    final dockWidth = isLandscapeLayout
-        ? (constraints.maxWidth * dockRatio).clamp(dockMin, dockMax).toDouble()
-        : 0.0;
     final hideHudForTinyViewport = _shouldHideHudForTinyViewport(
       window,
       constraints,
@@ -61,7 +39,6 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
       window,
       constraints,
       isLandscapeLayout: isLandscapeLayout,
-      dockWidth: dockWidth,
       hideHudForTinyViewport: hideHudForTinyViewport,
     );
 
@@ -71,28 +48,28 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
       UiWindowClass.expanded => 16.0,
       UiWindowClass.large || UiWindowClass.extraLarge => 18.0,
     };
-    final hasCenterNotice =
-        _cameraCenterNoticeMessage() != null && !_debugOverlayPreviewMode;
+    final hasCenterNotice = _cameraCenterNoticeMessage() != null;
     final hasBottomStatusBanner = !hasCenterNotice &&
         (_showSidecarStatusBanner ||
             !_hudModeLoaded ||
             (_cameraError?.isNotEmpty ?? false) ||
             _hudNoticeMessage != null);
     final fabBottom = hasBottomStatusBanner ? (fabInset + 72.0) : fabInset;
-    final debugFab = FloatingActionButton.small(
+    final settingsFab = FloatingActionButton.small(
       heroTag: isLandscapeLayout
-          ? 'drive_debug_fab_landscape'
-          : 'drive_debug_fab_portrait',
-      tooltip: 'HUD 디버그',
-      onPressed: _LiveDriveCanvasScreenState._temporaryLimitedHudControls
-          ? null
-          : _openDebugOptionsPopup,
+          ? 'drive_settings_fab_landscape'
+          : 'drive_settings_fab_portrait',
+      tooltip: '설정',
+      onPressed: _openDriveSettingsPopup,
       backgroundColor: const Color(0xCC2A1A12),
       foregroundColor: const Color(0xFFFFB07A),
-      child: const Icon(Icons.tune_rounded),
+      child: const Icon(Icons.settings_rounded),
     );
     final quickControls = _buildViewportZoomQuickControls(
-      debugFab: debugFab,
+      settingsFab: settingsFab,
+      isLandscapeLayout: isLandscapeLayout,
+    );
+    final developerPlaybackQuickControls = _buildDeveloperPlaybackQuickControls(
       isLandscapeLayout: isLandscapeLayout,
     );
 
@@ -100,12 +77,17 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
       return Stack(
         children: [
           Positioned.fill(child: mainContent),
-          if (_LiveDriveCanvasScreenState._hudDebugMenuEnabled)
+          if (developerPlaybackQuickControls != null)
             Positioned(
               right: fabInset,
-              bottom: fabBottom,
-              child: quickControls,
+              top: fabInset,
+              child: developerPlaybackQuickControls,
             ),
+          Positioned(
+            right: fabInset,
+            bottom: fabBottom,
+            child: quickControls,
+          ),
         ],
       );
     }
@@ -118,12 +100,17 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
           child: Stack(
             children: [
               Positioned.fill(child: mainContent),
-              if (_LiveDriveCanvasScreenState._hudDebugMenuEnabled)
+              if (developerPlaybackQuickControls != null)
                 Positioned(
                   right: fabInset,
-                  bottom: fabBottom,
-                  child: quickControls,
+                  top: fabInset,
+                  child: developerPlaybackQuickControls,
                 ),
+              Positioned(
+                right: fabInset,
+                bottom: fabBottom,
+                child: quickControls,
+              ),
             ],
           ),
         ),
@@ -140,30 +127,21 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
     UiWindowInfo window,
     BoxConstraints constraints, {
     required bool isLandscapeLayout,
-    required double dockWidth,
     required bool hideHudForTinyViewport,
   }) {
-    return Row(
-      children: [
-        if (_LiveDriveCanvasScreenState._showDriveDock && isLandscapeLayout)
-          _buildDriveDockImpl(dockWidth),
-        Expanded(
-          child: ColoredBox(
-            color: Colors.black,
-            child: _buildDriveViewportContentImpl(
-              window,
-              constraints,
-              isLandscapeLayout: isLandscapeLayout,
-              hideHudForTinyViewport: hideHudForTinyViewport,
-            ),
-          ),
-        ),
-      ],
+    return ColoredBox(
+      color: Colors.black,
+      child: _buildDriveViewportContentImpl(
+        window,
+        constraints,
+        isLandscapeLayout: isLandscapeLayout,
+        hideHudForTinyViewport: hideHudForTinyViewport,
+      ),
     );
   }
 
   Widget _buildViewportZoomQuickControls({
-    required Widget debugFab,
+    required Widget settingsFab,
     required bool isLandscapeLayout,
   }) {
     final spacing = isLandscapeLayout ? 8.0 : 7.0;
@@ -176,8 +154,155 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
             child: _buildViewportZoomButton(preset),
           ),
         ),
-        debugFab,
+        settingsFab,
       ],
+    );
+  }
+
+  Widget? _buildDeveloperPlaybackQuickControls({
+    required bool isLandscapeLayout,
+  }) {
+    final developerMode = Provider.of<DeveloperModeService>(context);
+    if (!developerMode.enabled) return null;
+    final hasSelection =
+        _developerPlaybackVideoPath?.trim().isNotEmpty ?? false;
+    final controller = _developerPlaybackController;
+    final canControlPlayback = _developerPlaybackEnabled &&
+        controller != null &&
+        controller.value.isInitialized;
+    final playbackRunning = canControlPlayback && controller.value.isPlaying;
+    final currentVideoName = hasSelection
+        ? p.basename(_developerPlaybackVideoPath!.trim())
+        : '영상 미선택';
+    final subtitle = canControlPlayback
+        ? controller.value.position.toString().split('.').first
+        : (_developerPlaybackEnabled ? '준비 중' : '대기');
+
+    Widget actionButton({
+      required String tooltip,
+      required IconData icon,
+      required VoidCallback? onTap,
+      bool selected = false,
+      bool destructive = false,
+    }) {
+      final backgroundColor = destructive
+          ? const Color(0xFFC25B4C)
+          : (selected ? const Color(0xFFE88C53) : const Color(0xCC2A1A12));
+      return Tooltip(
+        message: tooltip,
+        child: Material(
+          color: backgroundColor,
+          borderRadius: BorderRadius.circular(18),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(18),
+            onTap: onTap,
+            child: SizedBox(
+              width: 36,
+              height: 36,
+              child: Icon(
+                icon,
+                size: 18,
+                color: onTap == null ? Colors.white38 : Colors.white,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxWidth: isLandscapeLayout ? 320 : 280,
+      ),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: const Color(0xCC17120F),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.white12),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 240),
+                child: Text(
+                  currentVideoName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.right,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                subtitle,
+                textAlign: TextAlign.right,
+                style: const TextStyle(
+                  color: Color(0xFFFFD7B7),
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                alignment: WrapAlignment.end,
+                children: [
+                  actionButton(
+                    tooltip: '영상 선택',
+                    icon: Icons.video_library_rounded,
+                    onTap: () => unawaited(_selectDeveloperPlaybackVideo()),
+                  ),
+                  actionButton(
+                    tooltip: _developerPlaybackEnabled ? '재생 종료' : '오프라인 재생',
+                    icon: _developerPlaybackEnabled
+                        ? Icons.stop_circle_rounded
+                        : Icons.play_circle_fill_rounded,
+                    onTap: hasSelection
+                        ? () => unawaited(_toggleDeveloperPlaybackEnabled())
+                        : null,
+                    selected: _developerPlaybackEnabled,
+                  ),
+                  actionButton(
+                    tooltip: playbackRunning ? '일시정지' : '재생',
+                    icon: playbackRunning
+                        ? Icons.pause_circle_filled_rounded
+                        : Icons.play_arrow_rounded,
+                    onTap: !canControlPlayback
+                        ? null
+                        : () => unawaited(
+                              playbackRunning
+                                  ? _pauseDeveloperPlayback()
+                                  : _resumeDeveloperPlayback(),
+                            ),
+                  ),
+                  actionButton(
+                    tooltip: '상태 복사',
+                    icon: Icons.content_copy_rounded,
+                    onTap: () => unawaited(_copyDriveYoloRuntimeStatus()),
+                  ),
+                  actionButton(
+                    tooltip: '선택 해제',
+                    icon: Icons.close_rounded,
+                    onTap: hasSelection
+                        ? () => unawaited(_clearDeveloperPlaybackSelection())
+                        : null,
+                    destructive: true,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -225,62 +350,6 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
     );
   }
 
-  Widget _buildDriveDockImpl(double dockWidth) {
-    return Container(
-      width: dockWidth,
-      decoration: const BoxDecoration(
-        color: Color(0xFF11141A),
-        border: Border(
-          right: BorderSide(color: Colors.white24),
-        ),
-      ),
-      child: Column(
-        children: [
-          const SizedBox(height: 8),
-          IconButton(
-            onPressed: _exitScreen,
-            icon: const Icon(Icons.arrow_back, color: Colors.white),
-            tooltip: '뒤로가기',
-          ),
-          const SizedBox(height: 6),
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(
-              color: _sidecarConnected
-                  ? const Color(0xFF24FF67)
-                  : const Color(0xFFFF4C4C),
-              shape: BoxShape.circle,
-            ),
-          ),
-          const SizedBox(height: 10),
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.only(bottom: 4),
-              child: Column(
-                children: [
-                  if (_LiveDriveCanvasScreenState._hudDebugMenuEnabled)
-                    IconButton(
-                      onPressed: _LiveDriveCanvasScreenState
-                              ._temporaryLimitedHudControls
-                          ? null
-                          : _openDebugOptionsPopup,
-                      icon: const Icon(
-                        Icons.tune,
-                        color: Color(0xFF8FE7FF),
-                      ),
-                      tooltip: '디버그 옵션',
-                    ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
-        ],
-      ),
-    );
-  }
-
   Widget _buildDriveViewportContentImpl(
     UiWindowInfo window,
     BoxConstraints constraints, {
@@ -289,10 +358,12 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
   }) {
     return LayoutBuilder(
       builder: (context, viewport) {
+        final effectiveSourceSize = _effectiveViewportSourceSize;
         var sourceW =
-            _cameraSourceSize.width > 1 ? _cameraSourceSize.width : 1928.0;
-        var sourceH =
-            _cameraSourceSize.height > 1 ? _cameraSourceSize.height : 1208.0;
+            effectiveSourceSize.width > 1 ? effectiveSourceSize.width : 1928.0;
+        var sourceH = effectiveSourceSize.height > 1
+            ? effectiveSourceSize.height
+            : 1208.0;
         if ((sourceW - 1928.0).abs() <= 16.0 &&
             (sourceH - 1208.0).abs() <= 16.0) {
           sourceW = 1928.0;
@@ -316,7 +387,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
         final drawH = placement.height;
         final left = placement.left;
         final top = placement.top;
-        final showViewportEdgeGradient = !_debugOverlayPreviewMode;
+        const showViewportEdgeGradient = true;
         final fullSurfaceRect = Rect.fromLTWH(0.0, 0.0, drawW, drawH);
         final visibleViewportRect =
             Rect.fromLTWH(-left, -top, vw, vh).intersect(fullSurfaceRect);
@@ -403,8 +474,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
           UiWindowClass.large || UiWindowClass.extraLarge => 13.0,
         };
         final centerNoticeMessage = _cameraCenterNoticeMessage();
-        final hasCenterNotice =
-            centerNoticeMessage != null && !_debugOverlayPreviewMode;
+        final hasCenterNotice = centerNoticeMessage != null;
         final showBottomStatusBanners = !hasCenterNotice;
         final drawSize = Size(drawW, drawH);
         final landscapeHudHeight = isLandscapeLayout && !hideHudForTinyViewport
@@ -483,9 +553,8 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                         child: _buildViewportEdgeGradientOverlay(),
                       ),
                     if (_debugShowArOverlay &&
-                        ((_openpilotOverlayMode &&
-                                !_useNativeOverlayRenderer) ||
-                            _debugOverlayPreviewMode))
+                        _openpilotOverlayMode &&
+                        !_useNativeOverlayRenderer)
                       Positioned.fill(
                         child: ValueListenableBuilder<_DriveOverlaySnapshot>(
                           valueListenable: _overlayNotifier,
@@ -495,7 +564,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                                 painter: _DriveOverlayPainter(
                                   snapshot: overlay,
                                   isConnected: _sidecarConnected,
-                                  sourceSize: _cameraSourceSize,
+                                  sourceSize: effectiveSourceSize,
                                   cameraKind: _liveCameraKind,
                                   coverViewport: _coverViewport,
                                   viewportZoom: _viewportPlacementZoom,
@@ -518,7 +587,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                           },
                         ),
                       ),
-                    if (_cameraLoading && !_debugOverlayPreviewMode)
+                    if (_cameraLoading)
                       const Positioned.fill(
                         child: ColoredBox(
                           color: Colors.black45,
@@ -567,11 +636,6 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                       ),
                   ],
                 ),
-              ),
-              Positioned(
-                top: overlayInset * 0.7,
-                right: overlayInset * 0.7,
-                child: _buildDriveModeTag(window),
               ),
               if (isLandscapeLayout && !hideHudForTinyViewport)
                 Positioned(
@@ -695,9 +759,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                     ),
                   ),
                 )
-              else if (showBottomStatusBanners &&
-                  _cameraError != null &&
-                  !_debugOverlayPreviewMode)
+              else if (showBottomStatusBanners && _cameraError != null)
                 Positioned(
                   left: overlayInset,
                   right: overlayInset,

@@ -38,9 +38,17 @@ class _DashboardScreenState extends State<DashboardScreen>
     with WidgetsBindingObserver {
   static const String _lastDashboardTabIndexKey = 'dashboard_last_tab_index';
   static const int _tabCount = 5;
+  static const Duration _foregroundReconnectTick = Duration(seconds: 2);
+  static const Duration _appStartFastSocketTimeout = Duration(
+    milliseconds: 1200,
+  );
+  static const Duration _appStartFastAuthTimeout = Duration(
+    milliseconds: 1800,
+  );
   int _currentIndex = 0;
   StreamSubscription<String>? _discoverySubscription;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
+  Timer? _foregroundReconnectTimer;
   List<ConnectivityResult>? _lastConnectivity;
   bool _isAutoConnectRunning = false;
   bool _setupPromptShown = false;
@@ -85,6 +93,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     unawaited(_bootstrapDashboardRuntime());
     _setupDiscoveryListener();
     _setupConnectivityListener();
+    _startForegroundReconnectLoop();
 
     // Start global backup monitoring
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -117,7 +126,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   }
 
   Future<void> _bootstrapDashboardRuntime() async {
-    await _ensureBackgroundServiceReady(
+    final serviceReady = _ensureBackgroundServiceReady(
       foreground: true,
       source: 'dashboard_init',
     );
@@ -127,6 +136,7 @@ class _DashboardScreenState extends State<DashboardScreen>
       force: true,
       reason: 'app_start',
     );
+    await serviceReady;
   }
 
   Future<bool> _hasBackgroundRuntimePermissions() async {
@@ -165,6 +175,7 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   @override
   void dispose() {
+    _stopForegroundReconnectLoop();
     _setServiceAppVisibility(false, source: 'dashboard_dispose');
     WidgetsBinding.instance.removeObserver(this);
     _discoverySubscription?.cancel();
@@ -173,6 +184,8 @@ class _DashboardScreenState extends State<DashboardScreen>
   }
 
   void _setupConnectivityListener() {
+    final backupService = Provider.of<BackupService>(context, listen: false);
+    final ssh = Provider.of<SSHService>(context, listen: false);
     _connectivitySubscription =
         Connectivity().onConnectivityChanged.listen((results) async {
       // 네트워크가 없다가 생긴 경우 또는 네트워크 종류가 변경된 경우
@@ -190,18 +203,60 @@ class _DashboardScreenState extends State<DashboardScreen>
       if (hasNetwork &&
           (!hadNetwork ||
               !_connectivityListsEqual(_lastConnectivity, results))) {
-        final backupService =
-            Provider.of<BackupService>(context, listen: false);
         backupService.requestEventSync(
           reason: 'network_reconnected',
           debounce: const Duration(seconds: 6),
         );
-        final ssh = Provider.of<SSHService>(context, listen: false);
         ssh.notifyNetworkChanged(source: 'dashboard_connectivity');
+        _startDiscoveryIfNeeded(
+          force: true,
+          aggressive: true,
+          timeout: const Duration(seconds: 60),
+        );
+        unawaited(
+          _tryAutoConnect(
+            silent: true,
+            force: true,
+            reason: 'connectivity',
+          ),
+        );
       }
 
       _lastConnectivity = results;
     });
+  }
+
+  void _startForegroundReconnectLoop() {
+    _foregroundReconnectTimer?.cancel();
+    _foregroundReconnectTimer =
+        Timer.periodic(_foregroundReconnectTick, (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      final ssh = Provider.of<SSHService>(context, listen: false);
+      if (ssh.manualDisconnectRequested ||
+          ssh.isConnected ||
+          ssh.isConnecting) {
+        return;
+      }
+      _startDiscoveryIfNeeded(
+        aggressive: true,
+        timeout: const Duration(seconds: 25),
+      );
+      unawaited(
+        _tryAutoConnect(
+          silent: true,
+          force: true,
+          reason: 'foreground_tick',
+        ),
+      );
+    });
+  }
+
+  void _stopForegroundReconnectLoop() {
+    _foregroundReconnectTimer?.cancel();
+    _foregroundReconnectTimer = null;
   }
 
   void _setupDiscoveryListener() {
@@ -233,7 +288,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     if (!mounted || _setupPromptShown) return;
 
     final ready = await _hasOpenpilotPrerequisites();
-    if (ready) return;
+    if (!mounted || ready) return;
     _setupPromptShown = true;
 
     final goToSetup = await showDialog<bool>(
@@ -268,6 +323,7 @@ class _DashboardScreenState extends State<DashboardScreen>
     if (nowReady) {
       await _tryAutoConnect(force: true, reason: 'post-setup');
     } else {
+      if (!mounted) return;
       CustomToast.show(context, 'GitHub 로그인과 SSH 키 준비 후 자동 연결됩니다.');
     }
   }
@@ -318,6 +374,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      _startForegroundReconnectLoop();
       unawaited(_ensureBackgroundServiceReady(
         foreground: true,
         source: 'lifecycle_resumed',
@@ -339,11 +396,17 @@ class _DashboardScreenState extends State<DashboardScreen>
         debounce: const Duration(seconds: 2),
       );
       if (!ssh.isConnected) {
-        print("App resumed: Connection lost, trying to reconnect...");
+        debugPrint("App resumed: Connection lost, trying to reconnect...");
+        _startDiscoveryIfNeeded(
+          force: true,
+          aggressive: true,
+          timeout: const Duration(seconds: 60),
+        );
         unawaited(_tryAutoConnect(reason: 'resume'));
       }
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
+      _stopForegroundReconnectLoop();
       _setServiceAppVisibility(false, source: 'lifecycle_background');
       Provider.of<SharedRuntimeManager>(context, listen: false)
           .setAppForeground(false);
@@ -502,7 +565,18 @@ class _DashboardScreenState extends State<DashboardScreen>
       }
 
       // Broadcast-first: do not use persisted IP.
-      unawaited(ssh.tryFastReconnect(source: 'dashboard_$reason'));
+      final appStartFastPath = reason == 'app_start';
+      unawaited(
+        ssh.tryFastReconnect(
+          source: 'dashboard_$reason',
+          socketTimeout: appStartFastPath
+              ? _appStartFastSocketTimeout
+              : const Duration(seconds: 2),
+          authTimeout: appStartFastPath
+              ? _appStartFastAuthTimeout
+              : const Duration(seconds: 3),
+        ),
+      );
       _diag.info(
         'autoconnect',
         'Fast reconnect kicked reason=$reason '
@@ -567,8 +641,7 @@ class _DashboardScreenState extends State<DashboardScreen>
               _dismissKeyboard();
               Navigator.push(
                 context,
-                MaterialPageRoute(
-                    builder: (context) => const SettingsScreen()),
+                MaterialPageRoute(builder: (context) => const SettingsScreen()),
               );
             },
           ),

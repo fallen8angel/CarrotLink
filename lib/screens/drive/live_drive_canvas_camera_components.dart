@@ -9,7 +9,8 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     int windowUs = 2500000,
   }) {
     final nowUs = _renderClock.elapsedMicroseconds;
-    _cameraErrorGraceUntilUs = math.max(_cameraErrorGraceUntilUs, nowUs + windowUs);
+    _cameraErrorGraceUntilUs =
+        math.max(_cameraErrorGraceUntilUs, nowUs + windowUs);
     debugPrint(
       '[DriveCanvas][native] error-grace on reason=$reason window=${(windowUs / 1000).round()}ms',
     );
@@ -54,6 +55,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
   }
 
   void _handleNativeCameraEventImpl(dynamic event) {
+    if (_isDeveloperPlaybackRequested) return;
     if (!_canUseNativeCamera) return;
     if (event is! Map) return;
     final map = Map<String, dynamic>.from(event);
@@ -84,7 +86,8 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
           source: 'native',
           cameraKind: eventCameraKind,
         );
-        if (mounted && (_cameraLoading || (_cameraError?.isNotEmpty ?? false))) {
+        if (mounted &&
+            (_cameraLoading || (_cameraError?.isNotEmpty ?? false))) {
           _safeSetState(() {
             _cameraLoading = false;
             _cameraError = null;
@@ -129,10 +132,15 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
       debugPrint(
         '[DriveCanvas][native] yolo enabled=${map['yoloEnabled']} backend=${map['runtimeBackend']} model=${map['modelVariant']} source=${map['sourceWidth']}x${map['sourceHeight']}',
       );
+      unawaited(
+        YoloRuntimeStatusStore.saveConfig(Map<String, dynamic>.from(map)),
+      );
       return;
     }
     if (type == 'yolo_state') {
-      _lastNativeYoloState = map;
+      unawaited(
+        YoloRuntimeStatusStore.saveState(Map<String, dynamic>.from(map)),
+      );
       return;
     }
     if (type == 'camera_state') {
@@ -188,6 +196,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
   }
 
   void _handleCameraJsMessageImpl(String raw) {
+    if (_isDeveloperPlaybackRequested) return;
     dynamic decoded;
     try {
       decoded = jsonDecode(raw);
@@ -210,7 +219,8 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
           source: 'web',
           cameraKind: eventCameraKind,
         );
-        if (mounted && (_cameraLoading || (_cameraError?.isNotEmpty ?? false))) {
+        if (mounted &&
+            (_cameraLoading || (_cameraError?.isNotEmpty ?? false))) {
           _safeSetState(() {
             _cameraLoading = false;
             _cameraError = null;
@@ -274,10 +284,23 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
 
   Future<void> _loadCameraSource({bool force = false}) async {
     if (!_hudModeLoaded) return;
+    if (_isDeveloperPlaybackRequested) {
+      _cameraSourceKey =
+          'developer-playback:${_developerPlaybackVideoPath ?? '-'}';
+      if (mounted) {
+        _safeSetState(() {
+          _cameraLoading = _developerPlaybackLoading;
+          _cameraError = _developerPlaybackError;
+        });
+      } else {
+        _cameraLoading = _developerPlaybackLoading;
+        _cameraError = _developerPlaybackError;
+      }
+      return;
+    }
 
     if (_useNativeLiveCamera) {
-      final preserveVisibleNativeCamera =
-          _nativeCameraViewId != null &&
+      final preserveVisibleNativeCamera = _nativeCameraViewId != null &&
           _cameraError == null &&
           !_cameraSuspendedByLifecycle;
       _beginStartupProvisionalSync(reason: 'load_camera_source');

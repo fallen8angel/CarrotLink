@@ -1,9 +1,12 @@
 package com.example.carrot_pilot_manager
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.media.MediaCodec
 import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -45,13 +48,141 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
     private const val EVENT_CHANNEL = "carrotlink/native_drive_video_events"
     private const val CONTROL_CHANNEL = "carrotlink/native_drive_video_control"
 
+    @Volatile private var appContext: Context? = null
     @Volatile private var eventSink: EventChannel.EventSink? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val offlineDebugThread =
+        HandlerThread("CarrotYoloOfflineDebug").apply { start() }
+    private val offlineDebugHandler = Handler(offlineDebugThread.looper)
     private val views = ConcurrentHashMap<Int, NativeDriveVideoView>()
+    private val offlineVideoDebugSessionLock = Any()
+    private var offlineVideoDebugSession: OfflineVideoDebugSession? = null
+
+    private data class OfflineVideoDebugSession(
+        val path: String,
+        val baseSignature: String,
+        val runtime: NativeDriveExecuTorchRuntime,
+        val retriever: MediaMetadataRetriever,
+        var activeConfig: NativeDriveYoloConfig,
+        var sourceWidth: Int = 0,
+        var sourceHeight: Int = 0,
+        var frameCounter: Int = 0,
+        var framesSeen: Int = 0,
+        var framesSampled: Int = 0,
+        var framesSkipped: Int = 0,
+        var lastFrameId: Int = -1,
+        var lastFramePtsUs: Long = 0L,
+        var lastSkipReason: String = "idle",
+    )
+
+    private fun requiresQnnLoweredPlaybackModel(
+        config: NativeDriveYoloConfig,
+    ): Boolean {
+      val backend = config.runtimeBackend.trim().lowercase()
+      if (!backend.contains("qnn")) return false
+      return !NativeDriveYoloModelCatalog.isQnnLoweredReference(config.modelVariant)
+    }
+
+    private fun buildOfflineQnnModelMismatchResult(
+        config: NativeDriveYoloConfig,
+        path: String,
+        reason: String,
+        positionMs: Long? = null,
+        decodedWidth: Int? = null,
+        decodedHeight: Int? = null,
+        videoDurationMs: Long? = null,
+        videoSampleTimesMs: List<Long>? = null,
+    ): Map<String, Any?> {
+      val suggestedQnnWireValue =
+          NativeDriveYoloModelCatalog.suggestedQnnWireValueFor(config.modelVariant)
+      val suggestedQnnAssetFile =
+          suggestedQnnWireValue?.let { "$it.pte" }
+      Log.w(
+          NATIVE_VIDEO_TAG,
+          "Offline playback blocked reason=$reason backend=${config.runtimeBackend} " +
+              "model=${config.modelVariant} path=$path positionMs=${positionMs ?: -1L}",
+      )
+      val state =
+          NativeDriveYoloRuntimeSnapshot(
+                  runtimeReady = false,
+                  pixelPathReady = false,
+                  stage = "awaiting_qnn_lowered_model",
+                  blocker = "qnn_model_not_lowered",
+                  backend = config.runtimeBackend,
+                  backendAvailable = true,
+                  backendReason = "qnn_model_not_lowered",
+                  modelVariant = config.modelVariant,
+                  lastError =
+                      buildString {
+                        append(
+                            "Generic ExecuTorch/XNNPACK .pte is not safe for offline playback when " +
+                                "runtimeBackend=${config.runtimeBackend}; export or select a " +
+                                "QNN-lowered model",
+                        )
+                        if (!suggestedQnnAssetFile.isNullOrBlank()) {
+                          append(" such as $suggestedQnnAssetFile")
+                        }
+                        append(".")
+                      },
+              )
+              .toPayload()
+              .toMutableMap()
+      state["reason"] = reason
+      state["syncSource"] = "developer_playback"
+      state["inputPath"] = path
+      state["decodedWidth"] = decodedWidth ?: config.sourceWidth
+      state["decodedHeight"] = decodedHeight ?: config.sourceHeight
+      state["videoDurationMs"] = videoDurationMs
+      state["videoSampleTimesMs"] = videoSampleTimesMs
+      state["positionMs"] = positionMs
+      state["playbackRequestedPositionMs"] = positionMs
+      state["framesSeen"] = 0
+      state["framesSampled"] = 0
+      state["framesSkipped"] = 0
+      state["lastFrameId"] = -1
+      state["lastFramePtsUs"] = 0L
+      state["playbackFrameId"] = -1
+      state["playbackFramePtsUs"] = 0L
+      state["playbackFrameToken"] = null
+      state["samplePeriodMs"] = config.samplePeriodMs
+      state["lastSkipReason"] = "qnn_model_not_lowered"
+      state["copyInFlight"] = false
+      state["copyRequests"] = 0
+      state["copySuccesses"] = 0
+      state["copyFailures"] = 0
+      state["copySkippedBusy"] = 0
+      state["lastCopyResult"] = "offline_qnn_model_blocked"
+      state["sessionMode"] = "video_playback"
+      state["sessionFrameCounter"] = 0
+      state["suggestedQnnModelVariant"] = suggestedQnnWireValue
+      state["suggestedQnnAssetFile"] = suggestedQnnAssetFile
+      return mapOf(
+          "config" to config.toPayload(),
+          "state" to state,
+      )
+    }
 
     fun emit(event: Map<String, Any?>) {
       mainHandler.post {
         eventSink?.success(event)
+      }
+    }
+
+    private fun runOfflineDebugAsync(
+        result: MethodChannel.Result,
+        work: () -> Any?,
+    ) {
+      offlineDebugHandler.post {
+        try {
+          val payload = work()
+          mainHandler.post { result.success(payload) }
+        } catch (t: Throwable) {
+          val message =
+              t.stackTraceToString().lineSequence().firstOrNull()?.trim().orEmpty().ifBlank {
+                t.message ?: t::class.java.simpleName
+              }
+          mainHandler.post { result.error("offline_debug_failed", message, null) }
+        }
       }
     }
 
@@ -73,24 +204,434 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
       return view.updateYoloConfig(yoloConfig)
     }
 
-    fun updateArScene(viewId: Int, arScene: Map<String, Any?>?): Boolean {
-      val view = views[viewId] ?: return false
-      return view.updateArScene(arScene)
-    }
-
-    fun getArScene(viewId: Int): Map<String, Any?>? {
-      val view = views[viewId] ?: return null
-      return view.getArScene()
-    }
-
-    fun getArRenderDebug(viewId: Int): Map<String, Any?>? {
-      val view = views[viewId] ?: return null
-      return view.getArRenderDebug()
-    }
-
     fun getYoloState(viewId: Int): Map<String, Any?>? {
       val view = views[viewId] ?: return null
       return view.getYoloState()
+    }
+
+    fun clearYoloDebugVideoSession(): Boolean {
+      synchronized(offlineVideoDebugSessionLock) {
+        releaseOfflineVideoDebugSessionLocked()
+      }
+      return true
+    }
+
+    fun runYoloDebugImageFile(
+        path: String,
+        yoloConfig: Map<String, Any?>?,
+    ): Map<String, Any?>? {
+      val context = appContext ?: return null
+      val sourceBitmap = BitmapFactory.decodeFile(path) ?: return null
+      var scaledBitmap: Bitmap? = null
+      val baseConfig = NativeDriveYoloConfig.fromPayload(yoloConfig)
+      val activeConfig =
+          baseConfig.copy(
+              enabled = true,
+              sourceWidth = sourceBitmap.width,
+              sourceHeight = sourceBitmap.height,
+          )
+      if (requiresQnnLoweredPlaybackModel(activeConfig)) {
+        return buildOfflineQnnModelMismatchResult(
+            config = activeConfig,
+            path = path,
+            reason = "offline_image_qnn_model_blocked",
+            decodedWidth = sourceBitmap.width,
+            decodedHeight = sourceBitmap.height,
+        )
+      }
+      val runtime = NativeDriveExecuTorchRuntime(context)
+      return try {
+        runtime.updateConfig(activeConfig)
+        val frame =
+            NativeDriveYoloFrame(
+                frameId = 1,
+                ptsUs = System.nanoTime() / 1000L,
+                camera = activeConfig.camera,
+                sourceWidth = sourceBitmap.width,
+                sourceHeight = sourceBitmap.height,
+                fpsHint = 30f,
+            )
+        runtime.onSampledFrame(frame)
+        scaledBitmap =
+            if (sourceBitmap.width == activeConfig.inputWidth &&
+                sourceBitmap.height == activeConfig.inputHeight) {
+              sourceBitmap
+            } else {
+              Bitmap.createScaledBitmap(
+                  sourceBitmap,
+                  activeConfig.inputWidth.coerceAtLeast(32),
+                  activeConfig.inputHeight.coerceAtLeast(32),
+                  true,
+              )
+            }
+        runtime.onPixelFrame(frame, scaledBitmap!!)
+        val state = runtime.snapshot().toPayload().toMutableMap()
+        state["reason"] = "offline_image_debug"
+        state["inputPath"] = path
+        state["decodedWidth"] = sourceBitmap.width
+        state["decodedHeight"] = sourceBitmap.height
+        state["framesSeen"] = 1
+        state["framesSampled"] = 1
+        state["framesSkipped"] = 0
+        state["lastFrameId"] = frame.frameId
+        state["lastFramePtsUs"] = frame.ptsUs
+        state["samplePeriodMs"] = activeConfig.samplePeriodMs
+        state["lastSkipReason"] = "offline_image_debug"
+        state["copyInFlight"] = false
+        state["copyRequests"] = 0
+        state["copySuccesses"] = 0
+        state["copyFailures"] = 0
+        state["copySkippedBusy"] = 0
+        state["lastCopyResult"] = "offline_debug_bypass"
+        mapOf(
+            "config" to activeConfig.toPayload(),
+            "state" to state,
+        )
+      } finally {
+        runtime.release()
+        if (scaledBitmap != null && scaledBitmap !== sourceBitmap && !scaledBitmap!!.isRecycled) {
+          scaledBitmap!!.recycle()
+        }
+        if (!sourceBitmap.isRecycled) {
+          sourceBitmap.recycle()
+        }
+      }
+    }
+
+    fun runYoloDebugVideoFile(
+        path: String,
+        yoloConfig: Map<String, Any?>?,
+        sampleFrames: Int = 3,
+    ): Map<String, Any?>? {
+      val context = appContext ?: return null
+      val retriever = MediaMetadataRetriever()
+      val baseConfig = NativeDriveYoloConfig.fromPayload(yoloConfig)
+      val runtime = NativeDriveExecuTorchRuntime(context)
+      var sourceWidth = 0
+      var sourceHeight = 0
+      return try {
+        retriever.setDataSource(path)
+        val durationMs =
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull()
+                ?.coerceAtLeast(1L) ?: 1L
+        sourceWidth =
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                ?.toIntOrNull() ?: 0
+        sourceHeight =
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                ?.toIntOrNull() ?: 0
+
+        val activeConfig =
+            baseConfig.copy(
+                enabled = true,
+                sourceWidth = sourceWidth.coerceAtLeast(baseConfig.sourceWidth),
+                sourceHeight = sourceHeight.coerceAtLeast(baseConfig.sourceHeight),
+            )
+        val requestedSamples = sampleFrames.coerceIn(1, 8)
+        val sampleTimesMs =
+            if (requestedSamples <= 1) {
+              listOf(durationMs / 2L)
+            } else {
+              (0 until requestedSamples).map { index ->
+                val fraction = (index + 1).toDouble() / (requestedSamples + 1).toDouble()
+                (durationMs * fraction).toLong().coerceIn(0L, durationMs)
+              }
+            }
+        if (requiresQnnLoweredPlaybackModel(activeConfig)) {
+          return buildOfflineQnnModelMismatchResult(
+              config = activeConfig,
+              path = path,
+              reason = "offline_video_qnn_model_blocked",
+              decodedWidth = sourceWidth,
+              decodedHeight = sourceHeight,
+              videoDurationMs = durationMs,
+              videoSampleTimesMs = sampleTimesMs,
+          )
+        }
+        runtime.updateConfig(activeConfig)
+
+        var actualFrames = 0
+        var lastFrameId = -1
+        var lastPtsUs = 0L
+
+        for ((index, sampleMs) in sampleTimesMs.withIndex()) {
+          val bitmap =
+              retriever.getFrameAtTime(
+                  sampleMs * 1000L,
+                  MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+              ) ?: continue
+          val frame =
+              NativeDriveYoloFrame(
+                  frameId = index + 1,
+                  ptsUs = sampleMs * 1000L,
+                  camera = activeConfig.camera,
+                  sourceWidth = bitmap.width,
+                  sourceHeight = bitmap.height,
+                  fpsHint = 30f,
+              )
+          lastFrameId = frame.frameId
+          lastPtsUs = frame.ptsUs
+          runtime.onSampledFrame(frame)
+          val scaledBitmap =
+              if (bitmap.width == activeConfig.inputWidth &&
+                  bitmap.height == activeConfig.inputHeight) {
+                bitmap
+              } else {
+                Bitmap.createScaledBitmap(
+                    bitmap,
+                    activeConfig.inputWidth.coerceAtLeast(32),
+                    activeConfig.inputHeight.coerceAtLeast(32),
+                    true,
+                )
+              }
+          try {
+            runtime.onPixelFrame(frame, scaledBitmap)
+            actualFrames += 1
+          } finally {
+            if (scaledBitmap !== bitmap && !scaledBitmap.isRecycled) {
+              scaledBitmap.recycle()
+            }
+            if (!bitmap.isRecycled) {
+              bitmap.recycle()
+            }
+          }
+        }
+
+        val state = runtime.snapshot().toPayload().toMutableMap()
+        state["reason"] = "offline_video_debug"
+        state["inputPath"] = path
+        state["decodedWidth"] = sourceWidth
+        state["decodedHeight"] = sourceHeight
+        state["videoDurationMs"] = durationMs
+        state["videoSampleTimesMs"] = sampleTimesMs
+        state["framesSeen"] = actualFrames
+        state["framesSampled"] = actualFrames
+        state["framesSkipped"] = 0
+        state["lastFrameId"] = lastFrameId
+        state["lastFramePtsUs"] = lastPtsUs
+        state["samplePeriodMs"] = activeConfig.samplePeriodMs
+        state["lastSkipReason"] = if (actualFrames > 0) "offline_video_debug" else "video_frame_missing"
+        state["copyInFlight"] = false
+        state["copyRequests"] = 0
+        state["copySuccesses"] = 0
+        state["copyFailures"] = 0
+        state["copySkippedBusy"] = 0
+        state["lastCopyResult"] = "offline_debug_bypass"
+        mapOf(
+            "config" to activeConfig.toPayload(),
+            "state" to state,
+        )
+      } finally {
+        runtime.release()
+        try {
+          retriever.release()
+        } catch (_: Throwable) {
+        }
+      }
+    }
+
+    fun runYoloDebugVideoFrame(
+        path: String,
+        yoloConfig: Map<String, Any?>?,
+        positionMs: Long,
+    ): Map<String, Any?>? {
+      val context = appContext ?: return null
+      val baseConfig = NativeDriveYoloConfig.fromPayload(yoloConfig).copy(enabled = true)
+      Log.i(
+          NATIVE_VIDEO_TAG,
+          "runYoloDebugVideoFrame backend=${baseConfig.runtimeBackend} " +
+              "model=${baseConfig.modelVariant} positionMs=$positionMs path=$path",
+      )
+      if (requiresQnnLoweredPlaybackModel(baseConfig)) {
+        return buildOfflineQnnModelMismatchResult(
+            config = baseConfig,
+            path = path,
+            reason = "offline_video_frame_qnn_model_blocked",
+            positionMs = positionMs,
+        )
+      }
+      val session =
+          synchronized(offlineVideoDebugSessionLock) {
+            obtainOfflineVideoDebugSessionLocked(path, baseConfig, context)
+          }
+      val sourceBitmap =
+          session.retriever.getFrameAtTime(
+              positionMs.coerceAtLeast(0L) * 1000L,
+              MediaMetadataRetriever.OPTION_CLOSEST,
+          )
+      if (sourceBitmap == null) {
+        synchronized(offlineVideoDebugSessionLock) {
+          session.framesSkipped += 1
+          session.lastSkipReason = "video_frame_missing"
+          return buildOfflineVideoFrameDebugResultLocked(
+              session = session,
+              activeConfig = session.activeConfig,
+              positionMs = positionMs,
+              reason = "offline_video_frame_missing",
+          )
+        }
+      }
+      val activeConfig =
+          baseConfig.copy(
+              sourceWidth = sourceBitmap.width,
+              sourceHeight = sourceBitmap.height,
+          )
+      val scaledBitmap =
+          if (sourceBitmap.width == activeConfig.inputWidth &&
+              sourceBitmap.height == activeConfig.inputHeight) {
+            sourceBitmap
+          } else {
+            Bitmap.createScaledBitmap(
+                sourceBitmap,
+                activeConfig.inputWidth.coerceAtLeast(32),
+                activeConfig.inputHeight.coerceAtLeast(32),
+                true,
+            )
+          }
+      try {
+        synchronized(offlineVideoDebugSessionLock) {
+          session.activeConfig = activeConfig
+          session.sourceWidth = sourceBitmap.width
+          session.sourceHeight = sourceBitmap.height
+          session.runtime.updateConfig(activeConfig)
+          val frame =
+              NativeDriveYoloFrame(
+                  frameId = session.frameCounter + 1,
+                  ptsUs = positionMs.coerceAtLeast(0L) * 1000L,
+                  camera = activeConfig.camera,
+                  sourceWidth = sourceBitmap.width,
+                  sourceHeight = sourceBitmap.height,
+                  fpsHint = 30f,
+              )
+          session.frameCounter = frame.frameId
+          session.framesSeen += 1
+          session.framesSampled += 1
+          session.lastFrameId = frame.frameId
+          session.lastFramePtsUs = frame.ptsUs
+          session.runtime.onSampledFrame(frame)
+          session.runtime.onPixelFrame(frame, scaledBitmap)
+          session.lastSkipReason = "offline_video_playback_debug"
+          return buildOfflineVideoFrameDebugResultLocked(
+              session = session,
+              activeConfig = activeConfig,
+              positionMs = positionMs,
+              reason = "offline_video_playback_debug",
+          )
+        }
+      } finally {
+        if (scaledBitmap !== sourceBitmap && !scaledBitmap.isRecycled) {
+          scaledBitmap.recycle()
+        }
+        if (!sourceBitmap.isRecycled) {
+          sourceBitmap.recycle()
+        }
+      }
+    }
+
+    private fun obtainOfflineVideoDebugSessionLocked(
+        path: String,
+        baseConfig: NativeDriveYoloConfig,
+        context: Context,
+    ): OfflineVideoDebugSession {
+      val signature = buildOfflineVideoDebugConfigSignature(baseConfig)
+      val existing = offlineVideoDebugSession
+      if (existing != null &&
+          existing.path == path &&
+          existing.baseSignature == signature) {
+        return existing
+      }
+      releaseOfflineVideoDebugSessionLocked()
+      val retriever = MediaMetadataRetriever().apply { setDataSource(path) }
+      val sourceWidth =
+          retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+              ?.toIntOrNull() ?: 0
+      val sourceHeight =
+          retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+              ?.toIntOrNull() ?: 0
+      return OfflineVideoDebugSession(
+              path = path,
+              baseSignature = signature,
+              runtime = NativeDriveExecuTorchRuntime(context),
+              retriever = retriever,
+              activeConfig = baseConfig,
+              sourceWidth = sourceWidth,
+              sourceHeight = sourceHeight,
+          )
+          .also { offlineVideoDebugSession = it }
+    }
+
+    private fun releaseOfflineVideoDebugSessionLocked() {
+      val existing = offlineVideoDebugSession ?: return
+      try {
+        existing.runtime.release()
+      } catch (_: Throwable) {
+      }
+      try {
+        existing.retriever.release()
+      } catch (_: Throwable) {
+      }
+      offlineVideoDebugSession = null
+    }
+
+    private fun buildOfflineVideoDebugConfigSignature(
+        config: NativeDriveYoloConfig,
+    ): String {
+      return listOf(
+              config.enabled,
+              config.showBoxes,
+              config.showLabels,
+              config.showTrafficLights,
+              config.showStats,
+              config.unsafeRuntimeEnabled,
+              config.runtimeBackend,
+              config.modelVariant,
+              config.camera,
+              config.inputWidth,
+              config.inputHeight,
+              config.samplePeriodMs,
+          )
+          .joinToString("|")
+    }
+
+    private fun buildOfflineVideoFrameDebugResultLocked(
+        session: OfflineVideoDebugSession,
+        activeConfig: NativeDriveYoloConfig,
+        positionMs: Long,
+        reason: String,
+    ): Map<String, Any?> {
+      val state = session.runtime.snapshot().toPayload().toMutableMap()
+      val playbackFrameId = session.lastFrameId
+      val playbackFramePtsUs = session.lastFramePtsUs
+      state["reason"] = reason
+      state["syncSource"] = "developer_playback"
+      state["inputPath"] = session.path
+      state["positionMs"] = positionMs
+      state["playbackRequestedPositionMs"] = positionMs
+      state["decodedWidth"] = session.sourceWidth.coerceAtLeast(activeConfig.sourceWidth)
+      state["decodedHeight"] = session.sourceHeight.coerceAtLeast(activeConfig.sourceHeight)
+      state["framesSeen"] = session.framesSeen
+      state["framesSampled"] = session.framesSampled
+      state["framesSkipped"] = session.framesSkipped
+      state["lastFrameId"] = playbackFrameId
+      state["lastFramePtsUs"] = playbackFramePtsUs
+      state["playbackFrameId"] = playbackFrameId
+      state["playbackFramePtsUs"] = playbackFramePtsUs
+      state["playbackFrameToken"] = "video_playback:$playbackFramePtsUs:$playbackFrameId"
+      state["samplePeriodMs"] = activeConfig.samplePeriodMs
+      state["lastSkipReason"] = session.lastSkipReason
+      state["copyInFlight"] = false
+      state["copyRequests"] = 0
+      state["copySuccesses"] = 0
+      state["copyFailures"] = 0
+      state["copySkippedBusy"] = 0
+      state["lastCopyResult"] = "offline_video_playback_debug"
+      state["sessionMode"] = "video_playback"
+      state["sessionFrameCounter"] = session.frameCounter
+      return mapOf(
+          "config" to activeConfig.toPayload(),
+          "state" to state,
+      )
     }
 
     fun clearOverlay(viewId: Int): Boolean {
@@ -102,6 +643,7 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
   private var controlChannel: MethodChannel? = null
 
   fun register(context: Context, registry: PlatformViewRegistry) {
+    appContext = context.applicationContext
     registry.registerViewFactory(
         "carrotlink/native_drive_video",
         NativeDriveVideoViewFactory(context)
@@ -115,11 +657,7 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
                 val viewId = (call.argument<Number>("viewId") ?: -1).toInt()
                 @Suppress("UNCHECKED_CAST")
                 val overlay = call.argument<Map<String, Any?>>("overlay")
-                @Suppress("UNCHECKED_CAST")
-                val arScene = call.argument<Map<String, Any?>>("arScene")
-                val overlayOk = updateOverlay(viewId, overlay)
-                val sceneOk = updateArScene(viewId, arScene)
-                result.success(overlayOk && sceneOk)
+                result.success(updateOverlay(viewId, overlay))
               }
 
               "updateYoloConfig" -> {
@@ -134,19 +672,52 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
                 result.success(clearOverlay(viewId))
               }
 
-              "getArScene" -> {
-                val viewId = (call.argument<Number>("viewId") ?: -1).toInt()
-                result.success(getArScene(viewId))
-              }
-
-              "getArRenderDebug" -> {
-                val viewId = (call.argument<Number>("viewId") ?: -1).toInt()
-                result.success(getArRenderDebug(viewId))
-              }
-
               "getYoloState" -> {
                 val viewId = (call.argument<Number>("viewId") ?: -1).toInt()
                 result.success(getYoloState(viewId))
+              }
+
+              "runYoloDebugImageFile" -> {
+                val path = call.argument<String>("path")?.trim().orEmpty()
+                @Suppress("UNCHECKED_CAST")
+                val yoloConfig = call.argument<Map<String, Any?>>("yoloConfig")
+                if (path.isBlank()) {
+                  result.error("invalid_path", "path is blank", null)
+                } else {
+                  runOfflineDebugAsync(result) { runYoloDebugImageFile(path, yoloConfig) }
+                }
+              }
+
+              "runYoloDebugVideoFile" -> {
+                val path = call.argument<String>("path")?.trim().orEmpty()
+                @Suppress("UNCHECKED_CAST")
+                val yoloConfig = call.argument<Map<String, Any?>>("yoloConfig")
+                val sampleFrames = (call.argument<Number>("sampleFrames") ?: 3).toInt()
+                if (path.isBlank()) {
+                  result.error("invalid_path", "path is blank", null)
+                } else {
+                  runOfflineDebugAsync(result) {
+                    runYoloDebugVideoFile(path, yoloConfig, sampleFrames)
+                  }
+                }
+              }
+
+              "runYoloDebugVideoFrame" -> {
+                val path = call.argument<String>("path")?.trim().orEmpty()
+                @Suppress("UNCHECKED_CAST")
+                val yoloConfig = call.argument<Map<String, Any?>>("yoloConfig")
+                val positionMs = (call.argument<Number>("positionMs") ?: 0).toLong()
+                if (path.isBlank()) {
+                  result.error("invalid_path", "path is blank", null)
+                } else {
+                  runOfflineDebugAsync(result) {
+                    runYoloDebugVideoFrame(path, yoloConfig, positionMs)
+                  }
+                }
+              }
+
+              "clearYoloDebugVideoSession" -> {
+                result.success(clearYoloDebugVideoSession())
               }
 
               else -> result.notImplemented()
@@ -203,7 +774,6 @@ class NativeDriveVideoView(
   @Volatile private var webSocket: WebSocket? = null
   @Volatile private var surface: Surface? = null
   @Volatile private var codec: MediaCodec? = null
-  @Volatile private var arScenePayload: Map<String, Any?>? = null
   @Volatile private var codecConfigured = false
   @Volatile private var waitingKeyFrame = true
   @Volatile private var closed = false
@@ -487,28 +1057,12 @@ class NativeDriveVideoView(
     return true
   }
 
-  fun updateArScene(arScene: Map<String, Any?>?): Boolean {
-    if (closed) return false
-    overlayView.updateArScene(NativeDriveArScene.fromPayload(arScene))
-    arScenePayload = arScene
-    return true
-  }
-
-  fun getArScene(): Map<String, Any?>? {
-    return arScenePayload
-  }
-
-  fun getArRenderDebug(): Map<String, Any?>? {
-    return overlayView.getArRenderDebug()
-  }
-
   fun getYoloState(): Map<String, Any?> {
     return yoloController.snapshot(reason = "method_fetch")
   }
 
   fun clearOverlay(): Boolean {
     overlayView.clearOverlay()
-    arScenePayload = null
     return true
   }
 
@@ -1076,17 +1630,9 @@ class NativeDriveVideoView(
 }
 
 private class NativeDriveOverlayView(context: Context) : View(context) {
-  private data class OverlayVisualSuppression(
-      val polygonAlphaMultiplier: Float,
-      val strokeAlphaMultiplier: Float,
-      val labelAlphaMultiplier: Float,
-  )
-
   @Volatile private var overlayPayload: NativeDriveOverlayPayload? = null
   @Volatile private var yoloConfig: NativeDriveYoloConfig = NativeDriveYoloConfig.disabled
   private val overlayRenderer = NativeDriveOverlayCanvasRenderer()
-  private val arSceneRenderer = NativeDriveArSceneOverlayRenderer()
-  private val arRenderPipeline = NativeDriveArRenderStatePipeline()
 
   fun updateOverlay(payload: Map<String, Any?>?) {
     if (payload == null) {
@@ -1101,86 +1647,23 @@ private class NativeDriveOverlayView(context: Context) : View(context) {
     postInvalidateOnAnimation()
   }
 
-  fun updateArScene(scene: NativeDriveArScene?) {
-    arRenderPipeline.updateScene(scene)
-    postInvalidateOnAnimation()
-  }
-
   fun updateYoloConfig(config: NativeDriveYoloConfig) {
     yoloConfig = config
     postInvalidateOnAnimation()
   }
 
-  fun getArRenderDebug(): Map<String, Any?>? = arRenderPipeline.currentDebug()
-
   fun clearOverlay() {
     overlayPayload = null
-    arRenderPipeline.clear()
     postInvalidateOnAnimation()
   }
 
   override fun onDraw(canvas: Canvas) {
     super.onDraw(canvas)
     val overlay = overlayPayload
-    val scene = arRenderPipeline.currentScene()
-    if (overlay == null && scene == null) return
+    if (overlay == null) return
     val drawWidth = width.toFloat()
     val drawHeight = height.toFloat()
     if (drawWidth <= 1f || drawHeight <= 1f) return
-    val renderFrame = arRenderPipeline.resolveFrame(overlay = overlay, drawWidth = drawWidth)
-    val suppression = overlayVisualSuppression(renderFrame)
-    val strokeScale =
-        overlayRenderer.draw(
-            canvas,
-            overlay,
-            drawWidth,
-            drawHeight,
-            polygonAlphaMultiplier = suppression.polygonAlphaMultiplier,
-            strokeAlphaMultiplier = suppression.strokeAlphaMultiplier,
-            labelAlphaMultiplier = suppression.labelAlphaMultiplier,
-        )
-    if (renderFrame.scene == null || renderFrame.policy == null) return
-    arSceneRenderer.draw(
-        canvas = canvas,
-        scene = renderFrame.scene,
-        drawWidth = drawWidth,
-        drawHeight = drawHeight,
-        strokeScale = strokeScale,
-        policy = renderFrame.policy,
-    )
-  }
-
-  private fun overlayVisualSuppression(renderFrame: NativeDriveArRenderFrame): OverlayVisualSuppression {
-    val scene = renderFrame.scene
-    val policy = renderFrame.policy
-    if (scene == null || policy == null) {
-      return OverlayVisualSuppression(1f, 1f, 1f)
-    }
-    if (!scene.presentation.showGuidePrimitive && !scene.presentation.showStatusPill && !policy.drawCard) {
-      return OverlayVisualSuppression(1f, 1f, 1f)
-    }
-    val mode = scene.presentation.mode
-    val strongAr = policy.effectiveRenderBudget >= 2 &&
-        (policy.drawRibbon || policy.drawTrail || policy.drawGateChip || policy.drawCard)
-    return when {
-      mode == "turn" || mode == "arrival" ->
-          OverlayVisualSuppression(
-              polygonAlphaMultiplier = if (strongAr) 0.28f else 0.42f,
-              strokeAlphaMultiplier = if (strongAr) 0.52f else 0.66f,
-              labelAlphaMultiplier = 0.86f,
-          )
-      mode == "route" ->
-          OverlayVisualSuppression(
-              polygonAlphaMultiplier = if (strongAr) 0.34f else 0.48f,
-              strokeAlphaMultiplier = if (strongAr) 0.58f else 0.72f,
-              labelAlphaMultiplier = 0.90f,
-          )
-      else ->
-          OverlayVisualSuppression(
-              polygonAlphaMultiplier = 0.56f,
-              strokeAlphaMultiplier = 0.78f,
-              labelAlphaMultiplier = 0.94f,
-          )
-    }
+    overlayRenderer.draw(canvas, overlay, drawWidth, drawHeight)
   }
 }

@@ -83,6 +83,8 @@ void onStart(ServiceInstance service) async {
   Timer? reconnectTimer;
   Timer? discoveryRetryTimer;
   RawDatagramSocket? discoverySocket;
+  Future<void>? activeDiscoveryScanFuture;
+  int activeDiscoveryGeneration = 0;
 
   bool connectInFlight = false;
   bool discoveryListening = false;
@@ -102,12 +104,14 @@ void onStart(ServiceInstance service) async {
   DateTime? lastUdpCandidateSeenAt;
   String? lastSuccessfulIp;
   DateTime? lastSuccessfulSeenAt;
+  DateTime? lastActiveDiscoveryScanAt;
   final Map<String, int> activeScanHitCount = <String, int>{};
 
   String? profileUsername;
   String? profilePassword;
   String? profilePrivateKey;
   int profilePort = 22;
+  late void Function(String ip, {String source}) acceptCandidateIp;
 
   bool manualDisconnectRequested = false;
   int reconnectAttempt = 0;
@@ -148,14 +152,14 @@ void onStart(ServiceInstance service) async {
 
   Duration heartbeatIntervalForProfile() {
     return appForeground
-        ? const Duration(seconds: 2)
-        : const Duration(seconds: 4);
+        ? const Duration(seconds: 1)
+        : const Duration(seconds: 2);
   }
 
   Duration heartbeatTimeoutForProfile() {
     return appForeground
-        ? const Duration(milliseconds: 1200)
-        : const Duration(seconds: 2);
+        ? const Duration(milliseconds: 900)
+        : const Duration(milliseconds: 1500);
   }
 
   int heartbeatFailureThresholdForProfile() {
@@ -170,17 +174,45 @@ void onStart(ServiceInstance service) async {
   }
 
   int reconnectBackoffSeconds(int attempt) {
-    final seq = appForeground ? const [0, 1, 1, 2] : const [0, 1, 2, 3];
+    final seq = appForeground ? const [0, 0, 1, 1] : const [0, 1, 1, 2];
     if (attempt < 0) return seq.first;
     if (attempt >= seq.length) return seq.last;
     return seq[attempt];
   }
 
   int noBroadcastBackoffSeconds(int attempt) {
-    final seq = appForeground ? const [1, 1, 2] : const [1, 2, 3];
+    final seq = appForeground ? const [0, 1, 1] : const [1, 1, 2];
     if (attempt < 0) return seq.first;
     if (attempt >= seq.length) return seq.last;
     return seq[attempt];
+  }
+
+  Duration activeDiscoveryThrottleForProfile() {
+    return appForeground
+        ? const Duration(seconds: 2)
+        : const Duration(seconds: 5);
+  }
+
+  List<int> activeDiscoveryTimeoutPhasesMsForProfile() {
+    return appForeground
+        ? const <int>[250, 500, 900]
+        : const <int>[450, 900, 1500];
+  }
+
+  int activeDiscoveryBatchSizeForProfile() {
+    return appForeground ? 48 : 28;
+  }
+
+  Duration socketConnectTimeoutForProfile() {
+    return appForeground
+        ? const Duration(seconds: 4)
+        : const Duration(seconds: 6);
+  }
+
+  Duration authTimeoutForProfile() {
+    return appForeground
+        ? const Duration(seconds: 5)
+        : const Duration(seconds: 8);
   }
 
   Duration udpPreferWindowForProfile() {
@@ -202,6 +234,20 @@ void onStart(ServiceInstance service) async {
 
   String? pickReconnectTarget() {
     final now = DateTime.now();
+    final connected = connectedIp;
+    if (connected != null && connected.isNotEmpty) {
+      return connected;
+    }
+
+    final lastGood = lastSuccessfulIp;
+    final lastGoodSeenAt = lastSuccessfulSeenAt;
+    if (lastGood != null &&
+        lastGoodSeenAt != null &&
+        now.difference(lastGoodSeenAt) <=
+            lastSuccessfulReuseWindowForProfile()) {
+      return lastGood;
+    }
+
     final udpIp = lastUdpCandidateIp;
     final udpSeenAt = lastUdpCandidateSeenAt;
     if (udpIp != null &&
@@ -216,15 +262,6 @@ void onStart(ServiceInstance service) async {
         seenAt != null &&
         now.difference(seenAt) <= candidateStaleThresholdForProfile()) {
       return ip;
-    }
-
-    final lastGood = lastSuccessfulIp;
-    final lastGoodSeenAt = lastSuccessfulSeenAt;
-    if (lastGood != null &&
-        lastGoodSeenAt != null &&
-        now.difference(lastGoodSeenAt) <=
-            lastSuccessfulReuseWindowForProfile()) {
-      return lastGood;
     }
     return null;
   }
@@ -341,6 +378,128 @@ void onStart(ServiceInstance service) async {
     );
   }
 
+  Future<void> probeActiveDiscoveryTarget(
+    String ip, {
+    required int generation,
+    required int timeoutMs,
+  }) async {
+    if (stopping ||
+        !isValidIpv4(ip) ||
+        generation != activeDiscoveryGeneration) {
+      return;
+    }
+    try {
+      final socket = await Socket.connect(
+        ip,
+        profilePort,
+        timeout: Duration(milliseconds: timeoutMs),
+      );
+      socket.destroy();
+      if (generation != activeDiscoveryGeneration) return;
+      acceptCandidateIp(ip, source: 'active_scan');
+    } catch (_) {}
+  }
+
+  void cancelActiveDiscoveryScan() {
+    activeDiscoveryGeneration += 1;
+    activeDiscoveryScanFuture = null;
+  }
+
+  Future<void> runActiveDiscoveryScan({
+    required String reason,
+    required int generation,
+  }) async {
+    try {
+      final prefixes = <String>{};
+
+      void addPrefixFromIp(String? ip) {
+        if (ip == null || ip.isEmpty) return;
+        final parts = ip.split('.');
+        if (parts.length != 4) return;
+        prefixes.add('${parts[0]}.${parts[1]}.${parts[2]}');
+      }
+
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+        includeLinkLocal: false,
+      );
+      for (final interface in interfaces) {
+        for (final address in interface.addresses) {
+          if (address.isLoopback) continue;
+          addPrefixFromIp(address.address);
+        }
+      }
+
+      addPrefixFromIp(candidateIp);
+      addPrefixFromIp(lastUdpCandidateIp);
+      addPrefixFromIp(lastSuccessfulIp);
+      addPrefixFromIp(connectedIp);
+      if (prefixes.isEmpty) {
+        emitDiscoveryState(source: 'active_scan_no_prefix_$reason');
+        return;
+      }
+
+      final timeoutPhasesMs = activeDiscoveryTimeoutPhasesMsForProfile();
+      final batchSize = activeDiscoveryBatchSizeForProfile();
+      for (final timeoutMs in timeoutPhasesMs) {
+        for (final prefix in prefixes) {
+          if (stopping || generation != activeDiscoveryGeneration) return;
+          for (var i = 1; i < 255; i += batchSize) {
+            if (stopping || generation != activeDiscoveryGeneration) return;
+            final batch = <Future<void>>[];
+            for (var j = 0; j < batchSize && (i + j) < 255; j++) {
+              batch.add(
+                probeActiveDiscoveryTarget(
+                  '$prefix.${i + j}',
+                  generation: generation,
+                  timeoutMs: timeoutMs,
+                ),
+              );
+            }
+            await Future.wait(batch);
+          }
+        }
+      }
+      emitDiscoveryState(source: 'active_scan_done_$reason');
+    } catch (e) {
+      debugPrint('Active discovery scan failed: $e');
+      emitDiscoveryState(source: 'active_scan_fail_$reason');
+    }
+  }
+
+  void triggerActiveDiscoveryScan({
+    required String reason,
+    bool force = false,
+  }) {
+    if (stopping || !canAutoReconnect() || !hasConnectProfile()) return;
+    if (force && activeDiscoveryScanFuture != null) {
+      cancelActiveDiscoveryScan();
+    } else if (!force && activeDiscoveryScanFuture != null) {
+      return;
+    }
+    final now = DateTime.now();
+    if (!force &&
+        lastActiveDiscoveryScanAt != null &&
+        now.difference(lastActiveDiscoveryScanAt!) <
+            activeDiscoveryThrottleForProfile()) {
+      return;
+    }
+    lastActiveDiscoveryScanAt = now;
+    emitDiscoveryState(source: 'active_scan_start_$reason');
+    final generation = activeDiscoveryGeneration;
+    late final Future<void> scanFuture;
+    scanFuture = runActiveDiscoveryScan(
+      reason: reason,
+      generation: generation,
+    ).whenComplete(() {
+      if (identical(activeDiscoveryScanFuture, scanFuture)) {
+        activeDiscoveryScanFuture = null;
+      }
+    });
+    activeDiscoveryScanFuture = scanFuture;
+    unawaited(scanFuture);
+  }
+
   Future<void> closeClient() async {
     heartbeatTimer?.cancel();
     heartbeatTimer = null;
@@ -361,6 +520,7 @@ void onStart(ServiceInstance service) async {
   Future<void> handleDisconnected(String reason, {bool manual = false}) async {
     final wasConnected = connectedIp != null;
     await closeClient();
+    cancelActiveDiscoveryScan();
     if (manual) {
       manualDisconnectRequested = true;
     }
@@ -376,9 +536,11 @@ void onStart(ServiceInstance service) async {
     }
     if (wasConnected) {
       await updateConnectionNotification(status: '재연결 대기');
+      triggerActiveDiscoveryScan(reason: 'disconnect_$reason', force: true);
       return;
     }
     await updateConnectionNotification(status: '연결 대기');
+    triggerActiveDiscoveryScan(reason: 'disconnect_$reason');
   }
 
   void scheduleReconnect(String reason) {
@@ -386,6 +548,7 @@ void onStart(ServiceInstance service) async {
     if (connectInFlight || (sshClient != null && !sshClient!.isClosed)) return;
     final target = pickReconnectTarget();
     if (target == null || target.isEmpty) {
+      triggerActiveDiscoveryScan(reason: 'wait_target_$reason');
       if (reconnectTimer?.isActive == true) return;
       final delaySec = noBroadcastBackoffSeconds(noBroadcastWaitAttempt);
       noBroadcastWaitAttempt =
@@ -393,6 +556,7 @@ void onStart(ServiceInstance service) async {
       reconnectTimer = Timer(Duration(seconds: delaySec), () {
         if (stopping) return;
         emitDiscoveryState(source: 'wait_no_broadcast');
+        triggerActiveDiscoveryScan(reason: 'wait_retry_$reason', force: true);
         scheduleReconnect('wait_no_broadcast');
       });
       return;
@@ -465,6 +629,15 @@ void onStart(ServiceInstance service) async {
           ? 'profile_foreground_$source'
           : 'profile_background_$source',
     );
+    if ((sshClient == null || sshClient!.isClosed) &&
+        canAutoReconnect() &&
+        hasConnectProfile()) {
+      triggerActiveDiscoveryScan(
+        reason: foreground ? 'foreground_$source' : 'background_$source',
+        force: foreground,
+      );
+      scheduleReconnect('profile_$source');
+    }
   }
 
   connectTo = (String ip, {required String reason}) async {
@@ -487,7 +660,7 @@ void onStart(ServiceInstance service) async {
       final socket = await SSHSocket.connect(
         ip,
         profilePort,
-        timeout: const Duration(seconds: 8),
+        timeout: socketConnectTimeoutForProfile(),
       );
 
       if (profilePrivateKey != null && profilePrivateKey!.isNotEmpty) {
@@ -504,15 +677,19 @@ void onStart(ServiceInstance service) async {
         );
       }
 
-      await sshClient!.authenticated.timeout(const Duration(seconds: 10));
+      await sshClient!.authenticated.timeout(authTimeoutForProfile());
       await verifyOpenpilotTarget(sshClient!, ip);
 
       connectedIp = ip;
       connectedPort = profilePort;
+      candidateIp = ip;
+      candidateSource = 'connected';
+      candidateSeenAt = DateTime.now();
       lastSuccessfulIp = ip;
       lastSuccessfulSeenAt = DateTime.now();
       reconnectAttempt = 0;
       noBroadcastWaitAttempt = 0;
+      cancelActiveDiscoveryScan();
 
       emitConnectionState(
         isConnected: true,
@@ -543,6 +720,7 @@ void onStart(ServiceInstance service) async {
         allowLastSuccessful: false,
       );
       scheduleReconnect('connect_failed');
+      triggerActiveDiscoveryScan(reason: 'connect_failed', force: true);
     } finally {
       connectInFlight = false;
     }
@@ -591,6 +769,13 @@ void onStart(ServiceInstance service) async {
       lastUdpCandidateIp = ip;
       lastUdpCandidateSeenAt = now;
     }
+    if (connectedIp != null &&
+        connectedIp != ip &&
+        sshClient != null &&
+        !sshClient!.isClosed) {
+      emitDiscoveryState(source: 'candidate_secondary_ignored');
+      return;
+    }
     final changed = candidateIp != ip;
     final connectedChanged = connectedIp != null && connectedIp != ip;
     candidateIp = ip;
@@ -636,6 +821,8 @@ void onStart(ServiceInstance service) async {
       unawaited(connectTo(ip, reason: 'candidate_udp'));
     }
   }
+
+  acceptCandidateIp = onCandidateIp;
 
   void scheduleDiscoveryRetry() {
     if (stopping) return;
@@ -696,6 +883,7 @@ void onStart(ServiceInstance service) async {
 
   await updateConnectionNotification(status: '연결 대기');
   await startDiscoveryListener();
+  triggerActiveDiscoveryScan(reason: 'service_start', force: true);
   emitDiscoveryState(source: 'service_start');
 
   service.on('connect').listen((event) async {
@@ -778,6 +966,9 @@ void onStart(ServiceInstance service) async {
     } else {
       emitDiscoveryState(source: 'ensure_discovery');
     }
+    if ((sshClient == null || sshClient!.isClosed)) {
+      triggerActiveDiscoveryScan(reason: 'ensure_discovery');
+    }
   });
 
   service.on('networkChanged').listen((event) async {
@@ -810,6 +1001,7 @@ void onStart(ServiceInstance service) async {
         await handleDisconnected('network_changed_session_lost');
       }
     }
+    triggerActiveDiscoveryScan(reason: source, force: true);
     final target = pickReconnectTarget();
     if (target != null) {
       unawaited(connectTo(target, reason: 'network_changed_fast'));
@@ -834,6 +1026,10 @@ void onStart(ServiceInstance service) async {
     if ((sshClient == null || sshClient!.isClosed) &&
         canAutoReconnect() &&
         hasConnectProfile()) {
+      triggerActiveDiscoveryScan(
+        reason: foreground ? 'visibility_foreground' : 'visibility_background',
+        force: foreground,
+      );
       scheduleReconnect('profile_switch');
     }
   });
@@ -880,6 +1076,7 @@ void onStart(ServiceInstance service) async {
   service.on('disconnect').listen((event) async {
     await handleDisconnected('manual_disconnect', manual: true);
     clearReconnectTimer();
+    cancelActiveDiscoveryScan();
   });
 
   service.on('stopService').listen((event) {
@@ -889,6 +1086,7 @@ void onStart(ServiceInstance service) async {
     discoveryRetryTimer = null;
     heartbeatTimer?.cancel();
     heartbeatTimer = null;
+    cancelActiveDiscoveryScan();
     try {
       discoverySocket?.close();
     } catch (_) {}

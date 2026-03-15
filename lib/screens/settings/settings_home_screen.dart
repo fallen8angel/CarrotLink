@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../../ui/adaptive/layout_tokens.dart';
 
 import '../permission_screen.dart';
 import '../diagnostics_screen.dart';
+import '../../services/developer_mode_service.dart';
 import 'connection_settings_screen.dart';
+import 'developer_tools_screen.dart';
 import 'hud_settings_screen.dart';
 import 'info_settings_screen.dart';
 
@@ -12,6 +15,7 @@ class SettingsScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final developerMode = context.watch<DeveloperModeService>();
     final tokens = UiLayoutTokens.of(context);
     final scheme = Theme.of(context).colorScheme;
     final horizontalPadding = tokens.screenPadding.clamp(8.0, 20.0).toDouble();
@@ -65,13 +69,30 @@ class SettingsScreen extends StatelessWidget {
             onTap: () => Navigator.push(context,
                 MaterialPageRoute(builder: (_) => const InfoSettingsScreen())),
           ),
-          const Divider(),
-          navTile(
-            icon: Icons.bug_report_outlined,
-            title: '진단 로그',
-            onTap: () => Navigator.push(context,
-                MaterialPageRoute(builder: (_) => const DiagnosticsScreen())),
-          ),
+          if (developerMode.enabled) ...[
+            const Divider(),
+            navTile(
+              icon: Icons.developer_mode_rounded,
+              title: '개발자 도구',
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const DeveloperToolsScreen(),
+                ),
+              ),
+            ),
+            const Divider(),
+            navTile(
+              icon: Icons.bug_report_outlined,
+              title: '진단 로그',
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const DiagnosticsScreen(),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );

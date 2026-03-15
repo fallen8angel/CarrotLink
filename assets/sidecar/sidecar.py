@@ -701,7 +701,9 @@ class SidecarApp:
             "controlsState",
             "longitudinalPlan",
             "liveCalibration",
+            "liveDelay",
             "liveParameters",
+            "liveTorqueParameters",
             "modelV2",
             "radarState",
             "roadCameraState",
@@ -714,7 +716,9 @@ class SidecarApp:
             "controlsState",
             "longitudinalPlan",
             "liveCalibration",
+            "liveDelay",
             "liveParameters",
+            "liveTorqueParameters",
             "modelV2",
             "radarState",
             "roadCameraState",
@@ -728,7 +732,9 @@ class SidecarApp:
             "controlsState",
             "longitudinalPlan",
             "liveCalibration",
+            "liveDelay",
             "liveParameters",
+            "liveTorqueParameters",
             "modelV2",
             "radarState",
             "roadCameraState",
@@ -846,6 +852,7 @@ class SidecarApp:
             "tfGapDisplay": 0,
             "showDeviceState": True,
             "showDateTimeMode": 1,
+            "customSr": None,
         }
         self._hud_metric_toggle_last = 0.0
         self._hud_metric_show_volt = False
@@ -1443,6 +1450,12 @@ class SidecarApp:
             self._hud_params_cache["showDateTimeMode"] = int(
                 self._params.get_int("ShowDateTime")
             )
+            custom_sr = _safe_float(self._params.get_float("CustomSR"))
+            self._hud_params_cache["customSr"] = (
+                custom_sr / 10.0
+                if custom_sr is not None and math.isfinite(custom_sr)
+                else None
+            )
         except Exception:
             pass
         return dict(self._hud_params_cache)
@@ -1968,8 +1981,110 @@ class SidecarApp:
             pass
         return out
 
+    def _payload_stock_debug(self) -> dict[str, Any] | None:
+        sm = self.sm
+        if sm is None:
+            return None
+
+        live_delay = sm["liveDelay"] if sm.alive.get("liveDelay", False) else None
+        live_torque = (
+            sm["liveTorqueParameters"]
+            if sm.alive.get("liveTorqueParameters", False)
+            else None
+        )
+        live_params = (
+            sm["liveParameters"] if sm.alive.get("liveParameters", False) else None
+        )
+        hud_params = self._read_hud_params()
+
+        ld_cal = (
+            _safe_int(getattr(live_delay, "calPerc", None))
+            if live_delay is not None
+            else None
+        )
+        ld_lateral_delay = (
+            _safe_float(getattr(live_delay, "lateralDelay", None))
+            if live_delay is not None
+            else None
+        )
+        lt_cal = (
+            _safe_int(getattr(live_torque, "calPerc", None))
+            if live_torque is not None
+            else None
+        )
+        lt_live_valid = (
+            bool(getattr(live_torque, "liveValid", False))
+            if live_torque is not None
+            else False
+        )
+        lt_lat_accel_factor = (
+            _safe_float(getattr(live_torque, "latAccelFactorFiltered", None))
+            if live_torque is not None
+            else None
+        )
+        lt_friction_coefficient = (
+            _safe_float(getattr(live_torque, "frictionCoefficientFiltered", None))
+            if live_torque is not None
+            else None
+        )
+        sr_steer_ratio = (
+            _safe_float(getattr(live_params, "steerRatio", None))
+            if live_params is not None
+            else None
+        )
+        sr_custom = _safe_float(hud_params.get("customSr"))
+
+        has_any = any(
+            value is not None
+            for value in (
+                ld_cal,
+                ld_lateral_delay,
+                lt_cal,
+                lt_lat_accel_factor,
+                lt_friction_coefficient,
+                sr_steer_ratio,
+                sr_custom,
+            )
+        )
+        if not has_any:
+            return None
+
+        def fmt_pct(value: int | None) -> str:
+            return f"{value}%" if value is not None else "--%"
+
+        def fmt_float(value: float | None, digits: int) -> str:
+            if value is None or not math.isfinite(value):
+                return "--"
+            return f"{value:.{digits}f}"
+
+        top_right_text = (
+            f"LD[{fmt_pct(ld_cal)},{fmt_float(ld_lateral_delay, 2)}],"
+            f"LT[{fmt_pct(lt_cal)},{'ON' if lt_live_valid else 'OFF'}]"
+            f"({fmt_float(lt_lat_accel_factor, 2)}/{fmt_float(lt_friction_coefficient, 2)}), "
+            f"SR({fmt_float(sr_steer_ratio, 1)},{fmt_float(sr_custom, 1)})"
+        )
+        return {
+            "ldCalPerc": ld_cal,
+            "ldLateralDelay": ld_lateral_delay,
+            "ltCalPerc": lt_cal,
+            "ltLiveValid": lt_live_valid,
+            "ltLatAccelFactorFiltered": lt_lat_accel_factor,
+            "ltFrictionCoefficientFiltered": lt_friction_coefficient,
+            "srSteerRatio": sr_steer_ratio,
+            "srCustom": sr_custom,
+            "topRightText": top_right_text,
+        }
+
     def _payload_lateral_plan(self, lp: Any) -> dict[str, Any]:
         out: dict[str, Any] = {}
+        try:
+            out["laneChangeState"] = _safe_int(getattr(lp, "laneChangeState", None))
+            out["laneChangeDirection"] = _safe_int(
+                getattr(lp, "laneChangeDirection", None)
+            )
+            out["latDebugText"] = str(getattr(lp, "latDebugText", "") or "")
+        except Exception:
+            pass
         try:
             pos = getattr(lp, "position", None)
             if pos is not None:
@@ -2279,6 +2394,18 @@ class SidecarApp:
                 out["leadTwo"] = self._payload_radar_lead(lead_two)
         except Exception:
             pass
+        try:
+            lead_left = getattr(rs, "leadLeft", None)
+            if lead_left is not None:
+                out["leadLeft"] = self._payload_radar_lead(lead_left)
+        except Exception:
+            pass
+        try:
+            lead_right = getattr(rs, "leadRight", None)
+            if lead_right is not None:
+                out["leadRight"] = self._payload_radar_lead(lead_right)
+        except Exception:
+            pass
         for group in ("leadsLeft", "leadsRight", "leadsCenter"):
             try:
                 packed: list[dict[str, Any]] = []
@@ -2486,6 +2613,13 @@ class SidecarApp:
                 payload["longitudinalPlan"] = self._payload_longitudinal_plan(
                     self.sm["longitudinalPlan"]
                 )
+        except Exception:
+            pass
+        try:
+            if payload_mode != "camera_only" and self.profile in ("p2", "p3", "p4"):
+                stock_debug = self._payload_stock_debug()
+                if stock_debug is not None:
+                    payload["stockDebug"] = stock_debug
         except Exception:
             pass
         try:

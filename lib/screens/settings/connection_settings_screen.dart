@@ -14,6 +14,7 @@ import '../../ui/adaptive/layout_tokens.dart';
 import '../../ui/adaptive/window_class.dart';
 import '../../widgets/custom_toast.dart';
 import '../github_login_screen.dart';
+import 'settings_subpage_components.dart';
 
 part 'connection_settings_persistence.dart';
 part 'connection_settings_keys.dart';
@@ -63,7 +64,7 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
   bool _manualDiscoverySession = false;
   final Set<String> _discoverySeenIps = <String>{};
   String _discoveryStatus = '대기';
-  String _backupLocationSummary = '확인 중...';
+  String? _expandedPanelId;
 
   bool get _hasActiveSshKey =>
       _currentPrivateKey != null && _currentPrivateKey!.isNotEmpty;

@@ -5,12 +5,6 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
     _cancelLifecycleSuspendTimer();
     if (_cameraSuspendedByLifecycle) return;
     debugPrint('[DriveCanvas][lifecycle] suspend');
-    unawaited(
-      _persistArReplaySessionIfNeeded(
-        force: true,
-        reason: 'background_suspend',
-      ),
-    );
     _clearSidecarRecoverySchedule();
     _cameraSuspendedByLifecycle = true;
     _backgroundUiResetDone = false;
@@ -68,8 +62,6 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
   void _cancelDelayedSidecarStop() {
     _sidecarProcessStopTimer?.cancel();
     _sidecarProcessStopTimer = null;
-    _sidecarScheduledStopAt = null;
-    _sidecarScheduledStopReason = null;
   }
 
   void _cancelBackgroundUiResetTimer() {
@@ -131,16 +123,11 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
       'BG_KEEPALIVE',
       'defer stop ${_LiveDriveCanvasScreenState._backgroundProcessKeepAlive.inSeconds}s',
     );
-    _sidecarScheduledStopReason = 'background';
-    _sidecarScheduledStopAt = DateTime.now()
-        .add(_LiveDriveCanvasScreenState._backgroundProcessKeepAlive);
     _sidecarProcessStopTimer = Timer(
       _LiveDriveCanvasScreenState._backgroundProcessKeepAlive,
       () {
         _sidecarProcessStopTimer = null;
         final shouldStop = _cameraSuspendedByLifecycle;
-        _sidecarScheduledStopAt = null;
-        _sidecarScheduledStopReason = null;
         if (!shouldStop) return;
         _setSidecarPhase(
           _SidecarPhase.stopping,
@@ -158,9 +145,6 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
         _sidecarProcessSnapshot['running'] == '1' ||
         _sidecarProcessSnapshot['listening'] == '1';
     if (!hadRuntime) return;
-    _sidecarScheduledStopReason = 'idle';
-    _sidecarScheduledStopAt = DateTime.now()
-        .add(_LiveDriveCanvasScreenState._sidecarWarmProcessKeepAlive);
     _pushSidecarHistory(
       'AUTO_STOP_ARM',
       'idle ${_LiveDriveCanvasScreenState._sidecarWarmProcessKeepAlive.inSeconds}s',
@@ -171,8 +155,6 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
         _sidecarProcessStopTimer = null;
         final shouldStop =
             !_openpilotOverlayMode && !_cameraSuspendedByLifecycle;
-        _sidecarScheduledStopAt = null;
-        _sidecarScheduledStopReason = null;
         if (!shouldStop) return;
         _setSidecarPhase(
           _SidecarPhase.stopping,
@@ -236,11 +218,5 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
       DeviceOrientation.landscapeLeft,
       DeviceOrientation.landscapeRight,
     ]);
-  }
-
-  Future<void> _exitScreenImpl() async {
-    await _restorePortraitOrientation();
-    if (!mounted) return;
-    Navigator.of(context).maybePop();
   }
 }

@@ -11,6 +11,7 @@ import 'services/google_drive_service.dart';
 import 'services/backup_service.dart';
 import 'services/update_service.dart';
 import 'services/diagnostics_service.dart';
+import 'services/developer_mode_service.dart';
 import 'services/hud_feature_settings_service.dart';
 import 'services/storage_layout_service.dart';
 import 'features/hud/hud.dart';
@@ -39,6 +40,7 @@ void main() {
         ChangeNotifierProvider(create: (_) => GoogleDriveService()),
         ChangeNotifierProvider(create: (_) => BackupService()),
         ChangeNotifierProvider(create: (_) => UpdateService()),
+        ChangeNotifierProvider(create: (_) => DeveloperModeService()),
         ChangeNotifierProvider.value(value: DiagnosticsService.instance),
       ],
       child: CarrotLinkApp(startupWarmup: startupWarmup),

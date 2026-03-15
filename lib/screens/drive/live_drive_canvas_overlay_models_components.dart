@@ -1,84 +1,5 @@
 part of 'live_drive_canvas_screen.dart';
 
-class _PreviewRoadBackdropPainter extends CustomPainter {
-  const _PreviewRoadBackdropPainter();
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final skyRect = Offset.zero & Size(size.width, size.height * 0.58);
-    final roadRect =
-        Rect.fromLTWH(0, size.height * 0.34, size.width, size.height * 0.66);
-    final skyPaint = Paint()
-      ..shader = const LinearGradient(
-        begin: Alignment.topCenter,
-        end: Alignment.bottomCenter,
-        colors: <Color>[
-          Color(0xFF6F88A6),
-          Color(0xFF444D58),
-        ],
-      ).createShader(skyRect);
-    final roadPaint = Paint()
-      ..shader = const LinearGradient(
-        begin: Alignment.topCenter,
-        end: Alignment.bottomCenter,
-        colors: <Color>[
-          Color(0xFF3E444C),
-          Color(0xFF1D2127),
-        ],
-      ).createShader(roadRect);
-    canvas.drawRect(
-        Offset.zero & size, Paint()..color = const Color(0xFF0E1117));
-    canvas.drawRect(skyRect, skyPaint);
-    canvas.drawRect(roadRect, roadPaint);
-
-    final horizonY = size.height * 0.34;
-    final roadPath = Path()
-      ..moveTo(size.width * 0.08, size.height)
-      ..lineTo(size.width * 0.92, size.height)
-      ..lineTo(size.width * 0.59, horizonY)
-      ..lineTo(size.width * 0.41, horizonY)
-      ..close();
-    canvas.drawPath(
-      roadPath,
-      Paint()
-        ..color = const Color(0xFF2A2F36)
-        ..style = PaintingStyle.fill,
-    );
-
-    final lanePaint = Paint()
-      ..color = const Color(0xCCF7F7F7)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.0;
-    final dashPaint = Paint()
-      ..color = const Color(0xCCFFFFFF)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.6;
-    canvas.drawLine(
-      Offset(size.width * 0.28, size.height),
-      Offset(size.width * 0.47, horizonY),
-      lanePaint,
-    );
-    canvas.drawLine(
-      Offset(size.width * 0.72, size.height),
-      Offset(size.width * 0.53, horizonY),
-      lanePaint,
-    );
-    for (var i = 0; i < 7; i++) {
-      final t0 = i / 7.0;
-      final t1 = (i + 0.5) / 7.0;
-      final x0 = size.width * 0.5;
-      final y0 = size.height + ((horizonY - size.height) * t0);
-      final x1 = size.width * 0.5;
-      final y1 = size.height + ((horizonY - size.height) * t1);
-      canvas.drawLine(Offset(x0, y0), Offset(x1, y1), dashPaint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _PreviewRoadBackdropPainter oldDelegate) =>
-      false;
-}
-
 class _DriveOverlaySnapshot {
   final _XyzSeries modelPath;
   final _XyzSeries path;
@@ -95,8 +16,20 @@ class _DriveOverlaySnapshot {
   final double aEgo;
   final double? speedMps;
   final double? speedKph;
+  final bool longActive;
+  final int xState;
+  final int trafficState;
+  final double tFollow;
+  final double desiredDistance;
+  final int useLaneLineSpeed;
   final int leftLaneLine;
   final int rightLaneLine;
+  final bool leftBlindspot;
+  final bool rightBlindspot;
+  final int laneChangeState;
+  final int laneChangeDirection;
+  final String latDebugText;
+  final String stockDebugTopRightText;
   final List<double> calibrationRpy;
   final List<double> wideFromDeviceEuler;
   final double pathOffsetZ;
@@ -109,6 +42,8 @@ class _DriveOverlaySnapshot {
   final Map<String, dynamic>? sidecarOverlay2d;
   final _RadarLeadSample? leadOne;
   final _RadarLeadSample? leadTwo;
+  final _RadarLeadSample? leadLeft;
+  final _RadarLeadSample? leadRight;
   final List<_RadarTrackSample> leadsLeft;
   final List<_RadarTrackSample> leadsRight;
   final List<_RadarTrackSample> leadsCenter;
@@ -136,8 +71,20 @@ class _DriveOverlaySnapshot {
     required this.aEgo,
     required this.speedMps,
     required this.speedKph,
+    required this.longActive,
+    required this.xState,
+    required this.trafficState,
+    required this.tFollow,
+    required this.desiredDistance,
+    required this.useLaneLineSpeed,
     required this.leftLaneLine,
     required this.rightLaneLine,
+    required this.leftBlindspot,
+    required this.rightBlindspot,
+    required this.laneChangeState,
+    required this.laneChangeDirection,
+    required this.latDebugText,
+    required this.stockDebugTopRightText,
     required this.calibrationRpy,
     required this.wideFromDeviceEuler,
     required this.pathOffsetZ,
@@ -150,6 +97,8 @@ class _DriveOverlaySnapshot {
     required this.sidecarOverlay2d,
     required this.leadOne,
     required this.leadTwo,
+    required this.leadLeft,
+    required this.leadRight,
     required this.leadsLeft,
     required this.leadsRight,
     required this.leadsCenter,
@@ -178,8 +127,20 @@ class _DriveOverlaySnapshot {
         aEgo = 0.0,
         speedMps = null,
         speedKph = null,
+        longActive = false,
+        xState = 0,
+        trafficState = 0,
+        tFollow = 0.0,
+        desiredDistance = 0.0,
+        useLaneLineSpeed = 0,
         leftLaneLine = 0,
         rightLaneLine = 0,
+        leftBlindspot = false,
+        rightBlindspot = false,
+        laneChangeState = 0,
+        laneChangeDirection = 0,
+        latDebugText = '',
+        stockDebugTopRightText = '',
         calibrationRpy = const <double>[],
         wideFromDeviceEuler = const <double>[],
         pathOffsetZ = 1.22,
@@ -192,6 +153,8 @@ class _DriveOverlaySnapshot {
         sidecarOverlay2d = null,
         leadOne = null,
         leadTwo = null,
+        leadLeft = null,
+        leadRight = null,
         leadsLeft = const <_RadarTrackSample>[],
         leadsRight = const <_RadarTrackSample>[],
         leadsCenter = const <_RadarTrackSample>[],
@@ -234,8 +197,20 @@ class _DriveOverlaySnapshot {
       aEgo: aEgo,
       speedMps: speedMps,
       speedKph: speedKph,
+      longActive: longActive,
+      xState: xState,
+      trafficState: trafficState,
+      tFollow: tFollow,
+      desiredDistance: desiredDistance,
+      useLaneLineSpeed: useLaneLineSpeed,
       leftLaneLine: leftLaneLine,
       rightLaneLine: rightLaneLine,
+      leftBlindspot: leftBlindspot,
+      rightBlindspot: rightBlindspot,
+      laneChangeState: laneChangeState,
+      laneChangeDirection: laneChangeDirection,
+      latDebugText: latDebugText,
+      stockDebugTopRightText: stockDebugTopRightText,
       calibrationRpy: calibrationRpy ?? this.calibrationRpy,
       wideFromDeviceEuler: wideFromDeviceEuler ?? this.wideFromDeviceEuler,
       pathOffsetZ: pathOffsetZ ?? this.pathOffsetZ,
@@ -248,6 +223,8 @@ class _DriveOverlaySnapshot {
       sidecarOverlay2d: sidecarOverlay2d ?? this.sidecarOverlay2d,
       leadOne: leadOne,
       leadTwo: leadTwo,
+      leadLeft: leadLeft,
+      leadRight: leadRight,
       leadsLeft: leadsLeft,
       leadsRight: leadsRight,
       leadsCenter: leadsCenter,
@@ -490,8 +467,23 @@ class _DriveOverlaySnapshot {
       aEgo: _lerp(from.aEgo, to.aEgo, tt),
       speedMps: _lerpNullable(from.speedMps, to.speedMps, tt),
       speedKph: _lerpNullable(from.speedKph, to.speedKph, tt),
+      longActive: tt < 0.5 ? from.longActive : to.longActive,
+      xState: tt < 0.5 ? from.xState : to.xState,
+      trafficState: tt < 0.5 ? from.trafficState : to.trafficState,
+      tFollow: _lerp(from.tFollow, to.tFollow, tt),
+      desiredDistance: _lerp(from.desiredDistance, to.desiredDistance, tt),
+      useLaneLineSpeed:
+          tt < 0.5 ? from.useLaneLineSpeed : to.useLaneLineSpeed,
       leftLaneLine: tt < 0.5 ? from.leftLaneLine : to.leftLaneLine,
       rightLaneLine: tt < 0.5 ? from.rightLaneLine : to.rightLaneLine,
+      leftBlindspot: tt < 0.5 ? from.leftBlindspot : to.leftBlindspot,
+      rightBlindspot: tt < 0.5 ? from.rightBlindspot : to.rightBlindspot,
+      laneChangeState: tt < 0.5 ? from.laneChangeState : to.laneChangeState,
+      laneChangeDirection:
+          tt < 0.5 ? from.laneChangeDirection : to.laneChangeDirection,
+      latDebugText: tt < 0.5 ? from.latDebugText : to.latDebugText,
+      stockDebugTopRightText:
+          tt < 0.5 ? from.stockDebugTopRightText : to.stockDebugTopRightText,
       calibrationRpy: tt < 0.5 ? from.calibrationRpy : to.calibrationRpy,
       wideFromDeviceEuler:
           tt < 0.5 ? from.wideFromDeviceEuler : to.wideFromDeviceEuler,
@@ -505,6 +497,8 @@ class _DriveOverlaySnapshot {
       sidecarOverlay2d: tt < 0.5 ? from.sidecarOverlay2d : to.sidecarOverlay2d,
       leadOne: _lerpRadarLead(from.leadOne, to.leadOne, tt),
       leadTwo: _lerpRadarLead(from.leadTwo, to.leadTwo, tt),
+      leadLeft: _lerpRadarLead(from.leadLeft, to.leadLeft, tt),
+      leadRight: _lerpRadarLead(from.leadRight, to.leadRight, tt),
       leadsLeft: tt < 0.5 ? from.leadsLeft : to.leadsLeft,
       leadsRight: tt < 0.5 ? from.leadsRight : to.leadsRight,
       leadsCenter: tt < 0.5 ? from.leadsCenter : to.leadsCenter,
@@ -535,9 +529,15 @@ class _DriveOverlaySnapshot {
     final navInstructionCarrot = payload['navInstructionCarrot'];
     final debugPlot = _DriveDebugPlotSample.fromDynamic(payload['debugPlot']);
     final overlay2dRaw = payload['overlay2d'];
+    final stockDebug = payload['stockDebug'];
     Map<String, dynamic>? sidecarOverlay2d;
     if (overlay2dRaw is Map) {
       sidecarOverlay2d = Map<String, dynamic>.from(overlay2dRaw);
+    }
+    var stockDebugTopRightText = '';
+    if (stockDebug is Map) {
+      stockDebugTopRightText =
+          (stockDebug['topRightText']?.toString() ?? '').trim();
     }
 
     var navPathPoints = const <_NavPathPoint>[];
@@ -588,6 +588,8 @@ class _DriveOverlaySnapshot {
     double? speedKph;
     var aEgo = 0.0;
     var brakeLights = false;
+    var leftBlindspot = false;
+    var rightBlindspot = false;
     var useLaneLineSpeed = 0;
     var leftLaneLine = 0;
     var rightLaneLine = 0;
@@ -601,16 +603,24 @@ class _DriveOverlaySnapshot {
       final brakeRaw = carState['brakeLights'];
       if (brakeRaw is bool) brakeLights = brakeRaw;
       if (brakeRaw is num) brakeLights = brakeRaw != 0;
+      leftBlindspot = carState['leftBlindspot'] == true ||
+          _asInt(carState['leftBlindspot']) == 1;
+      rightBlindspot = carState['rightBlindspot'] == true ||
+          _asInt(carState['rightBlindspot']) == 1;
       useLaneLineSpeed = _asInt(carState['useLaneLineSpeed']) ?? 0;
       leftLaneLine = _asInt(carState['leftLaneLine']) ?? 0;
       rightLaneLine = _asInt(carState['rightLaneLine']) ?? 0;
     }
 
     bool active = false;
+    var longActive = false;
     if (selfdriveState is Map) {
       final activeRaw = selfdriveState['active'];
       if (activeRaw is bool) active = activeRaw;
       if (activeRaw is num) active = activeRaw != 0;
+      final enabledRaw = selfdriveState['enabled'];
+      if (enabledRaw is bool) longActive = enabledRaw;
+      if (enabledRaw is num) longActive = enabledRaw != 0;
     }
 
     var activeLaneLine = false;
@@ -619,11 +629,26 @@ class _DriveOverlaySnapshot {
       if (laneRaw is bool) activeLaneLine = laneRaw;
       if (laneRaw is num) activeLaneLine = laneRaw != 0;
     }
+    var laneChangeState = 0;
+    var laneChangeDirection = 0;
+    var latDebugText = '';
+    if (lateralPlan is Map) {
+      laneChangeState = _asInt(lateralPlan['laneChangeState']) ?? 0;
+      laneChangeDirection = _asInt(lateralPlan['laneChangeDirection']) ?? 0;
+      latDebugText = (lateralPlan['latDebugText']?.toString() ?? '').trim();
+    }
 
     var carrotExperimentalMode = false;
     var accel0 = 0.0;
+    var xState = 0;
+    var trafficState = 0;
+    var tFollow = 0.0;
+    var desiredDistance = 0.0;
     if (longitudinalPlan is Map) {
-      final xState = _asInt(longitudinalPlan['xState']) ?? -1;
+      xState = _asInt(longitudinalPlan['xState']) ?? 0;
+      trafficState = _asInt(longitudinalPlan['trafficState']) ?? 0;
+      tFollow = _asDouble(longitudinalPlan['tFollow']) ?? 0.0;
+      desiredDistance = _asDouble(longitudinalPlan['desiredDistance']) ?? 0.0;
       carrotExperimentalMode = xState == 4;
       accel0 = _asDouble(longitudinalPlan['accel0']) ?? 0.0;
     }
@@ -631,12 +656,16 @@ class _DriveOverlaySnapshot {
     var leadDetected = false;
     _RadarLeadSample? leadOne;
     _RadarLeadSample? leadTwo;
+    _RadarLeadSample? leadLeft;
+    _RadarLeadSample? leadRight;
     var leadsLeft = const <_RadarTrackSample>[];
     var leadsRight = const <_RadarTrackSample>[];
     var leadsCenter = const <_RadarTrackSample>[];
     if (radarState is Map) {
       leadOne = _parseRadarLead(radarState['leadOne']);
       leadTwo = _parseRadarLead(radarState['leadTwo']);
+      leadLeft = _parseRadarLead(radarState['leadLeft']);
+      leadRight = _parseRadarLead(radarState['leadRight']);
       leadsLeft = _parseRadarTracks(radarState['leadsLeft']);
       leadsRight = _parseRadarTracks(radarState['leadsRight']);
       leadsCenter = _parseRadarTracks(radarState['leadsCenter']);
@@ -897,8 +926,20 @@ class _DriveOverlaySnapshot {
       aEgo: aEgo,
       speedMps: speedMps,
       speedKph: speedKph,
+      longActive: longActive,
+      xState: xState,
+      trafficState: trafficState,
+      tFollow: tFollow,
+      desiredDistance: desiredDistance,
+      useLaneLineSpeed: useLaneLineSpeed,
       leftLaneLine: leftLaneLine,
       rightLaneLine: rightLaneLine,
+      leftBlindspot: leftBlindspot,
+      rightBlindspot: rightBlindspot,
+      laneChangeState: laneChangeState,
+      laneChangeDirection: laneChangeDirection,
+      latDebugText: latDebugText,
+      stockDebugTopRightText: stockDebugTopRightText,
       calibrationRpy: calibrationRpy,
       wideFromDeviceEuler: wideFromDeviceEuler,
       pathOffsetZ: pathOffsetZ,
@@ -911,6 +952,8 @@ class _DriveOverlaySnapshot {
       sidecarOverlay2d: sidecarOverlay2d,
       leadOne: leadOne,
       leadTwo: leadTwo,
+      leadLeft: leadLeft,
+      leadRight: leadRight,
       leadsLeft: leadsLeft,
       leadsRight: leadsRight,
       leadsCenter: leadsCenter,

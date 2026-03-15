@@ -27,6 +27,12 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   String _commit = "--";
   String _dongleId = "--";
   String _serial = "--";
+  String? _metadataHost;
+  String? _lastObservedConnectedHost;
+  String? _lastObservedServiceHost;
+  String? _lastObservedMetadataSignature;
+  bool _lastObservedIsConnected = false;
+  bool _statusRefreshQueued = false;
   bool _hasGitHubLogin = false;
   bool _hasActiveSshKey = false;
   bool _overlayRunning = false;
@@ -47,9 +53,10 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   void didChangeDependencies() {
     super.didChangeDependencies();
     final ssh = Provider.of<SSHService>(context);
-    _refreshConnectionPrerequisites();
-    if (ssh.isConnected && _branch == "--") {
-      _refreshStatus();
+    unawaited(_refreshConnectionPrerequisites());
+    _applyConnectionMetadata(ssh, ssh.cachedConnectionMetadata);
+    if (ssh.isConnected && _shouldRefreshConnectionMetadata(ssh)) {
+      unawaited(_refreshStatus());
     }
   }
 
@@ -107,29 +114,129 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     _overlaySyncTimer = null;
   }
 
+  String _normalizeMetadataValue(String value) {
+    final trimmed = value.trim();
+    return trimmed.isEmpty ? "--" : trimmed;
+  }
+
+  String _currentMetadataHost(SSHService ssh) {
+    return (ssh.connectedIp ?? ssh.serviceConnectedIp ?? '').trim();
+  }
+
+  void _applyConnectionMetadata(
+    SSHService ssh,
+    DeviceMetadataSnapshot? snapshot,
+  ) {
+    if (snapshot == null) return;
+    final connectedHost = _currentMetadataHost(ssh);
+    final snapshotHost = (snapshot.ip ?? '').trim();
+    if (connectedHost.isNotEmpty &&
+        snapshotHost.isNotEmpty &&
+        snapshotHost != connectedHost) {
+      return;
+    }
+
+    final nextBranch = _normalizeMetadataValue(snapshot.branch);
+    final nextCommit = _normalizeMetadataValue(snapshot.commit);
+    final nextDongleId = _normalizeMetadataValue(snapshot.dongleId);
+    final nextSerial = _normalizeMetadataValue(snapshot.serial);
+    final nextHost = snapshotHost.isEmpty ? _metadataHost : snapshotHost;
+
+    if (_branch == nextBranch &&
+        _commit == nextCommit &&
+        _dongleId == nextDongleId &&
+        _serial == nextSerial &&
+        _metadataHost == nextHost) {
+      return;
+    }
+
+    if (!mounted) {
+      _branch = nextBranch;
+      _commit = nextCommit;
+      _dongleId = nextDongleId;
+      _serial = nextSerial;
+      _metadataHost = nextHost;
+      return;
+    }
+
+    setState(() {
+      _branch = nextBranch;
+      _commit = nextCommit;
+      _dongleId = nextDongleId;
+      _serial = nextSerial;
+      _metadataHost = nextHost;
+    });
+  }
+
+  bool _shouldRefreshConnectionMetadata(SSHService ssh) {
+    final connectedHost = _currentMetadataHost(ssh);
+    if (connectedHost.isEmpty) return false;
+    if (_metadataHost != connectedHost) return true;
+    return _branch == "--" ||
+        _commit == "--" ||
+        _dongleId == "--" ||
+        _serial == "--";
+  }
+
+  String? _metadataSignature(DeviceMetadataSnapshot? snapshot) {
+    if (snapshot == null) return null;
+    return [
+      snapshot.ip ?? '',
+      snapshot.branch,
+      snapshot.commit,
+      snapshot.dongleId,
+      snapshot.serial,
+      snapshot.fetchedAt.toIso8601String(),
+    ].join('|');
+  }
+
+  void _queueImmediateStatusRefresh(SSHService ssh) {
+    if (!_realtimeWorkEnabled || _statusRefreshQueued || !mounted) return;
+    _statusRefreshQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _statusRefreshQueued = false;
+      if (!mounted || !_realtimeWorkEnabled) return;
+      _applyConnectionMetadata(ssh, ssh.cachedConnectionMetadata);
+      if (_shouldRefreshConnectionMetadata(ssh)) {
+        unawaited(_refreshStatus());
+      }
+    });
+  }
+
+  void _handleObservedSshState(SSHService ssh) {
+    final connectedHost = (ssh.connectedIp ?? '').trim();
+    final serviceHost = (ssh.serviceConnectedIp ?? '').trim();
+    final metadataSignature = _metadataSignature(ssh.cachedConnectionMetadata);
+    final changed = _lastObservedIsConnected != ssh.isConnected ||
+        _lastObservedConnectedHost != connectedHost ||
+        _lastObservedServiceHost != serviceHost ||
+        _lastObservedMetadataSignature != metadataSignature;
+    if (!changed) return;
+
+    _lastObservedIsConnected = ssh.isConnected;
+    _lastObservedConnectedHost = connectedHost;
+    _lastObservedServiceHost = serviceHost;
+    _lastObservedMetadataSignature = metadataSignature;
+
+    if (connectedHost.isNotEmpty ||
+        serviceHost.isNotEmpty ||
+        ssh.cachedConnectionMetadata != null) {
+      _queueImmediateStatusRefresh(ssh);
+    }
+  }
+
   Future<void> _refreshStatus() async {
     if (!_realtimeWorkEnabled) return;
-    await _refreshConnectionPrerequisites();
-    if (!mounted) return;
+    unawaited(_refreshConnectionPrerequisites());
 
     final ssh = Provider.of<SSHService>(context, listen: false);
+    _applyConnectionMetadata(ssh, ssh.cachedConnectionMetadata);
     if (ssh.isConnected) {
       try {
-        final results = await Future.wait([
-          ssh.getBranch(),
-          ssh.getCommitHash(),
-          ssh.getDongleId(),
-          ssh.getSerial(),
-        ]);
-
-        if (mounted) {
-          setState(() {
-            _branch = results[0];
-            _commit = results[1];
-            _dongleId = results[2];
-            _serial = results[3];
-          });
-        }
+        final snapshot = await ssh.getConnectionMetadata(
+          forceRefresh: _shouldRefreshConnectionMetadata(ssh),
+        );
+        _applyConnectionMetadata(ssh, snapshot);
         await _syncOverlayEndpoint();
       } catch (e) {
         debugPrint("Status refresh failed: $e");
@@ -168,7 +275,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     if (!_hasActiveSshKey) return "SSH 개인키 적용 필요";
     if (ssh.isConnected) return "연결됨";
     if ((ssh.serviceConnectedIp ?? '').trim().isNotEmpty) {
-      return "백그라운드 연결됨";
+      return "연결 동기화 중";
     }
     if (ssh.connectionStatus.startsWith("Connecting")) return "연결 중...";
     if (ssh.connectionStatus.contains("Error")) return "연결 실패";
@@ -245,9 +352,11 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     final window = UiWindowInfo.of(context);
     return Consumer2<SSHService, HudFeatureSettingsService>(
       builder: (context, ssh, featureSettings, child) {
+        _handleObservedSshState(ssh);
         final hudFeatureEnabled = featureSettings.enabled;
         final media = MediaQuery.of(context);
-        final compactStatusStack = window.windowClass == UiWindowClass.compact;
+        final compactStatusStack =
+            !window.isLandscape || window.windowClass == UiWindowClass.compact;
         final statusFontSize = switch (window.windowClass) {
           UiWindowClass.compact => 20.0,
           UiWindowClass.medium => 24.0,
@@ -279,14 +388,13 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
             ssh.connectionStatus.startsWith("Connecting") ||
             ssh.targetIp != null ||
             ssh.serviceCandidateIp != null;
-        final ipFieldText =
-            hasIp
-                ? (ssh.connectedIp ??
-                    ssh.serviceConnectedIp ??
-                    ssh.targetIp ??
-                    ssh.serviceCandidateIp ??
-                    "Unknown")
-                : "연동 필요";
+        final ipFieldText = hasIp
+            ? (ssh.connectedIp ??
+                ssh.serviceConnectedIp ??
+                ssh.targetIp ??
+                ssh.serviceCandidateIp ??
+                "Unknown")
+            : "연동 필요";
         final isLandscape = window.isLandscape;
         final homeContentMaxWidth = switch (window.windowClass) {
           UiWindowClass.compact => double.infinity,
@@ -656,8 +764,8 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                                     width: pinnedWidth,
                                     height: math.max(220.0, pinnedHeight),
                                     child: AdaptiveHudHost(
-                                      enabled:
-                                          hudFeatureEnabled && _hudKeepAliveEnabled,
+                                      enabled: hudFeatureEnabled &&
+                                          _hudKeepAliveEnabled,
                                       deviceIp: ssh.connectedIp,
                                       surface: HudSurfaceVariant.homePreview,
                                       fillParent: true,

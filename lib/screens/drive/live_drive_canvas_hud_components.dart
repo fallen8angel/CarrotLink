@@ -28,11 +28,11 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
   }
 
   Widget _buildDriveCameraSurfaceImpl() {
+    if (_isDeveloperPlaybackRequested) {
+      return _buildDeveloperPlaybackSurface();
+    }
     if (_cameraSuspendedByLifecycle) {
       return const ColoredBox(color: Colors.black);
-    }
-    if (_debugOverlayPreviewMode) {
-      return _buildOverlayPreviewBackdrop();
     }
     if (!_hudModeLoaded) {
       return const ColoredBox(color: Colors.black);
@@ -75,7 +75,16 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
   }
 
   String? _cameraCenterNoticeMessageImpl() {
-    if (_debugOverlayPreviewMode) return null;
+    if (_isDeveloperPlaybackRequested) {
+      if (_developerPlaybackLoading) {
+        return '재생 영상 로드 중입니다.';
+      }
+      final error = _developerPlaybackError?.trim();
+      if (error != null && error.isNotEmpty) {
+        return error;
+      }
+      return null;
+    }
     if (!_hudModeLoaded) return 'HUD 모드 설정을 불러오는 중입니다.';
     if (_openpilotOverlayMode && !_sidecarConnected) {
       return '사이드카 연결 대기 중입니다.';
@@ -99,70 +108,6 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
       return '로드카메라 프레임 대기 중입니다.';
     }
     return null;
-  }
-
-  Widget _buildDriveModeTagImpl(UiWindowInfo window) {
-    final fontSize = switch (window.windowClass) {
-      UiWindowClass.compact => 11.0,
-      UiWindowClass.medium => 11.5,
-      UiWindowClass.expanded => 12.0,
-      UiWindowClass.large || UiWindowClass.extraLarge => 12.5,
-    };
-    final horizontalPadding = switch (window.windowClass) {
-      UiWindowClass.compact => 10.0,
-      UiWindowClass.medium => 11.0,
-      UiWindowClass.expanded => 12.0,
-      UiWindowClass.large || UiWindowClass.extraLarge => 13.0,
-    };
-    final verticalPadding = switch (window.windowClass) {
-      UiWindowClass.compact => 5.0,
-      UiWindowClass.medium => 5.5,
-      UiWindowClass.expanded => 6.0,
-      UiWindowClass.large || UiWindowClass.extraLarge => 6.5,
-    };
-    final label = _modeTagLabel;
-    if (label.isEmpty) {
-      return const SizedBox.shrink();
-    }
-    final isOpenpilot = _openpilotOverlayMode;
-    final tagBorderColor = isOpenpilot ? _debugSelectedBorder : Colors.white12;
-    final tagFillColor = isOpenpilot ? _debugSelectedBg : _debugNavBg;
-    const tagTextColor = Colors.white;
-
-    return IgnorePointer(
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: tagFillColor,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(
-            color: tagBorderColor,
-            width: 1.0,
-          ),
-          boxShadow: const <BoxShadow>[
-            BoxShadow(
-              color: Color(0x33000000),
-              blurRadius: 8,
-              offset: Offset(0, 3),
-            ),
-          ],
-        ),
-        child: Padding(
-          padding: EdgeInsets.symmetric(
-            horizontal: horizontalPadding,
-            vertical: verticalPadding,
-          ),
-          child: Text(
-            label,
-            style: TextStyle(
-              color: tagTextColor,
-              fontSize: fontSize,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.15,
-            ),
-          ),
-        ),
-      ),
-    );
   }
 
   double _computePortraitHudHeightImpl(

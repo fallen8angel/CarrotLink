@@ -1279,16 +1279,6 @@ class _CarrotBackupTabState extends State<CarrotBackupTab>
             },
           ),
         ),
-        if (backupService.isBackingUp)
-          Padding(
-            padding: EdgeInsets.fromLTRB(
-              horizontalPadding,
-              sourceSectionGap,
-              horizontalPadding,
-              0,
-            ),
-            child: LinearProgressIndicator(value: backupService.progress),
-          ),
         Padding(
           padding: EdgeInsets.fromLTRB(
             horizontalPadding,

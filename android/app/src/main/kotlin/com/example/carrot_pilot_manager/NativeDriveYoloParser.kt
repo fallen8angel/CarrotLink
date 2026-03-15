@@ -11,19 +11,114 @@ internal data class NativeDriveYoloDetection(
     val top: Float,
     val right: Float,
     val bottom: Float,
-)
+) {
+  fun toPayload(
+      sourceWidth: Int,
+      sourceHeight: Int,
+      inputWidth: Int,
+      inputHeight: Int,
+  ): Map<String, Any?> {
+    val safeInputWidth = inputWidth.coerceAtLeast(1)
+    val safeInputHeight = inputHeight.coerceAtLeast(1)
+    // Developer playback can decode to a smaller frame than the model input
+    // size (for example 526x330 into 416x416). Keep source projection tied to
+    // the real decoded frame, otherwise box placement drifts vertically/horizontally.
+    val safeSourceWidth = if (sourceWidth > 0) sourceWidth else safeInputWidth
+    val safeSourceHeight = if (sourceHeight > 0) sourceHeight else safeInputHeight
+    val scaleX = safeSourceWidth.toFloat() / safeInputWidth.toFloat()
+    val scaleY = safeSourceHeight.toFloat() / safeInputHeight.toFloat()
+    val sourceLeft = (left * scaleX).coerceIn(0f, safeSourceWidth.toFloat())
+    val sourceTop = (top * scaleY).coerceIn(0f, safeSourceHeight.toFloat())
+    val sourceRight = (right * scaleX).coerceIn(0f, safeSourceWidth.toFloat())
+    val sourceBottom = (bottom * scaleY).coerceIn(0f, safeSourceHeight.toFloat())
+    return mapOf(
+        "classId" to classId,
+        "label" to label,
+        "score" to score,
+        "inputLeft" to left,
+        "inputTop" to top,
+        "inputRight" to right,
+        "inputBottom" to bottom,
+        "sourceLeft" to sourceLeft,
+        "sourceTop" to sourceTop,
+        "sourceRight" to sourceRight,
+        "sourceBottom" to sourceBottom,
+    )
+  }
+}
 
 internal data class NativeDriveYoloParseResult(
     val outputShape: String,
     val candidateCount: Int,
     val acceptedCount: Int,
     val detections: List<NativeDriveYoloDetection>,
+    val strategy: String,
+    val scoreThreshold: Float,
+    val maxClassScore: Float,
+    val aboveThresholdCount: Int,
 )
 
 internal object NativeDriveYoloParser {
-  private const val defaultScoreThreshold = 0.25f
+  private const val defaultScoreThreshold = 0.22f
   private const val defaultIouThreshold = 0.50f
-  private const val defaultMaxDetections = 20
+  private const val defaultMaxDetections = 28
+  private const val lowScoreThreshold = 0.08f
+  private const val sigmoidScoreThreshold = 0.50f
+
+  private data class ClassThresholdProfile(
+      val direct: Float,
+      val directLow: Float,
+      val sigmoid: Float,
+  )
+
+  private data class ParseStrategy(
+      val name: String,
+      val scoreThreshold: Float,
+      val decodeScore: (Float) -> Float,
+  ) {
+    fun thresholdFor(classId: Int): Float {
+      val profile = classThresholdProfiles[classId] ?: return scoreThreshold
+      return when (name) {
+        "direct" -> min(scoreThreshold, profile.direct)
+        "direct_low" -> min(scoreThreshold, profile.directLow)
+        "sigmoid" -> min(scoreThreshold, profile.sigmoid)
+        else -> scoreThreshold
+      }
+    }
+  }
+
+  // 1차 범위는 road-facing 주요 객체만 유지한다.
+  private val allowedClassIds = setOf(0, 1, 2, 3, 5, 7, 9)
+  private val classThresholdProfiles =
+      mapOf(
+          0 to ClassThresholdProfile(0.16f, 0.07f, 0.40f),
+          1 to ClassThresholdProfile(0.15f, 0.07f, 0.38f),
+          2 to ClassThresholdProfile(0.16f, 0.08f, 0.40f),
+          3 to ClassThresholdProfile(0.15f, 0.07f, 0.38f),
+          5 to ClassThresholdProfile(0.17f, 0.08f, 0.42f),
+          7 to ClassThresholdProfile(0.17f, 0.08f, 0.42f),
+          9 to ClassThresholdProfile(0.11f, 0.05f, 0.32f),
+      )
+  // QNN / generic export 결과가 score post-processing을 동일하게 보장하지 않아
+  // 1차 bring-up 단계에선 road-object 범위 안에서 몇 가지 score decode를 순차 시도한다.
+  private val parseStrategies =
+      listOf(
+          ParseStrategy(
+              name = "direct",
+              scoreThreshold = defaultScoreThreshold,
+              decodeScore = { value -> value },
+          ),
+          ParseStrategy(
+              name = "direct_low",
+              scoreThreshold = lowScoreThreshold,
+              decodeScore = { value -> value },
+          ),
+          ParseStrategy(
+              name = "sigmoid",
+              scoreThreshold = sigmoidScoreThreshold,
+              decodeScore = { value -> sigmoid(value) },
+          ),
+      )
 
   // COCO 80-class labels, matching the exported YOLO26 detection head.
   private val cocoLabels =
@@ -122,17 +217,25 @@ internal object NativeDriveYoloParser {
     for (index in outputShapes.indices) {
       val shape = outputShapes[index]
       val data = outputTensors.getOrNull(index) ?: continue
-      val candidate = parseTensor(
-          shape = shape,
-          data = data,
-          inputWidth = inputWidth,
-          inputHeight = inputHeight,
-          scoreThreshold = scoreThreshold,
-          iouThreshold = iouThreshold,
-          maxDetections = maxDetections,
-      )
-      if (candidate != null) {
-        return candidate
+      val attempts =
+          parseStrategies.mapNotNull { strategy ->
+            parseTensor(
+                shape = shape,
+                data = data,
+                inputWidth = inputWidth,
+                inputHeight = inputHeight,
+                scoreThreshold = strategy.scoreThreshold,
+                iouThreshold = iouThreshold,
+                maxDetections = maxDetections,
+                strategy = strategy,
+            )
+          }
+      if (attempts.isNotEmpty()) {
+        return attempts.maxWithOrNull(
+            compareBy<NativeDriveYoloParseResult> { it.acceptedCount }
+                .thenBy { it.aboveThresholdCount }
+                .thenBy { it.maxClassScore },
+        )
       }
     }
     return null
@@ -146,6 +249,7 @@ internal object NativeDriveYoloParser {
       scoreThreshold: Float,
       iouThreshold: Float,
       maxDetections: Int,
+      strategy: ParseStrategy,
   ): NativeDriveYoloParseResult? {
     val normalizedShape = shape.toList()
     if (normalizedShape.isEmpty()) return null
@@ -185,17 +289,29 @@ internal object NativeDriveYoloParser {
     }
 
     val decoded = mutableListOf<NativeDriveYoloDetection>()
+    var maxClassScore = Float.NEGATIVE_INFINITY
+    var aboveThresholdCount = 0
     for (candidateIndex in 0 until candidateCount) {
       var bestClassId = -1
       var bestScore = 0f
       for (channel in 4 until channelCount) {
-        val score = value(channel, candidateIndex)
+        val classId = channel - 4
+        if (!allowedClassIds.contains(classId)) continue
+        val score = strategy.decodeScore(value(channel, candidateIndex))
+        if (score > maxClassScore) {
+          maxClassScore = score
+        }
         if (score > bestScore) {
           bestScore = score
-          bestClassId = channel - 4
+          bestClassId = classId
         }
       }
-      if (bestClassId < 0 || bestScore < scoreThreshold) continue
+      val effectiveThreshold =
+          if (bestClassId >= 0) strategy.thresholdFor(bestClassId) else scoreThreshold
+      if (bestClassId >= 0 && bestScore >= effectiveThreshold) {
+        aboveThresholdCount += 1
+      }
+      if (bestClassId < 0 || bestScore < effectiveThreshold) continue
 
       val cx = value(0, candidateIndex)
       val cy = value(1, candidateIndex)
@@ -227,6 +343,10 @@ internal object NativeDriveYoloParser {
           candidateCount = candidateCount,
           acceptedCount = 0,
           detections = emptyList(),
+          strategy = strategy.name,
+          scoreThreshold = scoreThreshold,
+          maxClassScore = maxClassScore.takeIf { it.isFinite() } ?: 0f,
+          aboveThresholdCount = aboveThresholdCount,
       )
     }
 
@@ -251,7 +371,17 @@ internal object NativeDriveYoloParser {
         candidateCount = candidateCount,
         acceptedCount = selected.size,
         detections = selected,
+        strategy = strategy.name,
+        scoreThreshold = scoreThreshold,
+        maxClassScore = maxClassScore.takeIf { it.isFinite() } ?: 0f,
+        aboveThresholdCount = aboveThresholdCount,
     )
+  }
+
+  private fun sigmoid(value: Float): Float {
+    if (!value.isFinite()) return 0f
+    val clamped = value.coerceIn(-40f, 40f)
+    return (1.0 / (1.0 + kotlin.math.exp((-clamped).toDouble()))).toFloat()
   }
 
   private fun iou(a: NativeDriveYoloDetection, b: NativeDriveYoloDetection): Float {

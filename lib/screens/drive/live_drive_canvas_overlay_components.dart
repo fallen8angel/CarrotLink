@@ -1,8 +1,5 @@
 part of 'live_drive_canvas_screen.dart';
 
-const bool _driveEnableExperimentalSidecarDecorations = false;
-const bool _driveEnableExperimentalNavAr = false;
-
 class _DriveOverlayPainter extends CustomPainter {
   final _DriveOverlaySnapshot snapshot;
   final bool isConnected;
@@ -407,6 +404,51 @@ class _DriveOverlayPainter extends CustomPainter {
     }
     if (left.length < 2 || right.length < 2) return null;
     return <Offset>[...left, ...right];
+  }
+
+  List<Offset>? _mapLineToVerticalRibbonVertices(
+    _ProjectionTransform transform,
+    _XyzSeries line,
+    double topZOff,
+    double bottomZOff,
+    int maxIdx, {
+    bool allowInvert = true,
+    double lineCenterShift = 0.0,
+  }) {
+    if (line.length < 2) return null;
+    final top = <Offset>[];
+    final bottom = <Offset>[];
+    final end = math.min(maxIdx, line.length - 1);
+    for (var i = 0; i <= end; i++) {
+      final lx = line.x[i];
+      if (!lx.isFinite || lx < 0.0) continue;
+      final ly = line.y[i] + lineCenterShift;
+      final lz = line.z[i];
+      Offset? tp;
+      Offset? bp;
+      final okTop = _mapToScreen(
+        transform,
+        lx,
+        ly,
+        lz + topZOff,
+        (p) => tp = p,
+      );
+      final okBottom = _mapToScreen(
+        transform,
+        lx,
+        ly,
+        lz + bottomZOff,
+        (p) => bp = p,
+      );
+      if (!okTop || !okBottom || tp == null || bp == null) continue;
+      if (!allowInvert && top.isNotEmpty && tp!.dy > top.last.dy) {
+        continue;
+      }
+      top.add(tp!);
+      bottom.insert(0, bp!);
+    }
+    if (top.length < 2 || bottom.length < 2) return null;
+    return <Offset>[...top, ...bottom];
   }
 
   Path? _mapLineToPolygon(
@@ -1009,51 +1051,6 @@ class _DriveOverlayPainter extends CustomPainter {
     return painter._buildNativeOverlayPayload(canvasSize);
   }
 
-  static Map<String, dynamic>? buildArScenePayload({
-    required _DriveOverlaySnapshot snapshot,
-    required Size sourceSize,
-    required _DriveCameraKind cameraKind,
-    required Size canvasSize,
-    required bool coverViewport,
-    double viewportZoom = 1.0,
-    Rect? visibleViewportRect,
-    int frameGapTolerance = 8,
-  }) {
-    final painter = _DriveOverlayPainter(
-      snapshot: snapshot,
-      isConnected: true,
-      sourceSize: sourceSize,
-      cameraKind: cameraKind,
-      coverViewport: coverViewport,
-      viewportZoom: viewportZoom,
-      visibleViewportRect: visibleViewportRect,
-      debugPlotState: const _DriveDebugPlotState.hidden(),
-    );
-    return painter._buildArScenePayload(
-      canvasSize,
-      frameGapTolerance: frameGapTolerance,
-    );
-  }
-
-  Map<String, dynamic>? _buildArScenePayload(
-    Size canvasSize, {
-    int frameGapTolerance = 8,
-  }) {
-    final scene = snapshot.buildArScene(
-      cameraKind: cameraKind,
-      frameGapTolerance: frameGapTolerance,
-    );
-    if (scene.isEmpty) return null;
-    final screenAnchors = _buildArScreenAnchors(
-      scene: scene,
-      canvasSize: canvasSize,
-    );
-    return scene.toPayload(
-      cameraKind: cameraKind,
-      screenAnchors: screenAnchors?.toPayload(),
-    );
-  }
-
   static String buildProjectionDebugText({
     required _DriveOverlaySnapshot snapshot,
     required Size sourceSize,
@@ -1339,60 +1336,7 @@ class _DriveOverlayPainter extends CustomPainter {
     return Map<String, dynamic>.from(selected);
   }
 
-  Map<String, dynamic>? _buildNativeOverlayPayloadFromSidecar2d(Size size) {
-    if (!_driveEnableExperimentalSidecarDecorations) {
-      return null;
-    }
-    // Stock lead/radar parity work intentionally pins these decorations to the
-    // road camera only. Do not project them on wideRoad until parity is verified.
-    if (cameraKind != _DriveCameraKind.road) {
-      return null;
-    }
-    final cam = _currentCameraOverlay2d();
-    if (cam == null) return null;
-    final sourceWidth =
-        _DriveOverlaySnapshot._asDouble(cam['sourceWidth']) ?? _baseSourceWidth;
-    final sourceHeight = _DriveOverlaySnapshot._asDouble(cam['sourceHeight']) ??
-        _baseSourceHeight;
-    final displayTransformRaw = cam['displayTransform'];
-    final displayTransform = displayTransformRaw is Map
-        ? Map<String, dynamic>.from(displayTransformRaw)
-        : null;
-    final polygons = <Map<String, dynamic>>[];
-    final labels = <Map<String, dynamic>>[];
-
-    _appendSidecarLeadAndRadarPolygons(
-      cam: cam,
-      canvasSize: size,
-      sourceWidth: sourceWidth,
-      sourceHeight: sourceHeight,
-      displayTransform: displayTransform,
-      polygons: polygons,
-      labels: labels,
-      // Stock parity path projects lead/radar from raw data in Flutter.
-      // Keep sidecar 2D only for TF-style helpers and debug fallback paths.
-      showLead1: false,
-      showLead2: false,
-      showRadarBadge: false,
-      showRadarVector: false,
-      showStopDistanceTf: showStopDistanceTf,
-      showStateText: false,
-    );
-
-    if (polygons.isEmpty && labels.isEmpty) return null;
-    return <String, dynamic>{
-      'version': 3,
-      'canvasWidth': size.width,
-      'canvasHeight': size.height,
-      'sourceWidth': sourceWidth,
-      'sourceHeight': sourceHeight,
-      'polygons': polygons,
-      if (labels.isNotEmpty) 'labels': labels,
-    };
-  }
-
   Map<String, dynamic>? _buildNativeOverlayPayload(Size size) {
-    final sidecarPayload = _buildNativeOverlayPayloadFromSidecar2d(size);
     final transform = _buildTransform(size);
     final polygons = <Map<String, dynamic>>[];
     List<Map<String, dynamic>>? labels;
@@ -1473,6 +1417,11 @@ class _DriveOverlayPainter extends CustomPainter {
         }
       }
 
+      _appendBlindSpotBarrierPolygons(
+        transform: transform,
+        polygons: polygons,
+      );
+
       final pathMode = snapshot.pathMode;
       final widthApply =
           _pathHalfWidthByMode(pathMode, snapshot.pathWidthRatio);
@@ -1500,6 +1449,8 @@ class _DriveOverlayPainter extends CustomPainter {
         );
       }
 
+      final sidecarCameraOverlay = _currentCameraOverlay2d();
+      final sidecarHasTfMarker = sidecarCameraOverlay?['tfMarker'] is Map;
       final usedSidecarLeadRadar = _appendPreferredLeadAndRadarPolygons(
         canvasSize: size,
         polygons: polygons,
@@ -1513,34 +1464,28 @@ class _DriveOverlayPainter extends CustomPainter {
           labels: labels,
         );
       }
+      if (!sidecarHasTfMarker) {
+        _appendProjectedTfMarker(
+          transform: transform,
+          canvasSize: size,
+          polygons: polygons,
+          labels: labels,
+        );
+      }
     }
     labels ??= <Map<String, dynamic>>[];
-    if (_driveEnableExperimentalSidecarDecorations && sidecarPayload != null) {
-      final sidecarPolygons = sidecarPayload['polygons'];
-      if (sidecarPolygons is List) {
-        for (final item in sidecarPolygons) {
-          if (item is Map) {
-            polygons.add(Map<String, dynamic>.from(item));
-          }
-        }
-      }
-      final sidecarLabels = sidecarPayload['labels'];
-      if (sidecarLabels is List) {
-        for (final item in sidecarLabels) {
-          if (item is Map) {
-            labels.add(Map<String, dynamic>.from(item));
-          }
-        }
-      }
-    }
-    if (_driveEnableExperimentalNavAr) {
-      _appendNavArOverlayPolygons(
-        polygons: polygons,
-        labels: labels,
-        transform: transform,
-        canvasSize: size,
-      );
-    }
+    _appendLaneModeLabel(
+      canvasSize: size,
+      labels: labels,
+    );
+    _appendLaneDebugMetricsLabel(
+      canvasSize: size,
+      labels: labels,
+    );
+    _appendStockDebugTopRightLabel(
+      canvasSize: size,
+      labels: labels,
+    );
     _appendDebugPlotPayload(
       polygons,
       labels,
@@ -2066,6 +2011,314 @@ class _DriveOverlayPainter extends CustomPainter {
     });
   }
 
+  String _formatTfMarkerText(double distance, double tFollow) {
+    return '${distance.toStringAsFixed(1)}(${tFollow.toStringAsFixed(2)})';
+  }
+
+  Offset _clampTfMarkerLabelAnchor({
+    required Size canvasSize,
+    required Offset lineRight,
+    required double sourceScale,
+    required String text,
+    required double fontSize,
+  }) {
+    final margin = _clampDouble(10.0 * sourceScale, 8.0, 18.0);
+    final dx = _clampDouble(11.0 * sourceScale, 8.0, 16.0);
+    final dy = _clampDouble(4.0 * sourceScale, 2.0, 8.0);
+    final estimatedWidth = math.max(
+      48.0,
+      text.length * fontSize * 0.56,
+    );
+    final maxX = math.max(margin, canvasSize.width - estimatedWidth - margin);
+    final minY = margin + fontSize;
+    final maxY = math.max(minY, canvasSize.height - margin);
+    return Offset(
+      (lineRight.dx + dx).clamp(margin, maxX).toDouble(),
+      (lineRight.dy + dy).clamp(minY, maxY).toDouble(),
+    );
+  }
+
+  void _appendStockDebugTopRightLabel({
+    required Size canvasSize,
+    required List<Map<String, dynamic>> labels,
+  }) {
+    final text = snapshot.stockDebugTopRightText.trim();
+    if (text.isEmpty) return;
+    final exactC3Mode = canvasSize.width >= 1280.0 && canvasSize.height >= 720.0;
+    final baseScale = math.min(
+      canvasSize.width / 1920.0,
+      canvasSize.height / 1080.0,
+    );
+    final scale = _clampDouble(baseScale, 0.56, 1.0);
+    final marginX =
+        exactC3Mode ? 30.0 : _clampDouble(30.0 * scale, 16.0, 30.0);
+    final marginTop =
+        exactC3Mode ? 0.0 : _clampDouble(8.0 * scale, 4.0, 10.0);
+    final maxWidth = math.max(120.0, canvasSize.width - (marginX * 2.0));
+    var fontSize =
+        exactC3Mode ? 30.0 : _clampDouble(30.0 * scale, 16.0, 30.0);
+    final widthFactor = math.max(1.0, text.length * 0.57);
+    fontSize = math.min(fontSize, maxWidth / widthFactor);
+    fontSize = _clampDouble(fontSize, 14.0, 30.0);
+    labels.add(<String, dynamic>{
+      'x': canvasSize.width - marginX,
+      'y': marginTop,
+      'text': text,
+      'color': const Color(0xFFF4F4F4).toARGB32(),
+      'strokeColor': const Color(0xEE000000).toARGB32(),
+      'strokeWidth': 1.8,
+      'size': fontSize,
+      'fontWeight': 700,
+      'alignX': 'right',
+      'alignY': 'top',
+      'maxWidth': maxWidth,
+      'maxLines': 1,
+      if (!exactC3Mode) 'ellipsis': '...',
+    });
+  }
+
+  bool _hasNearbyAssistLead(_RadarLeadSample? lead, double speedMps) {
+    if (!speedMps.isFinite || speedMps <= 0.0) {
+      return false;
+    }
+    final threshold = speedMps * 3.0;
+    if (threshold <= 0.0) return false;
+    if (lead != null && lead.status && lead.dRel.isFinite) {
+      return lead.dRel > 0.0 && lead.dRel < threshold;
+    }
+    return false;
+  }
+
+  String _laneDebugText() {
+    final raw = snapshot.latDebugText.trim();
+    if (raw.isEmpty) return '';
+    return raw;
+  }
+
+  void _appendBlindSpotBarrierPolygons({
+    required _ProjectionTransform transform,
+    required List<Map<String, dynamic>> polygons,
+  }) {
+    if (cameraKind != _DriveCameraKind.road) return;
+    final laneChangeState = snapshot.laneChangeState;
+    final laneChangeDirection = snapshot.laneChangeDirection;
+    final preLaneChange = laneChangeState == 1;
+    final leftAssistWarn = !snapshot.leftBlindspot &&
+        preLaneChange &&
+        laneChangeDirection == 1 &&
+        _hasNearbyAssistLead(snapshot.leadLeft, snapshot.speedMps ?? 0.0);
+    final rightAssistWarn = !snapshot.rightBlindspot &&
+        preLaneChange &&
+        laneChangeDirection == 2 &&
+        _hasNearbyAssistLead(snapshot.leadRight, snapshot.speedMps ?? 0.0);
+    if (!snapshot.leftBlindspot &&
+        !snapshot.rightBlindspot &&
+        !leftAssistWarn &&
+        !rightAssistWarn) {
+      return;
+    }
+    final centerLine = snapshot.modelPath;
+    if (centerLine.length < 2) return;
+    final maxIdx = _getPathLengthIdx(centerLine.x, 40.0);
+    const goldFillColor = Color(0x7AFFD700);
+    const goldStrokeColor = Color(0xD6FFD700);
+    const greenFillColor = Color(0x7800CC00);
+    const greenStrokeColor = Color(0xD000CC00);
+
+    void appendRibbon(double shift, Color fillColor, Color strokeColor) {
+      final vertices = _mapLineToVerticalRibbonVertices(
+        transform,
+        centerLine,
+        1.15,
+        0.60,
+        maxIdx,
+        allowInvert: false,
+        lineCenterShift: shift,
+      );
+      if (vertices == null || vertices.length < 8) return;
+      final count = vertices.length;
+      for (var i = 0; i < (count ~/ 2) - 2; i += 2) {
+        polygons.add(
+          _encodePolygon(
+            <Offset>[
+              vertices[i + 0],
+              vertices[i + 1],
+              vertices[count - i - 3],
+              vertices[count - i - 2],
+            ],
+            fillColor,
+            strokeColor: strokeColor,
+            strokeWidth: 1.2,
+          ),
+        );
+      }
+    }
+
+    if (snapshot.leftBlindspot) {
+      appendRibbon(-1.7, goldFillColor, goldStrokeColor);
+    } else if (leftAssistWarn) {
+      appendRibbon(-1.7, greenFillColor, greenStrokeColor);
+    }
+    if (snapshot.rightBlindspot) {
+      appendRibbon(1.7, goldFillColor, goldStrokeColor);
+    } else if (rightAssistWarn) {
+      appendRibbon(1.7, greenFillColor, greenStrokeColor);
+    }
+  }
+
+  void _appendLaneModeLabel({
+    required Size canvasSize,
+    required List<Map<String, dynamic>> labels,
+  }) {
+    if (!isConnected || cameraKind != _DriveCameraKind.road) return;
+    final exactC3Mode = canvasSize.width >= 1280.0 && canvasSize.height >= 720.0;
+    final baseScale = math.min(
+      canvasSize.width / 1920.0,
+      canvasSize.height / 1080.0,
+    );
+    final scale = _clampDouble(baseScale, 0.56, 1.0);
+    final text = snapshot.useLaneLineSpeed > 0 ? 'LaneMode' : 'Laneless';
+    final textColor = snapshot.useLaneLineSpeed > 0
+        ? const Color(0xFF23D55D)
+        : const Color(0xFFFFD95E);
+    final fontSize = exactC3Mode
+        ? 26.0
+        : _clampDouble(26.0 * scale, 16.0, 26.0);
+    final bottomInset = exactC3Mode
+        ? 54.0
+        : _clampDouble(54.0 * scale, 30.0, 56.0);
+    labels.add(<String, dynamic>{
+      'x': canvasSize.width * 0.5,
+      'y': canvasSize.height - bottomInset,
+      'text': text,
+      'color': textColor.toARGB32(),
+      'strokeColor': const Color(0xE6000000).toARGB32(),
+      'strokeWidth': _clampDouble(2.2 * scale, 1.4, 2.6),
+      'size': fontSize,
+      'fontWeight': 700,
+      'alignX': 'center',
+      'alignY': 'baselineBottom',
+      'maxWidth': canvasSize.width * 0.42,
+      'maxLines': 1,
+      if (!exactC3Mode) 'ellipsis': '...',
+    });
+  }
+
+  void _appendLaneDebugMetricsLabel({
+    required Size canvasSize,
+    required List<Map<String, dynamic>> labels,
+  }) {
+    if (!isConnected || cameraKind != _DriveCameraKind.road) return;
+    final text = _laneDebugText();
+    if (text.isEmpty) return;
+    final exactC3Mode = canvasSize.width >= 1280.0 && canvasSize.height >= 720.0;
+    final baseScale = math.min(
+      canvasSize.width / 1920.0,
+      canvasSize.height / 1080.0,
+    );
+    final scale = _clampDouble(baseScale, 0.56, 1.0);
+    var fontSize =
+        exactC3Mode ? 30.0 : _clampDouble(30.0 * scale, 16.0, 30.0);
+    final maxWidth = canvasSize.width * 0.90;
+    final widthFactor = math.max(1.0, text.length * 0.57);
+    fontSize = math.min(fontSize, maxWidth / widthFactor);
+    fontSize = _clampDouble(fontSize, 11.0, 30.0);
+    final bottomInset = exactC3Mode
+        ? 0.0
+        : _clampDouble(18.0 * scale, 12.0, 22.0);
+    labels.add(<String, dynamic>{
+      'x': canvasSize.width * 0.5,
+      'y': canvasSize.height - bottomInset,
+      'text': text,
+      'color': const Color(0xFFECECEC).toARGB32(),
+      'strokeColor': const Color(0xF0000000).toARGB32(),
+      'strokeWidth': _clampDouble(2.4 * scale, 1.4, 3.0),
+      'size': fontSize,
+      'fontWeight': 600,
+      'alignX': 'center',
+      'alignY': 'baselineBottom',
+      'maxWidth': maxWidth,
+      'maxLines': 1,
+      if (!exactC3Mode) 'ellipsis': '...',
+    });
+  }
+
+  void _appendProjectedTfMarker({
+    required _ProjectionTransform transform,
+    required Size canvasSize,
+    required List<Map<String, dynamic>> polygons,
+    required List<Map<String, dynamic>> labels,
+  }) {
+    if (!showStopDistanceTf) return;
+    final tfDistance = snapshot.desiredDistance;
+    if (!tfDistance.isFinite || tfDistance <= 0.0) return;
+    final centerLine = snapshot.modelPath;
+    if (centerLine.length < 2) return;
+    final xs = _monotonicX(
+      centerLine.x.take(centerLine.length).toList(growable: false),
+    );
+    if (xs.length < 2) return;
+    final ys = centerLine.y.take(centerLine.length).toList(growable: false);
+    final zs = centerLine.z.take(centerLine.length).toList(growable: false);
+    final idxs =
+        List<double>.generate(xs.length, (i) => i.toDouble(), growable: false);
+    final dist = tfDistance.clamp(0.0, xs.last);
+    final idx = _interp1D(dist, xs, idxs);
+    if (!idx.isFinite || idx >= (xs.length - 1)) return;
+    final lineY = _interp1D(idx, idxs, ys);
+    final lineZ = _interp1D(idx, idxs, zs);
+    Offset? left;
+    Offset? right;
+    final okL = _mapToScreen(
+      transform,
+      dist,
+      lineY - 1.0,
+      lineZ + 1.22,
+      (p) => left = p,
+    );
+    final okR = _mapToScreen(
+      transform,
+      dist,
+      lineY + 1.0,
+      lineZ + 1.22,
+      (p) => right = p,
+    );
+    if (!okL || !okR || left == null || right == null) return;
+    final sourceScale =
+        transform.sourceScale.isFinite && transform.sourceScale > 0.0
+            ? transform.sourceScale
+            : 1.0;
+    _appendDebugLinePolygon(
+      polygons,
+      a: left!,
+      b: right!,
+      color: Colors.white,
+      thickness: _clampDouble(3.0 * sourceScale, 2.4, 4.2),
+    );
+    final labelText = _formatTfMarkerText(
+      snapshot.desiredDistance,
+      snapshot.tFollow,
+    );
+    final labelSize = _clampDouble(20.0 * sourceScale, 16.0, 24.0);
+    final labelAnchor = _clampTfMarkerLabelAnchor(
+      canvasSize: canvasSize,
+      lineRight: right!,
+      sourceScale: sourceScale,
+      text: labelText,
+      fontSize: labelSize,
+    );
+    _appendOverlayLabel(
+      labels,
+      anchor: labelAnchor,
+      text: labelText,
+      color: Colors.white,
+      strokeColor: Colors.black,
+      strokeWidth: 1.8,
+      size: labelSize,
+      centered: false,
+    );
+  }
+
   void _appendBadge(
     List<Map<String, dynamic>> polygons,
     List<Map<String, dynamic>> labels, {
@@ -2365,417 +2618,6 @@ class _DriveOverlayPainter extends CustomPainter {
     );
   }
 
-  String _navTurnText(int turnInfo, String fallbackText) {
-    final fallback = fallbackText.trim();
-    if (fallback.isNotEmpty) return fallback;
-    switch (turnInfo) {
-      case 1:
-        return '좌회전';
-      case 2:
-        return '우회전';
-      case 3:
-        return '좌차선 변경';
-      case 4:
-        return '우차선 변경';
-      case 7:
-        return '유턴';
-      case 8:
-        return '도착';
-      default:
-        return '';
-    }
-  }
-
-  String _formatNavDistance(double? distanceMeters) {
-    if (distanceMeters == null ||
-        !distanceMeters.isFinite ||
-        distanceMeters <= 0) {
-      return '';
-    }
-    if (distanceMeters >= 1000.0) {
-      return '${(distanceMeters / 1000.0).toStringAsFixed(1)}km';
-    }
-    return '${distanceMeters.round()}m';
-  }
-
-  List<Offset> _arrowHeadVertices(Offset center, double angle, double size) {
-    final forward = Offset(math.cos(angle), math.sin(angle));
-    final side = Offset(-forward.dy, forward.dx);
-    final tip = Offset(
-      center.dx + (forward.dx * size),
-      center.dy + (forward.dy * size),
-    );
-    final rear = Offset(
-      center.dx - (forward.dx * size * 0.92),
-      center.dy - (forward.dy * size * 0.92),
-    );
-    final left = Offset(
-      rear.dx + (side.dx * size * 0.70),
-      rear.dy + (side.dy * size * 0.70),
-    );
-    final right = Offset(
-      rear.dx - (side.dx * size * 0.70),
-      rear.dy - (side.dy * size * 0.70),
-    );
-    final inner = Offset(
-      center.dx - (forward.dx * size * 0.16),
-      center.dy - (forward.dy * size * 0.16),
-    );
-    return <Offset>[left, tip, right, inner];
-  }
-
-  _DriveArScreenAnchors? _buildArScreenAnchors({
-    required _DriveArScene scene,
-    required Size canvasSize,
-  }) {
-    if (cameraKind != _DriveCameraKind.road) return null;
-    if (scene.isEmpty) return null;
-    final transform = _buildTransform(canvasSize);
-    const distanceScale = 0.92;
-    final pathVerticalOffsetPx = canvasSize.height * 0.018;
-    final laneBaseLine = snapshot.laneLines.length > 2
-        ? snapshot.laneLines[2].line
-        : (snapshot.laneLines.isNotEmpty
-            ? snapshot.laneLines.first.line
-            : null);
-    final laneX = laneBaseLine?.x ?? snapshot.path.x;
-    final laneZ = laneBaseLine?.z ?? snapshot.path.z;
-    final zOffset = snapshot.pathOffsetZ.isFinite ? snapshot.pathOffsetZ : 1.22;
-
-    final projected = <Offset>[];
-    final projectedDist = <double>[];
-    for (final p in scene.routePoints) {
-      if (!p.x.isFinite || !p.y.isFinite || !p.d.isFinite) continue;
-      if (p.x < 2.0 || p.x > 140.0) continue;
-      final sampleDist = (p.d > 0 ? p.d : p.x) * distanceScale;
-      var z = 0.0;
-      if (laneX.isNotEmpty && laneZ.isNotEmpty) {
-        final idx = _getPathLengthIdx(laneX, sampleDist);
-        if (laneZ.isNotEmpty) {
-          final zi = idx.clamp(0, laneZ.length - 1);
-          z = laneZ[zi];
-        }
-      }
-      Offset? out;
-      final ok = _mapToScreen(
-        transform,
-        ((p.x < 3.0 ? 5.0 : p.x) * distanceScale).clamp(2.0, 140.0),
-        p.y,
-        z + zOffset,
-        (pt) => out = pt,
-      );
-      if (!ok || out == null) continue;
-      final o = Offset(out!.dx, out!.dy + pathVerticalOffsetPx);
-      if (o.dx < -60.0 ||
-          o.dx > canvasSize.width + 60.0 ||
-          o.dy < -60.0 ||
-          o.dy > canvasSize.height + 60.0) {
-        continue;
-      }
-      projected.add(o);
-      projectedDist.add(sampleDist);
-      if (projected.length >= 90) break;
-    }
-
-    Offset? gateAnchor;
-    if (projected.isNotEmpty) {
-      var anchorIdx = -1;
-      for (var i = 0; i < projected.length; i++) {
-        final d = i < projectedDist.length ? projectedDist[i] : 0.0;
-        if (d >= 14.0 && d <= 38.0) {
-          anchorIdx = i;
-          break;
-        }
-      }
-      if (anchorIdx < 0) anchorIdx = projected.length ~/ 2;
-      gateAnchor = projected[anchorIdx];
-    } else if (scene.turnCue != null) {
-      gateAnchor = Offset(canvasSize.width * 0.5, canvasSize.height * 0.28);
-    }
-
-    final sampledPoints = <Offset>[];
-    final sampledDistances = <double>[];
-    if (projected.length <= 18) {
-      sampledPoints.addAll(projected);
-      sampledDistances.addAll(projectedDist);
-    } else {
-      final sampleStep = math.max(1, (projected.length / 18).floor());
-      for (var i = 0; i < projected.length; i += sampleStep) {
-        sampledPoints.add(projected[i]);
-        sampledDistances.add(projectedDist[i]);
-      }
-      if (sampledPoints.last != projected.last) {
-        sampledPoints.add(projected.last);
-        sampledDistances.add(projectedDist.last);
-      }
-    }
-
-    final defaultStatusAnchor = Offset(
-      canvasSize.width * 0.5,
-      canvasSize.height - 58.0,
-    );
-    final statusAnchorSource = projected.isNotEmpty
-        ? projected.first
-        : (gateAnchor ?? defaultStatusAnchor);
-    final statusHorizontalMargin = math.min(92.0, canvasSize.width * 0.18);
-    final statusAnchor = Offset(
-      statusAnchorSource.dx.clamp(
-        statusHorizontalMargin,
-        canvasSize.width - statusHorizontalMargin,
-      ),
-      defaultStatusAnchor.dy,
-    );
-    final visibleDistanceMeters =
-        sampledDistances.isNotEmpty ? sampledDistances.last : 0.0;
-    var minDx = double.infinity;
-    var maxDx = double.negativeInfinity;
-    var minDy = double.infinity;
-    var maxDy = double.negativeInfinity;
-    for (final point in sampledPoints) {
-      if (point.dx < minDx) minDx = point.dx;
-      if (point.dx > maxDx) maxDx = point.dx;
-      if (point.dy < minDy) minDy = point.dy;
-      if (point.dy > maxDy) maxDy = point.dy;
-    }
-    final pathSpanX = sampledPoints.length >= 2 ? (maxDx - minDx) : 0.0;
-    final pathSpanY = sampledPoints.length >= 2 ? (maxDy - minDy) : 0.0;
-    final countScore = (sampledPoints.length / 8.0).clamp(0.0, 1.0);
-    final distanceScore = (visibleDistanceMeters / 34.0).clamp(0.0, 1.0);
-    final spanYScore = (pathSpanY / (canvasSize.height * 0.24)).clamp(0.0, 1.0);
-    final centeredScore = sampledPoints.isNotEmpty
-        ? (1.0 -
-                (((sampledPoints.first.dx - (canvasSize.width * 0.5)).abs()) /
-                        (canvasSize.width * 0.5))
-                    .clamp(0.0, 1.0))
-            .clamp(0.0, 1.0)
-        : 0.0;
-    final qualityScore = ((countScore * 0.34) +
-            (distanceScore * 0.30) +
-            (spanYScore * 0.24) +
-            (centeredScore * 0.12))
-        .clamp(0.0, 1.0);
-
-    return _DriveArScreenAnchors(
-      pathPoints: sampledPoints,
-      pathDistances: sampledDistances,
-      gateAnchor: gateAnchor,
-      statusAnchor: statusAnchor,
-      visibleDistanceMeters: visibleDistanceMeters,
-      pathSpanX: pathSpanX,
-      pathSpanY: pathSpanY,
-      qualityScore: qualityScore,
-    );
-  }
-
-  void _appendNavArOverlayPolygons({
-    required List<Map<String, dynamic>> polygons,
-    required List<Map<String, dynamic>> labels,
-    required _ProjectionTransform transform,
-    required Size canvasSize,
-  }) {
-    if (cameraKind != _DriveCameraKind.road) return;
-    final arScene = snapshot.buildArScene(cameraKind: cameraKind);
-
-    // Road-camera AR tuning knobs:
-    // - distanceScale: perspective depth scaling for nav path/chevrons
-    // - pathVerticalOffsetPx: vertical offset applied to projected nav path
-    // - gateVerticalOffsetPx: additional vertical offset for turn board
-    const distanceScale = 0.92;
-    final pathVerticalOffsetPx = canvasSize.height * 0.018;
-    final gateVerticalOffsetPx = -(canvasSize.height * 0.028);
-
-    final navPath = arScene.routePoints;
-    final turnCue = arScene.turnCue;
-    if (arScene.isEmpty) return;
-
-    final laneBaseLine = snapshot.laneLines.length > 2
-        ? snapshot.laneLines[2].line
-        : (snapshot.laneLines.isNotEmpty
-            ? snapshot.laneLines.first.line
-            : null);
-    final laneX = laneBaseLine?.x ?? snapshot.path.x;
-    final laneZ = laneBaseLine?.z ?? snapshot.path.z;
-    final zOffset = snapshot.pathOffsetZ.isFinite ? snapshot.pathOffsetZ : 1.22;
-
-    final projected = <Offset>[];
-    final projectedDist = <double>[];
-    for (final p in navPath) {
-      if (!p.x.isFinite || !p.y.isFinite || !p.d.isFinite) continue;
-      if (p.x < 2.0 || p.x > 140.0) continue;
-      final sampleDist = (p.d > 0 ? p.d : p.x) * distanceScale;
-      var z = 0.0;
-      if (laneX.isNotEmpty && laneZ.isNotEmpty) {
-        final idx = _getPathLengthIdx(laneX, sampleDist);
-        if (laneZ.isNotEmpty) {
-          final zi = idx.clamp(0, laneZ.length - 1);
-          z = laneZ[zi];
-        }
-      }
-      Offset? out;
-      final ok = _mapToScreen(
-        transform,
-        ((p.x < 3.0 ? 5.0 : p.x) * distanceScale).clamp(2.0, 140.0),
-        p.y,
-        z + zOffset,
-        (pt) => out = pt,
-      );
-      if (!ok || out == null) continue;
-      final o = Offset(out!.dx, out!.dy + pathVerticalOffsetPx);
-      if (o.dx < -60.0 ||
-          o.dx > canvasSize.width + 60.0 ||
-          o.dy < -60.0 ||
-          o.dy > canvasSize.height + 60.0) {
-        continue;
-      }
-      projected.add(o);
-      projectedDist.add(sampleDist);
-      if (projected.length >= 90) break;
-    }
-
-    if (projected.length >= 2) {
-      final segmentStep = math.max(1, (projected.length / 34).floor());
-      for (var i = 0; i + segmentStep < projected.length; i += segmentStep) {
-        final a = projected[i];
-        final b = projected[i + segmentStep];
-        final t = i / math.max(1, projected.length - 1);
-        final glowWidth = (11.0 - (t * 4.5)).clamp(4.8, 11.0);
-        final coreWidth = (5.6 - (t * 2.2)).clamp(2.4, 5.6);
-        polygons.add(
-          _encodePolygon(
-            _lineQuadVertices(a, b, glowWidth),
-            const Color(0x5535FF84),
-          ),
-        );
-        polygons.add(
-          _encodePolygon(
-            _lineQuadVertices(a, b, coreWidth),
-            const Color(0xCC2EEA6A),
-          ),
-        );
-      }
-
-      final chevronCount = math.min(3, projected.length - 1);
-      final chevronSize = (canvasSize.width * 0.013).clamp(8.0, 14.0);
-      for (var c = 0; c < chevronCount; c++) {
-        final idx = (((c + 1) * (projected.length - 2)) / (chevronCount + 1))
-            .round()
-            .clamp(0, projected.length - 2);
-        final a = projected[idx];
-        final b = projected[idx + 1];
-        final dir = b - a;
-        final len = dir.distance;
-        if (!len.isFinite || len <= 1.0) continue;
-        final center = Offset(
-          a.dx + (dir.dx * 0.35),
-          a.dy + (dir.dy * 0.35),
-        );
-        final angle = math.atan2(dir.dy, dir.dx);
-        polygons.add(
-          _encodePolygon(
-            _arrowHeadVertices(center, angle, chevronSize),
-            const Color(0xCC244CFF),
-            strokeColor: const Color(0xCCFFFFFF),
-            strokeWidth: 1.4,
-          ),
-        );
-      }
-    }
-
-    final turnText = turnCue == null
-        ? ''
-        : _navTurnText(turnCue.turnInfo, turnCue.primaryText);
-    final turnDistText = _formatNavDistance(turnCue?.distanceMeters);
-    final gateText = turnText.isEmpty
-        ? ''
-        : (turnDistText.isEmpty ? turnText : '$turnDistText ??$turnText');
-
-    if (gateText.isNotEmpty) {
-      Offset gateAnchor;
-      if (projected.isNotEmpty) {
-        var anchorIdx = -1;
-        for (var i = 0; i < projected.length; i++) {
-          final d = i < projectedDist.length ? projectedDist[i] : 0.0;
-          if (d >= 14.0 && d <= 38.0) {
-            anchorIdx = i;
-            break;
-          }
-        }
-        if (anchorIdx < 0) anchorIdx = projected.length ~/ 2;
-        gateAnchor = projected[anchorIdx];
-      } else {
-        gateAnchor = Offset(canvasSize.width * 0.5, canvasSize.height * 0.28);
-      }
-
-      final fontSize = (canvasSize.width * 0.017).clamp(13.0, 20.0);
-      final boardWidth = math
-          .min(
-            canvasSize.width * 0.66,
-            math.max(170.0, (gateText.length * fontSize * 0.58) + 38.0),
-          )
-          .toDouble();
-      final boardHeight = (fontSize * 2.2).clamp(46.0, 74.0);
-      final left = (gateAnchor.dx - (boardWidth * 0.5))
-          .clamp(12.0, canvasSize.width - boardWidth - 12.0);
-      final top = (gateAnchor.dy -
-              boardHeight -
-              (fontSize * 1.8) +
-              gateVerticalOffsetPx)
-          .clamp(12.0, canvasSize.height - boardHeight - 20.0);
-      final gateRect = Rect.fromLTWH(left, top, boardWidth, boardHeight);
-
-      polygons.add(
-        _encodePolygon(
-          _roundedRectVertices(gateRect, radius: 14.0, segmentsPerCorner: 5),
-          const Color(0xE617A84B),
-          strokeColor: const Color(0xCCFFFFFF),
-          strokeWidth: 1.4,
-        ),
-      );
-      _appendOverlayLabel(
-        labels,
-        anchor:
-            Offset(gateRect.center.dx, gateRect.center.dy + (fontSize * 0.22)),
-        text: gateText,
-        color: Colors.white,
-        size: fontSize,
-        centered: true,
-      );
-    }
-
-    String statusText;
-    Color statusFill;
-    if (!arScene.health.calibrationOk) {
-      statusText = '캘리브레이션 대기';
-      statusFill = const Color(0xD97A5100);
-    } else if (!arScene.health.frameGapOk) {
-      statusText = '프레임 정합 대기';
-      statusFill = const Color(0xD97A5100);
-    } else if ((turnCue?.isArrival ?? false) ||
-        turnText.contains('도착') ||
-        (turnCue?.primaryText.contains('도착') ?? false)) {
-      statusText = '도착 임박';
-      statusFill = const Color(0xE617A84B);
-    } else if (projected.length >= 2) {
-      statusText = '정상 경로';
-      statusFill = const Color(0xE617A84B);
-    } else {
-      statusText = '경로 탐색 중';
-      statusFill = const Color(0xD9A36800);
-    }
-    _appendBadge(
-      polygons,
-      labels,
-      center: Offset(canvasSize.width * 0.5, canvasSize.height - 58.0),
-      text: statusText,
-      fillColor: statusFill,
-      textColor: Colors.white,
-      strokeColor: const Color(0xB3FFFFFF),
-      fontSize: (canvasSize.width * 0.012).clamp(12.0, 16.0),
-      minWidth: 132.0,
-      height: 36.0,
-    );
-  }
-
   void _appendSidecarLeadAndRadarPolygons({
     required Map<String, dynamic> cam,
     required Size canvasSize,
@@ -2807,16 +2649,20 @@ class _DriveOverlayPainter extends CustomPainter {
         ? (_DriveOverlaySnapshot._asInt(meta['showRadarInfo']) ?? 0)
         : 0;
     final xState =
-        meta is Map ? (_DriveOverlaySnapshot._asInt(meta['xState']) ?? 0) : 0;
+        meta is Map
+            ? (_DriveOverlaySnapshot._asInt(meta['xState']) ?? snapshot.xState)
+            : snapshot.xState;
     final trafficState = meta is Map
-        ? (_DriveOverlaySnapshot._asInt(meta['trafficState']) ?? 0)
-        : 0;
+        ? (_DriveOverlaySnapshot._asInt(meta['trafficState']) ??
+            snapshot.trafficState)
+        : snapshot.trafficState;
     final longActive = meta is Map
-        ? _boolFromDynamic(meta['longActive'], fallback: false)
-        : false;
+        ? _boolFromDynamic(meta['longActive'], fallback: snapshot.longActive)
+        : snapshot.longActive;
     final vEgoMps = meta is Map
-        ? (_DriveOverlaySnapshot._asDouble(meta['vEgoMps']) ?? 0.0)
-        : 0.0;
+        ? (_DriveOverlaySnapshot._asDouble(meta['vEgoMps']) ??
+            (snapshot.speedMps ?? 0.0))
+        : (snapshot.speedMps ?? 0.0);
 
     var drawDistanceBadges = true;
     String? stateText;
@@ -2989,12 +2835,23 @@ class _DriveOverlayPainter extends CustomPainter {
         final dist = _DriveOverlaySnapshot._asDouble(tf['distance']) ?? 0.0;
         final tFollow = _DriveOverlaySnapshot._asDouble(tf['tFollow']) ?? 0.0;
         if (dist > 0.0) {
+          final labelText = _formatTfMarkerText(dist, tFollow);
+          final labelSize = _clampDouble(20.0 * sourceScale, 16.0, 24.0);
+          final labelAnchor = _clampTfMarkerLabelAnchor(
+            canvasSize: canvasSize,
+            lineRight: right,
+            sourceScale: sourceScale,
+            text: labelText,
+            fontSize: labelSize,
+          );
           _appendOverlayLabel(
             labels,
-            anchor: right,
-            text: '${dist.toStringAsFixed(1)}(${tFollow.toStringAsFixed(2)})',
+            anchor: labelAnchor,
+            text: labelText,
             color: Colors.white,
-            size: 20.0,
+            strokeColor: Colors.black,
+            strokeWidth: 1.8,
+            size: labelSize,
             centered: false,
           );
         }
@@ -3356,16 +3213,20 @@ class _DriveOverlayPainter extends CustomPainter {
         ? (_DriveOverlaySnapshot._asInt(meta['showRadarInfo']) ?? 0)
         : 0;
     final xState =
-        meta is Map ? (_DriveOverlaySnapshot._asInt(meta['xState']) ?? 0) : 0;
+        meta is Map
+            ? (_DriveOverlaySnapshot._asInt(meta['xState']) ?? snapshot.xState)
+            : snapshot.xState;
     final trafficState = meta is Map
-        ? (_DriveOverlaySnapshot._asInt(meta['trafficState']) ?? 0)
-        : 0;
+        ? (_DriveOverlaySnapshot._asInt(meta['trafficState']) ??
+            snapshot.trafficState)
+        : snapshot.trafficState;
     final longActive = meta is Map
-        ? _boolFromDynamic(meta['longActive'], fallback: false)
-        : false;
+        ? _boolFromDynamic(meta['longActive'], fallback: snapshot.longActive)
+        : snapshot.longActive;
     final vEgoMps = meta is Map
-        ? (_DriveOverlaySnapshot._asDouble(meta['vEgoMps']) ?? 0.0)
-        : 0.0;
+        ? (_DriveOverlaySnapshot._asDouble(meta['vEgoMps']) ??
+            (snapshot.speedMps ?? 0.0))
+        : (snapshot.speedMps ?? 0.0);
     final radarLatFactor = meta is Map
         ? (_DriveOverlaySnapshot._asDouble(meta['radarLatFactor']) ?? 0.0)
         : 0.0;
@@ -4011,6 +3872,9 @@ class _DriveOverlayPainter extends CustomPainter {
               .clamp(0.0, 8.0);
       final sizePx = (_DriveOverlaySnapshot._asDouble(item['size']) ?? 16.0)
           .clamp(8.0, 72.0);
+      final maxLinesRaw = _DriveOverlaySnapshot._asInt(item['maxLines']);
+      final maxLines = maxLinesRaw != null && maxLinesRaw > 0 ? maxLinesRaw : null;
+      final ellipsis = item['ellipsis']?.toString();
       final fontWeightRaw =
           _DriveOverlaySnapshot._asInt(item['fontWeight']) ?? 700;
       final fontWeight = switch (fontWeightRaw) {
@@ -4026,6 +3890,21 @@ class _DriveOverlayPainter extends CustomPainter {
         _ => FontWeight.w700,
       };
       final centered = _boolFromDynamic(item['centered']);
+      final alignXRaw = item['alignX']?.toString().trim().toLowerCase();
+      final alignYRaw = item['alignY']?.toString().trim().toLowerCase();
+      final alignX = switch (alignXRaw) {
+        'left' => 'left',
+        'right' => 'right',
+        'center' => 'center',
+        _ => centered ? 'center' : 'left',
+      };
+      final alignY = switch (alignYRaw) {
+        'top' => 'top',
+        'bottom' => 'bottom',
+        'baselinebottom' => 'baselineBottom',
+        'center' || 'middle' => 'middle',
+        _ => centered ? 'middle' : 'bottom',
+      };
       tp.text = TextSpan(
         text: text,
         style: TextStyle(
@@ -4034,15 +3913,32 @@ class _DriveOverlayPainter extends CustomPainter {
           fontWeight: fontWeight,
         ),
       );
-      final labelMaxWidth = (canvasSize.width * 0.42).clamp(140.0, 760.0);
+      final labelMaxWidth = (_DriveOverlaySnapshot._asDouble(item['maxWidth']) ??
+              (canvasSize.width * 0.42))
+          .clamp(140.0, 1600.0);
+      tp.maxLines = maxLines;
+      tp.ellipsis = ellipsis;
       tp.layout(maxWidth: labelMaxWidth.toDouble());
-      final paintOffset = centered
-          ? Offset(dx - (tp.width * 0.5), dy - (tp.height * 0.5))
-          : Offset(dx, dy - tp.height);
+      final baseline =
+          tp.computeDistanceToActualBaseline(TextBaseline.alphabetic);
+      final paintX = switch (alignX) {
+        'center' => dx - (tp.width * 0.5),
+        'right' => dx - tp.width,
+        _ => dx,
+      };
+      final paintY = switch (alignY) {
+        'top' => dy,
+        'middle' => dy - (tp.height * 0.5),
+        'baselineBottom' => dy - baseline,
+        _ => dy - tp.height,
+      };
+      final paintOffset = Offset(paintX, paintY);
       if (strokeInt != null && strokeWidth > 0.0) {
         final strokeTp = TextPainter(
           textDirection: TextDirection.ltr,
           textAlign: TextAlign.left,
+          maxLines: maxLines,
+          ellipsis: ellipsis,
           text: TextSpan(
             text: text,
             style: TextStyle(
@@ -4068,12 +3964,7 @@ class _DriveOverlayPainter extends CustomPainter {
     Canvas canvas,
     Size size,
   ) {
-    final sidecarPayload = _buildNativeOverlayPayloadFromSidecar2d(size);
     if (snapshot.path.length < 2) {
-      if (_driveEnableExperimentalSidecarDecorations &&
-          sidecarPayload != null) {
-        _drawEncodedOverlayPayload(canvas, size, sidecarPayload);
-      }
       final plotPayload = _buildDebugPlotOverlayPayload(size);
       if (plotPayload != null) {
         _drawEncodedOverlayPayload(canvas, size, plotPayload);
@@ -4165,29 +4056,6 @@ class _DriveOverlayPainter extends CustomPainter {
     if (showPathFill && trackVertices != null) {
       _drawPathByMode(canvas, trackVertices);
     }
-    if (_driveEnableExperimentalSidecarDecorations && sidecarPayload != null) {
-      _drawEncodedOverlayPayload(canvas, size, sidecarPayload);
-    }
-    if (_driveEnableExperimentalNavAr) {
-      final navPolygons = <Map<String, dynamic>>[];
-      final navLabels = <Map<String, dynamic>>[];
-      _appendNavArOverlayPolygons(
-        polygons: navPolygons,
-        labels: navLabels,
-        transform: transform,
-        canvasSize: size,
-      );
-      if (navPolygons.isNotEmpty || navLabels.isNotEmpty) {
-        _drawEncodedOverlayPayload(
-          canvas,
-          size,
-          <String, dynamic>{
-            'polygons': navPolygons,
-            if (navLabels.isNotEmpty) 'labels': navLabels,
-          },
-        );
-      }
-    }
     if (showDebugGuides) {
       _drawDebugGuides(
         canvas,
@@ -4222,45 +4090,6 @@ class _DriveOverlayPainter extends CustomPainter {
         oldDelegate.showStopDistanceTf != showStopDistanceTf ||
         oldDelegate.showStateText != showStateText ||
         oldDelegate.debugPlotState != debugPlotState;
-  }
-}
-
-class _DriveArScreenAnchors {
-  final List<Offset> pathPoints;
-  final List<double> pathDistances;
-  final Offset? gateAnchor;
-  final Offset statusAnchor;
-  final double visibleDistanceMeters;
-  final double pathSpanX;
-  final double pathSpanY;
-  final double qualityScore;
-
-  const _DriveArScreenAnchors({
-    required this.pathPoints,
-    required this.pathDistances,
-    required this.gateAnchor,
-    required this.statusAnchor,
-    required this.visibleDistanceMeters,
-    required this.pathSpanX,
-    required this.pathSpanY,
-    required this.qualityScore,
-  });
-
-  bool get hasPath => pathPoints.length >= 2;
-
-  Map<String, dynamic> toPayload() {
-    return <String, dynamic>{
-      'pathPoints':
-          pathPoints.map((p) => <double>[p.dx, p.dy]).toList(growable: false),
-      'pathDistances': pathDistances.toList(growable: false),
-      if (gateAnchor != null)
-        'gateAnchor': <double>[gateAnchor!.dx, gateAnchor!.dy],
-      'statusAnchor': <double>[statusAnchor.dx, statusAnchor.dy],
-      'visibleDistanceMeters': visibleDistanceMeters,
-      'pathSpanX': pathSpanX,
-      'pathSpanY': pathSpanY,
-      'qualityScore': qualityScore,
-    };
   }
 }
 

@@ -222,7 +222,6 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
   void _handleSidecarPayload(Map<String, dynamic> payload) {
     if (payload['type'] == 'hello') return;
     if (!_openpilotOverlayMode) return;
-    if (_debugOverlayPreviewMode) return;
 
     final next = _stabilizeOverlaySnapshot(
       _DriveOverlaySnapshot.fromSidecar(payload),
@@ -234,7 +233,6 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
     _cacheOverlaySnapshot(next);
     _overlayDiagFrames++;
     final now = DateTime.now();
-    _sidecarLastFrameAt = now;
     if (hasOverlayFrames) {
       if (mounted && (_cameraLoading || (_cameraError?.isNotEmpty ?? false))) {
         _safeSetState(() {

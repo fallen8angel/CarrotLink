@@ -28,12 +28,16 @@ class NativeDriveYoloController(
   private var lastEmitSignature = 0
 
   fun updateConfig(next: NativeDriveYoloConfig) {
+    val wasEnabled = config.enabled
     config = next
     runtime.updateConfig(next)
     pixelSampler.updateConfig(next)
     if (!next.enabled) {
       lastSamplePtsUs = Long.MIN_VALUE
       lastSkipReason = "disabled"
+    } else if (!wasEnabled) {
+      lastSamplePtsUs = Long.MIN_VALUE
+      lastSkipReason = "awaiting_rendered_frame_feed"
     }
     emitState(force = true, reason = "config_updated")
   }
@@ -81,6 +85,11 @@ class NativeDriveYoloController(
   fun snapshot(reason: String? = null): Map<String, Any?> {
     val runtimeSnapshot = runtime.snapshot()
     val pixelSnapshot = pixelSampler.snapshot()
+    val effectiveStageAndBlocker =
+        deriveEffectiveStageAndBlocker(
+            runtimeSnapshot = runtimeSnapshot,
+            pixelSnapshot = pixelSnapshot,
+        )
     val payload = mutableMapOf<String, Any?>(
         "enabled" to config.enabled,
         "yoloBoxes" to config.showBoxes,
@@ -102,6 +111,10 @@ class NativeDriveYoloController(
     )
     payload.putAll(pixelSnapshot.toPayload())
     payload.putAll(runtimeSnapshot.toPayload())
+    payload["runtimeStage"] = runtimeSnapshot.stage
+    payload["runtimeBlocker"] = runtimeSnapshot.blocker
+    payload["stage"] = effectiveStageAndBlocker.first
+    payload["blocker"] = effectiveStageAndBlocker.second
     payload["pixelPathReady"] = pixelSnapshot.pixelPathReady || runtimeSnapshot.pixelPathReady
     if (!reason.isNullOrBlank()) {
       payload["reason"] = reason
@@ -129,5 +142,34 @@ class NativeDriveYoloController(
     lastEmitAtMs = nowMs
     lastEmitSignature = signature
     onStateChanged(payload)
+  }
+
+  private fun deriveEffectiveStageAndBlocker(
+      runtimeSnapshot: NativeDriveYoloRuntimeSnapshot,
+      pixelSnapshot: NativeDriveYoloPixelSamplerSnapshot,
+  ): Pair<String, String?> {
+    if (!config.enabled) {
+      return "idle" to "disabled"
+    }
+    if (framesSeen <= 0) {
+      return "awaiting_rendered_frame_feed" to "render_frame_missing"
+    }
+    if (framesSampled <= 0) {
+      return when (lastSkipReason) {
+        "source_size_missing" -> "awaiting_valid_source_size" to "source_size_missing"
+        "surface_not_ready" -> "awaiting_surface_ready" to "surface_not_ready"
+        "copy_in_flight" -> "awaiting_pixel_copy" to "copy_in_flight"
+        "sample_throttled" -> "awaiting_sample_window" to "sample_throttled"
+        "pixel_requested" -> "awaiting_pixel_copy_result" to "pixel_copy_pending"
+        else -> "awaiting_pixel_copy_request" to lastSkipReason
+      }
+    }
+    if (pixelSnapshot.copyRequests > 0 && pixelSnapshot.copySuccesses <= 0) {
+      return "awaiting_pixel_copy_result" to pixelSnapshot.lastCopyResult
+    }
+    if (pixelSnapshot.copySuccesses > 0 && !runtimeSnapshot.pixelPathReady) {
+      return "awaiting_runtime_pixel_consume" to "runtime_pixel_consume_missing"
+    }
+    return runtimeSnapshot.stage to runtimeSnapshot.blocker
   }
 }

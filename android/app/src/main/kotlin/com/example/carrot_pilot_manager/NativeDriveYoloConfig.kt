@@ -2,6 +2,7 @@ package com.example.carrot_pilot_manager
 
 data class NativeDriveYoloConfig(
     val enabled: Boolean = false,
+    val unsafeRuntimeEnabled: Boolean = false,
     val showBoxes: Boolean = false,
     val showLabels: Boolean = false,
     val showTrafficLights: Boolean = false,
@@ -31,6 +32,7 @@ data class NativeDriveYoloConfig(
       if (payload == null) return disabled
       return NativeDriveYoloConfig(
           enabled = readBoolean(payload, "yoloEnabled"),
+          unsafeRuntimeEnabled = readBoolean(payload, "unsafeRuntimeEnabled"),
           showBoxes = readBoolean(payload, "yoloBoxes"),
           showLabels = readBoolean(payload, "yoloLabels"),
           showTrafficLights = readBoolean(payload, "yoloTrafficLights"),
@@ -83,6 +85,7 @@ data class NativeDriveYoloConfig(
   fun toPayload(): Map<String, Any?> {
     return mapOf(
         "yoloEnabled" to enabled,
+        "unsafeRuntimeEnabled" to unsafeRuntimeEnabled,
         "yoloBoxes" to showBoxes,
         "yoloLabels" to showLabels,
         "yoloTrafficLights" to showTrafficLights,

@@ -8,8 +8,7 @@ import '../../services/device_action_service.dart';
 import '../../services/hud_feature_settings_service.dart';
 import '../../services/sidecar_service.dart';
 import '../../services/ssh_service.dart';
-import '../../ui/adaptive/layout_tokens.dart';
-import '../../ui/adaptive/window_class.dart';
+import 'settings_subpage_components.dart';
 
 class HudSettingsScreen extends StatefulWidget {
   const HudSettingsScreen({super.key});
@@ -226,10 +225,10 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
       }
 
       _addStep('새 런타임 재바인드 준비', status: _StepStatus.running);
-        await _runtime.resetRuntime(
-          clearCachedSnapshots: true,
-          releaseHostSession: true,
-        );
+      await _runtime.resetRuntime(
+        clearCachedSnapshots: true,
+        releaseHostSession: true,
+      );
       _updateLastStep(
         status: _StepStatus.ok,
         detail: '설치된 sidecar 기준으로 새 HUD 세션을 준비합니다.',
@@ -432,7 +431,8 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
               line.startsWith('remote_revision='),
         )
         .toList(growable: false);
-    final source = picked.isEmpty ? lines.take(3).toList() : picked.take(4).toList();
+    final source =
+        picked.isEmpty ? lines.take(3).toList() : picked.take(4).toList();
     return source.join(' | ');
   }
 
@@ -447,7 +447,8 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
           trimmed.substring(idx + 1).trim();
     }
     bool up(String name) => (pairs[name] ?? '').trim().startsWith('up:');
-    final hasControlCore = up('selfdrived') && (up('controlsd') || up('plannerd'));
+    final hasControlCore =
+        up('selfdrived') && (up('controlsd') || up('plannerd'));
     final hasVisionCore =
         up('stream_encoderd') && up('modeld') && up('camerad');
     final hasRadarCore = up('radard');
@@ -516,7 +517,7 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
             );
           },
         ) ??
-         false;
+        false;
   }
 
   Future<void> _handlePostInstallReboot() async {
@@ -552,8 +553,10 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
     _addStep('기기 재부팅', status: _StepStatus.running);
 
     try {
-      final result = await _actionService.runAction(_ssh, DeviceActionType.reboot);
-      final output = result.output.trim().isEmpty ? result.command : result.output;
+      final result =
+          await _actionService.runAction(_ssh, DeviceActionType.reboot);
+      final output =
+          result.output.trim().isEmpty ? result.command : result.output;
       _appendTerminal('REBOOT', output);
       if (result.ok) {
         _updateLastStep(
@@ -646,120 +649,67 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final window = UiWindowInfo.of(context);
-    final tokens = UiLayoutTokens.of(context);
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
 
     return Consumer<HudFeatureSettingsService>(
       builder: (context, featureSettings, _) {
         final enabled = featureSettings.enabled;
-        return Scaffold(
-          appBar: AppBar(title: const Text('HUD')),
-          body: ListView(
-            padding: EdgeInsets.only(
-              left: tokens.screenPadding.clamp(12.0, 24.0).toDouble(),
-              right: tokens.screenPadding.clamp(12.0, 24.0).toDouble(),
-              top: 14.0,
-              bottom: tokens.footerSpacer,
+        return SettingsSubpageScaffold(
+          title: 'HUD',
+          children: [
+            SettingsSection(
+              title: '설정',
+              showTopDivider: false,
+              bottomSpacing: 20,
+              child: SettingsItemGroup(
+                children: [
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('활성화'),
+                    trailing: Switch.adaptive(
+                      value: enabled,
+                      onChanged: _busy ? null : _setFeatureEnabled,
+                    ),
+                  ),
+                ],
+              ),
             ),
-            children: [
-              _sectionHeader(context, Icons.toggle_on_rounded, '기능 상태'),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-                child: Container(
+            SettingsSection(
+              title: 'Stock 주행모드',
+              bottomSpacing: 20,
+              child: SettingsItemGroup(
+                children: [
+                  SettingsActionRow(
+                    title: '설치',
+                    onTap: _busy ? null : _installSidecar,
+                  ),
+                  SettingsActionRow(
+                    title: '삭제',
+                    onTap: _busy ? null : _deleteSidecar,
+                    destructive: true,
+                  ),
+                ],
+              ),
+            ),
+            if (_steps.isNotEmpty)
+              SettingsSection(
+                title: '작업 요약',
+                bottomSpacing: 20,
+                child: SettingsItemGroup(
+                  children: [
+                    for (final step in _steps) _buildStepRow(context, step),
+                  ],
+                ),
+              ),
+            if (_terminalLines.isNotEmpty)
+              SettingsSection(
+                title: '터미널 로그',
+                bottomSpacing: 20,
+                child: DecoratedBox(
                   decoration: BoxDecoration(
-                    color: scheme.surfaceContainerHigh.withValues(alpha: 0.7),
-                    borderRadius: BorderRadius.circular(16),
                     border: Border.all(
-                      color: scheme.outlineVariant.withValues(alpha: 0.3),
-                    ),
-                  ),
-                  child: SwitchListTile.adaptive(
-                    value: enabled,
-                    onChanged: _busy ? null : _setFeatureEnabled,
-                    title: const Text('HUD / Stock 활성화'),
-                    subtitle: Text(
-                      enabled
-                          ? 'Home HUD와 Stock 주행모드를 사용할 수 있습니다.'
-                          : '기본값은 비활성입니다. Home HUD는 안내 화면만 표시되고 Stock 진입은 차단됩니다.',
-                      style: textTheme.bodySmall?.copyWith(
-                        color: scheme.onSurfaceVariant,
-                        height: 1.45,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(8, 8, 8, 20),
-                child: Text(
-                  '설치/삭제는 수동 작업입니다. 토글 ON만으로는 sidecar를 자동 설치하지 않습니다.',
-                  style: TextStyle(
-                    fontSize: window.isCompact ? 11.5 : 12.0,
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
-              ),
-
-              _sectionHeader(
-                context,
-                Icons.developer_board_rounded,
-                'Stock 주행모드 관리',
-              ),
-              const SizedBox(height: 4),
-              _actionCard(
-                context,
-                icon: Icons.download_done_rounded,
-                iconColor: scheme.primary,
-                title: 'Stock 주행모드 설치',
-                subtitle: 'sidecar 배포 → 시작 → 상태 검증',
-                onTap: _busy ? null : _installSidecar,
-                destructive: false,
-              ),
-              const SizedBox(height: 8),
-              _actionCard(
-                context,
-                icon: Icons.delete_forever_rounded,
-                iconColor: scheme.error,
-                title: 'Stock 주행모드 삭제',
-                subtitle: 'sidecar 중지 → 파일/흔적 제거 → 런타임 정리',
-                onTap: _busy ? null : _deleteSidecar,
-                destructive: true,
-              ),
-
-              if (_steps.isNotEmpty) ...[
-                const SizedBox(height: 20),
-                _sectionHeader(context, Icons.playlist_add_check, '작업 요약'),
-                const SizedBox(height: 4),
-                Container(
-                  margin: const EdgeInsets.symmetric(horizontal: 4),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                  decoration: BoxDecoration(
-                    color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      for (final step in _steps) _buildStepRow(context, step),
-                    ],
-                  ),
-                ),
-              ],
-
-              if (_terminalLines.isNotEmpty) ...[
-                const SizedBox(height: 20),
-                _sectionHeader(context, Icons.terminal_rounded, '터미널 로그'),
-                const SizedBox(height: 4),
-                Container(
-                  margin: const EdgeInsets.symmetric(horizontal: 4),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF09121A),
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: scheme.outlineVariant.withValues(alpha: 0.32),
+                      color: scheme.outlineVariant.withValues(alpha: 0.35),
                     ),
                   ),
                   child: ConstrainedBox(
@@ -769,11 +719,10 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
                       thumbVisibility: true,
                       child: SingleChildScrollView(
                         controller: _terminalScrollController,
-                        padding: const EdgeInsets.all(14),
+                        padding: const EdgeInsets.all(12),
                         child: SelectableText(
                           _terminalLines.join('\n'),
                           style: textTheme.bodySmall?.copyWith(
-                            color: const Color(0xFFD6E2EA),
                             fontFamily: 'monospace',
                             height: 1.35,
                             fontSize: 11.5,
@@ -783,11 +732,8 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
                     ),
                   ),
                 ),
-              ],
-
-              const SizedBox(height: 24),
-            ],
-          ),
+              ),
+          ],
         );
       },
     );
@@ -805,138 +751,36 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
       _StepStatus.fail => (Icons.error_rounded, scheme.error),
     };
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              step.status == _StepStatus.running
-                  ? SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: color,
-                      ),
-                    )
-                  : Icon(icon, size: 16, color: color),
-              const SizedBox(width: 8),
-              Text(
-                step.label,
-                style: textTheme.bodyMedium?.copyWith(
-                  fontWeight: FontWeight.w600,
-                  color: color,
-                ),
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: step.status == _StepStatus.running
+          ? SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: color,
               ),
-            ],
-          ),
-          if (step.detail != null && step.detail!.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(left: 24, top: 2),
-              child: Text(
-                step.detail!,
-                style: textTheme.bodySmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                  fontFamily: 'monospace',
-                  fontSize: 11,
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _sectionHeader(BuildContext context, IconData icon, String label) {
-    final scheme = Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 14, 4, 6),
-      child: Row(
-        children: [
-          Icon(icon, size: 18, color: scheme.onSurfaceVariant),
-          const SizedBox(width: 6),
-          Text(
-            label,
-            style: Theme.of(context)
-                .textTheme
-                .titleSmall
-                ?.copyWith(fontWeight: FontWeight.w600),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _actionCard(
-    BuildContext context, {
-    required IconData icon,
-    required Color iconColor,
-    required String title,
-    required String subtitle,
-    required VoidCallback? onTap,
-    required bool destructive,
-  }) {
-    final scheme = Theme.of(context).colorScheme;
-    final textTheme = Theme.of(context).textTheme;
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4),
-      child: Material(
-        color: scheme.surfaceContainerHigh.withValues(alpha: 0.6),
-        borderRadius: BorderRadius.circular(14),
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(14),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-            child: Row(
-              children: [
-                Icon(
-                  icon,
-                  size: 24,
-                  color: onTap == null
-                      ? scheme.onSurfaceVariant.withValues(alpha: 0.4)
-                      : iconColor,
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: textTheme.titleSmall?.copyWith(
-                          fontWeight: FontWeight.w600,
-                          color: onTap == null
-                              ? scheme.onSurface.withValues(alpha: 0.4)
-                              : (destructive ? scheme.error : scheme.onSurface),
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        subtitle,
-                        style: textTheme.bodySmall?.copyWith(
-                          color: scheme.onSurfaceVariant.withValues(
-                            alpha: onTap == null ? 0.4 : 0.8,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Icon(
-                  Icons.chevron_right_rounded,
-                  size: 20,
-                  color: scheme.onSurfaceVariant.withValues(
-                    alpha: onTap == null ? 0.3 : 0.6,
-                  ),
-                ),
-              ],
-            ),
-          ),
+            )
+          : Icon(icon, size: 18, color: color),
+      title: Text(
+        step.label,
+        style: textTheme.bodyMedium?.copyWith(
+          fontWeight: FontWeight.w600,
+          color: color,
         ),
       ),
+      subtitle: step.detail != null && step.detail!.isNotEmpty
+          ? Text(
+              step.detail!,
+              style: textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+                fontFamily: 'monospace',
+                fontSize: 11,
+              ),
+            )
+          : null,
+      minVerticalPadding: 6,
     );
   }
 }

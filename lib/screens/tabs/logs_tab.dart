@@ -15,8 +15,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../services/diagnostics_service.dart';
+import '../../services/developer_mode_service.dart';
 import '../../services/ssh_service.dart';
 import '../../services/storage_layout_service.dart';
+import '../../features/yolo/yolo.dart';
 import '../../ui/adaptive/layout_tokens.dart';
 import '../../ui/adaptive/window_class.dart';
 import '../../widgets/connection_required_view.dart';
@@ -53,12 +55,12 @@ class _LogsTabState extends State<LogsTab> with SingleTickerProviderStateMixin {
     final maxWidth = window.isConstrainedLandscape
         ? double.infinity
         : switch (window.windowClass) {
-      UiWindowClass.compact => double.infinity,
-      UiWindowClass.medium => 1020.0,
-      UiWindowClass.expanded => 1220.0,
-      UiWindowClass.large => 1360.0,
-      UiWindowClass.extraLarge => 1480.0,
-    };
+            UiWindowClass.compact => double.infinity,
+            UiWindowClass.medium => 1020.0,
+            UiWindowClass.expanded => 1220.0,
+            UiWindowClass.large => 1360.0,
+            UiWindowClass.extraLarge => 1480.0,
+          };
 
     return Align(
       alignment: Alignment.topCenter,
@@ -66,10 +68,9 @@ class _LogsTabState extends State<LogsTab> with SingleTickerProviderStateMixin {
         constraints: BoxConstraints(maxWidth: maxWidth),
         child: Padding(
           padding: EdgeInsets.symmetric(
-            horizontal:
-                (window.isCompact || window.isConstrainedLandscape)
-                    ? 0
-                    : tokens.screenPadding,
+            horizontal: (window.isCompact || window.isConstrainedLandscape)
+                ? 0
+                : tokens.screenPadding,
           ),
           child: Column(
             children: [
@@ -726,6 +727,12 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
       );
       if (!mounted) return;
       final segment = _segmentIndex(segmentFolderName);
+      final developerModeEnabled = context.read<DeveloperModeService>().enabled;
+      final yoloAvailabilityHint = !developerModeEnabled
+          ? '개발자 모드가 꺼져 있어 route YOLO playback이 비활성입니다.'
+          : (assets.videoFile == null
+              ? '현재 스트리밍 재생(videoUri)이라 local file 기반 route YOLO playback을 시작할 수 없습니다.'
+              : null);
       await showDialog<void>(
         context: context,
         barrierDismissible: true,
@@ -789,6 +796,14 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
                     onShareRange: (startSec, endSec) => _shareSegmentClip(
                         route, segmentFolderName,
                         startSec: startSec, endSec: endSec),
+                    yoloAvailabilityHint: yoloAvailabilityHint,
+                    onRunYoloDebugAtPosition:
+                        developerModeEnabled && assets.videoFile != null
+                            ? (position) => _runSegmentYoloDebugAtPosition(
+                                  videoFile: assets.videoFile!,
+                                  position: position,
+                                )
+                            : null,
                     onClose: () => Navigator.of(dialogContext).pop(),
                   ),
                 ),
@@ -801,6 +816,16 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
       if (!mounted) return;
       CustomToast.show(context, '정밀 재생 실패: $e', isError: true);
     }
+  }
+
+  Future<YoloRuntimeStatusSnapshot> _runSegmentYoloDebugAtPosition({
+    required File videoFile,
+    required Duration position,
+  }) async {
+    return YoloOfflineDebugRunner.runVideoFrameAtPosition(
+      path: videoFile.path,
+      position: position,
+    );
   }
 
   Future<_SegmentShareOptions?> _showShareOptionsDialog(

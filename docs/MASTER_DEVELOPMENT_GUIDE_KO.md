@@ -237,7 +237,7 @@ stock 주행그래픽/HUD 관련 요청을 받으면 아래 문서를 먼저 본
 - `docs/architecture/carrotpilot/CARROTPILOT_ORIGINAL_ONROAD_HUD_ANALYSIS_2026-03-07_KO.md`
 - `docs/architecture/carrotpilot/CARROTPILOT_ONROAD_ELEMENT_MATRIX_2026-03-02_KO.md`
 - `docs/architecture/link/CARROTLINK_PRODUCER_CONSUMER_MAP_2026-03-11_KO.md`
-- `docs/architecture/remote_ar/STOCK_MODE_LEAD_RADAR_ALIGNMENT_CHECKLIST_2026-03-09_KO.md`
+- `docs/architecture/carrotpilot/STOCK_MODE_LEAD_RADAR_ALIGNMENT_CHECKLIST_2026-03-09_KO.md`
 
 기준:
 

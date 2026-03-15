@@ -47,7 +47,6 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
   }
 
   void _resetAdaptiveCameraQualityState({bool resetMode = false}) {
-    _adaptiveBadScore = 0;
     _adaptiveCameraQualitySynced = false;
     if (resetMode) {
       _adaptiveCameraQualityMode = _AdaptiveCameraQualityMode.lowLatency;
@@ -127,63 +126,6 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       parsed[key] = value;
     }
     return parsed;
-  }
-
-  Map<String, dynamic> get _activeCameraRelayStatus {
-    final relayRaw = _sidecarHealthSnapshot['cameraRelay'];
-    if (relayRaw is! Map) return const <String, dynamic>{};
-    final relay = Map<String, dynamic>.from(relayRaw);
-    final camerasRaw = relay['cameras'];
-    if (camerasRaw is! Map) return const <String, dynamic>{};
-    final cameras = Map<String, dynamic>.from(camerasRaw);
-    final cameraRaw = cameras[_liveCameraName];
-    if (cameraRaw is! Map) return const <String, dynamic>{};
-    return Map<String, dynamic>.from(cameraRaw);
-  }
-
-  bool get _sidecarProcessAlive => _sidecarProcessSnapshot['running'] == '1';
-
-  bool get _sidecarProcessListening =>
-      _sidecarProcessSnapshot['listening'] == '1';
-
-  bool get _sidecarStreamEncoderdAlive =>
-      (_sidecarCriticalProcSnapshot['stream_encoderd'] ?? '')
-          .trim()
-          .startsWith('up:');
-
-  String get _sidecarProcessStatusLabel {
-    if (!_openpilotOverlayMode) return 'inactive';
-    if (_sidecarProcessAlive && _sidecarProcessListening) return 'up';
-    if (_sidecarProcessAlive) return 'up_no_port';
-    if (_sidecarProcessListening) return 'port_only';
-    return 'down';
-  }
-
-  String get _sidecarCameraReadyLabel {
-    if (!_openpilotOverlayMode) return 'inactive';
-    if (!_sidecarProcessAlive) return 'sidecar_down';
-    final camera = _activeCameraRelayStatus;
-    if (camera.isEmpty) {
-      return _sidecarStreamEncoderdAlive ? 'relay_missing' : 'unavailable';
-    }
-    final clients = (camera['clients'] as num?)?.toInt() ?? 0;
-    final frames = (camera['frames'] as num?)?.toInt() ?? 0;
-    final service = camera['service']?.toString().trim() ?? '';
-    final codec = camera['codec']?.toString().trim() ?? '';
-    if (!_sidecarStreamEncoderdAlive &&
-        clients <= 0 &&
-        frames <= 0 &&
-        service.isEmpty &&
-        codec.isEmpty) {
-      return 'unavailable';
-    }
-    if (clients <= 0) return 'no_client';
-    if (service.isEmpty) return 'no_service';
-    if (codec.isEmpty) return 'no_codec';
-    if (_lastCameraFrameId == null) {
-      return frames > 0 ? 'await_local_frame' : 'no_frames';
-    }
-    return 'ready';
   }
 
   bool _profileRequiresLiveRuntime(String? profile) {
@@ -468,11 +410,6 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     try {
       final criticalRaw = await _sidecarService.criticalProcStatus(ssh);
       final parsed = _parseStatusPairs(criticalRaw);
-      if (!mounted) {
-        _sidecarCriticalProcSnapshot = parsed;
-      } else {
-        _safeSetState(() => _sidecarCriticalProcSnapshot = parsed);
-      }
       return parsed;
     } catch (_) {
       return const <String, String>{};
@@ -501,209 +438,71 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     }
   }
 
-  String get _sidecarCameraRelaySummary {
-    final camera = _activeCameraRelayStatus;
-    if (camera.isEmpty) return 'cam=$_liveCameraName relay=missing';
-    final clients = (camera['clients'] as num?)?.toInt() ?? 0;
-    final frames = (camera['frames'] as num?)?.toInt() ?? 0;
-    final queue = (camera['queue'] as num?)?.toInt() ?? 0;
-    final queueMax = (camera['queueMax'] as num?)?.toInt() ?? 0;
-    final queueDrops = (camera['queueDrops'] as num?)?.toInt() ?? 0;
-    final sendDrops = (camera['sendDrops'] as num?)?.toInt() ?? 0;
-    final ageMs = (camera['lastFrameAgeMs'] as num?)?.toInt();
-    final service = (camera['service']?.toString() ?? '').trim();
-    final codec = (camera['codec']?.toString() ?? '').trim();
-    final serviceLabel = service.isEmpty ? '-' : service;
-    final codecLabel = codec.isEmpty ? '-' : codec;
-    final bufferLabel = queueMax > 0 ? '$queue/$queueMax' : '$queue';
-    final parts = <String>[
-      'cam=$_liveCameraName',
-      'client=$clients',
-      'frames=$frames',
-      'service=$serviceLabel',
-      'codec=$codecLabel',
-      'q=$bufferLabel',
-    ];
-    if (queueDrops > 0) parts.add('qd=$queueDrops');
-    if (sendDrops > 0) parts.add('sd=$sendDrops');
-    if (ageMs != null) parts.add('age=${ageMs}ms');
-    return parts.join(' ');
-  }
-
-  String get _sidecarLiveRelaySummary {
-    final relayRaw = _sidecarHealthSnapshot['liveRelay'];
-    if (relayRaw is! Map) return '-';
-    final relay = Map<String, dynamic>.from(relayRaw);
-    final clients = (relay['clients'] as num?)?.toInt() ?? 0;
-    final sendDrops = (relay['sendDrops'] as num?)?.toInt() ?? 0;
-    final buildMs = (relay['lastBuildMs'] as num?)?.toDouble();
-    final sendMs = (relay['lastSendBatchMs'] as num?)?.toDouble();
-    final buildLabel = buildMs == null ? '-' : buildMs.toStringAsFixed(1);
-    final sendLabel = sendMs == null ? '-' : sendMs.toStringAsFixed(1);
-    return 'clients=$clients build=${buildLabel}ms send=${sendLabel}ms drops=$sendDrops';
-  }
-
-  String get _sidecarRemotePyName {
-    final raw = (_sidecarProcessSnapshot['py_name'] ?? '').trim();
-    if (raw.isNotEmpty) return raw;
-    return 'sidecar.py';
-  }
-
-  String get _sidecarRemoteRevisionLabel {
-    final candidates = <String?>[
-      _sidecarProcessSnapshot['remote_revision'],
-      _sidecarRemoteRevision,
-      _sidecarProcessSnapshot['remote_hash'],
-      _sidecarProcessSnapshot['hash'],
-      _sidecarProcessSnapshot['version'],
-      _sidecarProcessSnapshot['commit'],
-    ];
-    for (final raw in candidates) {
-      final value = (raw ?? '').trim();
-      if (value.isNotEmpty) {
-        return _shortSidecarRevision(value);
-      }
-    }
-    return '-';
-  }
-
-  DateTime? get _sidecarRemoteUpdatedAt {
-    final candidates = <String?>[
-      _sidecarProcessSnapshot['rev_updated_epoch'],
-      _sidecarProcessSnapshot['py_updated_epoch'],
-    ];
-    for (final raw in candidates) {
-      final seconds = int.tryParse((raw ?? '').trim());
-      if (seconds != null && seconds > 0) {
-        return DateTime.fromMillisecondsSinceEpoch(
-          seconds * 1000,
-          isUtc: true,
-        ).toLocal();
-      }
-    }
-    return _sidecarLastDeployAt;
-  }
-
-  String get _sidecarRemoteUpdatedLabel {
-    final when = _sidecarRemoteUpdatedAt;
-    if (when == null) return '-';
-    String two(int v) => v.toString().padLeft(2, '0');
-    return '${when.year}-${two(when.month)}-${two(when.day)} ${two(when.hour)}:${two(when.minute)}';
-  }
-
-  String get _sidecarScheduledStopSummary {
-    final when = _sidecarScheduledStopAt;
-    final reason = (_sidecarScheduledStopReason ?? '').trim();
-    if (when == null) return '-';
-    final remain = when.difference(DateTime.now()).inSeconds;
-    final remainClamped = remain > 0 ? remain : 0;
-    if (reason.isEmpty) return '${remainClamped}s 후';
-    return '$reason / ${remainClamped}s 후';
-  }
-
   Future<void> _refreshSidecarProcessStatus() async {
     final ssh = _sshService ??
         (mounted ? Provider.of<SSHService>(context, listen: false) : null);
     if (ssh == null || !ssh.isConnected) {
       if (!mounted) {
         _sidecarProcessSnapshot = <String, String>{};
-        _sidecarCriticalProcSnapshot = <String, String>{};
         _sidecarHealthSnapshot = <String, dynamic>{};
         _sidecarProfileSnapshot = <String, dynamic>{};
-        _sidecarCameraQualitySnapshot = <String, dynamic>{};
         _sidecarRepoFlavorHint = SidecarService.repoFlavorUnknown;
         _sidecarVariantHint = SidecarService.defaultVariant;
-        _sidecarProcessCheckedAt = DateTime.now();
-        _sidecarProcessStatusError = 'SSH 연결 안 됨';
         return;
       }
       _safeSetState(() {
         _sidecarProcessSnapshot = <String, String>{};
-        _sidecarCriticalProcSnapshot = <String, String>{};
         _sidecarHealthSnapshot = <String, dynamic>{};
         _sidecarProfileSnapshot = <String, dynamic>{};
-        _sidecarCameraQualitySnapshot = <String, dynamic>{};
         _sidecarRepoFlavorHint = SidecarService.repoFlavorUnknown;
         _sidecarVariantHint = SidecarService.defaultVariant;
-        _sidecarProcessCheckedAt = DateTime.now();
-        _sidecarProcessStatusError = 'SSH 연결 안 됨';
       });
       return;
     }
 
-    final now = DateTime.now();
     final nextProcess = <String, String>{};
     final nextCritical = <String, String>{};
     var nextHealth = <String, dynamic>{};
     var nextProfile = <String, dynamic>{};
-    var nextCameraQuality = <String, dynamic>{};
-    String? nextError;
-    String joinError(String message) =>
-        nextError == null ? message : '$nextError / $message';
     try {
       final statusRaw = await _sidecarService.status(ssh);
       nextProcess.addAll(_parseStatusPairs(statusRaw));
       try {
         final criticalRaw = await _sidecarService.criticalProcStatus(ssh);
         nextCritical.addAll(_parseStatusPairs(criticalRaw));
-      } catch (e) {
-        nextError = joinError('critical proc 조회 실패: $e');
-      }
+      } catch (_) {}
       try {
         nextHealth = await _sidecarGetJson('/health');
-      } catch (e) {
-        nextError = joinError('health 조회 실패: $e');
-      }
+      } catch (_) {}
       try {
         final cameraHealth = await _cameraGetJson('/health');
         final relay = cameraHealth['cameraRelay'];
         if (relay is Map) {
           nextHealth['cameraRelay'] = Map<String, dynamic>.from(relay);
         }
-      } catch (e) {
-        nextError = joinError('camera health 조회 실패: $e');
-      }
+      } catch (_) {}
       try {
         final diagHealth = await _diagGetJson('/health');
         final relay = diagHealth['diagRelay'];
         if (relay is Map) {
           nextHealth['diagRelay'] = Map<String, dynamic>.from(relay);
         }
-      } catch (e) {
-        nextError = joinError('diag health 조회 실패: $e');
-      }
+      } catch (_) {}
       try {
         nextProfile = await _sidecarGetJson('/profile');
-      } catch (e) {
-        nextError = joinError('/profile 조회 실패: $e');
-      }
-      try {
-        nextCameraQuality = await _cameraGetJson('/camera_quality');
-      } catch (e) {
-        nextError = joinError('/camera_quality 조회 실패: $e');
-      }
-    } catch (e) {
-      nextError = e.toString();
-    }
+      } catch (_) {}
+    } catch (_) {}
 
     if (!mounted) {
       _sidecarProcessSnapshot = nextProcess;
-      _sidecarCriticalProcSnapshot = nextCritical;
       _sidecarHealthSnapshot = nextHealth;
       _sidecarProfileSnapshot = nextProfile;
-      _sidecarCameraQualitySnapshot = nextCameraQuality;
-      _sidecarProcessCheckedAt = now;
-      _sidecarProcessStatusError = nextError;
       return;
     }
     _safeSetState(() {
       _sidecarProcessSnapshot = nextProcess;
-      _sidecarCriticalProcSnapshot = nextCritical;
       _sidecarHealthSnapshot = nextHealth;
       _sidecarProfileSnapshot = nextProfile;
-      _sidecarCameraQualitySnapshot = nextCameraQuality;
-      _sidecarProcessCheckedAt = now;
-      _sidecarProcessStatusError = nextError;
     });
   }
 
@@ -722,11 +521,11 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       _sidecarPhase == _SidecarPhase.stopping;
 
   bool get _showSidecarStatusBanner =>
-      !_debugOverlayPreviewMode &&
-      (_isSidecarBusy ||
-          _sidecarPhase == _SidecarPhase.failed ||
-          (_openpilotOverlayMode && !_sidecarConnected) ||
-          (_openpilotOverlayMode && _overlayStaleActive));
+      (!_isDeveloperPlaybackRequested &&
+          (_isSidecarBusy ||
+              _sidecarPhase == _SidecarPhase.failed ||
+              (_openpilotOverlayMode && !_sidecarConnected) ||
+              (_openpilotOverlayMode && _overlayStaleActive)));
 
   String _sidecarStatusTitle() {
     if (_sidecarPhase == _SidecarPhase.failed) return '사이드카 준비 실패';
@@ -1120,7 +919,6 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
 
   Future<void> _ensureSidecarRuntime({String reason = 'auto'}) async {
     if (!_openpilotOverlayMode || _cameraSuspendedByLifecycle) return;
-    if (_debugOverlayPreviewMode) return;
     if (_sidecarAutoManaging) return;
     final preserveVisibleNativeCamera = _useNativeLiveCamera &&
         _nativeCameraViewId != null &&
@@ -1278,8 +1076,6 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
               message: '사이드카 배포/복구 중...',
             );
             await _sidecarService.deploy(ssh);
-            _sidecarLastDeployAt = DateTime.now();
-            _sidecarLastDeployResult = 'success';
             _pushSidecarHistory('AUTO_DEPLOY', 'ok');
             _setSidecarPhase(
               _SidecarPhase.starting,
@@ -1392,9 +1188,6 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       }
       _suppressCameraErrors = false;
     } catch (e) {
-      if (_LiveDriveCanvasScreenState._autoDeployDuringHudRuntime) {
-        _sidecarLastDeployResult = 'fail';
-      }
       _pushSidecarHistory('FAIL', 'auto runtime: $e');
       _setSidecarPhase(
         _SidecarPhase.failed,
@@ -1429,7 +1222,6 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     );
     try {
       await _sidecarService.stop(ssh);
-      _sidecarLastStopAt = DateTime.now();
       _pushSidecarHistory('AUTO_STOP', 'ok');
       unawaited(_refreshSidecarProcessStatus());
     } catch (_) {
@@ -1440,30 +1232,4 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     }
   }
 
-  Color _sidecarProcessStatusColor() {
-    switch (_sidecarProcessStatusLabel) {
-      case 'up':
-        return const Color(0xFF73E07C);
-      case 'up_no_port':
-      case 'port_only':
-        return const Color(0xFFF6B26B);
-      case 'inactive':
-        return Colors.white70;
-      default:
-        return const Color(0xFFFF8A8A);
-    }
-  }
-
-  Color _sidecarCameraStatusColor() {
-    switch (_sidecarCameraReadyLabel) {
-      case 'ready':
-        return const Color(0xFF73E07C);
-      case 'inactive':
-        return Colors.white70;
-      case 'unavailable':
-        return const Color(0xFFF6B26B);
-      default:
-        return const Color(0xFFFF8A8A);
-    }
-  }
 }
