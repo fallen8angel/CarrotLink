@@ -96,7 +96,7 @@ jobs:
 
       - name: Export YOLO to QNN
         env:
-          PYTHONPATH: ${{ env.EXECUTORCH_DIR }}
+          PYTHONPATH: ${{ github.workspace }}/.cache
           LD_LIBRARY_PATH: ${{ env.QNN_SDK_ROOT }}/lib/x86_64-linux-clang
         run: |
           mkdir -p "$EXPORT_DIR"
