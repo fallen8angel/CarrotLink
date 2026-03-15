@@ -1,5 +1,19 @@
 # STOCK Mode YOLO Developer Playback (2026-03-15)
 
+## 2026-03-16 최신 메모
+
+- route 로그 playback은 이제 실제 native playback tick까지 들어간다.
+  - 확인 로그: `runYoloDebugVideoFrame backend=... model=... positionMs=...`
+- 따라서 "안 보임" 이슈는 더 이상 playback 경로 미진입이 아니라, 주로 model/runtime blocker 쪽으로 봐야 한다.
+- playback 우측 상단에는 현재 아래 상태 배지가 추가돼 있다.
+  - `QNN 변환 필요`
+  - `모델 파일 없음`
+  - `실행 확인`
+  - `QNN 검증 완료`
+- `YOLO26n QNN` / `YOLO26s QNN` 선택은 가능하지만, 현재 앱 번들에 실제 QNN-lowered `.pte`가 없어서 선택만으로는 박스가 뜨지 않는다.
+- 최신 전체 handoff는 아래 문서를 본다.
+  - `docs/architecture/yolo/STOCK_MODE_YOLO26_PROGRESS_HANDOFF_2026-03-16_KO.md`
+
 ## 목적
 
 - `alive` 없이도 stock 주행 화면 안에서 YOLO/QNN 상태와 박스/라벨을 테스트한다.

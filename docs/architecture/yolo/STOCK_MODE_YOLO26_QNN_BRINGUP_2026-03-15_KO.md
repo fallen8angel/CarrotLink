@@ -1,5 +1,20 @@
 # CarrotLink Stock Mode YOLO26 QNN Bring-up Notes (2026-03-15)
 
+## 2026-03-16 최신 메모
+
+- 앱 쪽 QNN 슬롯 연결은 끝났다.
+  - Flutter selector: `yolo26n_qnn`, `yolo26s_qnn`
+  - native model catalog도 같은 이름으로 lookup 한다.
+- route playback 경로는 실제로 native `runYoloDebugVideoFrame(...)`까지 들어가는 것이 로그로 확인됐다.
+- generic `.pte`를 `executorch_qnn` backend로 playback에 태우는 경우는 여전히 의도적으로 blocker 처리된다.
+  - 대표 blocker: `qnn_model_not_lowered`
+- 현재 앱 번들에는 generic `.pte`만 있고 QNN-lowered `.pte`는 아직 없다.
+  - 있음: `assets/models/yolo26n.pte`, `assets/models/yolo26s.pte`
+  - 없음: `assets/models/yolo26n_qnn.pte`, `assets/models/yolo26s_qnn.pte`
+- GitHub Actions 기반 QNN export workflow를 `dev`에 올려두었고, 2026-03-16 기준 최근 run #5가 `in_progress` 상태다.
+  - workflow: `.github/workflows/export-yolo-qnn.yml`
+  - 최신 handoff: `docs/architecture/yolo/STOCK_MODE_YOLO26_PROGRESS_HANDOFF_2026-03-16_KO.md`
+
 ## 목적
 
 - 최종 목표 runtime은 `YOLO26n + ExecuTorch + QNN backend`다.

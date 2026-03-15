@@ -1,5 +1,11 @@
 # CarrotLink Stock Mode YOLO26 진행상황 / Handoff (2026-03-10)
 
+## 최신 문서 안내
+
+- 이 문서는 2026-03-10 기준 handoff다.
+- 최신 상태, 남은 작업, 다음 순서는 아래 문서를 우선 본다.
+  - `docs/architecture/yolo/STOCK_MODE_YOLO26_PROGRESS_HANDOFF_2026-03-16_KO.md`
+
 최종 분석일: 2026-03-10  
 최종 업데이트: 2026-03-10  
 대상 경로: `D:\CarrotLink\CarrotLink-dev`
