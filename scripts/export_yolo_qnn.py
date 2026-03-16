@@ -146,6 +146,20 @@ def _resolve_ultralytics_module(weights_path: Path, yolo_cls) -> "torch.nn.Modul
   return candidate
 
 
+def _prime_ultralytics_detect_cache(
+    module: "torch.nn.Module", example_inputs, torch_module
+) -> None:
+  """Warm up Detect anchors/shape so export sees a static inference path."""
+  with torch_module.no_grad():
+    primed = module(*example_inputs)
+  if not isinstance(primed, torch_module.Tensor):
+    normalized = _normalize_output(primed)
+    if not isinstance(normalized, tuple) or not normalized:
+      _fail(
+          "[qnn-export] Ultralytics warm-up did not produce an exportable output."
+      )
+
+
 def _write_metadata(
     *,
     output_dir: Path,
@@ -207,19 +221,12 @@ def main() -> int:
   print(f"[qnn-export] soc={args.soc} use_fp16={args.use_fp16}")
 
   module = _resolve_ultralytics_module(weights_path, yolo_cls)
-
-  class ExportWrapper(torch.nn.Module):
-    def __init__(self, inner_module: torch.nn.Module):
-      super().__init__()
-      self.inner_module = inner_module
-
-    def forward(self, x: torch.Tensor):
-      return _normalize_output(self.inner_module(x))
-
-  wrapped_module = ExportWrapper(module).eval()
   example_inputs = (
       torch.randn(args.batch, 3, args.imgsz, args.imgsz, dtype=torch.float32),
   )
+  _prime_ultralytics_detect_cache(module, example_inputs, torch)
+
+  module = module.eval()
 
   backend_options = generate_htp_compiler_spec(use_fp16=args.use_fp16)
   compile_spec = generate_qnn_executorch_compiler_spec(
@@ -228,7 +235,7 @@ def main() -> int:
   )
 
   delegated_program = to_edge_transform_and_lower_to_qnn(
-      wrapped_module,
+      module,
       example_inputs,
       compile_spec,
   )
