@@ -18,6 +18,9 @@ class _DriveOverlayPainter extends CustomPainter {
   final bool showRadarVector;
   final bool showStopDistanceTf;
   final bool showStateText;
+  final bool showStockTopRight;
+  final bool showLaneMetrics;
+  final bool showDebugPlot;
   final _DriveDebugPlotState debugPlotState;
 
   static const double _baseSourceWidth = 1928.0;
@@ -63,6 +66,9 @@ class _DriveOverlayPainter extends CustomPainter {
     this.showRadarVector = true,
     this.showStopDistanceTf = true,
     this.showStateText = true,
+    this.showStockTopRight = true,
+    this.showLaneMetrics = true,
+    this.showDebugPlot = true,
     this.debugPlotState = const _DriveDebugPlotState.hidden(),
   });
 
@@ -1026,6 +1032,9 @@ class _DriveOverlayPainter extends CustomPainter {
     bool showRadarVector = true,
     bool showStopDistanceTf = true,
     bool showStateText = true,
+    bool showStockTopRight = true,
+    bool showLaneMetrics = true,
+    bool showDebugPlot = true,
     _DriveDebugPlotState debugPlotState = const _DriveDebugPlotState.hidden(),
   }) {
     final painter = _DriveOverlayPainter(
@@ -1046,6 +1055,9 @@ class _DriveOverlayPainter extends CustomPainter {
       showRadarVector: showRadarVector,
       showStopDistanceTf: showStopDistanceTf,
       showStateText: showStateText,
+      showStockTopRight: showStockTopRight,
+      showLaneMetrics: showLaneMetrics,
+      showDebugPlot: showDebugPlot,
       debugPlotState: debugPlotState,
     );
     return painter._buildNativeOverlayPayload(canvasSize);
@@ -1339,18 +1351,19 @@ class _DriveOverlayPainter extends CustomPainter {
   Map<String, dynamic>? _buildNativeOverlayPayload(Size size) {
     final transform = _buildTransform(size);
     final polygons = <Map<String, dynamic>>[];
+    final gradients = <Map<String, dynamic>>[];
     List<Map<String, dynamic>>? labels;
 
     List<Offset>? trackVertices;
     if (snapshot.path.length >= 2) {
-      final modelMax = snapshot.path.x.isNotEmpty ? snapshot.path.x.last : 0.0;
-      final maxDistance = modelMax.clamp(10.0, 100.0);
+      final sceneMaxDistance = _sceneMaxDistanceForOverlay();
+      final pathMaxDistance = _pathMaxDistanceForOverlay(sceneMaxDistance);
       final laneBaseX = snapshot.laneLines.isNotEmpty
           ? snapshot.laneLines.first.line.x
           : snapshot.path.x;
       final laneMaxIdx = laneBaseX.isNotEmpty
-          ? _getPathLengthIdx(laneBaseX, maxDistance)
-          : _getPathLengthIdx(snapshot.path.x, maxDistance);
+          ? _getPathLengthIdx(laneBaseX, sceneMaxDistance)
+          : _getPathLengthIdx(snapshot.path.x, sceneMaxDistance);
 
       if (showLaneLines) {
         for (var i = 0; i < snapshot.laneLines.length; i++) {
@@ -1433,7 +1446,7 @@ class _DriveOverlayPainter extends CustomPainter {
         widthApply,
         zOff,
         zOff,
-        maxDistance,
+        pathMaxDistance,
         startDistance: startDistance,
         allowInvert: false,
       );
@@ -1449,12 +1462,23 @@ class _DriveOverlayPainter extends CustomPainter {
         );
       }
 
-      final sidecarCameraOverlay = _currentCameraOverlay2d();
-      final sidecarHasTfMarker = sidecarCameraOverlay?['tfMarker'] is Map;
-      final usedSidecarLeadRadar = _appendPreferredLeadAndRadarPolygons(
+      final usedSidecarTfMarker = _appendPreferredTfMarker(
         canvasSize: size,
         polygons: polygons,
         labels: labels ??= <Map<String, dynamic>>[],
+      );
+      if (!usedSidecarTfMarker) {
+        _appendProjectedTfMarker(
+          transform: transform,
+          canvasSize: size,
+          polygons: polygons,
+          labels: labels,
+        );
+      }
+      final usedSidecarLeadRadar = _appendPreferredLeadAndRadarPolygons(
+        canvasSize: size,
+        polygons: polygons,
+        labels: labels,
       );
       if (!usedSidecarLeadRadar) {
         _appendProjectedLeadAndRadarPolygons(
@@ -1464,33 +1488,31 @@ class _DriveOverlayPainter extends CustomPainter {
           labels: labels,
         );
       }
-      if (!sidecarHasTfMarker) {
-        _appendProjectedTfMarker(
-          transform: transform,
-          canvasSize: size,
-          polygons: polygons,
-          labels: labels,
-        );
-      }
     }
+    _appendViewportFadeGradients(
+      gradients,
+      canvasSize: size,
+    );
     labels ??= <Map<String, dynamic>>[];
-    _appendLaneModeLabel(
-      canvasSize: size,
-      labels: labels,
-    );
-    _appendLaneDebugMetricsLabel(
-      canvasSize: size,
-      labels: labels,
-    );
-    _appendStockDebugTopRightLabel(
-      canvasSize: size,
-      labels: labels,
-    );
-    _appendDebugPlotPayload(
-      polygons,
-      labels,
-      canvasSize: size,
-    );
+    if (showLaneMetrics) {
+      _appendLaneDebugMetricsLabel(
+        canvasSize: size,
+        labels: labels,
+      );
+    }
+    if (showStockTopRight) {
+      _appendStockDebugTopRightLabel(
+        canvasSize: size,
+        labels: labels,
+      );
+    }
+    if (showDebugPlot) {
+      _appendDebugPlotPayload(
+        polygons,
+        labels,
+        canvasSize: size,
+      );
+    }
     if (labels.isEmpty) labels = null;
 
     if (showDebugGuides) {
@@ -1513,6 +1535,7 @@ class _DriveOverlayPainter extends CustomPainter {
       'sourceWidth': src.width,
       'sourceHeight': src.height,
       'polygons': polygons,
+      if (gradients.isNotEmpty) 'gradients': gradients,
       if (labels != null && labels.isNotEmpty) 'labels': labels,
     };
   }
@@ -2011,6 +2034,87 @@ class _DriveOverlayPainter extends CustomPainter {
     });
   }
 
+  double _fitSingleLineOverlayFontSize({
+    required String text,
+    required double preferredSize,
+    required double maxWidth,
+    double minSize = 4.5,
+    double charWidthFactor = 0.64,
+  }) {
+    final content = text.trim();
+    if (content.isEmpty) return preferredSize;
+    final estimatedWidth =
+        math.max(1.0, content.length * preferredSize * charWidthFactor);
+    if (estimatedWidth <= maxWidth) {
+      return preferredSize;
+    }
+    final scaled = preferredSize * ((maxWidth / estimatedWidth) * 0.985);
+    return _clampDouble(scaled, minSize, preferredSize);
+  }
+
+  Rect _resolvedOverlayViewportRect(Size canvasSize) {
+    final full = Offset.zero & canvasSize;
+    final candidate = (visibleViewportRect ?? full).intersect(full);
+    if (candidate.width < 80.0 || candidate.height < 60.0) {
+      return full;
+    }
+    return candidate;
+  }
+
+  void _appendViewportFadeGradients(
+    List<Map<String, dynamic>> gradients, {
+    required Size canvasSize,
+  }) {
+    final viewportRect = _resolvedOverlayViewportRect(canvasSize);
+    if (viewportRect.width < 40.0 || viewportRect.height < 40.0) return;
+
+    final topHeight =
+        (viewportRect.height * 0.17).clamp(52.0, 124.0).toDouble();
+    final bottomHeight =
+        (viewportRect.height * 0.23).clamp(72.0, 184.0).toDouble();
+
+    void appendGradientRect({
+      required bool top,
+      required double fadeHeight,
+      required double edgeAlpha,
+      required double centerAlpha,
+    }) {
+      const left = 0.0;
+      final right = canvasSize.width;
+      final topY = top ? viewportRect.top : viewportRect.bottom - fadeHeight;
+      final bottomY = top ? viewportRect.top + fadeHeight : viewportRect.bottom;
+      gradients.add(<String, dynamic>{
+        'left': left,
+        'top': topY,
+        'right': right,
+        'bottom': bottomY,
+        'startX': left,
+        'startY': top ? topY : bottomY,
+        'endX': left,
+        'endY': top ? bottomY : topY,
+        'colors': <int>[
+          Colors.black.withValues(alpha: edgeAlpha).toARGB32(),
+          Colors.black.withValues(alpha: centerAlpha).toARGB32(),
+          Colors.transparent.toARGB32(),
+        ],
+        'stops': const <double>[0.0, 0.42, 1.0],
+      });
+    }
+
+    appendGradientRect(
+      top: true,
+      fadeHeight: topHeight,
+      edgeAlpha: 0.52,
+      centerAlpha: 0.18,
+    );
+    appendGradientRect(
+      top: false,
+      fadeHeight: bottomHeight,
+      edgeAlpha: 0.66,
+      centerAlpha: 0.24,
+    );
+  }
+
   String _formatTfMarkerText(double distance, double tFollow) {
     return '${distance.toStringAsFixed(1)}(${tFollow.toStringAsFixed(2)})';
   }
@@ -2042,39 +2146,59 @@ class _DriveOverlayPainter extends CustomPainter {
     required Size canvasSize,
     required List<Map<String, dynamic>> labels,
   }) {
-    final text = snapshot.stockDebugTopRightText.trim();
+    final text = snapshot.stockDebugTopRightText
+        .split('\n')
+        .map((line) => line.trim())
+        .firstWhere((line) => line.isNotEmpty, orElse: () => '');
     if (text.isEmpty) return;
-    final exactC3Mode = canvasSize.width >= 1280.0 && canvasSize.height >= 720.0;
+    final exactC3Mode =
+        canvasSize.width >= 1280.0 && canvasSize.height >= 720.0;
     final baseScale = math.min(
       canvasSize.width / 1920.0,
       canvasSize.height / 1080.0,
     );
-    final scale = _clampDouble(baseScale, 0.56, 1.0);
-    final marginX =
-        exactC3Mode ? 30.0 : _clampDouble(30.0 * scale, 16.0, 30.0);
-    final marginTop =
-        exactC3Mode ? 0.0 : _clampDouble(8.0 * scale, 4.0, 10.0);
-    final maxWidth = math.max(120.0, canvasSize.width - (marginX * 2.0));
-    var fontSize =
-        exactC3Mode ? 30.0 : _clampDouble(30.0 * scale, 16.0, 30.0);
-    final widthFactor = math.max(1.0, text.length * 0.57);
-    fontSize = math.min(fontSize, maxWidth / widthFactor);
-    fontSize = _clampDouble(fontSize, 14.0, 30.0);
+    final viewportRect = _resolvedOverlayViewportRect(canvasSize);
+    final scale = _clampDouble(baseScale, 0.48, 1.0);
+    final edgeInsetX = exactC3Mode ? 1.5 : _clampDouble(2.0 * scale, 1.0, 2.5);
+    final edgeInsetTop =
+        exactC3Mode ? 1.5 : _clampDouble(2.0 * scale, 1.0, 2.5);
+    final maxWidth = math.max(120.0, viewportRect.width - (edgeInsetX * 2.0));
+    final preferredFontSize =
+        exactC3Mode ? 24.0 : _clampDouble(24.0 * scale, 7.0, 24.0);
+    final fontSize = _fitSingleLineOverlayFontSize(
+      text: text,
+      preferredSize: preferredFontSize,
+      maxWidth: maxWidth,
+      minSize: 4.5,
+      charWidthFactor: 0.69,
+    );
+    final labelAlpha = _overlayPhaseLabelAlpha(phaseShift: 0.0);
     labels.add(<String, dynamic>{
-      'x': canvasSize.width - marginX,
-      'y': marginTop,
+      'x': viewportRect.right - edgeInsetX,
+      'y': viewportRect.top + edgeInsetTop,
       'text': text,
-      'color': const Color(0xFFF4F4F4).toARGB32(),
-      'strokeColor': const Color(0xEE000000).toARGB32(),
-      'strokeWidth': 1.8,
+      'color': const Color(0xFFF4F4F4).withValues(alpha: labelAlpha).toARGB32(),
+      'strokeColor': const Color(0xEE000000)
+          .withValues(alpha: _clampDouble(labelAlpha + 0.08, 0.0, 1.0))
+          .toARGB32(),
+      'strokeWidth': _clampDouble(4.2 * scale, 2.8, 5.4),
       'size': fontSize,
-      'fontWeight': 700,
+      'fontWeight': 900,
       'alignX': 'right',
       'alignY': 'top',
       'maxWidth': maxWidth,
       'maxLines': 1,
-      if (!exactC3Mode) 'ellipsis': '...',
     });
+  }
+
+  double _overlayPhaseLabelAlpha({required double phaseShift}) {
+    if (snapshot.pathMode < 1 || snapshot.pathMode > 8) {
+      return 0.94;
+    }
+    final wave =
+        (math.sin((snapshot.animationPhase * 0.78) + phaseShift) + 1.0) * 0.5;
+    final eased = math.pow(wave, 1.7).toDouble();
+    return _clampDouble(0.14 + (eased * 0.86), 0.14, 1.0);
   }
 
   bool _hasNearbyAssistLead(_RadarLeadSample? lead, double speedMps) {
@@ -2091,8 +2215,14 @@ class _DriveOverlayPainter extends CustomPainter {
 
   String _laneDebugText() {
     final raw = snapshot.latDebugText.trim();
-    if (raw.isEmpty) return '';
-    return raw;
+    final modeText = snapshot.useLaneLineSpeed > 0 ? 'LaneMode' : 'Laneless';
+    if (raw.isEmpty) return modeText;
+    final normalized = raw.toLowerCase();
+    if (normalized.startsWith('lanemode') ||
+        normalized.startsWith('laneless')) {
+      return raw;
+    }
+    return '$modeText | $raw';
   }
 
   void _appendBlindSpotBarrierPolygons({
@@ -2166,44 +2296,6 @@ class _DriveOverlayPainter extends CustomPainter {
     }
   }
 
-  void _appendLaneModeLabel({
-    required Size canvasSize,
-    required List<Map<String, dynamic>> labels,
-  }) {
-    if (!isConnected || cameraKind != _DriveCameraKind.road) return;
-    final exactC3Mode = canvasSize.width >= 1280.0 && canvasSize.height >= 720.0;
-    final baseScale = math.min(
-      canvasSize.width / 1920.0,
-      canvasSize.height / 1080.0,
-    );
-    final scale = _clampDouble(baseScale, 0.56, 1.0);
-    final text = snapshot.useLaneLineSpeed > 0 ? 'LaneMode' : 'Laneless';
-    final textColor = snapshot.useLaneLineSpeed > 0
-        ? const Color(0xFF23D55D)
-        : const Color(0xFFFFD95E);
-    final fontSize = exactC3Mode
-        ? 26.0
-        : _clampDouble(26.0 * scale, 16.0, 26.0);
-    final bottomInset = exactC3Mode
-        ? 54.0
-        : _clampDouble(54.0 * scale, 30.0, 56.0);
-    labels.add(<String, dynamic>{
-      'x': canvasSize.width * 0.5,
-      'y': canvasSize.height - bottomInset,
-      'text': text,
-      'color': textColor.toARGB32(),
-      'strokeColor': const Color(0xE6000000).toARGB32(),
-      'strokeWidth': _clampDouble(2.2 * scale, 1.4, 2.6),
-      'size': fontSize,
-      'fontWeight': 700,
-      'alignX': 'center',
-      'alignY': 'baselineBottom',
-      'maxWidth': canvasSize.width * 0.42,
-      'maxLines': 1,
-      if (!exactC3Mode) 'ellipsis': '...',
-    });
-  }
-
   void _appendLaneDebugMetricsLabel({
     required Size canvasSize,
     required List<Map<String, dynamic>> labels,
@@ -2211,35 +2303,41 @@ class _DriveOverlayPainter extends CustomPainter {
     if (!isConnected || cameraKind != _DriveCameraKind.road) return;
     final text = _laneDebugText();
     if (text.isEmpty) return;
-    final exactC3Mode = canvasSize.width >= 1280.0 && canvasSize.height >= 720.0;
+    final exactC3Mode =
+        canvasSize.width >= 1280.0 && canvasSize.height >= 720.0;
     final baseScale = math.min(
       canvasSize.width / 1920.0,
       canvasSize.height / 1080.0,
     );
-    final scale = _clampDouble(baseScale, 0.56, 1.0);
-    var fontSize =
-        exactC3Mode ? 30.0 : _clampDouble(30.0 * scale, 16.0, 30.0);
-    final maxWidth = canvasSize.width * 0.90;
-    final widthFactor = math.max(1.0, text.length * 0.57);
-    fontSize = math.min(fontSize, maxWidth / widthFactor);
-    fontSize = _clampDouble(fontSize, 11.0, 30.0);
-    final bottomInset = exactC3Mode
-        ? 0.0
-        : _clampDouble(18.0 * scale, 12.0, 22.0);
+    final viewportRect = _resolvedOverlayViewportRect(canvasSize);
+    final scale = _clampDouble(baseScale, 0.48, 1.0);
+    final maxWidth = math.max(120.0, viewportRect.width - 4.0);
+    final preferredFontSize =
+        exactC3Mode ? 24.0 : _clampDouble(24.0 * scale, 7.0, 24.0);
+    final fontSize = _fitSingleLineOverlayFontSize(
+      text: text,
+      preferredSize: preferredFontSize,
+      maxWidth: maxWidth,
+      minSize: 4.5,
+      charWidthFactor: 0.69,
+    );
+    final bottomInset = exactC3Mode ? 1.5 : _clampDouble(2.0 * scale, 1.0, 2.5);
+    final labelAlpha = _overlayPhaseLabelAlpha(phaseShift: math.pi);
     labels.add(<String, dynamic>{
-      'x': canvasSize.width * 0.5,
-      'y': canvasSize.height - bottomInset,
+      'x': viewportRect.center.dx,
+      'y': viewportRect.bottom - bottomInset,
       'text': text,
-      'color': const Color(0xFFECECEC).toARGB32(),
-      'strokeColor': const Color(0xF0000000).toARGB32(),
-      'strokeWidth': _clampDouble(2.4 * scale, 1.4, 3.0),
+      'color': const Color(0xFFECECEC).withValues(alpha: labelAlpha).toARGB32(),
+      'strokeColor': const Color(0xF0000000)
+          .withValues(alpha: _clampDouble(labelAlpha + 0.08, 0.0, 1.0))
+          .toARGB32(),
+      'strokeWidth': _clampDouble(4.0 * scale, 2.8, 5.2),
       'size': fontSize,
-      'fontWeight': 600,
+      'fontWeight': 900,
       'alignX': 'center',
       'alignY': 'baselineBottom',
       'maxWidth': maxWidth,
       'maxLines': 1,
-      if (!exactC3Mode) 'ellipsis': '...',
     });
   }
 
@@ -2630,7 +2728,6 @@ class _DriveOverlayPainter extends CustomPainter {
     required bool showLead2,
     required bool showRadarBadge,
     required bool showRadarVector,
-    required bool showStopDistanceTf,
     required bool showStateText,
   }) {
     final cameraFrameId = _DriveOverlaySnapshot._asInt(cam['cameraFrameId']);
@@ -2648,10 +2745,9 @@ class _DriveOverlayPainter extends CustomPainter {
     final showRadarInfo = meta is Map
         ? (_DriveOverlaySnapshot._asInt(meta['showRadarInfo']) ?? 0)
         : 0;
-    final xState =
-        meta is Map
-            ? (_DriveOverlaySnapshot._asInt(meta['xState']) ?? snapshot.xState)
-            : snapshot.xState;
+    final xState = meta is Map
+        ? (_DriveOverlaySnapshot._asInt(meta['xState']) ?? snapshot.xState)
+        : snapshot.xState;
     final trafficState = meta is Map
         ? (_DriveOverlaySnapshot._asInt(meta['trafficState']) ??
             snapshot.trafficState)
@@ -2812,52 +2908,6 @@ class _DriveOverlayPainter extends CustomPainter {
       }
     }
 
-    final tfRaw = cam['tfMarker'];
-    if (showStopDistanceTf && tfRaw is Map) {
-      final tf = Map<String, dynamic>.from(tfRaw);
-      final mapped = _mapSourcePointsToCanvas(
-        _decodeOverlayPoints(tf['points']),
-        canvasSize: canvasSize,
-        sourceWidth: sourceWidth,
-        sourceHeight: sourceHeight,
-        displayTransform: displayTransform,
-      );
-      if (mapped.length >= 2) {
-        final left = mapped.first;
-        final right = mapped.last;
-        _appendDebugLinePolygon(
-          polygons,
-          a: left,
-          b: right,
-          color: Colors.white,
-          thickness: 3.0,
-        );
-        final dist = _DriveOverlaySnapshot._asDouble(tf['distance']) ?? 0.0;
-        final tFollow = _DriveOverlaySnapshot._asDouble(tf['tFollow']) ?? 0.0;
-        if (dist > 0.0) {
-          final labelText = _formatTfMarkerText(dist, tFollow);
-          final labelSize = _clampDouble(20.0 * sourceScale, 16.0, 24.0);
-          final labelAnchor = _clampTfMarkerLabelAnchor(
-            canvasSize: canvasSize,
-            lineRight: right,
-            sourceScale: sourceScale,
-            text: labelText,
-            fontSize: labelSize,
-          );
-          _appendOverlayLabel(
-            labels,
-            anchor: labelAnchor,
-            text: labelText,
-            color: Colors.white,
-            strokeColor: Colors.black,
-            strokeWidth: 1.8,
-            size: labelSize,
-            centered: false,
-          );
-        }
-      }
-    }
-
     if (showStateText && stateText != null) {
       dynamic leadOneAnchorRaw;
       if (leadRaw is List) {
@@ -2987,6 +3037,65 @@ class _DriveOverlayPainter extends CustomPainter {
     }
   }
 
+  void _appendSidecarTfMarker({
+    required Map<String, dynamic> cam,
+    required Size canvasSize,
+    required double sourceWidth,
+    required double sourceHeight,
+    required Map<String, dynamic>? displayTransform,
+    required List<Map<String, dynamic>> polygons,
+    required List<Map<String, dynamic>> labels,
+    required bool showStopDistanceTf,
+  }) {
+    final tfRaw = cam['tfMarker'];
+    if (!showStopDistanceTf || tfRaw is! Map) return;
+    final sourceScale = _sourceToCanvasPlacementFromDisplayTransform(
+      source: Size(sourceWidth, sourceHeight),
+      canvas: canvasSize,
+      displayTransform: displayTransform,
+    ).scale;
+    final tf = Map<String, dynamic>.from(tfRaw);
+    final mapped = _mapSourcePointsToCanvas(
+      _decodeOverlayPoints(tf['points']),
+      canvasSize: canvasSize,
+      sourceWidth: sourceWidth,
+      sourceHeight: sourceHeight,
+      displayTransform: displayTransform,
+    );
+    if (mapped.length < 2) return;
+    final left = mapped.first;
+    final right = mapped.last;
+    _appendDebugLinePolygon(
+      polygons,
+      a: left,
+      b: right,
+      color: Colors.white,
+      thickness: 3.0,
+    );
+    final dist = _DriveOverlaySnapshot._asDouble(tf['distance']) ?? 0.0;
+    final tFollow = _DriveOverlaySnapshot._asDouble(tf['tFollow']) ?? 0.0;
+    if (dist <= 0.0) return;
+    final labelText = _formatTfMarkerText(dist, tFollow);
+    final labelSize = _clampDouble(20.0 * sourceScale, 16.0, 24.0);
+    final labelAnchor = _clampTfMarkerLabelAnchor(
+      canvasSize: canvasSize,
+      lineRight: right,
+      sourceScale: sourceScale,
+      text: labelText,
+      fontSize: labelSize,
+    );
+    _appendOverlayLabel(
+      labels,
+      anchor: labelAnchor,
+      text: labelText,
+      color: Colors.white,
+      strokeColor: Colors.black,
+      strokeWidth: 1.8,
+      size: labelSize,
+      centered: false,
+    );
+  }
+
   double _sampleModelZAtDistance(double distance) {
     final modelPath =
         snapshot.modelPath.length >= 2 ? snapshot.modelPath : snapshot.path;
@@ -3008,7 +3117,8 @@ class _DriveOverlayPainter extends CustomPainter {
     if (snapshot.laneLines.length >= 3) {
       final lane = snapshot.laneLines[2].line;
       if (lane.length >= 2) {
-        final xs = _monotonicX(lane.x.take(lane.length).toList(growable: false));
+        final xs =
+            _monotonicX(lane.x.take(lane.length).toList(growable: false));
         if (xs.isNotEmpty) {
           final zs = lane.z.take(lane.length).toList(growable: false);
           final idxs = List<double>.generate(
@@ -3024,6 +3134,52 @@ class _DriveOverlayPainter extends CustomPainter {
     return _sampleModelZAtDistance(distance);
   }
 
+  double _sceneMaxDistanceForOverlay() {
+    final modelMax = snapshot.path.x.isNotEmpty ? snapshot.path.x.last : 0.0;
+    var maxDistance = modelMax.clamp(10.0, 100.0).toDouble();
+    final leadOne = snapshot.leadOne;
+    if (leadOne != null &&
+        leadOne.status &&
+        leadOne.dRel.isFinite &&
+        leadOne.dRel > 0.0) {
+      maxDistance = math.min(maxDistance, leadOne.dRel);
+    }
+    return maxDistance;
+  }
+
+  double _pathMaxDistanceForOverlay(double sceneMaxDistance) {
+    return math.max(0.0, sceneMaxDistance - 2.0);
+  }
+
+  bool _appendPreferredTfMarker({
+    required Size canvasSize,
+    required List<Map<String, dynamic>> polygons,
+    required List<Map<String, dynamic>> labels,
+  }) {
+    final cam = _currentCameraOverlay2d();
+    if (cam == null || cam['tfMarker'] is! Map) return false;
+    final sourceWidth =
+        _DriveOverlaySnapshot._asDouble(cam['sourceWidth']) ?? _baseSourceWidth;
+    final sourceHeight = _DriveOverlaySnapshot._asDouble(cam['sourceHeight']) ??
+        _baseSourceHeight;
+    final displayTransformRaw = cam['displayTransform'];
+    final displayTransform = displayTransformRaw is Map
+        ? Map<String, dynamic>.from(displayTransformRaw)
+        : null;
+
+    _appendSidecarTfMarker(
+      cam: cam,
+      canvasSize: canvasSize,
+      sourceWidth: sourceWidth,
+      sourceHeight: sourceHeight,
+      displayTransform: displayTransform,
+      polygons: polygons,
+      labels: labels,
+      showStopDistanceTf: showStopDistanceTf,
+    );
+    return true;
+  }
+
   bool _appendPreferredLeadAndRadarPolygons({
     required Size canvasSize,
     required List<Map<String, dynamic>> polygons,
@@ -3033,8 +3189,7 @@ class _DriveOverlayPainter extends CustomPainter {
     if (cam == null) return false;
     final hasLeadBoxes = cam['leadAreaBoxes'] is List;
     final hasRadarTargets = cam['radarTargets'] is List;
-    final hasTfMarker = cam['tfMarker'] is Map;
-    if (!hasLeadBoxes && !hasRadarTargets && !hasTfMarker) {
+    if (!hasLeadBoxes && !hasRadarTargets) {
       return false;
     }
     final sourceWidth =
@@ -3061,7 +3216,6 @@ class _DriveOverlayPainter extends CustomPainter {
       showLead2: showLead2,
       showRadarBadge: showRadarBadge,
       showRadarVector: showRadarVector,
-      showStopDistanceTf: showStopDistanceTf,
       showStateText: showStateText,
     );
     return true;
@@ -3121,8 +3275,9 @@ class _DriveOverlayPainter extends CustomPainter {
       prevFy = _emaFy1;
       prevFw = _emaFw1;
     }
-    final bool trackChanged =
-        prevTrackId != lead.radarTrackId || !prevFx.isFinite || !prevFy.isFinite;
+    final bool trackChanged = prevTrackId != lead.radarTrackId ||
+        !prevFx.isFinite ||
+        !prevFy.isFinite;
     final double emaAlpha;
     if (lead.dRel <= 14.0) {
       emaAlpha = _leadCloseEmaAlpha;
@@ -3212,10 +3367,9 @@ class _DriveOverlayPainter extends CustomPainter {
     final showRadarInfo = meta is Map
         ? (_DriveOverlaySnapshot._asInt(meta['showRadarInfo']) ?? 0)
         : 0;
-    final xState =
-        meta is Map
-            ? (_DriveOverlaySnapshot._asInt(meta['xState']) ?? snapshot.xState)
-            : snapshot.xState;
+    final xState = meta is Map
+        ? (_DriveOverlaySnapshot._asInt(meta['xState']) ?? snapshot.xState)
+        : snapshot.xState;
     final trafficState = meta is Map
         ? (_DriveOverlaySnapshot._asInt(meta['trafficState']) ??
             snapshot.trafficState)
@@ -3852,6 +4006,64 @@ class _DriveOverlayPainter extends CustomPainter {
       }
     }
 
+    final gradientsRaw = payload['gradients'];
+    if (gradientsRaw is List) {
+      for (final item in gradientsRaw) {
+        if (item is! Map) continue;
+        final left = _DriveOverlaySnapshot._asDouble(item['left']);
+        final top = _DriveOverlaySnapshot._asDouble(item['top']);
+        final right = _DriveOverlaySnapshot._asDouble(item['right']);
+        final bottom = _DriveOverlaySnapshot._asDouble(item['bottom']);
+        final startX = _DriveOverlaySnapshot._asDouble(item['startX']);
+        final startY = _DriveOverlaySnapshot._asDouble(item['startY']);
+        final endX = _DriveOverlaySnapshot._asDouble(item['endX']);
+        final endY = _DriveOverlaySnapshot._asDouble(item['endY']);
+        final colorsRaw = item['colors'];
+        final stopsRaw = item['stops'];
+        if (left == null ||
+            top == null ||
+            right == null ||
+            bottom == null ||
+            startX == null ||
+            startY == null ||
+            endX == null ||
+            endY == null ||
+            colorsRaw is! List ||
+            stopsRaw is! List ||
+            colorsRaw.length < 2 ||
+            colorsRaw.length != stopsRaw.length) {
+          continue;
+        }
+        final colors = <Color>[];
+        final stops = <double>[];
+        var ok = true;
+        for (var i = 0; i < colorsRaw.length; i++) {
+          final colorInt = _DriveOverlaySnapshot._asInt(colorsRaw[i]);
+          final stop = _DriveOverlaySnapshot._asDouble(stopsRaw[i]);
+          if (colorInt == null || stop == null) {
+            ok = false;
+            break;
+          }
+          colors.add(Color(colorInt));
+          stops.add(stop.clamp(0.0, 1.0));
+        }
+        if (!ok) continue;
+        final rect = Rect.fromLTRB(left, top, right, bottom);
+        if (rect.width <= 0.0 || rect.height <= 0.0) continue;
+        canvas.drawRect(
+          rect,
+          Paint()
+            ..shader = ui.Gradient.linear(
+              Offset(startX, startY),
+              Offset(endX, endY),
+              colors,
+              stops,
+              TileMode.clamp,
+            ),
+        );
+      }
+    }
+
     final labelsRaw = payload['labels'];
     if (labelsRaw is! List || labelsRaw.isEmpty) return;
     final tp = TextPainter(
@@ -3870,10 +4082,11 @@ class _DriveOverlayPainter extends CustomPainter {
       final strokeWidth =
           (_DriveOverlaySnapshot._asDouble(item['strokeWidth']) ?? 0.0)
               .clamp(0.0, 8.0);
-      final sizePx = (_DriveOverlaySnapshot._asDouble(item['size']) ?? 16.0)
-          .clamp(8.0, 72.0);
+      var sizePx = (_DriveOverlaySnapshot._asDouble(item['size']) ?? 16.0)
+          .clamp(4.5, 72.0);
       final maxLinesRaw = _DriveOverlaySnapshot._asInt(item['maxLines']);
-      final maxLines = maxLinesRaw != null && maxLinesRaw > 0 ? maxLinesRaw : null;
+      final maxLines =
+          maxLinesRaw != null && maxLinesRaw > 0 ? maxLinesRaw : null;
       final ellipsis = item['ellipsis']?.toString();
       final fontWeightRaw =
           _DriveOverlaySnapshot._asInt(item['fontWeight']) ?? 700;
@@ -3905,6 +4118,31 @@ class _DriveOverlayPainter extends CustomPainter {
         'center' || 'middle' => 'middle',
         _ => centered ? 'middle' : 'bottom',
       };
+      final labelMaxWidth =
+          (_DriveOverlaySnapshot._asDouble(item['maxWidth']) ??
+                  (canvasSize.width * 0.42))
+              .clamp(120.0, 1600.0);
+      final shouldScaleSingleLine = (maxLines == null || maxLines <= 1) &&
+          (ellipsis == null || ellipsis.isEmpty);
+      if (shouldScaleSingleLine) {
+        tp.text = TextSpan(
+          text: text,
+          style: TextStyle(
+            color: Color(colorInt),
+            fontSize: sizePx,
+            fontWeight: fontWeight,
+          ),
+        );
+        tp.maxLines = 1;
+        tp.ellipsis = null;
+        tp.layout();
+        if (tp.width > labelMaxWidth && tp.width > 1.0) {
+          sizePx = (sizePx * ((labelMaxWidth / tp.width) * 0.985)).clamp(
+            4.5,
+            sizePx,
+          );
+        }
+      }
       tp.text = TextSpan(
         text: text,
         style: TextStyle(
@@ -3913,9 +4151,6 @@ class _DriveOverlayPainter extends CustomPainter {
           fontWeight: fontWeight,
         ),
       );
-      final labelMaxWidth = (_DriveOverlaySnapshot._asDouble(item['maxWidth']) ??
-              (canvasSize.width * 0.42))
-          .clamp(140.0, 1600.0);
       tp.maxLines = maxLines;
       tp.ellipsis = ellipsis;
       tp.layout(maxWidth: labelMaxWidth.toDouble());
@@ -3965,21 +4200,22 @@ class _DriveOverlayPainter extends CustomPainter {
     Size size,
   ) {
     if (snapshot.path.length < 2) {
-      final plotPayload = _buildDebugPlotOverlayPayload(size);
+      final plotPayload =
+          showDebugPlot ? _buildDebugPlotOverlayPayload(size) : null;
       if (plotPayload != null) {
         _drawEncodedOverlayPayload(canvas, size, plotPayload);
       }
       return;
     }
     final transform = _buildTransform(size);
-    final modelMax = snapshot.path.x.isNotEmpty ? snapshot.path.x.last : 0.0;
-    final maxDistance = modelMax.clamp(10.0, 100.0);
+    final sceneMaxDistance = _sceneMaxDistanceForOverlay();
+    final pathMaxDistance = _pathMaxDistanceForOverlay(sceneMaxDistance);
     final laneBaseX = snapshot.laneLines.isNotEmpty
         ? snapshot.laneLines.first.line.x
         : snapshot.path.x;
     final laneMaxIdx = laneBaseX.isNotEmpty
-        ? _getPathLengthIdx(laneBaseX, maxDistance)
-        : _getPathLengthIdx(snapshot.path.x, maxDistance);
+        ? _getPathLengthIdx(laneBaseX, sceneMaxDistance)
+        : _getPathLengthIdx(snapshot.path.x, sceneMaxDistance);
 
     if (showLaneLines) {
       final laneFill = Paint()..style = PaintingStyle.fill;
@@ -4049,7 +4285,7 @@ class _DriveOverlayPainter extends CustomPainter {
       widthApply,
       zOff,
       zOff,
-      maxDistance,
+      pathMaxDistance,
       startDistance: startDistance,
       allowInvert: false,
     );
@@ -4064,7 +4300,25 @@ class _DriveOverlayPainter extends CustomPainter {
         trackVertices: trackVertices,
       );
     }
-    final plotPayload = _buildDebugPlotOverlayPayload(size);
+    final fadeGradients = <Map<String, dynamic>>[];
+    _appendViewportFadeGradients(
+      fadeGradients,
+      canvasSize: size,
+    );
+    if (fadeGradients.isNotEmpty) {
+      _drawEncodedOverlayPayload(
+        canvas,
+        size,
+        <String, dynamic>{
+          'version': 3,
+          'canvasWidth': size.width,
+          'canvasHeight': size.height,
+          'gradients': fadeGradients,
+        },
+      );
+    }
+    final plotPayload =
+        showDebugPlot ? _buildDebugPlotOverlayPayload(size) : null;
     if (plotPayload != null) {
       _drawEncodedOverlayPayload(canvas, size, plotPayload);
     }
@@ -4089,6 +4343,9 @@ class _DriveOverlayPainter extends CustomPainter {
         oldDelegate.showRadarVector != showRadarVector ||
         oldDelegate.showStopDistanceTf != showStopDistanceTf ||
         oldDelegate.showStateText != showStateText ||
+        oldDelegate.showStockTopRight != showStockTopRight ||
+        oldDelegate.showLaneMetrics != showLaneMetrics ||
+        oldDelegate.showDebugPlot != showDebugPlot ||
         oldDelegate.debugPlotState != debugPlotState;
   }
 }

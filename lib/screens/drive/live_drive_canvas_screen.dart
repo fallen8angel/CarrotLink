@@ -3,6 +3,7 @@ import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
@@ -182,6 +183,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   int _lastNativeOverlayPushUs = 0;
   static const int _nativeOverlayPushIntervalUs = 16666;
   bool _nativeOverlayPushBusy = false;
+  int _nativeOverlayRelayoutEpoch = 0;
+  int _nativeOverlayRelayoutGraceUntilUs = 0;
   _DriveOverlaySnapshot? _pendingNativeOverlaySnapshot;
   bool _pendingNativeOverlayForce = false;
 
@@ -211,11 +214,14 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const bool _strictFrameLock = true;
   static const int _strictFrameHoldUs = 120000;
   static const int _cameraFrameStaleUs = 350000;
+  static const int _cameraHealthyFrameAgeUs = 1200000;
   static const int _startupProvisionalSyncWindowUs = 4000000;
   static const int _startupProvisionalNativeSettleFrames = 3;
   static const int _interpMinUs = 6000;
   static const int _interpMaxUs = 50000;
   static const Duration _cameraDiagCaptureCooldown = Duration(seconds: 12);
+  static const Duration _cameraTransientErrorEscalationDelay =
+      Duration(seconds: 5);
   static const Duration _lifecycleSuspendDelay = Duration(milliseconds: 3200);
   static const Duration _sidecarWarmProcessKeepAlive = Duration(seconds: 35);
   static const Duration _backgroundProcessKeepAlive = Duration(seconds: 45);
@@ -266,6 +272,10 @@ fi
   int? _lastCameraFrameId;
   int _lastCameraFrameEventUs = 0;
   int _cameraErrorGraceUntilUs = 0;
+  Timer? _cameraTransientErrorTimer;
+  String? _cameraTransientErrorSource;
+  String? _cameraTransientErrorReason;
+  String? _cameraTransientErrorMessage;
   int? _lastPublishedModelFrameId;
   int _lastSyncHitUs = 0;
   int _lastOverlayPublishUs = 0;
@@ -310,6 +320,9 @@ fi
   bool _debugShowRadarVector = true;
   bool _debugShowStopDistanceTf = true;
   bool _debugShowStateText = true;
+  bool _debugShowStockTopRight = true;
+  bool _debugShowLaneMetrics = true;
+  bool _debugShowDebugPlot = true;
   // Developer-only offline playback lives next to the live stock path on
   // purpose so it can be removed later without rewriting the production
   // native/web camera feed logic.
@@ -371,7 +384,10 @@ fi
   bool _adaptiveCameraQualitySynced = false;
   bool? _sidecarBootstrapDone;
   int _lastDebugPlotSampleUs = 0;
+  int _lastDebugPlotQueueUs = 0;
+  _DriveDebugPlotSample? _latestDebugPlotSample;
   static const int _debugPlotMissingClearGraceUs = 1500000;
+  static const int _debugPlotTargetQueueIntervalUs = 33333;
 
   final ValueNotifier<_DriveOverlaySnapshot> _overlayNotifier =
       ValueNotifier<_DriveOverlaySnapshot>(
@@ -879,6 +895,8 @@ fi
     _sidecarRecoveryTimer = null;
     _overlayDisconnectDebounce?.cancel();
     _overlayDisconnectDebounce = null;
+    _cameraTransientErrorTimer?.cancel();
+    _cameraTransientErrorTimer = null;
     _hudNoticeTimer?.cancel();
     _hudNoticeTimer = null;
     _stopAdaptiveCameraQualityLoop(resetMode: true);

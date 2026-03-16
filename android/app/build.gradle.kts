@@ -13,6 +13,9 @@ val useLocalExecuTorchAar =
     requestedLocalExecuTorchAar ?: localExecuTorchAar.exists()
 val effectiveLocalExecuTorchAar =
     useLocalExecuTorchAar && localExecuTorchAar.exists()
+val requestedQnnLoweredRuntime =
+    project.findProperty("enableQnnLoweredRuntime")?.toString()?.toBooleanStrictOrNull()
+val enableQnnLoweredRuntime = requestedQnnLoweredRuntime ?: false
 val configuredQnnSdkRoot =
     project
         .findProperty("qnnSdkRoot")
@@ -21,11 +24,21 @@ val configuredQnnSdkRoot =
         ?.takeIf { it.isNotEmpty() }
         ?.let { file(it) }
 val envQnnSdkRoot = System.getenv("QNN_SDK_ROOT")?.trim()?.takeIf { it.isNotEmpty() }?.let { file(it) }
-val defaultQnnSdkRoot = file("../../../yolo/2.32.6.250402")
+val defaultQnnSdkRoot =
+    listOf(
+            file("../../../yolo/2.37.0.250724"),
+            file("../../../yolo/2.32.6.250402"),
+        )
+        .firstOrNull { it.exists() }
 val localQnnSdkRoot =
     configuredQnnSdkRoot?.takeIf { it.exists() }
         ?: envQnnSdkRoot?.takeIf { it.exists() }
-        ?: defaultQnnSdkRoot.takeIf { it.exists() }
+        ?: defaultQnnSdkRoot
+val resolvedQnnSdkVersion = localQnnSdkRoot?.name ?: ""
+val autoEnableQnnLoweredRuntime =
+    effectiveLocalExecuTorchAar &&
+        (localQnnSdkRoot?.exists() == true) &&
+        resolvedQnnSdkVersion == "2.37.0.250724"
 val localQnnAndroidLibDir = localQnnSdkRoot?.resolve("lib/aarch64-android")
 val useLocalQnnSdk = effectiveLocalExecuTorchAar && (localQnnAndroidLibDir?.exists() == true)
 val generatedQnnJniDir = layout.buildDirectory.dir("generated/qnnJni/main")
@@ -118,9 +131,19 @@ android {
             useLocalQnnSdk.toString(),
         )
         buildConfigField(
+            "boolean",
+            "ENABLE_QNN_LOWERED_RUNTIME",
+            (requestedQnnLoweredRuntime ?: autoEnableQnnLoweredRuntime).toString(),
+        )
+        buildConfigField(
             "String",
             "QNN_SDK_PACKAGING_MODE",
             "\"${if (useLocalQnnSdk) "local_sdk" else "none"}\"",
+        )
+        buildConfigField(
+            "String",
+            "QNN_SDK_VERSION",
+            "\"$resolvedQnnSdkVersion\"",
         )
     }
 

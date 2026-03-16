@@ -21,6 +21,9 @@ extension _LiveDriveCanvasSettingsPopupComponents
         _debugShowRadarVector = true;
         _debugShowStopDistanceTf = true;
         _debugShowStateText = true;
+        _debugShowStockTopRight = true;
+        _debugShowLaneMetrics = true;
+        _debugShowDebugPlot = true;
       });
     }
 
@@ -648,6 +651,33 @@ extension _LiveDriveCanvasSettingsPopupComponents
                     onChanged: (value) => _onLayerToggleChanged(
                       setLocalState,
                       () => _debugShowStateText = value,
+                    ),
+                  ),
+                  buildToggle(
+                    title: 'LD/LT/SR',
+                    value: _debugShowStockTopRight,
+                    enabled: _debugShowArOverlay,
+                    onChanged: (value) => _onLayerToggleChanged(
+                      setLocalState,
+                      () => _debugShowStockTopRight = value,
+                    ),
+                  ),
+                  buildToggle(
+                    title: '레인모드/레인리스',
+                    value: _debugShowLaneMetrics,
+                    enabled: _debugShowArOverlay,
+                    onChanged: (value) => _onLayerToggleChanged(
+                      setLocalState,
+                      () => _debugShowLaneMetrics = value,
+                    ),
+                  ),
+                  buildToggle(
+                    title: '디버그 플롯',
+                    value: _debugShowDebugPlot,
+                    enabled: _debugShowArOverlay,
+                    onChanged: (value) => _onLayerToggleChanged(
+                      setLocalState,
+                      () => _debugShowDebugPlot = value,
                     ),
                   ),
                 ],

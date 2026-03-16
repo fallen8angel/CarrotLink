@@ -330,26 +330,6 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
     );
   }
 
-  Widget _buildViewportEdgeGradientOverlay() {
-    return const IgnorePointer(
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            stops: [0.0, 0.14, 0.86, 1.0],
-            colors: [
-              Color(0x5C000000),
-              Color(0x00000000),
-              Color(0x00000000),
-              Color(0x42000000),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
   Widget _buildDriveViewportContentImpl(
     UiWindowInfo window,
     BoxConstraints constraints, {
@@ -387,7 +367,6 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
         final drawH = placement.height;
         final left = placement.left;
         final top = placement.top;
-        const showViewportEdgeGradient = true;
         final fullSurfaceRect = Rect.fromLTWH(0.0, 0.0, drawW, drawH);
         final visibleViewportRect =
             Rect.fromLTWH(-left, -top, vw, vh).intersect(fullSurfaceRect);
@@ -548,10 +527,6 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                     Positioned.fill(
                       child: _buildDriveCameraSurface(),
                     ),
-                    if (showViewportEdgeGradient)
-                      Positioned.fill(
-                        child: _buildViewportEdgeGradientOverlay(),
-                      ),
                     if (_debugShowArOverlay &&
                         _openpilotOverlayMode &&
                         !_useNativeOverlayRenderer)
@@ -580,6 +555,9 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                                   showRadarVector: _debugShowRadarVector,
                                   showStopDistanceTf: _debugShowStopDistanceTf,
                                   showStateText: _debugShowStateText,
+                                  showStockTopRight: _debugShowStockTopRight,
+                                  showLaneMetrics: _debugShowLaneMetrics,
+                                  showDebugPlot: _debugShowDebugPlot,
                                   debugPlotState: _debugPlotState,
                                 ),
                               ),

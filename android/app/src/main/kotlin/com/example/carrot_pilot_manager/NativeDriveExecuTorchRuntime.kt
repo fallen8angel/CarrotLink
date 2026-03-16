@@ -113,13 +113,18 @@ internal object NativeDriveYoloModelLocator {
   ): File? {
     return try {
       context.assets.open(assetPath).use { input ->
+        val assetBytes = input.readBytes()
         val outDir = File(context.noBackupFilesDir, extractedDirName)
         if (!outDir.exists()) {
           outDir.mkdirs()
         }
         val outFile = File(outDir, fileName)
-        if (!outFile.exists() || outFile.length() <= 0L) {
-          outFile.outputStream().use { output -> input.copyTo(output) }
+        val shouldRewrite =
+            !outFile.exists() ||
+                outFile.length() != assetBytes.size.toLong() ||
+                !runCatching { outFile.readBytes().contentEquals(assetBytes) }.getOrDefault(false)
+        if (shouldRewrite) {
+          outFile.outputStream().use { output -> output.write(assetBytes) }
         }
         outFile
       }
@@ -134,6 +139,14 @@ internal object NativeDriveYoloModelLocator {
 internal class NativeDriveExecuTorchRuntime(
     context: Context,
 ) : NativeDriveYoloRuntime {
+  private companion object {
+    private const val qnnLoweredRuntimeGuardBlocker = "qnn_lowered_runtime_guarded"
+    private const val qnnLoweredRuntimeGuardMessage =
+        "QNN-lowered runtime is guarded because the current ExecuTorch/QNN stack " +
+            "can crash during delegate initialization. Rebuild the export/runtime " +
+            "from the same stack and enable it explicitly."
+  }
+
   private data class NativeDriveYoloBackendSupport(
       val available: Boolean = false,
       val reason: String? = null,
@@ -258,6 +271,10 @@ internal class NativeDriveExecuTorchRuntime(
       reusableInputShape = longArrayOf(1, 3, 0, 0)
       return
     }
+    if (shouldGuardQnnLoweredRuntime(config)) {
+      applyQnnLoweredRuntimeGuard()
+      return
+    }
     ensureInputBuffers()
     ensureModuleLoaded(forceReload = reloadRequired)
   }
@@ -272,6 +289,10 @@ internal class NativeDriveExecuTorchRuntime(
     if (!backendSupport.available) {
       stage = "backend_unavailable"
       blocker = backendSupport.reason ?: "backend_unavailable"
+      return
+    }
+    if (shouldGuardQnnLoweredRuntime(config)) {
+      applyQnnLoweredRuntimeGuard()
       return
     }
     inferenceRequests += 1
@@ -294,6 +315,10 @@ internal class NativeDriveExecuTorchRuntime(
     if (!backendSupport.available) {
       stage = "backend_unavailable"
       blocker = backendSupport.reason ?: "backend_unavailable"
+      return
+    }
+    if (shouldGuardQnnLoweredRuntime(config)) {
+      applyQnnLoweredRuntimeGuard()
       return
     }
     pixelFramesConsumed += 1
@@ -494,6 +519,10 @@ internal class NativeDriveExecuTorchRuntime(
       lastError = null
       return
     }
+    if (shouldGuardQnnLoweredRuntime(config)) {
+      applyQnnLoweredRuntimeGuard()
+      return
+    }
     if (config.runtimeBackend.contains("qnn", ignoreCase = true)) {
       val prepared = NativeDriveQnnRuntimeFiles.prepare(appContext, backendSupport.nativeLibDir)
       qnnRuntimeDir = prepared.runtimeDir
@@ -545,6 +574,23 @@ internal class NativeDriveExecuTorchRuntime(
       stage = "module_load_failed"
       blocker = "executorch_module_load_failed"
     }
+  }
+
+  private fun shouldGuardQnnLoweredRuntime(config: NativeDriveYoloConfig): Boolean {
+    if (BuildConfig.ENABLE_QNN_LOWERED_RUNTIME) {
+      return false
+    }
+    if (!config.runtimeBackend.contains("qnn", ignoreCase = true)) {
+      return false
+    }
+    return NativeDriveYoloModelCatalog.isQnnLoweredReference(config.modelVariant)
+  }
+
+  private fun applyQnnLoweredRuntimeGuard() {
+    releaseModule()
+    lastError = qnnLoweredRuntimeGuardMessage
+    stage = "backend_unavailable"
+    blocker = qnnLoweredRuntimeGuardBlocker
   }
 
   private fun requiresModuleReload(

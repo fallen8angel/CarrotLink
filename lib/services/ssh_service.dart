@@ -113,6 +113,9 @@ class SSHService extends ChangeNotifier {
       final serviceIp = event['ip']?.toString();
       _serviceConnectedIp =
           (serviceIp != null && _isValidIpv4(serviceIp)) ? serviceIp : null;
+      if ((_serviceConnectedIp ?? '').trim().isNotEmpty) {
+        _disconnectedSince = null;
+      }
 
       if (!isServiceConnected) {
         if (!isConnected && _connectionStatus != "Disconnected") {
@@ -172,6 +175,9 @@ class SSHService extends ChangeNotifier {
       final connected = event['connectedIp']?.toString();
       _serviceConnectedIp =
           (connected != null && _isValidIpv4(connected)) ? connected : null;
+      if ((_serviceConnectedIp ?? '').trim().isNotEmpty) {
+        _disconnectedSince = null;
+      }
       final lastSuccessful = event['lastSuccessfulIp']?.toString();
       if (lastSuccessful != null && _isValidIpv4(lastSuccessful)) {
         _serviceLastSuccessfulIp = lastSuccessful;
@@ -202,6 +208,9 @@ class SSHService extends ChangeNotifier {
       }
       final ip = event['ip']?.toString();
       _serviceConnectedIp = (ip != null && _isValidIpv4(ip)) ? ip : null;
+      if ((_serviceConnectedIp ?? '').trim().isNotEmpty) {
+        _disconnectedSince = null;
+      }
       final lastSuccessful = event['lastSuccessfulIp']?.toString();
       if (lastSuccessful != null && _isValidIpv4(lastSuccessful)) {
         _serviceLastSuccessfulIp = lastSuccessful;
@@ -261,6 +270,7 @@ class SSHService extends ChangeNotifier {
   }) async {
     if (resumeAutoReconnect) {
       _manualDisconnectRequested = false;
+      _disconnectedSince = DateTime.now();
     }
     await _syncAutoConnectProfileToService(
       resumeAutoReconnect: resumeAutoReconnect,
@@ -335,6 +345,21 @@ class SSHService extends ChangeNotifier {
   bool get isConnected => _client != null && !_client!.isClosed;
   String _connectionStatus = "Disconnected";
   String get connectionStatus => _connectionStatus;
+  DateTime? _disconnectedSince = DateTime.now();
+  Duration get disconnectedDuration {
+    if (isConnected ||
+        (_serviceConnectedIp ?? '').trim().isNotEmpty ||
+        _isConnecting) {
+      return Duration.zero;
+    }
+    final since = _disconnectedSince;
+    if (since == null) return Duration.zero;
+    return DateTime.now().difference(since);
+  }
+
+  bool get isLongDisconnected =>
+      !_manualDisconnectRequested &&
+      disconnectedDuration >= const Duration(minutes: 5);
   String? _connectedIp;
   String? get connectedIp => _connectedIp;
   int? _connectedPort;
@@ -529,6 +554,7 @@ class SSHService extends ChangeNotifier {
 
     _manualDisconnectRequested = false;
     _isConnecting = true;
+    _disconnectedSince ??= DateTime.now();
     _targetIp = ip; // Set target IP immediately
     _targetPort = port;
     _connectionStatus = "Connecting to $ip:$port...";
@@ -580,6 +606,7 @@ class SSHService extends ChangeNotifier {
       }
 
       _connectionStatus = "Connected";
+      _disconnectedSince = null;
       _connectedIp = ip; // Set IP only after successful connection
       _connectedPort = port;
       _serviceCandidateIp = ip;
@@ -624,6 +651,7 @@ class SSHService extends ChangeNotifier {
       _connectedPort = null;
       _targetIp = null;
       _targetPort = null;
+      _disconnectedSince ??= DateTime.now();
       rethrow;
     } finally {
       _isConnecting = false;
@@ -775,6 +803,7 @@ class SSHService extends ChangeNotifier {
       _client?.close();
       _client = null;
       _connectionStatus = "Disconnected";
+      _disconnectedSince ??= DateTime.now();
       _connectedIp = null;
       _connectedPort = null;
       _targetIp = null;
@@ -1147,8 +1176,11 @@ class SSHService extends ChangeNotifier {
   void notifyNetworkChanged({String source = 'ui'}) {
     _serviceCandidateIp = null;
     _serviceCandidateSeenAt = null;
+    _serviceLastSuccessfulIp = null;
+    _serviceLastSuccessfulSeenAt = null;
     _lastDiscoveredIp = null;
     _lastDiscoveredAt = null;
+    _disconnectedSince = DateTime.now();
     FlutterBackgroundService().invoke('networkChanged', {'source': source});
     _diag.info('connectivity', 'Network changed source=$source');
     notifyListeners();

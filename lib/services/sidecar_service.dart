@@ -197,7 +197,6 @@ curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null || true
       (health['variant'] ?? normalizedExpectedVariant ?? defaultVariant)
           .toString(),
     );
-    final repoFlavor = _normalizeRepoFlavor(health['repoFlavor']?.toString());
     if (normalizedExpected != null && profile != normalizedExpected) {
       return false;
     }
@@ -207,14 +206,6 @@ curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null || true
     }
     if (profile == hudBootstrapProfile || profile == 'p0') {
       return health['hudReady'] == true;
-    }
-    final requiresC4SafeRadarStability =
-        variant == c4SafeVariant && repoFlavor == repoFlavorC4;
-    if (requiresC4SafeRadarStability &&
-        (health['startupProtectionActive'] == true ||
-            health['radarReady'] != true ||
-            health['radarFreshStable'] != true)) {
-      return false;
     }
     final freshVisionCore = serviceFresh('modelV2') &&
         (serviceFresh('roadCameraState') ||
@@ -332,14 +323,9 @@ if expect_profile and profile != expect_profile:
 variant = str(health.get("variant") or "default").strip().lower()
 if expect_variant and variant != expect_variant:
     raise SystemExit(1)
-repo_flavor = str(health.get("repoFlavor") or "unknown").strip().lower()
-
 hud_ready = health.get("hudReady") is True
 live_ready = health.get("liveReady") is True
 camera_ready = health.get("cameraReady") is True
-startup_protection_active = health.get("startupProtectionActive") is True
-radar_ready = health.get("radarReady") is True
-radar_fresh_stable = health.get("radarFreshStable") is True
 service_health = health.get("serviceHealth") or {}
 
 def service_fresh(name: str) -> bool:
@@ -351,16 +337,6 @@ fresh_vision_core = service_fresh("modelV2") and (
 )
 
 if profile in ("p2", "p3", "p4"):
-    if (
-        variant == ${jsonEncode(c4SafeVariant)}
-        and repo_flavor == ${jsonEncode(repoFlavorC4)}
-        and (
-            startup_protection_active
-            or not radar_ready
-            or not radar_fresh_stable
-        )
-    ):
-        raise SystemExit(1)
     raise SystemExit(
         0 if (hud_ready and live_ready and (camera_ready or fresh_vision_core)) else 1
     )
@@ -1565,14 +1541,10 @@ if expect_profile and profile != expect_profile:
 variant = str(health.get("variant") or "default").strip().lower()
 if expect_variant and variant != expect_variant:
     raise SystemExit(1)
-repo_flavor = str(health.get("repoFlavor") or "unknown").strip().lower()
 
 hud_ready = health.get("hudReady") is True
 live_ready = health.get("liveReady") is True
 camera_ready = health.get("cameraReady") is True
-startup_protection_active = health.get("startupProtectionActive") is True
-radar_ready = health.get("radarReady") is True
-radar_fresh_stable = health.get("radarFreshStable") is True
 service_health = health.get("serviceHealth") or {}
 
 def service_fresh(name: str) -> bool:

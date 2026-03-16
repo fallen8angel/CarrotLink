@@ -4,6 +4,148 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
   bool get _cameraErrorGraceActive =>
       _renderClock.elapsedMicroseconds <= _cameraErrorGraceUntilUs;
 
+  bool _isTransientCameraRuntimeErrorReason(String reason) {
+    final normalized = reason.trim().toLowerCase();
+    if (normalized.isEmpty) return false;
+    return normalized.startsWith('socket_failure:') ||
+        normalized.startsWith('frame_stall_') ||
+        normalized.startsWith('decoder_queue_failed:') ||
+        normalized == 'socket_error' ||
+        normalized == 'socket_open_failed' ||
+        normalized == 'no_frames' ||
+        normalized == 'decoder_error';
+  }
+
+  bool _cameraRuntimeLooksHealthy({
+    int maxFrameAgeUs = _LiveDriveCanvasScreenState._cameraHealthyFrameAgeUs,
+  }) {
+    if (_cameraSuspendedByLifecycle || _cameraLoading || _overlayStaleActive) {
+      return false;
+    }
+    if (_openpilotOverlayMode &&
+        (!_sidecarConnected || !_nativeCameraAttachReady)) {
+      return false;
+    }
+    if (_lastCameraFrameId == null || _lastCameraFrameEventUs <= 0) {
+      return false;
+    }
+    final ageUs = _renderClock.elapsedMicroseconds - _lastCameraFrameEventUs;
+    return ageUs >= 0 && ageUs <= maxFrameAgeUs;
+  }
+
+  void _clearDeferredTransientCameraError() {
+    _cameraTransientErrorTimer?.cancel();
+    _cameraTransientErrorTimer = null;
+    _cameraTransientErrorSource = null;
+    _cameraTransientErrorReason = null;
+    _cameraTransientErrorMessage = null;
+  }
+
+  void _surfaceCameraRuntimeError({
+    required String source,
+    required String reason,
+    required String message,
+    required bool unsupported,
+  }) {
+    _clearDeferredTransientCameraError();
+    debugPrint('[DriveCanvas][$source] error=$reason');
+    if (!mounted) return;
+    _safeSetState(() {
+      _cameraError = message;
+      if (unsupported) {
+        _nativeCameraUnsupported = true;
+      }
+    });
+    unawaited(
+      _captureCameraErrorDiagnostics(
+        source: source,
+        reason: reason,
+      ),
+    );
+    if (_nativeCameraUnsupported) {
+      unawaited(_loadCameraSource(force: true));
+    }
+  }
+
+  void _deferTransientCameraRuntimeError({
+    required String source,
+    required String reason,
+    required String message,
+  }) {
+    _cameraTransientErrorTimer?.cancel();
+    _cameraTransientErrorSource = source;
+    _cameraTransientErrorReason = reason;
+    _cameraTransientErrorMessage = message;
+    debugPrint(
+      '[DriveCanvas][$source] deferred transient error while runtime healthy: $reason',
+    );
+    _cameraTransientErrorTimer = Timer(
+      _LiveDriveCanvasScreenState._cameraTransientErrorEscalationDelay,
+      () {
+        _cameraTransientErrorTimer = null;
+        final pendingSource = _cameraTransientErrorSource;
+        final pendingReason = _cameraTransientErrorReason;
+        final pendingMessage = _cameraTransientErrorMessage;
+        _cameraTransientErrorSource = null;
+        _cameraTransientErrorReason = null;
+        _cameraTransientErrorMessage = null;
+        if (pendingSource == null ||
+            pendingReason == null ||
+            pendingMessage == null) {
+          return;
+        }
+        if (_cameraSuspendedByLifecycle ||
+            _sidecarTransitioning ||
+            _suppressCameraErrors ||
+            _cameraErrorGraceActive) {
+          debugPrint(
+            '[DriveCanvas][$pendingSource] dropped deferred transient error: $pendingReason',
+          );
+          return;
+        }
+        if (_cameraRuntimeLooksHealthy(
+          maxFrameAgeUs:
+              _LiveDriveCanvasScreenState._cameraHealthyFrameAgeUs * 2,
+        )) {
+          debugPrint(
+            '[DriveCanvas][$pendingSource] transient error recovered before escalation: $pendingReason',
+          );
+          return;
+        }
+        _surfaceCameraRuntimeError(
+          source: pendingSource,
+          reason: pendingReason,
+          message: pendingMessage,
+          unsupported: false,
+        );
+      },
+    );
+  }
+
+  void _handleCameraRuntimeError({
+    required String source,
+    required String reason,
+    required String message,
+  }) {
+    final unsupported = reason.contains('invalid_ws_url') ||
+        reason.contains('decoder_init_failed');
+    final transient = _isTransientCameraRuntimeErrorReason(reason);
+    if (!unsupported && transient && _cameraRuntimeLooksHealthy()) {
+      _deferTransientCameraRuntimeError(
+        source: source,
+        reason: reason,
+        message: message,
+      );
+      return;
+    }
+    _surfaceCameraRuntimeError(
+      source: source,
+      reason: reason,
+      message: message,
+      unsupported: unsupported,
+    );
+  }
+
   void _startCameraErrorGrace({
     required String reason,
     int windowUs = 2500000,
@@ -38,11 +180,20 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
         next.height <= 10) {
       return;
     }
+    final previous = _sourceSizeByKind[kind];
     _sourceSizeByKind[kind] = next;
     if (kind != _liveCameraKind) {
       return;
     }
     _cameraSourceSize = next;
+    if (previous == null ||
+        (previous.width - next.width).abs() > 0.5 ||
+        (previous.height - next.height).abs() > 0.5) {
+      _invalidateNativeOverlayLayout(
+        reason: 'source_size',
+        clearExisting: true,
+      );
+    }
   }
 
   Future<void> _unloadWebCameraSurfaceImpl() async {
@@ -86,6 +237,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
           source: 'native',
           cameraKind: eventCameraKind,
         );
+        _clearDeferredTransientCameraError();
         if (mounted &&
             (_cameraLoading || (_cameraError?.isNotEmpty ?? false))) {
           _safeSetState(() {
@@ -120,6 +272,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
         }
       }
       if (!mounted) return;
+      _clearDeferredTransientCameraError();
       _safeSetState(() {
         _cameraLoading = false;
         _cameraError = null;
@@ -149,6 +302,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
       if (!mounted) return;
       if (state == 'connected' || state.startsWith('decoder_configured')) {
         _sidecarTransitionTimer?.cancel();
+        _clearDeferredTransientCameraError();
         _safeSetState(() {
           _cameraLoading = false;
           _suppressCameraErrors = false;
@@ -165,33 +319,19 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     if (type == 'camera_error') {
       final reason = map['reason']?.toString().trim() ?? '';
       if (reason.isEmpty) return;
-      final unsupported = reason.contains('invalid_ws_url') ||
-          reason.contains('decoder_init_failed');
       if ((_sidecarTransitioning ||
               _suppressCameraErrors ||
               _cameraErrorGraceActive) &&
-          !unsupported) {
+          !(reason.contains('invalid_ws_url') ||
+              reason.contains('decoder_init_failed'))) {
         debugPrint('[DriveCanvas][native] suppressed error=$reason');
         return;
       }
-      debugPrint('[DriveCanvas][native] error=$reason');
-      if (!mounted) return;
-      _safeSetState(() {
-        _cameraError = '네이티브 뷰어 오류: $reason';
-        if (reason.contains('invalid_ws_url') ||
-            reason.contains('decoder_init_failed')) {
-          _nativeCameraUnsupported = true;
-        }
-      });
-      unawaited(
-        _captureCameraErrorDiagnostics(
-          source: 'native',
-          reason: reason,
-        ),
+      _handleCameraRuntimeError(
+        source: 'native',
+        reason: reason,
+        message: '네이티브 뷰어 오류: $reason',
       );
-      if (_nativeCameraUnsupported) {
-        unawaited(_loadCameraSource(force: true));
-      }
     }
   }
 
@@ -219,6 +359,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
           source: 'web',
           cameraKind: eventCameraKind,
         );
+        _clearDeferredTransientCameraError();
         if (mounted &&
             (_cameraLoading || (_cameraError?.isNotEmpty ?? false))) {
           _safeSetState(() {
@@ -251,6 +392,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
       debugPrint(
         '[DriveCanvas] camera_meta=${next.width.toStringAsFixed(0)}x${next.height.toStringAsFixed(0)}',
       );
+      _clearDeferredTransientCameraError();
       _safeSetState(() {
         _updateSourceSize(next, kind: eventCameraKind);
         _cameraLoading = false;
@@ -267,13 +409,10 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
         debugPrint('[DriveCanvas] suppressed camera_error reason=$reason');
         return;
       }
-      debugPrint('[DriveCanvas] camera_error reason=$reason');
-      _safeSetState(() => _cameraError = '카메라 뷰어 오류: $reason');
-      unawaited(
-        _captureCameraErrorDiagnostics(
-          source: 'web',
-          reason: reason,
-        ),
+      _handleCameraRuntimeError(
+        source: 'web',
+        reason: reason,
+        message: '카메라 뷰어 오류: $reason',
       );
       return;
     }

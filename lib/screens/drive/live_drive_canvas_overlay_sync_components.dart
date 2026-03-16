@@ -1,6 +1,67 @@
 part of 'live_drive_canvas_screen.dart';
 
 extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
+  Map<String, dynamic>? _overlayCamera2dForSnapshot(
+    _DriveOverlaySnapshot snapshot,
+  ) {
+    final root = snapshot.sidecarOverlay2d;
+    if (root == null) return null;
+    final cameras = root['cameras'];
+    if (cameras is! Map) return null;
+    final key =
+        _liveCameraKind == _DriveCameraKind.wideRoad ? 'wideRoad' : 'road';
+    final selected = cameras[key];
+    if (selected is! Map) return null;
+    return Map<String, dynamic>.from(selected);
+  }
+
+  int _overlayDisplayTransformSignature(_DriveOverlaySnapshot snapshot) {
+    final camera = _overlayCamera2dForSnapshot(snapshot);
+    if (camera == null) return 0;
+    final raw = camera['displayTransform'];
+    if (raw is! Map) return 0;
+    final transform = Map<String, dynamic>.from(raw);
+    double read(String key) =>
+        _DriveOverlaySnapshot._asDouble(transform[key]) ?? 0.0;
+    return Object.hash(
+      (read('zoom') * 1000.0).round(),
+      (read('tx') * 10.0).round(),
+      (read('ty') * 10.0).round(),
+      (read('sx') * 1000.0).round(),
+      (read('sy') * 1000.0).round(),
+    );
+  }
+
+  void _invalidateNativeOverlayLayout({
+    required String reason,
+    bool clearExisting = false,
+  }) {
+    _nativeOverlayRelayoutEpoch += 1;
+    _nativeOverlayRelayoutGraceUntilUs =
+        _renderClock.elapsedMicroseconds + 1200000;
+    _lastNativeOverlaySignature = null;
+    _lastNativeOverlayHadPayload = false;
+    _pendingNativeOverlaySnapshot = null;
+    _pendingNativeOverlayForce = false;
+    _beginStartupProvisionalSync(
+      reason: 'overlay_layout_$reason',
+      windowUs: 1800000,
+    );
+    if (!_useNativeOverlayRenderer) return;
+    final epoch = _nativeOverlayRelayoutEpoch;
+    // Keep the last overlay visible until the next geometry-aware payload
+    // arrives to avoid blink during source-size / zoom transitions.
+    final _ = clearExisting;
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          !_useNativeOverlayRenderer ||
+          epoch != _nativeOverlayRelayoutEpoch) {
+        return;
+      }
+      unawaited(_pushNativeOverlay(_overlayNotifier.value, force: true));
+    });
+  }
+
   bool get _startupProvisionalSyncActive {
     if (!_startupProvisionalSyncEnabled) return false;
     final nowUs = _renderClock.elapsedMicroseconds;
@@ -293,6 +354,10 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     if (!mounted) return;
     if (_viewportZoomPreset == preset) return;
     _safeSetState(() => _viewportZoomPreset = preset);
+    _invalidateNativeOverlayLayout(
+      reason: 'zoom_preset',
+      clearExisting: true,
+    );
     unawaited(_saveViewportZoomPresetForOrientationImpl(preset));
     _toast('${preset.tooltip} 적용');
   }
@@ -312,6 +377,9 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
         'radarVector': true,
         'stopDistanceTf': true,
         'stateText': true,
+        'stockTopRight': true,
+        'laneMetrics': true,
+        'debugPlot': true,
       };
 
       bool readBool(Map<String, dynamic> source, String key, bool fallback) {
@@ -344,6 +412,12 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
               readBool(map, 'stopDistanceTf', defaults['stopDistanceTf']!);
           _debugShowStateText =
               readBool(map, 'stateText', defaults['stateText']!);
+          _debugShowStockTopRight =
+              readBool(map, 'stockTopRight', defaults['stockTopRight']!);
+          _debugShowLaneMetrics =
+              readBool(map, 'laneMetrics', defaults['laneMetrics']!);
+          _debugShowDebugPlot =
+              readBool(map, 'debugPlot', defaults['debugPlot']!);
           return;
         }
 
@@ -364,6 +438,12 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
               readBool(map, 'stopDistanceTf', defaults['stopDistanceTf']!);
           _debugShowStateText =
               readBool(map, 'stateText', defaults['stateText']!);
+          _debugShowStockTopRight =
+              readBool(map, 'stockTopRight', defaults['stockTopRight']!);
+          _debugShowLaneMetrics =
+              readBool(map, 'laneMetrics', defaults['laneMetrics']!);
+          _debugShowDebugPlot =
+              readBool(map, 'debugPlot', defaults['debugPlot']!);
         });
       }
 
@@ -414,6 +494,9 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
         'radarVector': _debugShowRadarVector,
         'stopDistanceTf': _debugShowStopDistanceTf,
         'stateText': _debugShowStateText,
+        'stockTopRight': _debugShowStockTopRight,
+        'laneMetrics': _debugShowLaneMetrics,
+        'debugPlot': _debugShowDebugPlot,
       };
       await prefs.setString(
         _LiveDriveCanvasScreenState._hudDebugLayerTogglesPrefKey,
@@ -509,7 +592,10 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     if (snapshot.modelFrameId == null &&
         snapshot.path.length < 2 &&
         snapshot.debugPlot == null) {
-      _clearDebugPlotState();
+      final nowUs = _renderClock.elapsedMicroseconds;
+      if (nowUs > _nativeOverlayRelayoutGraceUntilUs) {
+        _clearDebugPlotState();
+      }
     }
     final decorated = snapshot.copyWith(animationPhase: _pathAnimationPhase);
     _overlayNotifier.value = decorated;
@@ -557,6 +643,18 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       (snapshot.navDistToTurn ?? -1.0).round(),
       snapshot.navMainText,
       animBucket,
+      _debugShowPathFill ? 1 : 0,
+      _debugShowLaneLines ? 1 : 0,
+      _debugShowRoadEdge ? 1 : 0,
+      _debugShowLead1 ? 1 : 0,
+      _debugShowLead2 ? 1 : 0,
+      _debugShowRadarBadge ? 1 : 0,
+      _debugShowRadarVector ? 1 : 0,
+      _debugShowStopDistanceTf ? 1 : 0,
+      _debugShowStateText ? 1 : 0,
+      _debugShowStockTopRight ? 1 : 0,
+      _debugShowLaneMetrics ? 1 : 0,
+      _debugShowDebugPlot ? 1 : 0,
       _debugPlotState.version,
       _debugPlotState.mode,
       _nativeOverlaySize.width.round(),
@@ -565,6 +663,10 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       _nativeOverlayVisibleViewportRect.top.round(),
       _nativeOverlayVisibleViewportRect.width.round(),
       _nativeOverlayVisibleViewportRect.height.round(),
+      (_viewportPlacementZoom * 1000.0).round(),
+      _cameraSourceSize.width.round(),
+      _cameraSourceSize.height.round(),
+      _overlayDisplayTransformSignature(snapshot),
       _liveCameraKind.index,
       _coverViewport ? 1 : 0,
     ]);
@@ -675,6 +777,9 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       showRadarVector: _debugShowRadarVector,
       showStopDistanceTf: _debugShowStopDistanceTf,
       showStateText: _debugShowStateText,
+      showStockTopRight: _debugShowStockTopRight,
+      showLaneMetrics: _debugShowLaneMetrics,
+      showDebugPlot: _debugShowDebugPlot,
       debugPlotState: _debugPlotState,
     );
     final overlayHadPayload = payload != null;
@@ -702,6 +807,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
             'overlay': payload,
           },
         );
+        _nativeOverlayRelayoutGraceUntilUs = 0;
       }
       _lastNativeOverlaySignature = signature;
       _lastNativeOverlayHadPayload = overlayHadPayload;
@@ -891,6 +997,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
   void _onRenderTick(Duration _) {
     if (!mounted) return;
     final nowUs = _renderClock.elapsedMicroseconds;
+    _pumpDebugPlotTick(nowUs: nowUs);
     final tickSnapshot =
         _renderInterpActive ? _renderToSnapshot : _overlayNotifier.value;
     _advancePathAnimationTick(nowUs: nowUs, snapshot: tickSnapshot);

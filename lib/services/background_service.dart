@@ -105,6 +105,7 @@ void onStart(ServiceInstance service) async {
   String? lastSuccessfulIp;
   DateTime? lastSuccessfulSeenAt;
   DateTime? lastActiveDiscoveryScanAt;
+  DateTime? disconnectedSinceAt = DateTime.now();
   final Map<String, int> activeScanHitCount = <String, int>{};
 
   String? profileUsername;
@@ -144,6 +145,14 @@ void onStart(ServiceInstance service) async {
     return true;
   }
 
+  bool isLongDisconnected() {
+    if (connectedIp != null && connectedIp!.isNotEmpty) return false;
+    if (connectInFlight) return false;
+    final since = disconnectedSinceAt;
+    if (since == null) return false;
+    return DateTime.now().difference(since) >= const Duration(minutes: 5);
+  }
+
   Duration candidateStaleThresholdForProfile() {
     return appForeground
         ? const Duration(seconds: 20)
@@ -174,6 +183,9 @@ void onStart(ServiceInstance service) async {
   }
 
   int reconnectBackoffSeconds(int attempt) {
+    if (isLongDisconnected()) {
+      return appForeground ? 10 : 20;
+    }
     final seq = appForeground ? const [0, 0, 1, 1] : const [0, 1, 1, 2];
     if (attempt < 0) return seq.first;
     if (attempt >= seq.length) return seq.last;
@@ -181,6 +193,9 @@ void onStart(ServiceInstance service) async {
   }
 
   int noBroadcastBackoffSeconds(int attempt) {
+    if (isLongDisconnected()) {
+      return appForeground ? 10 : 20;
+    }
     final seq = appForeground ? const [0, 1, 1] : const [1, 1, 2];
     if (attempt < 0) return seq.first;
     if (attempt >= seq.length) return seq.last;
@@ -188,6 +203,11 @@ void onStart(ServiceInstance service) async {
   }
 
   Duration activeDiscoveryThrottleForProfile() {
+    if (isLongDisconnected()) {
+      return appForeground
+          ? const Duration(seconds: 10)
+          : const Duration(seconds: 20);
+    }
     return appForeground
         ? const Duration(seconds: 2)
         : const Duration(seconds: 5);
@@ -327,8 +347,8 @@ void onStart(ServiceInstance service) async {
 
   String? pickNotificationIp({
     String? explicitIp,
-    bool allowCandidate = true,
-    bool allowLastSuccessful = true,
+    bool allowCandidate = false,
+    bool allowLastSuccessful = false,
   }) {
     final candidates = <String?>[
       explicitIp,
@@ -347,8 +367,8 @@ void onStart(ServiceInstance service) async {
   String buildConnectionNotificationContent({
     required String status,
     String? ip,
-    bool allowCandidate = true,
-    bool allowLastSuccessful = true,
+    bool allowCandidate = false,
+    bool allowLastSuccessful = false,
   }) {
     final displayIp = pickNotificationIp(
       explicitIp: ip,
@@ -364,8 +384,8 @@ void onStart(ServiceInstance service) async {
   Future<void> updateConnectionNotification({
     required String status,
     String? ip,
-    bool allowCandidate = true,
-    bool allowLastSuccessful = true,
+    bool allowCandidate = false,
+    bool allowLastSuccessful = false,
   }) async {
     await updateNotification(
       title: 'CarrotLink',
@@ -521,6 +541,7 @@ void onStart(ServiceInstance service) async {
     final wasConnected = connectedIp != null;
     await closeClient();
     cancelActiveDiscoveryScan();
+    disconnectedSinceAt ??= DateTime.now();
     if (manual) {
       manualDisconnectRequested = true;
     }
@@ -535,11 +556,19 @@ void onStart(ServiceInstance service) async {
       return;
     }
     if (wasConnected) {
-      await updateConnectionNotification(status: '재연결 대기');
+      await updateConnectionNotification(
+        status: '재연결 대기',
+        allowCandidate: false,
+        allowLastSuccessful: false,
+      );
       triggerActiveDiscoveryScan(reason: 'disconnect_$reason', force: true);
       return;
     }
-    await updateConnectionNotification(status: '연결 대기');
+    await updateConnectionNotification(
+      status: '연결 대기',
+      allowCandidate: false,
+      allowLastSuccessful: false,
+    );
     triggerActiveDiscoveryScan(reason: 'disconnect_$reason');
   }
 
@@ -687,6 +716,7 @@ void onStart(ServiceInstance service) async {
       candidateSeenAt = DateTime.now();
       lastSuccessfulIp = ip;
       lastSuccessfulSeenAt = DateTime.now();
+      disconnectedSinceAt = null;
       reconnectAttempt = 0;
       noBroadcastWaitAttempt = 0;
       cancelActiveDiscoveryScan();
@@ -713,12 +743,6 @@ void onStart(ServiceInstance service) async {
           error: e.toString(),
           ip: ip,
           port: profilePort);
-      await updateConnectionNotification(
-        status: '연결 실패',
-        ip: ip,
-        allowCandidate: false,
-        allowLastSuccessful: false,
-      );
       scheduleReconnect('connect_failed');
       triggerActiveDiscoveryScan(reason: 'connect_failed', force: true);
     } finally {
@@ -810,14 +834,6 @@ void onStart(ServiceInstance service) async {
     if ((sshClient == null || sshClient!.isClosed) &&
         canAutoReconnect() &&
         hasConnectProfile()) {
-      unawaited(
-        updateConnectionNotification(
-          status: '연결 대기',
-          ip: ip,
-          allowCandidate: false,
-          allowLastSuccessful: false,
-        ),
-      );
       unawaited(connectTo(ip, reason: 'candidate_udp'));
     }
   }
@@ -983,6 +999,9 @@ void onStart(ServiceInstance service) async {
     candidateSeenAt = null;
     lastUdpCandidateIp = null;
     lastUdpCandidateSeenAt = null;
+    lastSuccessfulIp = null;
+    lastSuccessfulSeenAt = null;
+    disconnectedSinceAt = DateTime.now();
     activeScanHitCount.clear();
     reconnectAttempt = 0;
     noBroadcastWaitAttempt = 0;

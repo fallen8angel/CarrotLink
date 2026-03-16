@@ -49,6 +49,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   StreamSubscription<String>? _discoverySubscription;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   Timer? _foregroundReconnectTimer;
+  DateTime? _lastForegroundReconnectRunAt;
   List<ConnectivityResult>? _lastConnectivity;
   bool _isAutoConnectRunning = false;
   bool _setupPromptShown = false;
@@ -237,9 +238,20 @@ class _DashboardScreenState extends State<DashboardScreen>
       final ssh = Provider.of<SSHService>(context, listen: false);
       if (ssh.manualDisconnectRequested ||
           ssh.isConnected ||
-          ssh.isConnecting) {
+          ssh.isConnecting ||
+          (ssh.serviceConnectedIp ?? '').trim().isNotEmpty) {
+        _lastForegroundReconnectRunAt = null;
         return;
       }
+      final desiredInterval = ssh.isLongDisconnected
+          ? const Duration(seconds: 10)
+          : _foregroundReconnectTick;
+      final now = DateTime.now();
+      if (_lastForegroundReconnectRunAt != null &&
+          now.difference(_lastForegroundReconnectRunAt!) < desiredInterval) {
+        return;
+      }
+      _lastForegroundReconnectRunAt = now;
       _startDiscoveryIfNeeded(
         aggressive: true,
         timeout: const Duration(seconds: 25),
@@ -257,6 +269,7 @@ class _DashboardScreenState extends State<DashboardScreen>
   void _stopForegroundReconnectLoop() {
     _foregroundReconnectTimer?.cancel();
     _foregroundReconnectTimer = null;
+    _lastForegroundReconnectRunAt = null;
   }
 
   void _setupDiscoveryListener() {

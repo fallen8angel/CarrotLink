@@ -17,9 +17,7 @@ extension _LiveDriveCanvasYoloComponents on _LiveDriveCanvasScreenState {
   }
 
   Future<YoloDebugSettings> _currentYoloDebugSettingsForNativeImpl() async {
-    if (_isDeveloperPlaybackRequested ||
-        !_openpilotOverlayMode ||
-        !_useNativeLiveCamera) {
+    if (_isDeveloperPlaybackRequested || !_canUseNativeCamera) {
       return YoloDebugSettings.empty;
     }
     try {

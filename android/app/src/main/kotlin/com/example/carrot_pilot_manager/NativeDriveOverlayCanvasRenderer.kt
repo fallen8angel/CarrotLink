@@ -2,9 +2,14 @@ package com.example.carrot_pilot_manager
 
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.RectF
+import android.graphics.Shader
 import android.graphics.Typeface
+import android.text.TextPaint
+import android.text.TextUtils
 
 internal class NativeDriveOverlayCanvasRenderer {
     private val reusablePath = Path()
@@ -18,10 +23,19 @@ internal class NativeDriveOverlayCanvasRenderer {
         strokeCap = Paint.Cap.ROUND
         isDither = true
     }
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val fillTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
         textAlign = Paint.Align.LEFT
         typeface = Typeface.MONOSPACE
+        isDither = true
+    }
+    private val outlineTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeJoin = Paint.Join.ROUND
+        strokeCap = Paint.Cap.ROUND
+        textAlign = Paint.Align.LEFT
+        typeface = Typeface.MONOSPACE
+        isDither = true
     }
 
     fun draw(
@@ -59,11 +73,90 @@ internal class NativeDriveOverlayCanvasRenderer {
             }
         }
 
+        for (gradient in payload.gradients) {
+            val rect =
+                RectF(
+                    gradient.left * scaleX,
+                    gradient.top * scaleY,
+                    gradient.right * scaleX,
+                    gradient.bottom * scaleY,
+                )
+            if (rect.width() <= 0f || rect.height() <= 0f) continue
+            fillPaint.shader =
+                LinearGradient(
+                    gradient.startX * scaleX,
+                    gradient.startY * scaleY,
+                    gradient.endX * scaleX,
+                    gradient.endY * scaleY,
+                    gradient.colors.map { withScaledAlpha(it, polygonAlphaMultiplier) }.toIntArray(),
+                    gradient.stops,
+                    Shader.TileMode.CLAMP,
+                )
+            canvas.drawRect(rect, fillPaint)
+            fillPaint.shader = null
+        }
+
         for (label in payload.labels) {
-            textPaint.color = withScaledAlpha(label.color, labelAlphaMultiplier)
-            textPaint.textSize = (label.size * strokeScale).coerceIn(8f, 28f)
-            textPaint.setShadowLayer(3f, 0f, 0f, Color.BLACK)
-            canvas.drawText(label.text, label.x * scaleX, label.y * scaleY, textPaint)
+            val rawText = label.text.trim()
+            if (rawText.isEmpty()) continue
+            val labelMaxWidth = label.maxWidth?.let { (it * scaleX).coerceAtLeast(24f) }
+            val shouldEllipsize =
+                !label.ellipsis.isNullOrBlank() &&
+                    labelMaxWidth != null &&
+                    (label.maxLines ?: 1) <= 1
+            val typefaceStyle = if (label.fontWeight >= 700) Typeface.BOLD else Typeface.NORMAL
+            val typeface = Typeface.create(Typeface.MONOSPACE, typefaceStyle)
+            fillTextPaint.typeface = typeface
+            outlineTextPaint.typeface = typeface
+            val requestedSize = (label.size * strokeScale).coerceIn(4.5f, 28f)
+            val fittedSize =
+                fitSingleLineTextSize(
+                    text = rawText,
+                    requestedSize = requestedSize,
+                    minSize = 4.5f,
+                    maxWidth = labelMaxWidth,
+                    canScaleDown = !shouldEllipsize && (label.maxLines ?: 1) <= 1,
+                )
+            fillTextPaint.color = withScaledAlpha(label.color, labelAlphaMultiplier)
+            fillTextPaint.textSize = fittedSize
+            fillTextPaint.clearShadowLayer()
+            outlineTextPaint.color =
+                withScaledAlpha(label.strokeColor ?: Color.BLACK, labelAlphaMultiplier)
+            outlineTextPaint.textSize = fittedSize
+            outlineTextPaint.strokeWidth =
+                ((if (label.strokeWidth > 0f) label.strokeWidth else 2.6f) * strokeScale)
+                    .coerceAtLeast(1.25f)
+            outlineTextPaint.clearShadowLayer()
+            val displayText =
+                if (shouldEllipsize) {
+                    TextUtils.ellipsize(
+                            rawText,
+                            fillTextPaint,
+                            labelMaxWidth,
+                            TextUtils.TruncateAt.END,
+                        )
+                        .toString()
+                } else {
+                    rawText
+                }
+            val measuredWidth = fillTextPaint.measureText(displayText)
+            val dx = label.x * scaleX
+            val dy = label.y * scaleY
+            val baseline = when (label.alignY.lowercase()) {
+                "top" -> dy - fillTextPaint.fontMetrics.ascent
+                "center" -> dy - ((fillTextPaint.fontMetrics.ascent + fillTextPaint.fontMetrics.descent) * 0.5f)
+                "baselinebottom" -> dy
+                else -> dy
+            }
+            val drawX = when (label.alignX.lowercase()) {
+                "right" -> dx - measuredWidth
+                "center" -> dx - (measuredWidth * 0.5f)
+                else -> dx
+            }
+            if (outlineTextPaint.strokeWidth > 0f) {
+                canvas.drawText(displayText, drawX, baseline, outlineTextPaint)
+            }
+            canvas.drawText(displayText, drawX, baseline, fillTextPaint)
         }
 
         return strokeScale
@@ -72,5 +165,29 @@ internal class NativeDriveOverlayCanvasRenderer {
     private fun withScaledAlpha(color: Int, alphaMultiplier: Float): Int {
         val alpha = (Color.alpha(color) * alphaMultiplier.coerceIn(0f, 1f)).toInt().coerceIn(0, 255)
         return Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
+    }
+
+    private fun fitSingleLineTextSize(
+        text: String,
+        requestedSize: Float,
+        minSize: Float,
+        maxWidth: Float?,
+        canScaleDown: Boolean,
+    ): Float {
+        if (!canScaleDown || maxWidth == null || maxWidth <= 0f) {
+            return requestedSize
+        }
+        fillTextPaint.textSize = requestedSize
+        val initialWidth = fillTextPaint.measureText(text)
+        if (!initialWidth.isFinite() || initialWidth <= maxWidth || initialWidth <= 1f) {
+            return requestedSize
+        }
+        var size = (requestedSize * ((maxWidth / initialWidth) * 0.985f)).coerceIn(minSize, requestedSize)
+        fillTextPaint.textSize = size
+        val secondWidth = fillTextPaint.measureText(text)
+        if (secondWidth.isFinite() && secondWidth > maxWidth && size > minSize + 0.05f) {
+            size = (size * ((maxWidth / secondWidth) * 0.995f)).coerceIn(minSize, requestedSize)
+        }
+        return size
     }
 }

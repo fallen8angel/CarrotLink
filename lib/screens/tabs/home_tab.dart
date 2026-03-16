@@ -273,22 +273,27 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   String _statusHeadline(SSHService ssh) {
     if (!_hasGitHubLogin) return "GitHub 연동 필요";
     if (!_hasActiveSshKey) return "SSH 개인키 적용 필요";
+    if (ssh.manualDisconnectRequested) return "연결 해제";
     if (ssh.isConnected) return "연결됨";
     if ((ssh.serviceConnectedIp ?? '').trim().isNotEmpty) {
       return "연결 동기화 중";
     }
     if (ssh.connectionStatus.startsWith("Connecting")) return "연결 중...";
     if (ssh.connectionStatus.contains("Error")) return "연결 실패";
-    return "연결 대기";
+    return "재연결 대기";
   }
 
   Color _statusColor(BuildContext context, SSHService ssh) {
     if (!_hasGitHubLogin || !_hasActiveSshKey) return Colors.grey;
+    if (ssh.manualDisconnectRequested) return Colors.grey;
+    if (ssh.isConnected || ssh.connectionStatus.startsWith("Connecting")) {
+      return Theme.of(context).colorScheme.primary;
+    }
     if ((ssh.serviceConnectedIp ?? '').trim().isNotEmpty) {
       return Theme.of(context).colorScheme.primary;
     }
     if (ssh.connectionStatus.contains("Error")) return Colors.grey;
-    return Theme.of(context).colorScheme.primary;
+    return Colors.grey;
   }
 
   String? _currentDeviceHost(SSHService ssh) {
@@ -385,16 +390,16 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
         };
         final hasIp = ssh.isConnected ||
             (ssh.serviceConnectedIp ?? '').trim().isNotEmpty ||
-            ssh.connectionStatus.startsWith("Connecting") ||
-            ssh.targetIp != null ||
-            ssh.serviceCandidateIp != null;
+            (ssh.connectionStatus.startsWith("Connecting") &&
+                (ssh.targetIp ?? '').trim().isNotEmpty);
         final ipFieldText = hasIp
             ? (ssh.connectedIp ??
                 ssh.serviceConnectedIp ??
                 ssh.targetIp ??
-                ssh.serviceCandidateIp ??
                 "Unknown")
-            : "연동 필요";
+            : (!_hasGitHubLogin || !_hasActiveSshKey
+                ? "연동 필요"
+                : (ssh.manualDisconnectRequested ? "연결 해제" : "재연결 대기"));
         final isLandscape = window.isLandscape;
         final homeContentMaxWidth = switch (window.windowClass) {
           UiWindowClass.compact => double.infinity,

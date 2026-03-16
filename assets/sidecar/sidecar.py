@@ -775,6 +775,9 @@ class SidecarApp:
     }
 
     SUPPORTED_VARIANTS = {"default", "c4_safe"}
+    # Keep the C4-safe flag wire-compatible, but disable its special runtime
+    # behavior so C4 now follows the same runtime policy as C3/default.
+    C4_SAFE_RELAXATION_ENABLED = False
     C4_SAFE_LIVE_PROFILES = ("p2", "p3", "p4")
     C4_SAFE_RADAR_MONITOR_PROFILES = ("p1", "p2", "p3", "p4")
     C4_SAFE_STARTUP_GRACE_SEC = 12.0
@@ -956,6 +959,8 @@ class SidecarApp:
 
     def _radar_stable_for_variant(self, now: float | None = None) -> bool:
         if (
+            not self.C4_SAFE_RELAXATION_ENABLED
+            or
             self.variant != "c4_safe"
             or self.profile not in self.C4_SAFE_RADAR_MONITOR_PROFILES
         ):
@@ -974,6 +979,8 @@ class SidecarApp:
 
     def _variant_soft_mode_active(self, now: float | None = None) -> bool:
         if (
+            not self.C4_SAFE_RELAXATION_ENABLED
+            or
             self.variant != "c4_safe"
             or self.profile not in self.C4_SAFE_RADAR_MONITOR_PROFILES
         ):
@@ -986,6 +993,8 @@ class SidecarApp:
     def _services_for_profile(self, profile: str) -> list[str]:
         services = list(self.PROFILE_SERVICES.get(profile, []))
         if (
+            self.C4_SAFE_RELAXATION_ENABLED
+            and
             self.variant == "c4_safe"
             and profile == "p1"
             and "radarState" not in services
