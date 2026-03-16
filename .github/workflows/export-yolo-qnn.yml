@@ -92,6 +92,13 @@ jobs:
           git clone --branch "${{ inputs.executorch_ref }}" --depth 1 https://github.com/pytorch/executorch.git "$EXECUTORCH_DIR"
           git -C "$EXECUTORCH_DIR" submodule update --init --recursive
 
+      - name: Install TorchAO from ExecuTorch submodule
+        run: |
+          pushd "$EXECUTORCH_DIR/third-party/ao" >/dev/null
+          export USE_CPP=0
+          python -m pip install . --no-build-isolation
+          popd >/dev/null
+
       - name: Build ExecuTorch QNN host adaptor
         run: |
           mkdir -p "$EXPORT_DIR/logs"
