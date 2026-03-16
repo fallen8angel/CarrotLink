@@ -121,6 +121,35 @@ def _patch_qnn_floor_divide_scalar_bug(torch_module) -> None:
   DecomposeFloorDivide._carrotlink_scalar_patch = True
 
 
+def _patch_qnn_partitioner_missing_visitors() -> None:
+  try:
+    from executorch.backends.qualcomm.partition.qnn_partitioner import (  # type: ignore
+        QnnOperatorSupport,
+    )
+  except Exception:
+    return
+
+  if getattr(QnnOperatorSupport, "_carrotlink_missing_visitor_patch", False):
+    return
+
+  original_is_node_supported = QnnOperatorSupport.is_node_supported
+
+  def _patched_is_node_supported(self, submodules, node):
+    try:
+      return original_is_node_supported(self, submodules, node)
+    except KeyError:
+      self.nodes_to_wrappers.clear()
+      target_name = getattr(node.target, "__name__", str(node.target))
+      print(
+          "[qnn-export] missing QNN visitor, falling back to CPU: "
+          f"{target_name}"
+      )
+      return False
+
+  QnnOperatorSupport.is_node_supported = _patched_is_node_supported
+  QnnOperatorSupport._carrotlink_missing_visitor_patch = True
+
+
 def _load_runtime():
   try:
     import torch  # type: ignore
@@ -150,6 +179,7 @@ def _load_runtime():
     format_delegated_graph = None
 
   _patch_qnn_floor_divide_scalar_bug(torch)
+  _patch_qnn_partitioner_missing_visitors()
 
   return {
       "torch": torch,
