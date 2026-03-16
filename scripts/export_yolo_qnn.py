@@ -46,6 +46,14 @@ def _parse_args() -> argparse.Namespace:
       action="store_true",
       help="Lower for HTP FP16 instead of quantized HTP.",
   )
+  parser.add_argument(
+      "--online-prepare",
+      action="store_true",
+      help=(
+          "Export with QNN online_prepare so the graph is composed on-device "
+          "instead of relying on a serialized precompiled context binary."
+      ),
+  )
   return parser.parse_args()
 
 
@@ -266,6 +274,7 @@ def _write_metadata(
     output_name: str,
     soc: str,
     use_fp16: bool,
+    online_prepare: bool,
     imgsz: int,
     batch: int,
 ) -> None:
@@ -274,6 +283,7 @@ def _write_metadata(
       "output_name": output_name,
       "soc": soc,
       "use_fp16": use_fp16,
+      "online_prepare": online_prepare,
       "imgsz": imgsz,
       "batch": batch,
   }
@@ -317,7 +327,10 @@ def main() -> int:
   print(f"[qnn-export] weights={weights_path}")
   print(f"[qnn-export] output_dir={output_dir}")
   print(f"[qnn-export] output_name={output_name}")
-  print(f"[qnn-export] soc={args.soc} use_fp16={args.use_fp16}")
+  print(
+      f"[qnn-export] soc={args.soc} use_fp16={args.use_fp16} "
+      f"online_prepare={args.online_prepare}"
+  )
 
   module = _resolve_ultralytics_module(weights_path, yolo_cls)
   example_inputs = (
@@ -331,6 +344,7 @@ def main() -> int:
   compile_spec = generate_qnn_executorch_compiler_spec(
       soc_model=soc_map[args.soc],
       backend_options=backend_options,
+      online_prepare=args.online_prepare,
   )
 
   delegated_program = to_edge_transform_and_lower_to_qnn(
@@ -357,6 +371,7 @@ def main() -> int:
       output_name=output_name,
       soc=args.soc,
       use_fp16=args.use_fp16,
+      online_prepare=args.online_prepare,
       imgsz=args.imgsz,
       batch=args.batch,
   )

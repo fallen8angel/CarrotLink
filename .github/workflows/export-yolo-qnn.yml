@@ -26,10 +26,20 @@ on:
         required: true
         default: true
         type: boolean
+      online_prepare:
+        description: Compose the QNN graph on device instead of packaging a precompiled context binary
+        required: true
+        default: true
+        type: boolean
       executorch_ref:
         description: ExecuTorch git ref
         required: true
         default: v1.1.0
+        type: string
+      qnn_sdk_version:
+        description: Qualcomm AI Runtime Community SDK version used for lowering
+        required: true
+        default: 2.37.0.250724
         type: string
 
 jobs:
@@ -59,7 +69,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.QNN_STAGING_DIR }}
-          key: qnn-staging-${{ runner.os }}-${{ inputs.executorch_ref }}
+          key: qnn-staging-${{ runner.os }}-${{ inputs.executorch_ref }}-${{ inputs.qnn_sdk_version }}
 
       - name: Install system dependencies
         run: |
@@ -93,6 +103,29 @@ jobs:
           rm -rf "$EXECUTORCH_DIR"
           git clone --branch "${{ inputs.executorch_ref }}" --depth 1 https://github.com/pytorch/executorch.git "$EXECUTORCH_DIR"
           git -C "$EXECUTORCH_DIR" submodule update --init --recursive
+
+      - name: Pin QNN SDK version for ExecuTorch download helper
+        env:
+          QNN_SDK_VERSION: ${{ inputs.qnn_sdk_version }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          version = os.environ["QNN_SDK_VERSION"].strip()
+          path = Path(os.environ["EXECUTORCH_DIR"]) / "backends" / "qualcomm" / "scripts" / "download_qnn_sdk.py"
+          source = path.read_text(encoding="utf-8")
+          marker = 'QNN_VERSION = "'
+          start = source.find(marker)
+          if start < 0:
+            raise SystemExit(f"Failed to find QNN_VERSION marker in {path}")
+          end = source.find('"', start + len(marker))
+          if end < 0:
+            raise SystemExit(f"Failed to parse QNN_VERSION in {path}")
+          patched = source[:start] + f'{marker}{version}"' + source[end + 1:]
+          path.write_text(patched, encoding="utf-8")
+          print(f"[qnn-export] pinned QNN SDK version to {version}")
+          PY
 
       - name: Install TorchAO from ExecuTorch submodule
         run: |
@@ -133,6 +166,9 @@ jobs:
             if [[ "${{ inputs.use_fp16 }}" == "true" ]]; then
               args+=(--use-fp16)
             fi
+            if [[ "${{ inputs.online_prepare }}" == "true" ]]; then
+              args+=(--online-prepare)
+            fi
             python "$GITHUB_WORKSPACE/scripts/export_yolo_qnn.py" "${args[@]}" \
               2>&1 | tee "$EXPORT_DIR/logs/export_${model}_qnn.log"
           done
@@ -141,5 +177,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: qnn-export-${{ inputs.model_variant }}-${{ inputs.soc }}
+          name: qnn-export-${{ inputs.model_variant }}-${{ inputs.soc }}-${{ inputs.qnn_sdk_version }}-${{ inputs.online_prepare && 'online' || 'offline' }}
           path: ${{ env.EXPORT_DIR }}
