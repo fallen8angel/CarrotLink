@@ -54,6 +54,73 @@ def _fail(message: str, *, exit_code: int = 1) -> None:
   raise SystemExit(exit_code)
 
 
+def _patch_qnn_floor_divide_scalar_bug(torch_module) -> None:
+  try:
+    from executorch.backends.qualcomm._passes.decompose_floor_divide import (  # type: ignore
+        DecomposeFloorDivide,
+        FloorDivide,
+    )
+    from executorch.backends.qualcomm._passes.utils import merge_decomposed_graph  # type: ignore
+    from executorch.exir.pass_base import PassResult  # type: ignore
+  except Exception:
+    return
+
+  if getattr(DecomposeFloorDivide, "_carrotlink_scalar_patch", False):
+    return
+
+  def _meta_value(arg):
+    if hasattr(arg, "meta") and isinstance(getattr(arg, "meta"), dict):
+      return arg.meta.get("val", arg)
+    return arg
+
+  def _as_tensor(value, *, reference=None):
+    if isinstance(value, torch_module.Tensor):
+      return value
+    kwargs = {}
+    if isinstance(reference, torch_module.Tensor):
+      kwargs["dtype"] = reference.dtype
+      kwargs["device"] = reference.device
+    return torch_module.tensor(value, **kwargs)
+
+  def _patched_call(self, graph_module):
+    graph = graph_module.graph
+    changed = False
+    for node in list(graph.nodes):
+      if (
+          torch_module.ops.aten.floor_divide.default != node.target
+          or torch_module.is_floating_point(node.meta["val"])
+      ):
+        continue
+
+      lhs_value = _meta_value(node.args[0])
+      rhs_value = _meta_value(node.args[1])
+      lhs_tensor = _as_tensor(lhs_value)
+      rhs_tensor = _as_tensor(rhs_value, reference=lhs_tensor)
+      decomposed_module = torch_module.export.export(
+          FloorDivide(),
+          (lhs_tensor, rhs_tensor),
+          strict=True,
+      ).module()
+      with graph.inserting_before(node):
+        remap = {"x": node.args[0], "y": node.args[1]}
+        merge_decomposed_graph(
+            remap=remap,
+            target_node=node,
+            target_graph=graph,
+            decomposed_graph_module=decomposed_module,
+        )
+        graph.erase_node(node)
+        changed = True
+
+    if changed:
+      graph.eliminate_dead_code()
+      graph_module.recompile()
+    return PassResult(graph_module, changed)
+
+  DecomposeFloorDivide.call = _patched_call
+  DecomposeFloorDivide._carrotlink_scalar_patch = True
+
+
 def _load_runtime():
   try:
     import torch  # type: ignore
@@ -81,6 +148,8 @@ def _load_runtime():
     from executorch.exir.backend.utils import format_delegated_graph  # type: ignore
   except Exception:
     format_delegated_graph = None
+
+  _patch_qnn_floor_divide_scalar_bug(torch)
 
   return {
       "torch": torch,
