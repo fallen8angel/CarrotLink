@@ -275,6 +275,8 @@ YOLO box overlay를 위해 새로 만들 필요가 없는 stock 모드 자산도
 - `Snapdragon Galaxy`
   - 1차 시도: `YOLO26n_qnn + ExecuTorch QNN`
   - 반복 blocker가 `qnn_*` 계열이면 즉시 `YOLO26n + ExecuTorch XNNPACK`으로 강등
+  - 반복 fatal blocker는 기기 단위로 잠시 기억하고, 이후 기본 추천 backend도 `XNNPACK`으로 보정한다.
+  - 이 기억은 영구 차단이 아니라 `7일 TTL`을 두고, 기간이 지나면 다시 `QNN`을 재시도할 수 있게 한다.
 - `Exynos Galaxy`
   - 현재 앱 기준 기본 backend는 `ExecuTorch XNNPACK`
   - QNN은 대상 backend로 보지 않는다.

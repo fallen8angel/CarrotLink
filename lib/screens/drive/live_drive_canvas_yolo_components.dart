@@ -26,8 +26,26 @@ extension _LiveDriveCanvasYoloComponents on _LiveDriveCanvasScreenState {
     if (!current.enabled) {
       return;
     }
+    if (YoloRuntimePolicy.shouldClearRememberedQnnFailure(current, snapshot)) {
+      await YoloRuntimeCapabilityStore.clearQnnFailureForCurrentDevice();
+    }
     if (!YoloRuntimePolicy.shouldFallbackFromRuntimeFailure(current, snapshot)) {
       return;
+    }
+    if (YoloRuntimePolicy.shouldRememberQnnFailure(current, snapshot)) {
+      final blocker =
+          (snapshot.state['runtimeBlocker'] ?? snapshot.state['blocker'])
+                  ?.toString()
+                  .trim() ??
+              '';
+      final detail =
+          snapshot.state['lastError']?.toString().trim() ??
+              snapshot.config['modelVariant']?.toString().trim() ??
+              '';
+      await YoloRuntimeCapabilityStore.rememberQnnFailureForCurrentDevice(
+        blocker: blocker,
+        detail: detail,
+      );
     }
     final fallback = YoloRuntimePolicy.fallbackFromQnnFailure(current);
     if (fallback == current) {

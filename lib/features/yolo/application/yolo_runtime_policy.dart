@@ -1,6 +1,7 @@
 import '../domain/entities/yolo_model_variant.dart';
 import '../domain/entities/yolo_runtime_backend.dart';
 import '../presentation/models/yolo_debug_settings.dart';
+import 'yolo_runtime_capability_store.dart';
 import 'yolo_device_profile_service.dart';
 import 'yolo_runtime_status_store.dart';
 
@@ -34,7 +35,8 @@ class YoloRuntimePolicy {
     YoloDebugSettings base = YoloDebugSettings.empty,
   }) async {
     final profile = await YoloDeviceProfileService.load();
-    final backend = profile.supportsQnn
+    final capability = await YoloRuntimeCapabilityStore.loadForCurrentDevice();
+    final backend = profile.supportsQnn && !capability.qnnBlocked
         ? YoloRuntimeBackend.executorchQnn
         : YoloRuntimeBackend.executorchXnnpack;
     final model = backend == YoloRuntimeBackend.executorchQnn
@@ -86,6 +88,30 @@ class YoloRuntimePolicy {
     return _qnnFatalBlockers.contains(blocker) || blocker.startsWith('qnn_');
   }
 
+  static bool shouldRememberQnnFailure(
+    YoloDebugSettings settings,
+    YoloRuntimeStatusSnapshot snapshot,
+  ) {
+    if (settings.runtimeBackend != YoloRuntimeBackend.executorchQnn) {
+      return false;
+    }
+    return shouldFallbackFromRuntimeFailure(settings, snapshot);
+  }
+
+  static bool shouldClearRememberedQnnFailure(
+    YoloDebugSettings settings,
+    YoloRuntimeStatusSnapshot snapshot,
+  ) {
+    if (settings.runtimeBackend != YoloRuntimeBackend.executorchQnn) {
+      return false;
+    }
+    final state = snapshot.state;
+    final blocker =
+        (state['runtimeBlocker'] ?? state['blocker'])?.toString().trim() ?? '';
+    final forwardSuccesses = _readInt(state['forwardSuccesses']);
+    return forwardSuccesses > 0 && blocker.isEmpty;
+  }
+
   static YoloDebugSettings fallbackFromQnnFailure(YoloDebugSettings settings) {
     final normalized = _normalizeBackendModelPair(settings);
     return normalized.copyWith(
@@ -106,5 +132,11 @@ class YoloRuntimePolicy {
       );
     }
     return settings;
+  }
+
+  static int _readInt(dynamic raw) {
+    if (raw is int) return raw;
+    if (raw is num) return raw.toInt();
+    return int.tryParse(raw?.toString() ?? '') ?? 0;
   }
 }

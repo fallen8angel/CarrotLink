@@ -11,6 +11,8 @@
 - 실제 앱 번들에는 이제 `yolo26n_qnn.pte`, `yolo26s_qnn.pte`와 companion metadata가 들어간다.
 - 현재 기기 실검증 기준 QNN-lowered 경로는 `qnn_dsp_transport_failed`에서 막힌다.
 - 즉 문제는 모델 누락보다 `QnnDsp transport / skel load` 계층으로 좁혀졌다.
+- 반복 fatal `qnn_*` blocker는 기기 단위로 기억하고, 이후 기본 추천 backend를 잠시 `XNNPACK`으로 내린다.
+- 이 실패 기억은 영구 고정이 아니라 `7일 TTL` 뒤 자동 만료되어, 같은 기기에서 다시 `QNN` 재시도를 허용한다.
 - 운영 정책은 아래로 보정한다.
   - `Snapdragon Galaxy`: `QNN` 우선, 반복 `qnn_*` blocker면 `XNNPACK` 자동 폴백
   - `Exynos Galaxy`: 현재 앱 기준 `XNNPACK` 기본
