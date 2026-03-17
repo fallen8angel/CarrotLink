@@ -115,6 +115,12 @@ internal object NativeDriveYoloModelLocator {
         val extracted = extractAssetIfPresent(context, assetPath, fileName)
         if (extracted != null) {
           candidatePaths += extracted.absolutePath
+          // Also refresh the sibling metadata file so resolveMetadata() always
+          // reads a current copy — prevents stale on-device cache after re-export.
+          val metaName = fileName.removeSuffix(".pte") + ".metadata.json"
+          if (metaName != fileName) {
+            extractAssetIfPresent(context, "$assetDir/$metaName", metaName)
+          }
           return NativeDriveYoloModelResolution(
               modelPath = extracted.absolutePath,
               modelSource = "asset:$assetPath",
@@ -343,6 +349,33 @@ internal class NativeDriveExecuTorchRuntime(
   private var reusableInputBuffer: FloatBuffer? = null
   private var reusablePixels: IntArray? = null
   private var reusableInputShape: LongArray = longArrayOf(1, 3, 0, 0)
+
+  private fun summarizeThrowable(t: Throwable): String {
+    val primary = t.message?.trim().orEmpty()
+    val className = t::class.java.simpleName.ifBlank { t::class.java.name }
+    val cause = t.cause
+    if (cause != null) {
+      val causeClass = cause::class.java.simpleName.ifBlank { cause::class.java.name }
+      val causeMessage = cause.message?.trim().orEmpty()
+      return buildString {
+        append(className)
+        if (primary.isNotEmpty()) {
+          append(": ")
+          append(primary)
+        }
+        append(" | cause=")
+        append(causeClass)
+        if (causeMessage.isNotEmpty()) {
+          append(": ")
+          append(causeMessage)
+        }
+      }
+    }
+    if (primary.isNotEmpty()) {
+      return "$className: $primary"
+    }
+    return className
+  }
 
   override fun updateConfig(config: NativeDriveYoloConfig) {
     val previous = this.config
@@ -791,7 +824,7 @@ internal class NativeDriveExecuTorchRuntime(
       blocker = "preprocess_missing"
     } catch (t: Throwable) {
       releaseModule()
-      lastError = t.message ?: t::class.java.simpleName
+      lastError = summarizeThrowable(t)
       resetForwardFailureTracking()
       stage = "module_load_failed"
       blocker = "executorch_module_load_failed"

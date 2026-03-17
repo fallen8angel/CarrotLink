@@ -565,7 +565,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                           },
                         ),
                       ),
-                    if (_cameraLoading)
+                    if (_shouldShowCameraLoadingOverlay())
                       const Positioned.fill(
                         child: ColoredBox(
                           color: Colors.black45,

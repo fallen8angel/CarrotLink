@@ -162,6 +162,12 @@ flutter {
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.3")
+    // LiteRT Android artifacts keep the classic org.tensorflow.lite.* class paths.
+    // Use the official Google AI Edge coordinates so Gradle can resolve them from google().
+    implementation("com.google.ai.edge.litert:litert:1.4.1")
+    implementation("com.google.ai.edge.litert:litert-gpu-api:1.4.1")
+    implementation("com.google.ai.edge.litert:litert-gpu:1.4.1")
+    // ExecuTorch — XNNPACK CPU 폴백 경로 유지 (점진적 deprecated 예정)
     if (effectiveLocalExecuTorchAar) {
         implementation(files("libs/executorch.aar"))
         implementation("com.facebook.soloader:soloader:0.10.5")

@@ -303,6 +303,8 @@ extension _LiveDriveCanvasDeveloperPlaybackComponents
         _attachDeveloperPlaybackControllerListener(controller);
         _developerPlaybackLoading = false;
         _developerPlaybackError = null;
+        _cameraLoading = false;
+        _cameraError = null;
         return;
       }
       _safeSetState(() {
@@ -310,6 +312,8 @@ extension _LiveDriveCanvasDeveloperPlaybackComponents
         _attachDeveloperPlaybackControllerListener(controller);
         _developerPlaybackLoading = false;
         _developerPlaybackError = null;
+        _cameraLoading = false;
+        _cameraError = null;
       });
       if (startPlaying) {
         _syncDeveloperPlaybackLoop();

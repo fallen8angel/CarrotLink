@@ -17,8 +17,8 @@ data class NativeDriveYoloConfig(
     val samplePeriodMs: Int = DEFAULT_SAMPLE_PERIOD_MS,
 ) {
   companion object {
-    const val DEFAULT_RUNTIME_BACKEND = "executorch_xnnpack"
-    const val DEFAULT_MODEL_VARIANT = "yolo26n"
+    const val DEFAULT_RUNTIME_BACKEND = "litert_gpu"
+    const val DEFAULT_MODEL_VARIANT = "yolo26n_litert"
     private const val DEFAULT_CAMERA = "road"
     private const val DEFAULT_SOURCE_WIDTH = 1928
     private const val DEFAULT_SOURCE_HEIGHT = 1208

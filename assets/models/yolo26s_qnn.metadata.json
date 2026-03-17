@@ -1,11 +1,11 @@
 {
-  "weights": "scripts/yolo26s.pt",
+  "weights": "/home/runner/work/CarrotLink/CarrotLink/scripts/yolo26s.pt",
   "output_name": "yolo26s_qnn",
   "soc": "SM8750",
   "qnn_sdk_version": "2.37.0.250724",
   "executorch_ref": "v1.1.0",
   "use_fp16": true,
-  "online_prepare": true,
+  "online_prepare": false,
   "imgsz": 416,
   "batch": 1
 }

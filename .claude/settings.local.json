@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la /e/Carrot/CarrotLink/lib/*.dart)",
+      "WebFetch(domain:docs.pytorch.org)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:workbench.aihub.qualcomm.com)",
+      "Bash(find e:/Carrot/CarrotLink/ -name *.yml -o -name *.yaml)",
+      "Bash(find e:/Carrot/CarrotLink -name *.metadata.json)",
+      "Bash(gh workflow:*)",
+      "Bash(gh run:*)",
+      "Bash(ARTIFACT=\"e:/Carrot/CarrotLink/build/qnn_offline_export/qnn-export-all-SM8750-2.37.0.250724-offline\")",
+      "Bash(DEST=\"e:/Carrot/CarrotLink/assets/models\")",
+      "Bash(__NEW_LINE_99913dca3809a57e__ cp:*)",
+      "Bash(cp \"$ARTIFACT/yolo26n_qnn.metadata.json\" \"$DEST/yolo26n_qnn.metadata.json\")",
+      "Bash(cp \"$ARTIFACT/yolo26s_qnn.pte\" \"$DEST/yolo26s_qnn.pte\")",
+      "Bash(cp \"$ARTIFACT/yolo26s_qnn.metadata.json\" \"$DEST/yolo26s_qnn.metadata.json\")",
+      "Bash(__NEW_LINE_99913dca3809a57e__ echo:*)",
+      "Read(//e/Carrot/CarrotLink/$DEST/**)",
+      "Bash(python3 -c \":*)",
+      "Bash(python -c \":*)",
+      "Bash(find e:/Carrot/CarrotLink/build -name *.apk)"
+    ]
+  }
+}

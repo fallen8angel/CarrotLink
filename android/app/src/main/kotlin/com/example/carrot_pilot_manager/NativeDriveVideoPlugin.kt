@@ -38,10 +38,23 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 private const val NATIVE_VIDEO_TAG = "CarrotNativeVideo"
+
+private fun createNativeDriveYoloRuntime(
+    context: Context,
+    backendHint: String,
+): NativeDriveYoloRuntime {
+  val backend = backendHint.trim().lowercase()
+  return if (backend.startsWith("litert") || backend.startsWith("tflite")) {
+    NativeDriveLiteRtRuntime(context)
+  } else {
+    NativeDriveExecuTorchRuntime(context)
+  }
+}
 
 class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChannel.StreamHandler {
   companion object {
@@ -61,7 +74,7 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
     private data class OfflineVideoDebugSession(
         val path: String,
         val baseSignature: String,
-        val runtime: NativeDriveExecuTorchRuntime,
+        val runtime: NativeDriveYoloRuntime,
         val retriever: MediaMetadataRetriever,
         var activeConfig: NativeDriveYoloConfig,
         var sourceWidth: Int = 0,
@@ -186,6 +199,39 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
       }
     }
 
+    private fun prepareOfflineRuntimeForPlayback(
+        runtime: NativeDriveYoloRuntime,
+        config: NativeDriveYoloConfig,
+    ) {
+      val backend = config.runtimeBackend.trim().lowercase()
+      // LiteRT runtimes initialize on their own inference thread; no main-thread dispatch needed.
+      // The main-thread QNN init path only applies to the ExecuTorch QNN backend.
+      if (!backend.contains("qnn") || runtime !is NativeDriveExecuTorchRuntime) {
+        runtime.updateConfig(config)
+        return
+      }
+      if (Looper.myLooper() == Looper.getMainLooper()) {
+        runtime.updateConfig(config)
+        return
+      }
+      val latch = CountDownLatch(1)
+      var failure: Throwable? = null
+      mainHandler.post {
+        try {
+          runtime.updateConfig(config)
+        } catch (t: Throwable) {
+          failure = t
+        } finally {
+          latch.countDown()
+        }
+      }
+      val completed = latch.await(8, TimeUnit.SECONDS)
+      if (!completed) {
+        throw IllegalStateException("offline_qnn_runtime_prepare_timeout")
+      }
+      failure?.let { throw it }
+    }
+
     fun registerView(viewId: Int, view: NativeDriveVideoView) {
       views[viewId] = view
     }
@@ -239,9 +285,9 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
             decodedHeight = sourceBitmap.height,
         )
       }
-      val runtime = NativeDriveExecuTorchRuntime(context)
+      val runtime = createNativeDriveYoloRuntime(context, activeConfig.runtimeBackend)
       return try {
-        runtime.updateConfig(activeConfig)
+        prepareOfflineRuntimeForPlayback(runtime, activeConfig)
         val frame =
             NativeDriveYoloFrame(
                 frameId = 1,
@@ -306,7 +352,7 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
       val context = appContext ?: return null
       val retriever = MediaMetadataRetriever()
       val baseConfig = NativeDriveYoloConfig.fromPayload(yoloConfig)
-      val runtime = NativeDriveExecuTorchRuntime(context)
+      val runtime = createNativeDriveYoloRuntime(context, baseConfig.runtimeBackend)
       var sourceWidth = 0
       var sourceHeight = 0
       return try {
@@ -349,7 +395,7 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
               videoSampleTimesMs = sampleTimesMs,
           )
         }
-        runtime.updateConfig(activeConfig)
+        prepareOfflineRuntimeForPlayback(runtime, activeConfig)
 
         var actualFrames = 0
         var lastFrameId = -1
@@ -549,16 +595,30 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
       val sourceHeight =
           retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
               ?.toIntOrNull() ?: 0
-      return OfflineVideoDebugSession(
+      val session =
+          OfflineVideoDebugSession(
               path = path,
               baseSignature = signature,
-              runtime = NativeDriveExecuTorchRuntime(context),
+              runtime = createNativeDriveYoloRuntime(context, baseConfig.runtimeBackend),
               retriever = retriever,
               activeConfig = baseConfig,
               sourceWidth = sourceWidth,
               sourceHeight = sourceHeight,
           )
-          .also { offlineVideoDebugSession = it }
+      return try {
+        prepareOfflineRuntimeForPlayback(session.runtime, baseConfig)
+        session.also { offlineVideoDebugSession = it }
+      } catch (t: Throwable) {
+        try {
+          session.runtime.release()
+        } catch (_: Throwable) {
+        }
+        try {
+          session.retriever.release()
+        } catch (_: Throwable) {
+        }
+        throw t
+      }
     }
 
     private fun releaseOfflineVideoDebugSessionLocked() {
@@ -764,7 +824,14 @@ class NativeDriveVideoView(
           onStateChanged = { payload ->
             emitYoloState(payload)
           },
-          runtime = NativeDriveExecuTorchRuntime(context))
+          runtimeFactory = { backend -> createNativeDriveYoloRuntime(context, backend) },
+          initialRuntime =
+              createNativeDriveYoloRuntime(
+                  context,
+                  NativeDriveYoloConfig.DEFAULT_RUNTIME_BACKEND,
+              ),
+          initialRuntimeBackend = NativeDriveYoloConfig.DEFAULT_RUNTIME_BACKEND,
+      )
   private val reconnectHandler = Handler(Looper.getMainLooper())
   private val decodeThread = HandlerThread("CarrotNativeDecode-$viewId").apply { start() }
   private val decodeHandler = Handler(decodeThread.looper)
@@ -790,7 +857,13 @@ class NativeDriveVideoView(
   @Volatile private var pendingSyncFrameCount = 0
   private val pendingDecodeTasks = AtomicInteger(0)
   @Volatile private var frameStallStrikes = 0
+  @Volatile private var startupSyncFrameStrikes = 0
   @Volatile private var decodeBacklogDropCount = 0
+  @Volatile private var missingSourceFrameIdCount = 0
+  @Volatile private var syntheticFrameEmitCount = 0
+  @Volatile private var syntheticSyncActive = false
+  @Volatile private var lastSourceFrameKey = ""
+  @Volatile private var lastMetaKeySummary = ""
 
   private var reconnectRunnable: Runnable? = null
   private var frameWatchdogRunnable: Runnable? = null
@@ -828,6 +901,11 @@ class NativeDriveVideoView(
   private data class PendingFrame(
       val yoloFrameId: Int,
       val syncFrameId: Int?,
+  )
+
+  private data class SourceFrameIdResult(
+      val frameId: Int,
+      val key: String?,
   )
 
   init {
@@ -903,6 +981,7 @@ class NativeDriveVideoView(
     closeSocket()
     connectAttempts += 1
     frameStallStrikes = 0
+    startupSyncFrameStrikes = 0
     emitState("connecting")
     val request = Request.Builder().url(wsUrl).build()
     val newSocket =
@@ -914,6 +993,7 @@ class NativeDriveVideoView(
                 lastPacketAtMs = System.currentTimeMillis()
                 lastDecodedAtMs = lastPacketAtMs
                 frameStallStrikes = 0
+                startupSyncFrameStrikes = 0
                 startFrameWatchdog()
                 emitState("connected")
               }
@@ -921,7 +1001,6 @@ class NativeDriveVideoView(
               override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 if (!isCurrentSocket(webSocket)) return
                 lastPacketAtMs = System.currentTimeMillis()
-                frameStallStrikes = 0
                 val copy = bytes.toByteArray()
                 packetsWindow += 1
                 packetBytesWindow += copy.size.toLong()
@@ -997,6 +1076,8 @@ class NativeDriveVideoView(
     lastDecodedAtMs = lastPacketAtMs
     lastFrameEmitAtMs = 0L
     firstDecodedWithoutSyncAtMs = 0L
+    frameStallStrikes = 0
+    startupSyncFrameStrikes = 0
     frameWatchdogRunnable =
         object : Runnable {
           override fun run() {
@@ -1025,13 +1106,26 @@ class NativeDriveVideoView(
                     !waitingKeyFrame &&
                     lastFrameEmitAtMs <= 0L &&
                     elapsedSynclessDecodeMs > startupSyncFrameSoftTimeoutMs
+            val ordinaryStall = packetStalled || decodeStalled || startupFirstFrameStalled
             if (webSocket != null &&
-                (packetStalled ||
-                    decodeStalled ||
-                    startupFirstFrameStalled ||
-                    startupSyncFrameStalled)) {
-              frameStallStrikes += 1
-              if (frameStallStrikes == 1 || frameStallStrikes % frameStallStateEmitEvery == 0) {
+                (ordinaryStall || startupSyncFrameStalled)) {
+              if (ordinaryStall) {
+                frameStallStrikes += 1
+              } else {
+                frameStallStrikes = 0
+              }
+              if (startupSyncFrameStalled) {
+                startupSyncFrameStrikes += 1
+              } else {
+                startupSyncFrameStrikes = 0
+              }
+              val activeStrikes =
+                  if (startupSyncFrameStalled && !ordinaryStall) {
+                    startupSyncFrameStrikes
+                  } else {
+                    frameStallStrikes
+                  }
+              if (activeStrikes == 1 || activeStrikes % frameStallStateEmitEvery == 0) {
                 if (startupFirstFrameStalled) {
                   emitState("waiting_keyframe_${elapsedDecodedMs}ms")
                 } else if (startupSyncFrameStalled) {
@@ -1055,7 +1149,7 @@ class NativeDriveVideoView(
                       decodeHardStall ||
                       startupFirstFrameHardStall ||
                       startupSyncFrameHardStall) &&
-                  frameStallStrikes >= strikeLimit) {
+                  activeStrikes >= strikeLimit) {
                 if (startupFirstFrameHardStall) {
                   emitError("startup_keyframe_timeout_${elapsedDecodedMs}ms")
                 } else if (startupSyncFrameHardStall) {
@@ -1071,10 +1165,11 @@ class NativeDriveVideoView(
                 return
               }
             } else {
-              if (frameStallStrikes > 0) {
+              if (frameStallStrikes > 0 || startupSyncFrameStrikes > 0) {
                 emitState("recovered")
               }
               frameStallStrikes = 0
+              startupSyncFrameStrikes = 0
             }
             reconnectHandler.postDelayed(this, frameWatchdogIntervalMs)
           }
@@ -1127,6 +1222,13 @@ class NativeDriveVideoView(
     nextRenderedFrameId = 0
     lastFrameEmitAtMs = 0L
     firstDecodedWithoutSyncAtMs = 0L
+    frameStallStrikes = 0
+    startupSyncFrameStrikes = 0
+    missingSourceFrameIdCount = 0
+    syntheticFrameEmitCount = 0
+    syntheticSyncActive = false
+    lastSourceFrameKey = ""
+    lastMetaKeySummary = ""
     pendingDecodeTasks.set(0)
     pendingFrames.clear()
     pendingSyncFrameCount = 0
@@ -1163,7 +1265,16 @@ class NativeDriveVideoView(
 
     val parsed = parsePacket(packet) ?: return
     val meta = parsed.meta
-    val sourceFrameId = meta.optInt("frameId", -1)
+    val sourceFrame = extractSourceFrameId(meta)
+    val sourceFrameId = sourceFrame.frameId
+    if (!sourceFrame.key.isNullOrBlank()) {
+      lastSourceFrameKey = sourceFrame.key
+    } else {
+      missingSourceFrameIdCount += 1
+      if (lastMetaKeySummary.isBlank() || missingSourceFrameIdCount <= 3) {
+        lastMetaKeySummary = summarizeMetaKeys(meta)
+      }
+    }
     if (sourceFrameId >= 0 && lastSourceFrameId >= 0 && sourceFrameId <= lastSourceFrameId) {
       return
     }
@@ -1233,11 +1344,17 @@ class NativeDriveVideoView(
     val s = surface ?: return false
     return try {
       val localCodec = MediaCodec.createDecoderByType("video/avc")
-      val format = MediaFormat.createVideoFormat("video/avc", width, height)
+      // Hardware H.264 decoders (Snapdragon, Exynos) require dimensions aligned to
+      // a multiple of 16. Non-aligned heights like 760 cause the decoder to silently
+      // accept input but produce no output frames. Round up to the nearest 16-byte
+      // boundary to avoid this issue; the SPS/PPS in the bitstream remains authoritative.
+      val alignedWidth = (width + 15) and 15.inv()
+      val alignedHeight = (height + 15) and 15.inv()
+      val format = MediaFormat.createVideoFormat("video/avc", alignedWidth, alignedHeight)
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
         format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
       }
-      format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, width * height)
+      format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, alignedWidth * alignedHeight)
       localCodec.configure(format, s, null, 0)
       localCodec.start()
       applySurfaceFrameRateHint(hintedFrameRate)
@@ -1304,9 +1421,32 @@ class NativeDriveVideoView(
             pendingSyncFrameCount = (pendingSyncFrameCount - 1).coerceAtLeast(0)
             lastFrameEmitAtMs = lastDecodedAtMs
             firstDecodedWithoutSyncAtMs = 0L
-            emitFrame(syncFrameId)
+            startupSyncFrameStrikes = 0
+            if (syntheticSyncActive) {
+              syntheticSyncActive = false
+              emitState("sync_frame_restored")
+            }
+            emitFrame(syncFrameId, synthetic = false)
           } else if (lastFrameEmitAtMs <= 0L && firstDecodedWithoutSyncAtMs <= 0L) {
             firstDecodedWithoutSyncAtMs = lastDecodedAtMs
+          }
+          val synclessDecodeMs =
+              if (firstDecodedWithoutSyncAtMs > 0L) {
+                (lastDecodedAtMs - firstDecodedWithoutSyncAtMs).coerceAtLeast(0L)
+              } else {
+                -1L
+              }
+          if (syncFrameId == null &&
+              yoloFrameId >= 0 &&
+              (syntheticSyncActive || synclessDecodeMs >= startupSyncFrameSoftTimeoutMs)) {
+            syntheticSyncActive = true
+            syntheticFrameEmitCount += 1
+            lastFrameEmitAtMs = lastDecodedAtMs
+            startupSyncFrameStrikes = 0
+            if (syntheticFrameEmitCount == 1) {
+              emitState("synthetic_sync_frame_${synclessDecodeMs.coerceAtLeast(0L)}ms")
+            }
+            emitFrame(yoloFrameId, synthetic = true)
           }
           if (yoloFrameId >= 0) {
             yoloController.onFrameRendered(
@@ -1481,14 +1621,56 @@ class NativeDriveVideoView(
         ))
   }
 
-  private fun emitFrame(frameId: Int) {
+  private fun emitFrame(frameId: Int, synthetic: Boolean = false) {
     NativeDriveVideoPlugin.emit(
         mapOf(
             "viewId" to viewId,
             "type" to "camera_frame",
             "camera" to cameraName,
             "frameId" to frameId,
+            "synthetic" to synthetic,
         ))
+  }
+
+  private fun extractSourceFrameId(meta: JSONObject): SourceFrameIdResult {
+    val keys =
+        arrayOf(
+            "frameId",
+            "frame_id",
+            "cameraFrameId",
+            "camera_frame_id",
+            "roadFrameId",
+            "road_frame_id",
+            "frameIndex",
+            "frame_index",
+            "index",
+        )
+    for (key in keys) {
+      val parsed = parseIntLike(meta.opt(key))
+      if (parsed != null && parsed >= 0) {
+        return SourceFrameIdResult(parsed, key)
+      }
+    }
+    return SourceFrameIdResult(-1, null)
+  }
+
+  private fun parseIntLike(value: Any?): Int? {
+    return when (value) {
+      null -> null
+      is Number -> value.toInt()
+      is String -> value.trim().toIntOrNull()
+      else -> null
+    }
+  }
+
+  private fun summarizeMetaKeys(meta: JSONObject, limit: Int = 8): String {
+    val keys = mutableListOf<String>()
+    val iterator = meta.keys()
+    while (iterator.hasNext() && keys.size < limit) {
+      keys.add(iterator.next())
+    }
+    keys.sort()
+    return keys.joinToString(",")
   }
 
   private fun emitError(reason: String) {
@@ -1567,6 +1749,13 @@ class NativeDriveVideoView(
             "connectAttempts" to connectAttempts,
             "codecConfigured" to codecConfigured,
             "waitingKeyFrame" to waitingKeyFrame,
+            "lastSourceFrameId" to lastSourceFrameId,
+            "lastSourceFrameKey" to lastSourceFrameKey,
+            "missingSourceFrameIds" to missingSourceFrameIdCount,
+            "syntheticSyncActive" to syntheticSyncActive,
+            "syntheticFrameEmits" to syntheticFrameEmitCount,
+            "startupSyncFrameStrikes" to startupSyncFrameStrikes,
+            "metaKeySummary" to lastMetaKeySummary,
             "lastError" to lastErrorReason,
             "lastErrorAgeMs" to errorAgeMs,
         ))

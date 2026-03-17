@@ -185,6 +185,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   };
   StreamSubscription<dynamic>? _nativeCameraEventSub;
   int? _nativeCameraViewId;
+  int _nativeCameraAttachEpoch = 0;
   bool _nativeCameraUnsupported = false;
   bool _isDisposing = false;
   final bool _nativeOverlayEnabled = true;
@@ -227,6 +228,9 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const int _cameraFrameStaleUs = 350000;
   static const int _cameraHealthyFrameAgeUs = 1200000;
   static const int _startupProvisionalSyncWindowUs = 4000000;
+  static const int _cameraFirstFrameDegradedHoldUs = 12000000;
+  static const int _cameraFirstFrameForceReattachUs = 6500000;
+  static const int _cameraFirstFrameRecoveryCooldownUs = 8000000;
   static const int _startupProvisionalNativeSettleFrames = 3;
   static const int _interpMinUs = 6000;
   static const int _interpMaxUs = 50000;
@@ -287,6 +291,8 @@ fi
   int _cameraErrorGraceUntilUs = 0;
   int _cameraAttachStartedUs = 0;
   int _cameraStartupSocketFailureCount = 0;
+  int _lastCameraFirstFrameRecoveryUs = 0;
+  int _cameraFirstFrameRecoveryCount = 0;
   _CameraAttachPhase _cameraAttachPhase = _CameraAttachPhase.idle;
   Timer? _cameraTransientErrorTimer;
   String? _cameraTransientErrorSource;
@@ -682,6 +688,7 @@ fi
       _safeSetState(() {
         _cameraSourceKey = null;
         _nativeCameraViewId = null;
+        _nativeCameraAttachEpoch += 1;
         _nativeCameraUnsupported = false;
         _nativeCameraAttachReady = false;
         _liveCameraKind = _DriveCameraKind.road;
@@ -693,6 +700,7 @@ fi
     } else {
       _cameraSourceKey = null;
       _nativeCameraViewId = null;
+      _nativeCameraAttachEpoch += 1;
       _nativeCameraUnsupported = false;
       _nativeCameraAttachReady = false;
       _liveCameraKind = _DriveCameraKind.road;
@@ -715,6 +723,8 @@ fi
     _cameraErrorGraceUntilUs = 0;
     _cameraAttachStartedUs = 0;
     _cameraStartupSocketFailureCount = 0;
+    _lastCameraFirstFrameRecoveryUs = 0;
+    _cameraFirstFrameRecoveryCount = 0;
     _cameraAttachPhase = _CameraAttachPhase.idle;
     _lastPublishedModelFrameId = null;
     _lastSyncHitUs = 0;

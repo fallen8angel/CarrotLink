@@ -119,6 +119,7 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
     unawaited(_clearNativeOverlay());
     _cameraSourceKey = null;
     _nativeCameraViewId = null;
+    _nativeCameraAttachEpoch += 1;
     unawaited(_unloadWebCameraSurface());
     if (mounted) {
       _safeSetState(() {

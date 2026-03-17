@@ -5,8 +5,12 @@ private const val YOLO_STATE_EMIT_INTERVAL_MS = 1_000L
 class NativeDriveYoloController(
     surfaceView: android.view.SurfaceView,
     private val onStateChanged: (Map<String, Any?>) -> Unit,
-    private val runtime: NativeDriveYoloRuntime = NativeDriveYoloStubRuntime(),
+    private val runtimeFactory: ((String) -> NativeDriveYoloRuntime)? = null,
+    initialRuntime: NativeDriveYoloRuntime = NativeDriveYoloStubRuntime(),
+    initialRuntimeBackend: String = NativeDriveYoloConfig.DEFAULT_RUNTIME_BACKEND,
 ) {
+  private var runtime: NativeDriveYoloRuntime = initialRuntime
+  private var runtimeBackend: String = initialRuntimeBackend
   private val pixelSampler =
       NativeDriveYoloPixelSampler(
           surfaceView = surfaceView,
@@ -31,6 +35,7 @@ class NativeDriveYoloController(
 
   fun updateConfig(next: NativeDriveYoloConfig) {
     val wasEnabled = config.enabled
+    maybeSwapRuntime(next)
     config = next
     runtime.updateConfig(next)
     pixelSampler.updateConfig(next)
@@ -146,6 +151,20 @@ class NativeDriveYoloController(
     lastEmitAtMs = nowMs
     lastEmitSignature = signature
     onStateChanged(payload)
+  }
+
+  private fun maybeSwapRuntime(next: NativeDriveYoloConfig) {
+    val factory = runtimeFactory ?: return
+    val requestedBackend = next.runtimeBackend.trim().ifEmpty {
+      NativeDriveYoloConfig.DEFAULT_RUNTIME_BACKEND
+    }
+    if (requestedBackend == runtimeBackend && runtime !is NativeDriveYoloStubRuntime) {
+      return
+    }
+    val replacement = factory(requestedBackend)
+    runtime.release()
+    runtime = replacement
+    runtimeBackend = requestedBackend
   }
 
   private fun deriveEffectiveStageAndBlocker(

@@ -32,7 +32,8 @@ extension _LiveDriveCanvasYoloComponents on _LiveDriveCanvasScreenState {
     if (!YoloRuntimePolicy.shouldFallbackFromRuntimeFailure(current, snapshot)) {
       return;
     }
-    if (YoloRuntimePolicy.shouldRememberQnnFailure(current, snapshot)) {
+    if (current.runtimeBackend == YoloRuntimeBackend.executorchQnn &&
+        YoloRuntimePolicy.shouldRememberQnnFailure(current, snapshot)) {
       final blocker =
           (snapshot.state['runtimeBlocker'] ?? snapshot.state['blocker'])
                   ?.toString()
@@ -47,13 +48,19 @@ extension _LiveDriveCanvasYoloComponents on _LiveDriveCanvasScreenState {
         detail: detail,
       );
     }
-    final fallback = YoloRuntimePolicy.fallbackFromQnnFailure(current);
+    final fallback = current.runtimeBackend == YoloRuntimeBackend.liteRtGpu
+        ? YoloRuntimePolicy.fallbackToLiteRtCpu(current)
+        : YoloRuntimePolicy.fallbackFromQnnFailure(current);
     if (fallback == current) {
       return;
     }
     await _setDriveYoloDebugSettingsImpl(fallback);
     if (mounted) {
-      _toast('QNN 실패로 ExecuTorch XNNPACK으로 전환했습니다.');
+      _toast(
+        current.runtimeBackend == YoloRuntimeBackend.liteRtGpu
+            ? 'LiteRT GPU 실패로 LiteRT CPU로 전환했습니다.'
+            : 'QNN 실패로 ExecuTorch XNNPACK으로 전환했습니다.',
+      );
     }
   }
 

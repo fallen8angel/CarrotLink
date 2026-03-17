@@ -1,7 +1,6 @@
 import '../domain/entities/yolo_model_variant.dart';
 import '../domain/entities/yolo_runtime_backend.dart';
 import '../presentation/models/yolo_debug_settings.dart';
-import 'yolo_runtime_capability_store.dart';
 import 'yolo_device_profile_service.dart';
 import 'yolo_runtime_status_store.dart';
 
@@ -35,13 +34,10 @@ class YoloRuntimePolicy {
     YoloDebugSettings base = YoloDebugSettings.empty,
   }) async {
     final profile = await YoloDeviceProfileService.load();
-    final capability = await YoloRuntimeCapabilityStore.loadForCurrentDevice();
-    final backend = profile.supportsQnn && !capability.qnnBlocked
-        ? YoloRuntimeBackend.executorchQnn
-        : YoloRuntimeBackend.executorchXnnpack;
-    final model = backend == YoloRuntimeBackend.executorchQnn
-        ? YoloModelVariant.yolo26nQnn
-        : YoloModelVariant.yolo26n;
+    final backend = profile.supportsQnn
+        ? YoloRuntimeBackend.liteRtGpu
+        : YoloRuntimeBackend.liteRtCpu;
+    const model = YoloModelVariant.yolo26nLiteRt;
     return normalizeForProfile(
       base.copyWith(
         runtimeBackend: backend,
@@ -53,19 +49,13 @@ class YoloRuntimePolicy {
   static Future<YoloDebugSettings> normalizeForProfile(
     YoloDebugSettings settings,
   ) async {
-    final profile = await YoloDeviceProfileService.load();
     var next = _normalizeBackendModelPair(settings);
-    if (!profile.supportsQnn &&
-        next.runtimeBackend == YoloRuntimeBackend.executorchQnn) {
-      next = next.copyWith(
-        runtimeBackend: YoloRuntimeBackend.executorchXnnpack,
-        modelVariant: next.modelVariant.genericVariant,
-      );
-    }
+    // Downgrade large model if not in allowed profile.
+    final profile = await YoloDeviceProfileService.load();
     if (!profile.allowsYolo26sByDefault && next.modelVariant.isLargeModel) {
       next = next.copyWith(
-        modelVariant: next.runtimeBackend == YoloRuntimeBackend.executorchQnn
-            ? YoloModelVariant.yolo26nQnn
+        modelVariant: next.runtimeBackend.isLiteRt
+            ? YoloModelVariant.yolo26nLiteRt
             : YoloModelVariant.yolo26n,
       );
     }
@@ -76,6 +66,15 @@ class YoloRuntimePolicy {
     YoloDebugSettings settings,
     YoloRuntimeStatusSnapshot snapshot,
   ) {
+    if (settings.runtimeBackend == YoloRuntimeBackend.liteRtGpu) {
+      final rawBlocker =
+          snapshot.state['runtimeBlocker'] ?? snapshot.state['blocker'];
+      final blocker = rawBlocker?.toString().trim().toLowerCase() ?? '';
+      return blocker == 'litert_gpu_unsupported' ||
+          blocker == 'litert_gpu_delegate_failed' ||
+          blocker == 'litert_interpreter_load_failed' ||
+          blocker == 'litert_init_failed';
+    }
     if (settings.runtimeBackend != YoloRuntimeBackend.executorchQnn) {
       return false;
     }
@@ -120,13 +119,27 @@ class YoloRuntimePolicy {
     );
   }
 
-  static YoloDebugSettings _normalizeBackendModelPair(YoloDebugSettings settings) {
+  static YoloDebugSettings fallbackToLiteRtCpu(YoloDebugSettings settings) {
+    return settings.copyWith(
+      runtimeBackend: YoloRuntimeBackend.liteRtCpu,
+      modelVariant: settings.modelVariant.liteRtVariant,
+    );
+  }
+
+  static YoloDebugSettings _normalizeBackendModelPair(
+    YoloDebugSettings settings,
+  ) {
+    if (settings.runtimeBackend.isLiteRt && !settings.modelVariant.isLiteRt) {
+      return settings.copyWith(
+        modelVariant: settings.modelVariant.liteRtVariant,
+      );
+    }
     if (settings.runtimeBackend == YoloRuntimeBackend.executorchQnn &&
         !settings.modelVariant.isQnnLowered) {
       return settings.copyWith(modelVariant: settings.modelVariant.qnnVariant);
     }
     if (settings.runtimeBackend == YoloRuntimeBackend.executorchXnnpack &&
-        settings.modelVariant.isQnnLowered) {
+        (settings.modelVariant.isQnnLowered || settings.modelVariant.isLiteRt)) {
       return settings.copyWith(
         modelVariant: settings.modelVariant.genericVariant,
       );

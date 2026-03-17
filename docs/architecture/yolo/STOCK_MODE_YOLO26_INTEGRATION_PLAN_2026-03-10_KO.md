@@ -1,10 +1,10 @@
 # CarrotLink Stock Mode YOLO26 통합 계획 (2026-03-10)
 
 최종 분석일: 2026-03-10  
-최종 업데이트: 2026-03-10  
-대상 경로: `D:\CarrotLink\CarrotLink-dev`
+최종 업데이트: 2026-03-17  
+대상 경로: `E:\Carrot\CarrotLink`
 
-이 문서는 `stock` 주행모드 원격 카메라 화면 위에 YOLO26 객체감지를 얹을 때의 1차 통합 계획을 정리한다.
+이 문서는 `stock` 주행모드 원격 카메라 화면 위에 YOLO26 객체감지를 얹을 때의 1차 통합 계획을 정리한다. 원래 문서는 계획 문서지만, 아래 2026-03-17 보정으로 현재 운영 정책과 구현 현실을 같이 반영한다.
 
 같이 봐야 하는 문서:
 
@@ -222,10 +222,13 @@ YOLO box는 세 경우 모두 아래 규칙을 따른다.
 
 현재 구현 상태 보정:
 
-- 현재 앱은 generic ExecuTorch bring-up까지는 성공했다.
-- 현재 `runtimeBackend=executorch_qnn`은 목표 문자열이며, 진짜 QNN-lowered runtime은 아직 다음 단계다.
-- 따라서 parser/draw 안정화 전까지는 generic ExecuTorch path를 기준으로 기능을 완성하고,
-- 그 뒤 QNN path를 병행/치환하는 순서가 맞다.
+- 현재 앱은 generic `ExecuTorch/XNNPACK` 기준선까지는 실제 사용 가능 상태다.
+- 현재 앱은 `executorch_qnn`과 `executorch_xnnpack` 두 backend를 모두 가진다.
+- QNN-lowered model과 metadata도 앱 번들에 실제로 들어간다.
+- 다만 live 기기 기준 QNN의 본질적 blocker는 `qnn_dsp_transport_failed`다.
+- developer playback 쪽은 별도로 `executorch_module_load_failed` 가능성이 남아 있다.
+- 따라서 운영은 `QNN only`가 아니라, `Snapdragon=QNN 우선 + 실패 시 XNNPACK`, `Exynos=XNNPACK 기본`으로 가져가는 것이 맞다.
+- parser/draw/tracking은 backend와 독립적으로 유지하고, backend 교체가 overlay 정합을 깨지 않게 하는 원칙은 그대로 유지한다.
 
 2차 확장안:
 

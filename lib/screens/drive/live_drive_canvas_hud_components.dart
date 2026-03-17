@@ -42,7 +42,7 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
     if (_useNativeLiveCamera || nativeCameraPrewarm) {
       return AndroidView(
         key: ValueKey<String>(
-          'native-live-$_hostIp-$_liveCameraName',
+          'native-live-$_hostIp-$_liveCameraName-$_nativeCameraAttachEpoch',
         ),
         viewType: 'carrotlink/native_drive_video',
         creationParams: <String, dynamic>{
@@ -96,7 +96,9 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
     }
     final attachNotice = _cameraAttachNoticeMessage();
     if (attachNotice != null && attachNotice.isNotEmpty) {
-      return attachNotice;
+      if (!_shouldUseDegradedOverlayFallbackUi()) {
+        return attachNotice;
+      }
     }
     final err = _cameraError?.trim();
     if (err != null && err.isNotEmpty) {
@@ -110,12 +112,16 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
         _cameraLoading &&
         _nativeCameraAttachReady &&
         _lastCameraFrameId == null) {
-      return '로드카메라 첫 프레임 대기 중입니다.';
+      if (!_shouldUseDegradedOverlayFallbackUi()) {
+        return '로드카메라 첫 프레임 대기 중입니다.';
+      }
     }
     if (_openpilotOverlayMode &&
         !_cameraLoading &&
         _lastCameraFrameId == null) {
-      return '카메라 스트림 재동기화 중입니다.';
+      if (!_shouldUseDegradedOverlayFallbackUi()) {
+        return '카메라 스트림 재동기화 중입니다.';
+      }
     }
     return null;
   }

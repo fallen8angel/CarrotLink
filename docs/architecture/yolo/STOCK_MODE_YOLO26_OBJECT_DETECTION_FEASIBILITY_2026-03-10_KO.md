@@ -1,10 +1,10 @@
 # CarrotLink Stock Mode YOLO26 객체감지 도입 검토 (2026-03-10)
 
 최종 분석일: 2026-03-10  
-최종 업데이트: 2026-03-10  
-분석 대상 경로: `D:\CarrotLink\CarrotLink-dev`
+최종 업데이트: 2026-03-17  
+분석 대상 경로: `E:\Carrot\CarrotLink`
 
-이 문서는 CarrotLink의 stock/live drive 화면에서, 기존 sidecar는 수정하지 않고 현재 앱이 받아서 표시하는 원격 주행카메라 영상 위에 YOLO26 기반 객체감지를 추가할 수 있는지 검토한 결과를 정리한다.
+이 문서는 CarrotLink의 stock/live drive 화면에서, 기존 sidecar는 수정하지 않고 현재 앱이 받아서 표시하는 원격 주행카메라 영상 위에 YOLO26 기반 객체감지를 추가할 수 있는지 검토한 결과를 정리한다. 원래 문서는 도입 검토용이지만, 아래 2026-03-17 보정으로 현재 구현 상태와 운영 정책을 같이 반영한다.
 
 같이 봐야 하는 문서:
 
@@ -28,15 +28,16 @@
 - 2차 선택 모델: `YOLO26s`
 - 1차 목표: `실시간 30fps full inference`가 아니라 `5~10Hz 감지 + 부드러운 overlay`
 
-2026-03-10 현재 구현 스냅샷:
+2026-03-17 현재 구현 스냅샷:
 
 - Flutter/Android 사이 YOLO config bridge는 이미 구현됨
-- native video path 안에 `frame sampling`, `yolo_state`, `stub runtime` 골격이 있음
-- `SurfaceView -> PixelCopy -> 저해상도 bitmap` POC 경로까지는 연결됨
-- `ExecuTorch Module.load()` / 전처리 / 첫 `forward()`까지는 실제 기기에서 확인됨
-- 첫 output shape `[1,84,3549]` 진단까지는 확인됨
-- 1차 output parser 골격은 추가됨
-- 아직 실제 stock canvas box draw / tracking / QNN-lowered runtime은 미구현
+- native video path 안에 `frame sampling`, `yolo_state`, `runtime status`가 실제로 연결됨
+- `SurfaceView -> PixelCopy -> 저해상도 bitmap` 경로는 실제 stock/live와 developer playback에서 사용 중
+- generic `ExecuTorch/XNNPACK` 경로는 기준선으로 성립
+- `source pixel -> detection payload -> stock overlay draw` 경로도 실제로 동작
+- QNN-lowered model과 metadata는 앱 번들에 실제로 들어감
+- live 기기 QNN blocker는 현재 `qnn_dsp_transport_failed`로 좁혀짐
+- developer playback QNN은 별도로 `executorch_module_load_failed` 가능성이 남아 있음
 
 핵심 판단은 단순하다.
 
@@ -287,6 +288,8 @@ YOLO box overlay를 위해 새로 만들 필요가 없는 stock 모드 자산도
   - `Exynos 2400`
 - 그 외 Galaxy는 기본 `YOLO26n`으로 시작하고, 실제 기기 벤치 통과 시에만 `s`를 올린다.
 - 사용자에게는 `성능 우선` / `정확도 우선` 정도만 노출
+- 현재 live QNN은 `모델/패키징 부재` 단계가 아니라, 실제 기기에서 `QnnDsp transport / skel load` 계층이 본질적 blocker다.
+- developer playback은 별도 session mode이므로, QNN은 live와 다른 형태로 `executorch_module_load_failed`가 먼저 보일 수 있다.
 
 ### 8.3 1차 성능 목표
 

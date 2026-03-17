@@ -97,6 +97,10 @@ class SSHService extends ChangeNotifier {
   static const int _maxHeartbeatFailures = 5;
   static const Duration _heartbeatInterval = Duration(seconds: 8);
   static const Duration _heartbeatTimeout = Duration(seconds: 4);
+  static const Duration _serviceLossProbeTimeout = Duration(milliseconds: 1200);
+  static const Duration _serviceLossGraceTimeout = Duration(seconds: 3);
+  static const Duration _serviceLossProbeRetryDelay =
+      Duration(milliseconds: 450);
 
   SSHService() {
     _initServiceListener();
@@ -110,14 +114,24 @@ class SSHService extends ChangeNotifier {
       if (event == null) return;
       _syncManualDisconnectState(event['manualDisconnectRequested']);
       final isServiceConnected = event['isConnected'] == true;
+      _serviceReportedConnected = isServiceConnected;
       final serviceIp = event['ip']?.toString();
       _serviceConnectedIp =
           (serviceIp != null && _isValidIpv4(serviceIp)) ? serviceIp : null;
       if ((_serviceConnectedIp ?? '').trim().isNotEmpty) {
         _disconnectedSince = null;
+        _clearServiceSessionLossHint();
       }
 
       if (!isServiceConnected) {
+        _serviceConnectedIp = null;
+        if (isConnected && !_isConnecting && !_manualDisconnectRequested) {
+          _markServiceSessionLossHint();
+          _connectionStatus = "세션 확인 중...";
+          unawaited(_probeLocalConnectionAfterServiceLoss());
+          notifyListeners();
+          return;
+        }
         if (!isConnected && _connectionStatus != "Disconnected") {
           _handleDisconnect(notifyService: false, reason: "background");
         }
@@ -177,6 +191,7 @@ class SSHService extends ChangeNotifier {
           (connected != null && _isValidIpv4(connected)) ? connected : null;
       if ((_serviceConnectedIp ?? '').trim().isNotEmpty) {
         _disconnectedSince = null;
+        _clearServiceSessionLossHint();
       }
       final lastSuccessful = event['lastSuccessfulIp']?.toString();
       if (lastSuccessful != null && _isValidIpv4(lastSuccessful)) {
@@ -196,6 +211,8 @@ class SSHService extends ChangeNotifier {
     service.on('status').listen((event) async {
       if (event == null) return;
       _syncManualDisconnectState(event['manualDisconnectRequested']);
+      final isServiceConnected = event['isConnected'] == true;
+      _serviceReportedConnected = isServiceConnected;
       _serviceDiscoveryListening = event['listening'] == true;
       final candidate = event['candidateIp']?.toString();
       if (candidate != null && _isValidIpv4(candidate)) {
@@ -210,6 +227,7 @@ class SSHService extends ChangeNotifier {
       _serviceConnectedIp = (ip != null && _isValidIpv4(ip)) ? ip : null;
       if ((_serviceConnectedIp ?? '').trim().isNotEmpty) {
         _disconnectedSince = null;
+        _clearServiceSessionLossHint();
       }
       final lastSuccessful = event['lastSuccessfulIp']?.toString();
       if (lastSuccessful != null && _isValidIpv4(lastSuccessful)) {
@@ -222,6 +240,17 @@ class SSHService extends ChangeNotifier {
       }
 
       if (_manualDisconnectRequested) {
+        notifyListeners();
+        return;
+      }
+      if (!isServiceConnected &&
+          isConnected &&
+          !_isConnecting &&
+          !_manualDisconnectRequested) {
+        _serviceConnectedIp = null;
+        _markServiceSessionLossHint();
+        _connectionStatus = "세션 확인 중...";
+        unawaited(_probeLocalConnectionAfterServiceLoss());
         notifyListeners();
         return;
       }
@@ -380,10 +409,22 @@ class SSHService extends ChangeNotifier {
   DateTime? get serviceCandidateSeenAt => _serviceCandidateSeenAt;
   String? _serviceConnectedIp;
   String? get serviceConnectedIp => _serviceConnectedIp;
+  bool _serviceReportedConnected = false;
+  bool get serviceReportedConnected => _serviceReportedConnected;
   String? _serviceLastSuccessfulIp;
   String? get serviceLastSuccessfulIp => _serviceLastSuccessfulIp;
   DateTime? _serviceLastSuccessfulSeenAt;
   DateTime? get serviceLastSuccessfulSeenAt => _serviceLastSuccessfulSeenAt;
+  bool _serviceSessionLossHint = false;
+  bool get hasServiceSessionLossHint => _serviceSessionLossHint;
+  bool get isLikelySessionLost =>
+      _serviceSessionLossHint &&
+      !_manualDisconnectRequested &&
+      isConnected &&
+      !_isConnecting;
+  bool _serviceLossProbeInFlight = false;
+  DateTime? _serviceSessionLossSince;
+  Timer? _serviceLossProbeRetryTimer;
 
   void _syncManualDisconnectState(dynamic value) {
     if (value is! bool) return;
@@ -610,6 +651,7 @@ class SSHService extends ChangeNotifier {
       _disconnectedSince = null;
       _connectedIp = ip; // Set IP only after successful connection
       _connectedPort = port;
+      _clearServiceSessionLossHint();
       _serviceCandidateIp = ip;
       _serviceCandidateSeenAt = DateTime.now();
       _serviceLastSuccessfulIp = ip;
@@ -824,6 +866,8 @@ class SSHService extends ChangeNotifier {
       _client = null;
       _connectionStatus = "Disconnected";
       _disconnectedSince ??= DateTime.now();
+      _clearServiceSessionLossHint();
+      _serviceLossProbeInFlight = false;
       _connectedIp = null;
       _connectedPort = null;
       _targetIp = null;
@@ -1194,6 +1238,74 @@ class SSHService extends ChangeNotifier {
         await _storage.delete(key: 'ssh_manual_disconnect_boot_id');
       }
     } catch (_) {}
+  }
+
+  void _markServiceSessionLossHint() {
+    _serviceSessionLossHint = true;
+    _serviceSessionLossSince ??= DateTime.now();
+  }
+
+  void _clearServiceSessionLossHint() {
+    _serviceSessionLossHint = false;
+    _serviceSessionLossSince = null;
+    _serviceLossProbeRetryTimer?.cancel();
+    _serviceLossProbeRetryTimer = null;
+  }
+
+  bool _isServiceLossProbeExpired() {
+    final since = _serviceSessionLossSince;
+    if (since == null) return false;
+    return DateTime.now().difference(since) >= _serviceLossGraceTimeout;
+  }
+
+  void _scheduleServiceLossProbeRetry() {
+    _serviceLossProbeRetryTimer?.cancel();
+    _serviceLossProbeRetryTimer = Timer(_serviceLossProbeRetryDelay, () {
+      unawaited(_probeLocalConnectionAfterServiceLoss());
+    });
+  }
+
+  Future<void> _probeLocalConnectionAfterServiceLoss() async {
+    if (_serviceLossProbeInFlight) return;
+    final client = _client;
+    if (client == null || client.isClosed || _manualDisconnectRequested) {
+      return;
+    }
+    if (_runningCommandCount > 0) {
+      if (_isServiceLossProbeExpired()) {
+        _handleDisconnect(
+          notifyService: false,
+          reason: "service_reported_disconnect_timeout",
+        );
+      } else {
+        _scheduleServiceLossProbeRetry();
+      }
+      return;
+    }
+    _serviceLossProbeInFlight = true;
+    try {
+      await client.run('true').timeout(_serviceLossProbeTimeout);
+      if (isConnected && !_manualDisconnectRequested) {
+        _clearServiceSessionLossHint();
+        _connectionStatus = "Connected";
+        notifyListeners();
+      }
+    } catch (_) {
+      _handleDisconnect(
+        notifyService: false,
+        reason: "service_reported_disconnect_probe_failed",
+      );
+    } finally {
+      _serviceLossProbeInFlight = false;
+      if (isLikelySessionLost && !_isServiceLossProbeExpired()) {
+        _scheduleServiceLossProbeRetry();
+      } else if (isLikelySessionLost && _isServiceLossProbeExpired()) {
+        _handleDisconnect(
+          notifyService: false,
+          reason: "service_reported_disconnect_timeout",
+        );
+      }
+    }
   }
 
   Future<void> _persistManualDisconnectBootContext() async {

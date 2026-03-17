@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//e/Carrot/**)",
+      "Bash(pip show:*)",
+      "Bash(pip install:*)",
+      "Bash(python -c \"from ultralytics import YOLO; m = YOLO\\(''yolo26n.pt''\\); m.export\\(format=''tflite'', half=True, imgsz=416\\)\")",
+      "Bash(python -c \"import tensorflow as tf; print\\(tf.__version__\\)\")",
+      "Bash(python -c \"import sys; print\\(sys.executable\\)\")",
+      "Bash(python -c \"import importlib.util; spec=importlib.util.find_spec\\(''tensorflow''\\); print\\(spec.origin if spec else ''not found''\\)\")",
+      "Bash(python -m pip show tensorflow)",
+      "Bash(python -m pip install \"tensorflow==2.18.0\" \"tf-keras==2.18.0\")",
+      "Bash(python -c \":*)"
+    ]
+  }
+}

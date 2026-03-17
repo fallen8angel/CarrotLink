@@ -14,8 +14,8 @@ class YoloDebugSettings {
   const YoloDebugSettings({
     this.enabled = false,
     this.unsafeRuntimeEnabled = false,
-    this.runtimeBackend = YoloRuntimeBackend.executorchXnnpack,
-    this.modelVariant = YoloModelVariant.yolo26n,
+    this.runtimeBackend = YoloRuntimeBackend.liteRtGpu,
+    this.modelVariant = YoloModelVariant.yolo26nLiteRt,
     this.showBoxes = false,
     this.showLabels = false,
     this.showTrafficLights = false,

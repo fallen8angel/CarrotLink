@@ -1,164 +1,141 @@
 # CarrotLink Stock Mode YOLO26 QNN Bring-up Notes (2026-03-15)
 
-## 2026-03-16 최신 메모
+최종 업데이트: 2026-03-17  
+대상 경로: `E:\Carrot\CarrotLink`
+
+## 1. 현재 결론
 
 - 앱 쪽 QNN 슬롯 연결은 끝났다.
   - Flutter selector: `yolo26n_qnn`, `yolo26s_qnn`
   - native model catalog도 같은 이름으로 lookup 한다.
-- route playback 경로는 실제로 native `runYoloDebugVideoFrame(...)`까지 들어가는 것이 로그로 확인됐다.
-- generic `.pte`를 `executorch_qnn` backend로 playback에 태우는 경우는 여전히 의도적으로 blocker 처리된다.
-  - 대표 blocker: `qnn_model_not_lowered`
-- 현재 앱 번들에는 generic `.pte`만 있고 QNN-lowered `.pte`는 아직 없다.
-  - 있음: `assets/models/yolo26n.pte`, `assets/models/yolo26s.pte`
-  - 없음: `assets/models/yolo26n_qnn.pte`, `assets/models/yolo26s_qnn.pte`
-- GitHub Actions 기반 QNN export workflow를 `dev`에 올려두었고, 2026-03-16 기준 최근 run #5가 `in_progress` 상태다.
-  - workflow: `.github/workflows/export-yolo-qnn.yml`
-  - 최신 handoff: `docs/architecture/yolo/STOCK_MODE_YOLO26_PROGRESS_HANDOFF_2026-03-16_KO.md`
+- 앱 번들에는 실제 QNN-lowered model과 companion metadata가 들어간다.
+  - `assets/models/yolo26n_qnn.pte`
+  - `assets/models/yolo26s_qnn.pte`
+  - `assets/models/yolo26n_qnn.metadata.json`
+  - `assets/models/yolo26s_qnn.metadata.json`
+- local AAR + QNN runtime libs + skel assets 패키징 경로는 실제로 동작한다.
+- live 기기 기준 현재 본질적 blocker는 `qnn_dsp_transport_failed`다.
+- developer playback 쪽은 별도로 `executorch_module_load_failed`가 먼저 보일 수 있다.
 
-## 목적
+즉 현재 QNN bring-up은 "모델/패키징 부재" 단계는 넘었고, "실제 기기 DSP bring-up / playback load 안정화" 단계에 들어와 있다.
 
-- 최종 목표 runtime은 `YOLO26n + ExecuTorch + QNN backend`다.
-- 현재 앱은 generic ExecuTorch AAR 기준으로 동작한다.
-- 따라서 QNN bring-up은 `로컬 ExecuTorch AAR + QNN runtime libs`를 앱에 실제 패키징하는 단계가 먼저다.
+## 2. 현재 앱 상태
 
-## 현재 앱 상태
+### 2.1 패키징
 
-- 기본 Android 의존성은 `org.pytorch:executorch-android:1.1.0`이다.
-- 이 경로는 generic ExecuTorch bring-up 기준이다.
-- `runtimeBackend=executorch_qnn`은 목표 문자열이지만, QNN native가 없으면 런타임은 `backend_unavailable`로 fail-open 된다.
+현재 앱은 아래 조합을 기준으로 본다.
 
-## 로컬 AAR 경로
+- `android/app/libs/executorch.aar`
+- `libqnn_executorch_backend.so`
+- `libQnnHtp.so`
+- `libQnnSystem.so`
+- `libQnnHtpPrepare.so`
+- `libQnnHtpNetRunExtensions.so`
+- `libQnnHtpV##Stub.so`
+- `libQnnHtpV68Skel.so`
+- `libQnnHtpV69Skel.so`
+- `libQnnHtpV73Skel.so`
+- `libQnnHtpV75Skel.so`
+- `libQnnHtpV79Skel.so`
 
-앱은 이제 아래 경로를 지원한다.
+현재 런타임이 보고하는 대표 상태값:
 
-- local AAR 파일:
-  - `android/app/libs/executorch.aar`
-- 활성화 build flag:
-  - `-PuseLocalAar=true`
-
-local AAR는 두 경로 중 하나로 준비할 수 있다.
-
-- 공식 Android AAR 문서의 backend별 AAR
-- Qualcomm backend 문서 기준 source build 결과물
-
-예:
-
-```powershell
-cd E:\Carrot\CarrotLink\android
-.\gradlew.bat :app:assembleDebug
-```
-
-동작 규칙:
-
-- `android/app/libs/executorch.aar` 가 있으면 기본으로 local AAR 모드 사용
-- 강제로 Maven 경로를 쓰고 싶으면:
-  - `-PuseLocalAar=false`
-- local AAR 파일이 없으면 Maven `executorch-android:1.1.0` 사용
-
-## 로컬 QNN SDK 경로
-
-local AAR 모드일 때는 QNN SDK도 같이 찾는다.
-
-- Gradle property:
-  - `-PqnnSdkRoot=...`
-- 환경변수:
-  - `QNN_SDK_ROOT`
-- 로컬 기본값:
-  - `E:\Carrot\yolo\2.32.6.250402`
-
-현재 앱은 위 SDK에서 필요한 QNN 파일을 자동으로 패키징한다.
-
-- Android runtime lib:
-  - `libQnnHtp.so`
-  - `libQnnSystem.so`
-  - `libQnnHtpPrepare.so`
-  - `libQnnHtpNetRunExtensions.so`
-  - `libQnnHtpV##Stub.so`
-- Hexagon skel asset:
-  - `libQnnHtpV68Skel.so`
-  - `libQnnHtpV69Skel.so`
-  - `libQnnHtpV73Skel.so`
-  - `libQnnHtpV75Skel.so`
-  - `libQnnHtpV79Skel.so`
-
-빌드 시점에는 아래 generated 경로로 동기화된다.
-
-- JNI libs:
-  - `android/app/build/generated/qnnJni/main/arm64-v8a`
-- skel assets:
-  - `android/app/build/generated/qnnAssets/main/qnn/skels`
-
-## QNN runtime libs
-
-QNN backend가 실제로 동작하려면 APK 안에 아래 두 종류가 같이 들어가야 한다.
-
-- ExecuTorch QNN bridge
-  - 예: `libqnn_executorch_backend.so`
-- QNN runtime lib
-  - 예: `libQnnHtp.so`, `libQnnSystem.so`, 기타 `libQnn*.so`
-- QNN skel asset
-  - 예: `libQnnHtpV79Skel.so`
-
-런타임은 현재 `nativeLibraryDir` 안의 `.so` 목록을 보고 아래처럼 판정한다.
-
-- bridge와 runtime lib, stub, skel asset가 모두 있으면 `backendAvailable=true`
-- bridge가 없으면:
-  - Maven mode: `qnn_backend_not_packaged`
-  - local AAR mode: `qnn_backend_bridge_missing`
-- `libQnnHtp.so`가 없으면:
-  - `qnn_htp_runtime_missing`
-- `libQnnSystem.so`가 없으면:
-  - `qnn_system_runtime_missing`
-- `libQnnHtpV##Stub.so`가 없으면:
-  - `qnn_htp_stub_missing`
-- skel asset가 없으면:
-  - `qnn_skel_assets_missing`
-- runtime dir 준비/환경 변수 구성이 실패하면:
-  - `backend_environment_unavailable`
-  - `qnn_runtime_dir_unavailable`
-  - `qnn_skel_extract_failed`
-  - `qnn_env_config_failed`
-
-## 개발자 도구에서 확인할 값
-
-- `backend`
 - `backendAvailable`
-- `backendPackaging`
 - `backendReason`
+- `backendPackagingMode`
 - `backendNativeLibDir`
 - `backendNativeLibs`
 - `backendAssetFiles`
 - `backendRuntimeDir`
 - `backendEnvReady`
 
-정상적인 QNN bring-up 직전/직후 기대값:
+### 2.2 metadata 정합
 
-- local AAR만 있고 QNN bridge 없음
-  - `backendPackaging=local_aar`
-  - `backendReason=qnn_backend_bridge_missing`
-- local AAR + QNN SDK sync 전
-  - `backendPackaging=local_aar`
-  - `backendReason=qnn_htp_runtime_missing` 또는 `qnn_system_runtime_missing`
-- local AAR + QNN SDK sync 후
-  - `backendPackaging=local_aar`
-  - `backendAvailable=true`
-- module load 전 환경 준비 단계
-  - `backendRuntimeDir` 채워짐
-  - `backendEnvReady=true`
+QNN-lowered model은 `.pte`만 보는 것이 아니라 companion metadata도 같이 본다.
 
-## 현재 단계의 의미
+대표 확인값:
 
-- 지금 코드 변경은 QNN을 완성한 것이 아니다.
-- QNN bring-up을 위한 build/runtime slot과 local SDK packaging 경로를 프로젝트에 먼저 만든 단계다.
-- 다음 단계는:
-  1. QNN-enabled ExecuTorch AAR 유지/검증
-  2. 실제 기기에서 `backendAvailable=true`, `backendEnvReady=true` 확인
-  3. 그 뒤에 first inference 확인
-  4. 마지막으로 QNN-lowered model 호환성 확인
+- `modelMetadataPath`
+- `modelMetadataOutputName`
+- `modelMetadataSoc`
+- `modelMetadataQnnSdkVersion`
+- `modelMetadataExecutorchRef`
+- `modelMetadataOnlinePrepare`
 
-## 공식 문서 참고
+대표 blocker:
 
-- Android AAR 사용:
-  - [Using ExecuTorch on Android](https://docs.pytorch.org/executorch/stable/using-executorch-android.html)
-- Qualcomm backend:
-  - [Qualcomm AI Engine Backend](https://docs.pytorch.org/executorch/stable/backends-qualcomm.html)
+- `qnn_model_metadata_missing`
+- `qnn_model_metadata_invalid`
+- `qnn_model_metadata_incomplete`
+- `qnn_model_variant_mismatch`
+- `qnn_sdk_version_mismatch`
+
+## 3. 실기기 상태 해석
+
+### 3.1 live road camera
+
+현재 live 기기에서 많이 본 조합은 아래다.
+
+- `backendAvailable=true`
+- `backendEnvReady=true`
+- `runtimeReady=true`
+- 이후 `forward()` 시점에서 `qnn_dsp_transport_failed`
+
+이 상태의 의미:
+
+- 모델 lookup 성공
+- metadata lookup 성공
+- QNN runtime/skel 환경 준비 성공
+- 하지만 DSP device handle 또는 skel load 단계에서 실패
+
+즉 현재 live QNN blocker는 model asset 문제가 아니라 `QnnDsp transport / skel load` 계층이다.
+
+### 3.2 developer playback
+
+route replay에서는 live와 다른 형태의 실패가 먼저 보일 수 있다.
+
+대표 예:
+
+- `stage=module_load_failed`
+- `blocker=executorch_module_load_failed`
+
+2026-03-17 보정:
+
+- offline playback 첫 QNN runtime 준비는 `prepareOfflineRuntimeForPlayback(...)`을 통해 main thread에서 한 번 warm-up 한다.
+- `lastError`는 예외 클래스와 cause까지 더 직접적으로 남긴다.
+
+즉 playback QNN은 아직 live QNN과 같은 실패 모양을 보장하지 않지만, 현재는 둘의 초기 조건 차이를 줄이는 중이다.
+
+## 4. 운영 정책
+
+- `Snapdragon Galaxy`
+  - 1차 시도: `executorch_qnn`
+  - 반복 fatal `qnn_*` blocker면 `executorch_xnnpack`으로 자동 폴백
+  - 이 실패는 동일 기기에서 `7일 TTL`로 기억하고, 이후 다시 `QNN`을 재시도한다.
+- `Exynos Galaxy`
+  - 현재 앱 기준 기본 backend는 `executorch_xnnpack`
+  - QNN은 대상 backend로 보지 않는다.
+- 모델은 계속 `YOLO26n first`, `YOLO26s later`다.
+
+## 5. 현재 단계에서 봐야 할 blocker
+
+우선순위가 높은 blocker는 아래다.
+
+- live bring-up
+  - `qnn_dsp_transport_failed`
+  - `qnn_delegate_init_failed`
+- metadata / export 정합
+  - `qnn_model_metadata_missing`
+  - `qnn_model_variant_mismatch`
+  - `qnn_sdk_version_mismatch`
+- playback bring-up
+  - `executorch_module_load_failed`
+
+즉 지금은 `qnn_model_not_lowered` 같은 초기 bring-up 이전 단계보다, 실제 runtime 계층 blocker를 더 많이 본다.
+
+## 6. 다음 작업
+
+1. live 기기에서 `qnn_dsp_transport_failed`를 앱 밖 최소 QNN init과 분리 검증
+2. developer playback에서 `executorch_module_load_failed` 재현 시 `lastError` 상세 수집
+3. 성공/실패 기기별 QNN 상태 JSON 샘플 축적
+4. QNN 성공 기기에서만 더 공격적으로 `YOLO26s` 확장 검토

@@ -236,6 +236,12 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
     final now = DateTime.now();
     final inferredCameraFrame = _cameraFrameIdFromSnapshot(next);
     final hasUsableCameraFrame = inferredCameraFrame != null;
+    if (!hasUsableCameraFrame && _isOverlaySnapshotRenderable(next)) {
+      _beginStartupProvisionalSync(
+        reason: 'sidecar_overlay_without_camera_frame',
+        windowUs: _LiveDriveCanvasScreenState._cameraFirstFrameDegradedHoldUs,
+      );
+    }
     if (hasUsableCameraFrame) {
       if (mounted && (_cameraLoading || (_cameraError?.isNotEmpty ?? false))) {
         _safeSetState(() {

@@ -14,6 +14,15 @@ import '../drive/live_drive_canvas_screen.dart';
 import '../../ui/adaptive/layout_tokens.dart';
 import '../../ui/adaptive/window_class.dart';
 
+enum _HomeConnectionPhase {
+  searching,
+  connecting,
+  connected,
+  settling,
+  disconnected,
+  failure,
+}
+
 class HomeTab extends StatefulWidget {
   final bool isActive;
 
@@ -370,34 +379,85 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     }
   }
 
+  bool _isFailureStatus(SSHService ssh) {
+    final status = ssh.connectionStatus.trim();
+    if (status.isEmpty ||
+        status == "Connected" ||
+        status == "Disconnected" ||
+        status.startsWith("Connecting") ||
+        status.contains("세션 복구") ||
+        status.contains("세션 확인")) {
+      return false;
+    }
+    return status.contains("실패") ||
+        status.contains("오류") ||
+        status.contains("시간 초과") ||
+        status.contains("인증") ||
+        status.contains("키");
+  }
+
+  _HomeConnectionPhase _homeConnectionPhase(SSHService ssh) {
+    if (ssh.manualDisconnectRequested) {
+      return _HomeConnectionPhase.disconnected;
+    }
+    if (ssh.isLikelySessionLost || _showHomeConnectionSettling(ssh)) {
+      return _HomeConnectionPhase.settling;
+    }
+    if (ssh.isConnected) {
+      return _HomeConnectionPhase.connected;
+    }
+    if (ssh.isConnecting || ssh.connectionStatus.startsWith("Connecting")) {
+      return _HomeConnectionPhase.connecting;
+    }
+    if (_isFailureStatus(ssh)) {
+      return _HomeConnectionPhase.failure;
+    }
+    return _HomeConnectionPhase.searching;
+  }
+
+  bool _showConnectedHomeState(SSHService ssh) {
+    return _homeConnectionPhase(ssh) == _HomeConnectionPhase.connected;
+  }
+
   String _statusHeadline(SSHService ssh) {
     if (!_hasGitHubLogin) return "GitHub 연동 필요";
     if (!_hasActiveSshKey) return "SSH 개인키 적용 필요";
-    if (_showHomeDiscoverySearching(ssh)) {
-      return "IP 검색 중";
+    return _showConnectedHomeState(ssh) ? "연결됨" : "연결 안 됨";
+  }
+
+  String _detailPlaceholderForPhase(_HomeConnectionPhase phase) {
+    return phase == _HomeConnectionPhase.connected ? "연결 안 됨" : "연결 안 됨";
+  }
+
+  bool _showConnectedDetails(_HomeConnectionPhase phase) {
+    return phase == _HomeConnectionPhase.connected;
+  }
+
+  String _ipFieldText(SSHService ssh, _HomeConnectionPhase phase) {
+    if (!_hasGitHubLogin || !_hasActiveSshKey) {
+      return "연동 필요";
     }
-    if (ssh.manualDisconnectRequested) return "연결 해제";
-    if (ssh.isConnected) return "연결됨";
-    if (ssh.connectionStatus.startsWith("Connecting")) return "연결 중...";
-    if (_showHomeConnectionSettling(ssh)) return "세션 복구 중";
-    if (ssh.connectionStatus.contains("Error")) return "연결 실패";
-    return "재연결 대기";
+    if (phase == _HomeConnectionPhase.connected) {
+      return (ssh.connectedIp ?? ssh.serviceConnectedIp ?? "Unknown").trim();
+    }
+    return "연결 안 됨";
+  }
+
+  bool _disconnectActionEnabled(SSHService ssh) {
+    if (!_hasGitHubLogin || !_hasActiveSshKey) return false;
+    if (ssh.manualDisconnectRequested) return false;
+    return ssh.isConnected ||
+        ssh.isConnecting ||
+        ssh.isLikelySessionLost ||
+        _showHomeConnectionSettling(ssh) ||
+        _showHomeDiscoverySearching(ssh);
   }
 
   Color _statusColor(BuildContext context, SSHService ssh) {
     if (!_hasGitHubLogin || !_hasActiveSshKey) return Colors.grey;
-    if (_showHomeDiscoverySearching(ssh)) {
-      return Theme.of(context).colorScheme.primary;
-    }
-    if (ssh.manualDisconnectRequested) return Colors.grey;
-    if (ssh.isConnected || ssh.connectionStatus.startsWith("Connecting")) {
-      return Theme.of(context).colorScheme.primary;
-    }
-    if (_showHomeConnectionSettling(ssh)) {
-      return Theme.of(context).colorScheme.primary;
-    }
-    if (ssh.connectionStatus.contains("Error")) return Colors.grey;
-    return Colors.grey;
+    return _showConnectedHomeState(ssh)
+        ? Theme.of(context).colorScheme.primary
+        : Colors.grey;
   }
 
   String? _currentDeviceHost(SSHService ssh) {
@@ -636,27 +696,13 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
           UiWindowClass.expanded => 38.0,
           UiWindowClass.large || UiWindowClass.extraLarge => 40.0,
         };
-        final hasDiscoveryCandidate = _hasFreshDiscoveryCandidate(ssh);
-        final discoverySearching =
-            _showHomeDiscoverySearching(ssh) && !hasDiscoveryCandidate;
-        final hasIp = ssh.isConnected ||
-            (ssh.serviceConnectedIp ?? '').trim().isNotEmpty ||
-            hasDiscoveryCandidate ||
-            (ssh.connectionStatus.startsWith("Connecting") &&
-                (ssh.targetIp ?? '').trim().isNotEmpty);
-        final ipFieldText = hasIp
-            ? (ssh.connectedIp ??
-                ssh.serviceConnectedIp ??
-                (hasDiscoveryCandidate ? ssh.serviceCandidateIp : null) ??
-                ssh.targetIp ??
-                "Unknown")
-            : (!_hasGitHubLogin || !_hasActiveSshKey
-                ? "연동 필요"
-                : (discoverySearching
-                    ? "자동 검색 중"
-                : (_showHomeConnectionSettling(ssh)
-                    ? "세션 복구 중"
-                    : (ssh.manualDisconnectRequested ? "연결 해제" : "재연결 대기"))));
+        final phase = _homeConnectionPhase(ssh);
+        final statusHeadline = _statusHeadline(ssh);
+        final statusColor = _statusColor(context, ssh);
+        final ipFieldText = _ipFieldText(ssh, phase);
+        final canDisconnect = _disconnectActionEnabled(ssh);
+        final showDetails = _showConnectedDetails(phase);
+        final detailPlaceholder = _detailPlaceholderForPhase(phase);
         final isLandscape = window.isLandscape;
         final homeContentMaxWidth = switch (window.windowClass) {
           UiWindowClass.compact => double.infinity,
@@ -758,20 +804,20 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                               width: 10,
                               height: 10,
                               decoration: BoxDecoration(
-                                color: _statusColor(context, ssh),
+                                color: statusColor,
                                 shape: BoxShape.circle,
                               ),
                             ),
                             const SizedBox(width: 10),
                             Expanded(
                               child: Text(
-                                _statusHeadline(ssh),
+                                statusHeadline,
                                 style: Theme.of(context)
                                     .textTheme
                                     .titleLarge
                                     ?.copyWith(
                                       fontWeight: FontWeight.w900,
-                                      color: _statusColor(context, ssh),
+                                      color: statusColor,
                                       fontSize: statusFontSize,
                                       height: 1.0,
                                     ),
@@ -779,26 +825,30 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
-                            if (ssh.isConnected ||
-                                ssh.connectionStatus.startsWith("Connecting"))
-                              SizedBox(
-                                width: compactActionSize * 0.88,
-                                height: compactActionSize * 0.88,
-                                child: IconButton(
-                                  padding: EdgeInsets.zero,
-                                  tooltip: '연결 해제',
-                                  iconSize: compactActionSize * 0.52,
-                                  color: Colors.white70,
-                                  onPressed: () {
-                                    ssh.disconnect();
-                                    CustomToast.show(
-                                      context,
-                                      "연결이 해제되었습니다.",
-                                    );
-                                  },
-                                  icon: const Icon(Icons.link_off_rounded),
+                            SizedBox(
+                              width: compactActionSize * 0.88,
+                              height: compactActionSize * 0.88,
+                              child: IconButton(
+                                padding: EdgeInsets.zero,
+                                tooltip: '연결 해제',
+                                iconSize: compactActionSize * 0.52,
+                                onPressed: canDisconnect
+                                    ? () {
+                                        ssh.disconnect();
+                                        CustomToast.show(
+                                          context,
+                                          "연결이 해제되었습니다.",
+                                        );
+                                      }
+                                    : null,
+                                icon: Icon(
+                                  Icons.link_off_rounded,
+                                  color: canDisconnect
+                                      ? Colors.white70
+                                      : Colors.white24,
                                 ),
                               ),
+                            ),
                           ],
                         ),
                         SizedBox(height: blockGap),
@@ -820,20 +870,20 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                           width: 10,
                           height: 10,
                           decoration: BoxDecoration(
-                            color: _statusColor(context, ssh),
+                            color: statusColor,
                             shape: BoxShape.circle,
                           ),
                         ),
                         const SizedBox(width: 10),
                         Expanded(
                           child: Text(
-                            _statusHeadline(ssh),
+                            statusHeadline,
                             style: Theme.of(context)
                                 .textTheme
                                 .titleLarge
                                 ?.copyWith(
                                   fontWeight: FontWeight.w900,
-                                  color: _statusColor(context, ssh),
+                                  color: statusColor,
                                   fontSize: statusFontSize,
                                   height: 1.0,
                                 ),
@@ -853,28 +903,31 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                             ipFontSize: ipFontSize,
                           ),
                         ),
-                        if (ssh.isConnected ||
-                            ssh.connectionStatus.startsWith("Connecting")) ...[
-                          SizedBox(width: blockGap * 0.6),
-                          SizedBox(
-                            width: compactActionSize * 0.88,
-                            height: compactActionSize * 0.88,
-                            child: IconButton(
-                              padding: EdgeInsets.zero,
-                              tooltip: '연결 해제',
-                              iconSize: compactActionSize * 0.52,
-                              color: Colors.white70,
-                              onPressed: () {
-                                ssh.disconnect();
-                                CustomToast.show(
-                                  context,
-                                  "연결이 해제되었습니다.",
-                                );
-                              },
-                              icon: const Icon(Icons.link_off_rounded),
+                        SizedBox(width: blockGap * 0.6),
+                        SizedBox(
+                          width: compactActionSize * 0.88,
+                          height: compactActionSize * 0.88,
+                          child: IconButton(
+                            padding: EdgeInsets.zero,
+                            tooltip: '연결 해제',
+                            iconSize: compactActionSize * 0.52,
+                            onPressed: canDisconnect
+                                ? () {
+                                    ssh.disconnect();
+                                    CustomToast.show(
+                                      context,
+                                      "연결이 해제되었습니다.",
+                                    );
+                                  }
+                                : null,
+                            icon: Icon(
+                              Icons.link_off_rounded,
+                              color: canDisconnect
+                                  ? Colors.white70
+                                  : Colors.white24,
                             ),
                           ),
-                        ],
+                        ),
                       ],
                     ),
                   SizedBox(height: blockGap),
@@ -903,19 +956,19 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                       final itemValues = <MapEntry<String, String>>[
                         MapEntry(
                           "브랜치",
-                          ssh.isConnected ? _branch : "연결 안 됨",
+                          showDetails ? _branch : detailPlaceholder,
                         ),
                         MapEntry(
                           "커밋",
-                          ssh.isConnected ? _commit : "연결 안 됨",
+                          showDetails ? _commit : detailPlaceholder,
                         ),
                         MapEntry(
                           "Dongle ID",
-                          ssh.isConnected ? _dongleId : "연결 안 됨",
+                          showDetails ? _dongleId : detailPlaceholder,
                         ),
                         MapEntry(
                           "Serial",
-                          ssh.isConnected ? _serial : "연결 안 됨",
+                          showDetails ? _serial : detailPlaceholder,
                         ),
                       ];
                       return Wrap(

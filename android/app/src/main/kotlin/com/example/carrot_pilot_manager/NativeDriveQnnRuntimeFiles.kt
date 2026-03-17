@@ -110,6 +110,8 @@ internal object NativeDriveQnnRuntimeFiles {
     val adspLibraryPath =
         listOf(
                 runtimeDir.absolutePath,
+                "/vendor/lib64/hw/audio",   // Samsung Galaxy (SM8x50) system QNN path
+                "/vendor/lib/hw/audio",
                 "/vendor/dsp/cdsp",
                 "/vendor/lib/rfsa/adsp",
                 "/system/lib/rfsa/adsp",

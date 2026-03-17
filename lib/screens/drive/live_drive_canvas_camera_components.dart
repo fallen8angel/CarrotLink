@@ -32,6 +32,125 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     };
   }
 
+  bool _hasRenderableOverlayFallback() {
+    return _openpilotOverlayMode &&
+        (_lastPublishedModelFrameId != null ||
+            _isOverlaySnapshotRenderable(_latestOverlaySnapshot));
+  }
+
+  bool _shouldUseDegradedOverlayFallbackUi() {
+    if (!_openpilotOverlayMode) return false;
+    if (_lastCameraFrameId != null) return false;
+    if (!_sidecarConnected) return false;
+    if (!_hasRenderableOverlayFallback()) return false;
+    if (_cameraAttachStartedUs <= 0) return false;
+    final elapsedUs = _renderClock.elapsedMicroseconds - _cameraAttachStartedUs;
+    return elapsedUs >= 2200000;
+  }
+
+  bool _shouldShowCameraLoadingOverlay() {
+    return _cameraLoading && !_shouldUseDegradedOverlayFallbackUi();
+  }
+
+  void _forceRestartNativeCameraAttach({
+    required String reason,
+  }) {
+    if (_isDeveloperPlaybackRequested ||
+        _cameraSuspendedByLifecycle ||
+        !_useNativeLiveCamera) {
+      return;
+    }
+    debugPrint('[DriveCanvas][native] force reattach reason=$reason');
+    _appendDriveDiagEvent(
+      'camera_first_frame_recover',
+      <String, dynamic>{
+        'reason': reason,
+        'count': _cameraFirstFrameRecoveryCount + 1,
+        'hostIp': _hostIp,
+        'lastFrameId': _lastCameraFrameId,
+        'attachPhase': _cameraAttachPhase.name,
+        'nativeDiagState': _lastNativeCameraDiag?['state'],
+      },
+    );
+    _lastCameraFirstFrameRecoveryUs = _renderClock.elapsedMicroseconds;
+    _cameraFirstFrameRecoveryCount += 1;
+    _beginCameraAttachSession(reason: reason);
+    _setCameraAttachPhase(
+      _CameraAttachPhase.retrying,
+      reason: reason,
+    );
+    _beginStartupProvisionalSync(
+      reason: reason,
+      windowUs: _LiveDriveCanvasScreenState._cameraFirstFrameDegradedHoldUs,
+    );
+    _startCameraErrorGrace(
+      reason: reason,
+      windowUs: 3500000,
+    );
+    if (mounted) {
+      _safeSetState(() {
+        _nativeCameraViewId = null;
+        _cameraSourceKey = null;
+        _cameraLoading = true;
+        _cameraError = null;
+        _nativeCameraAttachEpoch += 1;
+      });
+    } else {
+      _nativeCameraViewId = null;
+      _cameraSourceKey = null;
+      _cameraLoading = true;
+      _cameraError = null;
+      _nativeCameraAttachEpoch += 1;
+    }
+    _lastCameraFrameId = null;
+    _lastCameraFrameEventUs = 0;
+    _lastPublishedModelFrameId = null;
+    unawaited(_clearNativeOverlay());
+    unawaited(_loadCameraSource(force: true));
+  }
+
+  void _handleNativeCameraDiagRecovery(Map<String, dynamic> payload) {
+    if (_isDeveloperPlaybackRequested ||
+        _cameraSuspendedByLifecycle ||
+        !_openpilotOverlayMode) {
+      return;
+    }
+    final state = payload['state']?.toString() ?? '';
+    final decodedWindow = (payload['decodedWindow'] as num?)?.toInt() ?? 0;
+    final codecConfigured = payload['codecConfigured'] == true;
+    final syncWaitState = state.startsWith('waiting_sync_frame_');
+    final firstFramePending =
+        _lastCameraFrameId == null &&
+        (_cameraAttachPendingBeforeFirstFrame ||
+            syncWaitState ||
+            (codecConfigured && decodedWindow > 0));
+    if (!firstFramePending) {
+      return;
+    }
+    _beginStartupProvisionalSync(
+      reason: 'camera_diag:$state',
+      windowUs: _LiveDriveCanvasScreenState._cameraFirstFrameDegradedHoldUs,
+    );
+    if (!_hasRenderableOverlayFallback()) {
+      return;
+    }
+    final nowUs = _renderClock.elapsedMicroseconds;
+    if (_cameraAttachStartedUs <= 0) {
+      return;
+    }
+    final attachElapsedUs = nowUs - _cameraAttachStartedUs;
+    final cooldownElapsedUs = nowUs - _lastCameraFirstFrameRecoveryUs;
+    if (attachElapsedUs <
+            _LiveDriveCanvasScreenState._cameraFirstFrameForceReattachUs ||
+        cooldownElapsedUs <
+            _LiveDriveCanvasScreenState._cameraFirstFrameRecoveryCooldownUs) {
+      return;
+    }
+    _forceRestartNativeCameraAttach(
+      reason: syncWaitState ? 'sync_frame_stuck_flutter' : 'first_frame_stuck_flutter',
+    );
+  }
+
   void _beginCameraAttachSession({
     required String reason,
   }) {
@@ -328,6 +447,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     if (_cameraSuspendedByLifecycle && type != 'camera_state') return;
     if (type == 'camera_diag') {
       _recordNativeCameraDiag(map);
+      _handleNativeCameraDiagRecovery(map);
       return;
     }
     if (type == 'camera_frame') {

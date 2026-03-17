@@ -1,15 +1,20 @@
 import 'yolo_runtime_backend.dart';
 
 enum YoloModelFamily {
+  liteRt(
+    groupLabel: 'LiteRT',
+    shortLabel: 'litert',
+    selectorDescription: 'LiteRT .tflite — GPU(OpenCL) or CPU',
+  ),
   genericExecutorch(
     groupLabel: 'Generic ExecuTorch',
     shortLabel: 'generic',
-    selectorDescription: '현재 packaged generic ExecuTorch/XNN .pte',
+    selectorDescription: 'generic ExecuTorch/XNNPACK .pte (deprecated)',
   ),
   qnnLowered(
     groupLabel: 'QNN-Lowered',
     shortLabel: 'qnn',
-    selectorDescription: 'QNN-lowered .pte 필요',
+    selectorDescription: 'QNN-lowered .pte (deprecated — fastrpc blocked)',
   );
 
   const YoloModelFamily({
@@ -24,6 +29,42 @@ enum YoloModelFamily {
 }
 
 enum YoloModelVariant {
+  yolo26nLiteRt(
+    wireValue: 'yolo26n_litert',
+    label: 'YOLO26n LiteRT',
+    family: YoloModelFamily.liteRt,
+    wireAliases: <String>[
+      'yolo26n_litert',
+      'yolo26n_tflite',
+      'yolo26n_gpu',
+      'yolo26n_fp16',
+      'yolo26n_float16',
+    ],
+    assetBaseNames: <String>[
+      'yolo26n_float16',
+      'yolo26n_fp16',
+      'yolo26n_litert',
+      'yolo26n',
+    ],
+  ),
+  yolo26sLiteRt(
+    wireValue: 'yolo26s_litert',
+    label: 'YOLO26s LiteRT',
+    family: YoloModelFamily.liteRt,
+    wireAliases: <String>[
+      'yolo26s_litert',
+      'yolo26s_tflite',
+      'yolo26s_gpu',
+      'yolo26s_fp16',
+      'yolo26s_float16',
+    ],
+    assetBaseNames: <String>[
+      'yolo26s_float16',
+      'yolo26s_fp16',
+      'yolo26s_litert',
+      'yolo26s',
+    ],
+  ),
   yolo26n(
     wireValue: 'yolo26n',
     label: 'YOLO26n',
@@ -93,40 +134,69 @@ enum YoloModelVariant {
 
   bool get isQnnLowered => family == YoloModelFamily.qnnLowered;
 
-  bool get isLargeModel =>
-      this == YoloModelVariant.yolo26s || this == YoloModelVariant.yolo26sQnn;
+  bool get isLiteRt => family == YoloModelFamily.liteRt;
 
+  bool get isLargeModel =>
+      this == YoloModelVariant.yolo26s ||
+      this == YoloModelVariant.yolo26sQnn ||
+      this == YoloModelVariant.yolo26sLiteRt;
+
+  // Returns the generic (non-LiteRt, non-QNN) variant for this model size.
   YoloModelVariant get genericVariant {
     switch (this) {
+      case YoloModelVariant.yolo26nLiteRt:
       case YoloModelVariant.yolo26n:
       case YoloModelVariant.yolo26nQnn:
         return YoloModelVariant.yolo26n;
+      case YoloModelVariant.yolo26sLiteRt:
       case YoloModelVariant.yolo26s:
       case YoloModelVariant.yolo26sQnn:
         return YoloModelVariant.yolo26s;
     }
   }
 
+  YoloModelVariant get liteRtVariant {
+    switch (this) {
+      case YoloModelVariant.yolo26nLiteRt:
+      case YoloModelVariant.yolo26n:
+      case YoloModelVariant.yolo26nQnn:
+        return YoloModelVariant.yolo26nLiteRt;
+      case YoloModelVariant.yolo26sLiteRt:
+      case YoloModelVariant.yolo26s:
+      case YoloModelVariant.yolo26sQnn:
+        return YoloModelVariant.yolo26sLiteRt;
+    }
+  }
+
   YoloModelVariant get qnnVariant {
     switch (this) {
+      case YoloModelVariant.yolo26nLiteRt:
       case YoloModelVariant.yolo26n:
       case YoloModelVariant.yolo26nQnn:
         return YoloModelVariant.yolo26nQnn;
+      case YoloModelVariant.yolo26sLiteRt:
       case YoloModelVariant.yolo26s:
       case YoloModelVariant.yolo26sQnn:
         return YoloModelVariant.yolo26sQnn;
     }
   }
 
-  String get primaryAssetFileName => '${assetBaseNames.first}.pte';
+  // LiteRT models use .tflite; ExecuTorch models use .pte.
+  String get primaryAssetFileName => isLiteRt
+      ? '${assetBaseNames.first}.tflite'
+      : '${assetBaseNames.first}.pte';
 
-  String get assetFileHint =>
-      assetBaseNames.take(3).map((name) => '$name.pte').join(' / ');
+  String get assetFileHint {
+    final ext = isLiteRt ? '.tflite' : '.pte';
+    return assetBaseNames.take(3).map((name) => '$name$ext').join(' / ');
+  }
 
   YoloModelVariant? get suggestedQnnVariant {
     switch (this) {
+      case YoloModelVariant.yolo26nLiteRt:
       case YoloModelVariant.yolo26n:
         return YoloModelVariant.yolo26nQnn;
+      case YoloModelVariant.yolo26sLiteRt:
       case YoloModelVariant.yolo26s:
         return YoloModelVariant.yolo26sQnn;
       case YoloModelVariant.yolo26nQnn:
@@ -138,15 +208,18 @@ enum YoloModelVariant {
   String selectorSubtitle({
     required YoloRuntimeBackend backend,
   }) {
+    if (isLiteRt) {
+      return '${family.selectorDescription} · 예: $assetFileHint';
+    }
     if (isQnnLowered) {
-      const base = 'QNN-lowered .pte 슬롯';
-      if (backend == YoloRuntimeBackend.executorchQnn) {
+      const base = 'QNN-lowered .pte (deprecated)';
+      if (backend.isQnn) {
         return '$base · 예: $assetFileHint';
       }
       return '$base · QNN backend 전환 후 사용 · 예: $assetFileHint';
     }
     final base = family.selectorDescription;
-    if (backend == YoloRuntimeBackend.executorchQnn) {
+    if (backend.isQnn) {
       return '$base · XNNPACK backend에서 사용';
     }
     return base;
@@ -160,7 +233,7 @@ enum YoloModelVariant {
         return variant;
       }
     }
-    return YoloModelVariant.yolo26n;
+    return YoloModelVariant.yolo26nLiteRt;
   }
 
   bool _matches(String normalized, String compact) {
@@ -181,6 +254,9 @@ enum YoloModelVariant {
     var value = raw?.trim().toLowerCase() ?? '';
     if (value.endsWith('.pte')) {
       value = value.substring(0, value.length - 4);
+    }
+    if (value.endsWith('.tflite')) {
+      value = value.substring(0, value.length - 7);
     }
     return value;
   }
@@ -216,9 +292,11 @@ Map<String, List<YoloModelSelectorChoice>> buildYoloModelSelectorSections({
             variant: variant,
             title: variant.label,
             subtitle: variant.selectorSubtitle(backend: backend),
-            enabled: backend == YoloRuntimeBackend.executorchQnn
+            enabled: backend.isQnn
                 ? variant.isQnnLowered
-                : !variant.isQnnLowered,
+                : backend.isLiteRt
+                    ? variant.isLiteRt
+                    : !variant.isQnnLowered && !variant.isLiteRt,
           ),
       ],
   };

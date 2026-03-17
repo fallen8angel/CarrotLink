@@ -68,6 +68,7 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
     let reconnectTimer = null;
     let directErrorCount = 0;
     let lastDirectFrameId = -1;
+    let syntheticFrameId = 0;
     let droppedOutdated = 0;
     let droppedQueue = 0;
     let sourceW = 0;
@@ -144,6 +145,26 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
       if (frameId <= lastCameraFramePosted) return;
       lastCameraFramePosted = frameId;
       postToFlutter(payloadWithCamera({ type: 'camera_frame', frameId: frameId }));
+    }
+
+    function readMetaFrameId(meta) {
+      if (!meta || typeof meta !== 'object') return null;
+      const keys = [
+        'frameId',
+        'frame_id',
+        'cameraFrameId',
+        'camera_frame_id',
+        'roadFrameId',
+        'road_frame_id',
+        'frameIndex',
+        'frame_index',
+        'index',
+      ];
+      for (const key of keys) {
+        const value = Number(meta[key]);
+        if (Number.isFinite(value) && value >= 0) return value;
+      }
+      return null;
     }
 
     function drawFrameCover(frame) {
@@ -229,6 +250,7 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
       decoderCodec = '';
       waitingKey = true;
       lastDirectFrameId = -1;
+      syntheticFrameId = 0;
       pendingFrameIds.length = 0;
     }
 
@@ -457,14 +479,18 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
             return;
           }
 
-          const frameId = Number(meta.frameId ?? -1);
-          if (Number.isFinite(frameId) && frameId >= 0) {
-            if (lastDirectFrameId >= 0 && frameId <= lastDirectFrameId) {
+          const directFrameId = readMetaFrameId(meta);
+          if (Number.isFinite(directFrameId) && directFrameId >= 0) {
+            if (lastDirectFrameId >= 0 && directFrameId <= lastDirectFrameId) {
               droppedOutdated++;
               return;
             }
-            lastDirectFrameId = frameId;
+            lastDirectFrameId = directFrameId;
           }
+          const frameId =
+            Number.isFinite(directFrameId) && directFrameId >= 0
+              ? directFrameId
+              : (++syntheticFrameId);
 
           const metaW = Number(meta.width || 0);
           const metaH = Number(meta.height || 0);
@@ -490,9 +516,7 @@ extension _LiveDriveCanvasCameraHtmlComponents on _LiveDriveCanvasScreenState {
               timestamp: ts,
               data: annexb,
             });
-            if (Number.isFinite(frameId) && frameId >= 0) {
-              pendingFrameIds.push(frameId);
-            }
+            pendingFrameIds.push(frameId);
             decoder.decode(chunk);
             if ((droppedOutdated + droppedQueue) > 0 && ((droppedOutdated + droppedQueue) % 120) === 0) {
               console.log('[DriveCanvas] direct drops outdated=' + droppedOutdated + ' queue=' + droppedQueue);
