@@ -784,6 +784,8 @@ class NativeDriveVideoView(
   @Volatile private var connectAttempts = 0
   @Volatile private var lastPacketAtMs = 0L
   @Volatile private var lastDecodedAtMs = 0L
+  @Volatile private var lastFrameEmitAtMs = 0L
+  @Volatile private var firstDecodedWithoutSyncAtMs = 0L
   private val pendingFrames: ArrayDeque<PendingFrame> = ArrayDeque()
   @Volatile private var pendingSyncFrameCount = 0
   private val pendingDecodeTasks = AtomicInteger(0)
@@ -793,12 +795,18 @@ class NativeDriveVideoView(
   private var reconnectRunnable: Runnable? = null
   private var frameWatchdogRunnable: Runnable? = null
   private val cameraName: String = parseCameraName(wsUrl)
+  private val surfaceInitialConnectDebounceMs = 140L
   private val frameWatchdogIntervalMs = 700L
   private val frameStallTimeoutMs = 7000L
   private val frameDecodeStallTimeoutMs = 6500L
   private val frameStallStrikeLimit = 4
   private val frameHardReconnectMs = 24000L
   private val frameDecodeHardReconnectMs = 18000L
+  private val startupFirstFrameSoftTimeoutMs = 2500L
+  private val startupFirstFrameHardTimeoutMs = 5000L
+  private val startupSyncFrameSoftTimeoutMs = 1400L
+  private val startupSyncFrameHardTimeoutMs = 2600L
+  private val startupSyncFrameStrikeLimit = 2
   private val frameStallStateEmitEvery = 2
   private val decodeTaskBacklogLimit = 1
   private val codecBacklogLimit = 1
@@ -869,7 +877,7 @@ class NativeDriveVideoView(
     surface = holder.surface
     applySurfaceFrameRateHint(hintedFrameRate)
     emitState("surface_created")
-    connect()
+    scheduleReconnect(surfaceInitialConnectDebounceMs)
   }
 
   override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
@@ -987,6 +995,8 @@ class NativeDriveVideoView(
     stopFrameWatchdog()
     lastPacketAtMs = System.currentTimeMillis()
     lastDecodedAtMs = lastPacketAtMs
+    lastFrameEmitAtMs = 0L
+    firstDecodedWithoutSyncAtMs = 0L
     frameWatchdogRunnable =
         object : Runnable {
           override fun run() {
@@ -999,21 +1009,65 @@ class NativeDriveVideoView(
             val now = System.currentTimeMillis()
             val elapsedPacketMs = now - lastPacketAtMs
             val elapsedDecodedMs = now - lastDecodedAtMs
+            val elapsedSynclessDecodeMs =
+                if (firstDecodedWithoutSyncAtMs <= 0L) {
+                  -1L
+                } else {
+                  now - firstDecodedWithoutSyncAtMs
+                }
             val packetStalled = elapsedPacketMs > frameStallTimeoutMs
             val decodeStalled = codecConfigured && elapsedDecodedMs > frameDecodeStallTimeoutMs
-            if (webSocket != null && (packetStalled || decodeStalled)) {
+            val waitingFirstFrame = codecConfigured && waitingKeyFrame
+            val startupFirstFrameStalled =
+                waitingFirstFrame && elapsedDecodedMs > startupFirstFrameSoftTimeoutMs
+            val startupSyncFrameStalled =
+                codecConfigured &&
+                    !waitingKeyFrame &&
+                    lastFrameEmitAtMs <= 0L &&
+                    elapsedSynclessDecodeMs > startupSyncFrameSoftTimeoutMs
+            if (webSocket != null &&
+                (packetStalled ||
+                    decodeStalled ||
+                    startupFirstFrameStalled ||
+                    startupSyncFrameStalled)) {
               frameStallStrikes += 1
               if (frameStallStrikes == 1 || frameStallStrikes % frameStallStateEmitEvery == 0) {
-                emitState("stalling_pkt_${elapsedPacketMs}ms_dec_${elapsedDecodedMs}ms")
+                if (startupFirstFrameStalled) {
+                  emitState("waiting_keyframe_${elapsedDecodedMs}ms")
+                } else if (startupSyncFrameStalled) {
+                  emitState("waiting_sync_frame_${elapsedSynclessDecodeMs}ms")
+                } else {
+                  emitState("stalling_pkt_${elapsedPacketMs}ms_dec_${elapsedDecodedMs}ms")
+                }
               }
               val packetHardStall = elapsedPacketMs > frameHardReconnectMs
               val decodeHardStall = codecConfigured && elapsedDecodedMs > frameDecodeHardReconnectMs
-              if ((packetHardStall || decodeHardStall) && frameStallStrikes >= frameStallStrikeLimit) {
-                emitError("frame_stall_pkt_${elapsedPacketMs}ms_dec_${elapsedDecodedMs}ms")
+              val startupFirstFrameHardStall =
+                  waitingFirstFrame && elapsedDecodedMs > startupFirstFrameHardTimeoutMs
+              val startupSyncFrameHardStall =
+                  codecConfigured &&
+                      !waitingKeyFrame &&
+                      lastFrameEmitAtMs <= 0L &&
+                      elapsedSynclessDecodeMs > startupSyncFrameHardTimeoutMs
+              val strikeLimit =
+                  if (startupSyncFrameHardStall) startupSyncFrameStrikeLimit else frameStallStrikeLimit
+              if ((packetHardStall ||
+                      decodeHardStall ||
+                      startupFirstFrameHardStall ||
+                      startupSyncFrameHardStall) &&
+                  frameStallStrikes >= strikeLimit) {
+                if (startupFirstFrameHardStall) {
+                  emitError("startup_keyframe_timeout_${elapsedDecodedMs}ms")
+                } else if (startupSyncFrameHardStall) {
+                  emitError("startup_sync_frame_timeout_${elapsedSynclessDecodeMs}ms")
+                } else {
+                  emitError("frame_stall_pkt_${elapsedPacketMs}ms_dec_${elapsedDecodedMs}ms")
+                }
                 stopFrameWatchdog()
                 closeSocket()
                 releaseDecoder()
-                scheduleReconnect(350)
+                scheduleReconnect(
+                    if (startupFirstFrameHardStall || startupSyncFrameHardStall) 250 else 350)
                 return
               }
             } else {
@@ -1071,6 +1125,8 @@ class NativeDriveVideoView(
     waitingKeyFrame = true
     lastSourceFrameId = -1
     nextRenderedFrameId = 0
+    lastFrameEmitAtMs = 0L
+    firstDecodedWithoutSyncAtMs = 0L
     pendingDecodeTasks.set(0)
     pendingFrames.clear()
     pendingSyncFrameCount = 0
@@ -1114,12 +1170,19 @@ class NativeDriveVideoView(
     val frameId = if (sourceFrameId >= 0) sourceFrameId else nextRenderedFrameId++
     val keyByMeta =
         meta.optBoolean("keyFrame", false) || ((meta.optInt("flags", 0) and 0x8) != 0)
+    val annexb =
+        toAnnexB(
+            parsed.payload,
+            keyByMeta || looksLikeAvcDecoderConfig(parsed.payload),
+        ) ?: return
+    val keyByBitstream = isAnnexBKeyFrame(annexb)
+    val isKey = keyByMeta || keyByBitstream
     val queuedTasks = pendingDecodeTasks.get()
-    if (queuedTasks > (decodeTaskBacklogLimit + 1) && !keyByMeta) {
+    if (queuedTasks > (decodeTaskBacklogLimit + 1) && !isKey) {
       noteBacklogDrop("task", queuedTasks)
       return
     }
-    if (pendingSyncFrameCount >= codecBacklogLimit && !keyByMeta) {
+    if (pendingSyncFrameCount >= codecBacklogLimit && !isKey) {
       noteBacklogDrop("codec", pendingSyncFrameCount)
       return
     }
@@ -1136,10 +1199,9 @@ class NativeDriveVideoView(
       emitMeta(width, height)
     }
 
-    val annexb = toAnnexB(parsed.payload, keyByMeta) ?: return
 
     if (!codecConfigured) {
-      if (!keyByMeta) return
+      if (!isKey) return
       val w = if (width > 0) width else 1928
       val h = if (height > 0) height else 1208
       if (!configureDecoder(w, h)) {
@@ -1148,7 +1210,6 @@ class NativeDriveVideoView(
       }
     }
 
-    val isKey = keyByMeta
     if (waitingKeyFrame && !isKey) return
     waitingKeyFrame = false
 
@@ -1241,7 +1302,11 @@ class NativeDriveVideoView(
           val syncFrameId = renderedFrame?.syncFrameId
           if (syncFrameId != null && syncFrameId >= 0) {
             pendingSyncFrameCount = (pendingSyncFrameCount - 1).coerceAtLeast(0)
+            lastFrameEmitAtMs = lastDecodedAtMs
+            firstDecodedWithoutSyncAtMs = 0L
             emitFrame(syncFrameId)
+          } else if (lastFrameEmitAtMs <= 0L && firstDecodedWithoutSyncAtMs <= 0L) {
+            firstDecodedWithoutSyncAtMs = lastDecodedAtMs
           }
           if (yoloFrameId >= 0) {
             yoloController.onFrameRendered(
@@ -1298,6 +1363,37 @@ class NativeDriveVideoView(
         if (i + 3 < data.size && data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte()) return true
       }
       i += 1
+    }
+    return false
+  }
+
+  private fun looksLikeAvcDecoderConfig(data: ByteArray): Boolean {
+    return data.size >= 7 && data[0].toInt() == 1
+  }
+
+  private fun isAnnexBKeyFrame(data: ByteArray): Boolean {
+    var i = 0
+    while (i + 4 < data.size) {
+      var startLen = 0
+      if (data[i] == 0.toByte() && data[i + 1] == 0.toByte()) {
+        if (data[i + 2] == 1.toByte()) {
+          startLen = 3
+        } else if (i + 3 < data.size &&
+            data[i + 2] == 0.toByte() &&
+            data[i + 3] == 1.toByte()) {
+          startLen = 4
+        }
+      }
+      if (startLen == 0) {
+        i += 1
+        continue
+      }
+      val nalIndex = i + startLen
+      if (nalIndex >= data.size) break
+      when (data[nalIndex].toInt() and 0x1F) {
+        5, 7, 8 -> return true
+      }
+      i = nalIndex + 1
     }
     return false
   }

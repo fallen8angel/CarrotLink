@@ -108,6 +108,9 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     if (_overlayStaleActive && _overlayStaleReason == reason) {
       return;
     }
+    if (_overlayStaleStartedUs <= 0) {
+      _overlayStaleStartedUs = _renderClock.elapsedMicroseconds;
+    }
     _recordOverlayStaleEnter(reason);
     if (mounted) {
       _safeSetState(() {
@@ -122,8 +125,10 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
 
   void _clearOverlayStaleState() {
     if (!_overlayStaleActive && _overlayStaleReason.isEmpty) {
+      _overlayStaleStartedUs = 0;
       return;
     }
+    _overlayStaleStartedUs = 0;
     _recordOverlayStaleExit();
     if (mounted) {
       _safeSetState(() {
@@ -153,22 +158,59 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     }
     _renderInterpActive = false;
     _markOverlayStale(reason: reason);
-    _applyOverlaySnapshot(
-      const _DriveOverlaySnapshot.empty(),
-      forceNativePush: true,
-    );
-    _lastPublishedModelFrameId = null;
-    _lastOverlayPublishUs = 0;
+    _lastOverlayPublishUs = nowUs;
     if (_shouldRecoverSidecarForOverlayStall()) {
       _scheduleSidecarRuntimeRecovery(reason: 'overlay_stalled');
     }
-    return false;
+    return true;
+  }
+
+  bool _tryPublishLatestOverlayWhileStale({
+    required int nowUs,
+    required String reason,
+  }) {
+    if (!_openpilotOverlayMode || !_sidecarConnected) {
+      return false;
+    }
+    final startedUs = _overlayStaleStartedUs;
+    if (startedUs <= 0) {
+      return false;
+    }
+    if ((nowUs - startedUs) <
+        _LiveDriveCanvasScreenState._staleDegradedPublishAfterUs) {
+      return false;
+    }
+    final latest = _latestOverlaySnapshot;
+    final modelFrameId = latest.modelFrameId;
+    if (modelFrameId == null || !_isOverlaySnapshotRenderable(latest)) {
+      return false;
+    }
+    if (_lastPublishedModelFrameId != null &&
+        modelFrameId <= _lastPublishedModelFrameId!) {
+      return false;
+    }
+    _markOverlayStale(reason: reason);
+    _recordDebugPlotSample(latest);
+    _setRenderTarget(latest, nowUs: nowUs);
+    _lastPublishedModelFrameId = modelFrameId;
+    return true;
   }
 
   bool _isOverlaySnapshotRenderable(_DriveOverlaySnapshot snapshot) {
     return snapshot.modelFrameId != null ||
         snapshot.path.length >= 2 ||
         snapshot.debugPlot != null;
+  }
+
+  bool _allowDegradedNativeOverlayPush(_DriveOverlaySnapshot snapshot) {
+    if (_lastCameraFrameId != null && !_cameraLoading) {
+      return false;
+    }
+    if (!_isOverlaySnapshotRenderable(snapshot)) {
+      return false;
+    }
+    return _openpilotOverlayMode &&
+        (_sidecarConnected || _startupProvisionalSyncActive || _overlayStaleActive);
   }
 
   bool _tryPublishLatestOverlayDuringStartup(int nowUs) {
@@ -735,6 +777,13 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       _recordOverlayPushSkipped(duplicate: false, noSurface: true);
       return;
     }
+    final allowDegradedPush = _allowDegradedNativeOverlayPush(snapshot);
+    if ((_cameraLoading || _lastCameraFrameId == null) && !allowDegradedPush) {
+      _recordOverlayPushCoalesced();
+      _pendingNativeOverlaySnapshot = snapshot;
+      _pendingNativeOverlayForce = _pendingNativeOverlayForce || force;
+      return;
+    }
     if (_nativeOverlaySize.width <= 1 || _nativeOverlaySize.height <= 1) {
       _recordOverlayPushSkipped(duplicate: false, noSurface: true);
       return;
@@ -837,6 +886,12 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
         if (_lastPublishedModelFrameId != null &&
             (nowUs - math.max(_lastOverlayPublishUs, _lastSyncHitUs)) >
                 _LiveDriveCanvasScreenState._strictFrameHoldUs) {
+          if (_tryPublishLatestOverlayWhileStale(
+            nowUs: nowUs,
+            reason: '카메라 프레임 임시 추론 유지 중',
+          )) {
+            return;
+          }
           if (_holdLastGoodOverlayWhileStale(
             nowUs: nowUs,
             reason: '카메라 프레임 동기화 대기 중',
@@ -876,6 +931,12 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
           _lastPublishedModelFrameId != null &&
           (nowUs - math.max(_lastOverlayPublishUs, _lastSyncHitUs)) >
               _LiveDriveCanvasScreenState._strictFrameHoldUs) {
+        if (_tryPublishLatestOverlayWhileStale(
+          nowUs: nowUs,
+          reason: '모델/카메라 임시 정합 유지 중',
+        )) {
+          return;
+        }
         if (_holdLastGoodOverlayWhileStale(
           nowUs: nowUs,
           reason: '모델/카메라 프레임 정합 재시도 중',

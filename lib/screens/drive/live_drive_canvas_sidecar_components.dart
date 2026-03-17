@@ -151,7 +151,7 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
         } else if (_openpilotOverlayMode) {
           _suppressCameraErrors = true;
           _cameraError = null;
-          _cameraLoading = false;
+          _cameraLoading = _lastCameraFrameId == null;
         }
       });
     } else {
@@ -162,7 +162,7 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
       } else if (_openpilotOverlayMode) {
         _suppressCameraErrors = true;
         _cameraError = null;
-        _cameraLoading = false;
+        _cameraLoading = _lastCameraFrameId == null;
       }
     }
 
@@ -176,8 +176,12 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
         _startCameraErrorGrace(reason: 'shared_runtime_connected');
       }
       _setSidecarPhase(
-        _SidecarPhase.running,
-        message: '사이드카 연결이 복구되었습니다.',
+        _lastCameraFrameId != null
+            ? _SidecarPhase.running
+            : _SidecarPhase.verifying,
+        message: _lastCameraFrameId != null
+            ? '사이드카 연결이 복구되었습니다.'
+            : '사이드카 연결 후 첫 프레임을 기다리는 중입니다.',
       );
       if (!_adaptiveCameraQualitySynced) {
         unawaited(
@@ -226,14 +230,13 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
     final next = _stabilizeOverlaySnapshot(
       _DriveOverlaySnapshot.fromSidecar(payload),
     );
-    final hasOverlayFrames = next.modelFrameId != null ||
-        next.roadFrameId != null ||
-        next.wideRoadFrameId != null;
     _syncLiveCameraKind(next);
     _cacheOverlaySnapshot(next);
     _overlayDiagFrames++;
     final now = DateTime.now();
-    if (hasOverlayFrames) {
+    final inferredCameraFrame = _cameraFrameIdFromSnapshot(next);
+    final hasUsableCameraFrame = inferredCameraFrame != null;
+    if (hasUsableCameraFrame) {
       if (mounted && (_cameraLoading || (_cameraError?.isNotEmpty ?? false))) {
         _safeSetState(() {
           _cameraLoading = false;
@@ -271,7 +274,6 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
       _overlayDiagLastLogAt = now;
     }
     if (!mounted) return;
-    final inferredCameraFrame = _cameraFrameIdFromSnapshot(next);
     final nowUs = _renderClock.elapsedMicroseconds;
     final cameraStale = _lastCameraFrameEventUs <= 0 ||
         (nowUs - _lastCameraFrameEventUs) >

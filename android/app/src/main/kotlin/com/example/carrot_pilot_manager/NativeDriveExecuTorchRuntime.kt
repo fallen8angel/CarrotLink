@@ -2,6 +2,8 @@ package com.example.carrot_pilot_manager
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.os.SystemClock
+import org.json.JSONObject
 import org.pytorch.executorch.EValue
 import org.pytorch.executorch.Module
 import org.pytorch.executorch.Tensor
@@ -16,6 +18,25 @@ internal data class NativeDriveYoloModelResolution(
 ) {
   val found: Boolean
     get() = !modelPath.isNullOrBlank()
+}
+
+internal data class NativeDriveYoloModelMetadata(
+    val metadataPath: String? = null,
+    val metadataSource: String? = null,
+    val candidatePaths: List<String> = emptyList(),
+    val outputName: String? = null,
+    val weights: String? = null,
+    val soc: String? = null,
+    val qnnSdkVersion: String? = null,
+    val executorchRef: String? = null,
+    val useFp16: Boolean? = null,
+    val onlinePrepare: Boolean? = null,
+    val imgsz: Int? = null,
+    val batch: Int? = null,
+    val parseError: String? = null,
+) {
+  val present: Boolean
+    get() = !metadataPath.isNullOrBlank()
 }
 
 internal object NativeDriveYoloModelLocator {
@@ -106,6 +127,131 @@ internal object NativeDriveYoloModelLocator {
     return NativeDriveYoloModelResolution(candidatePaths = candidatePaths.toList())
   }
 
+  fun resolveMetadata(
+      context: Context,
+      config: NativeDriveYoloConfig,
+      model: NativeDriveYoloModelResolution,
+  ): NativeDriveYoloModelMetadata {
+    val candidatePaths = linkedSetOf<String>()
+    val sibling =
+        model.modelPath
+            ?.let { File(it) }
+            ?.takeIf { it.isFile }
+            ?.parentFile
+            ?.resolve("${File(model.modelPath!!).nameWithoutExtension}.metadata.json")
+    if (sibling != null) {
+      candidatePaths += sibling.absolutePath
+      if (sibling.isFile) {
+        return parseMetadataFile(
+            metadataFile = sibling,
+            source = "sibling:${sibling.name}",
+            candidatePaths = candidatePaths.toList(),
+        )
+      }
+    }
+
+    val requested = config.modelVariant.trim().ifEmpty { NativeDriveYoloConfig.DEFAULT_MODEL_VARIANT }
+    val metadataFileNames =
+        linkedSetOf<String>().apply {
+          for (baseName in NativeDriveYoloModelCatalog.candidateBaseNamesFor(requested)) {
+            val normalized =
+                if (baseName.endsWith(".pte", ignoreCase = true)) {
+                  baseName.removeSuffix(".pte")
+                } else {
+                  baseName
+                }
+            add("$normalized.metadata.json")
+          }
+        }
+
+    for (dir in searchDirectories(context)) {
+      for (fileName in metadataFileNames) {
+        val candidate = File(dir, fileName)
+        candidatePaths += candidate.absolutePath
+        if (candidate.isFile) {
+          return parseMetadataFile(
+              metadataFile = candidate,
+              source = dir.name.ifBlank { "metadata_dir" },
+              candidatePaths = candidatePaths.toList(),
+          )
+        }
+      }
+    }
+
+    for (assetDir in assetDirectories()) {
+      for (fileName in metadataFileNames) {
+        val assetPath = "$assetDir/$fileName"
+        val extracted = extractAssetIfPresent(context, assetPath, fileName)
+        if (extracted != null) {
+          candidatePaths += extracted.absolutePath
+          return parseMetadataFile(
+              metadataFile = extracted,
+              source = "asset:$assetPath",
+              candidatePaths = candidatePaths.toList(),
+          )
+        }
+      }
+    }
+
+    return NativeDriveYoloModelMetadata(candidatePaths = candidatePaths.toList())
+  }
+
+  private fun parseMetadataFile(
+      metadataFile: File,
+      source: String,
+      candidatePaths: List<String>,
+  ): NativeDriveYoloModelMetadata {
+    return try {
+      val json = JSONObject(metadataFile.readText(Charsets.UTF_8))
+      NativeDriveYoloModelMetadata(
+          metadataPath = metadataFile.absolutePath,
+          metadataSource = source,
+          candidatePaths = candidatePaths,
+          outputName = json.optString("output_name").ifBlank { null },
+          weights = json.optString("weights").ifBlank { null },
+          soc = json.optString("soc").ifBlank { null },
+          qnnSdkVersion = json.optString("qnn_sdk_version").ifBlank { null },
+          executorchRef = json.optString("executorch_ref").ifBlank { null },
+          useFp16 = if (json.has("use_fp16")) json.optBoolean("use_fp16") else null,
+          onlinePrepare = if (json.has("online_prepare")) json.optBoolean("online_prepare") else null,
+          imgsz = if (json.has("imgsz")) json.optInt("imgsz") else null,
+          batch = if (json.has("batch")) json.optInt("batch") else null,
+      )
+    } catch (t: Throwable) {
+      NativeDriveYoloModelMetadata(
+          metadataPath = metadataFile.absolutePath,
+          metadataSource = source,
+          candidatePaths = candidatePaths,
+          parseError = t.message ?: t::class.java.simpleName,
+      )
+    }
+  }
+
+  private fun searchDirectories(context: Context): List<File> {
+    return listOfNotNull(
+        File(context.filesDir, "yolo"),
+        File(context.filesDir, "models"),
+        File(context.noBackupFilesDir, "yolo"),
+        File(context.noBackupFilesDir, "models"),
+        File(context.cacheDir, "yolo"),
+        File(context.cacheDir, "models"),
+        context.getExternalFilesDir("yolo"),
+        context.getExternalFilesDir("models"),
+        File("/data/local/tmp/carrotlink/models"),
+        File("/data/local/tmp/carrotlink/yolo"),
+        File("/data/local/tmp"),
+    )
+  }
+
+  private fun assetDirectories(): List<String> {
+    return listOf(
+        "yolo",
+        "models",
+        "flutter_assets/assets/yolo",
+        "flutter_assets/assets/models",
+    )
+  }
+
   private fun extractAssetIfPresent(
       context: Context,
       assetPath: String,
@@ -145,6 +291,10 @@ internal class NativeDriveExecuTorchRuntime(
         "QNN-lowered runtime is guarded because the current ExecuTorch/QNN stack " +
             "can crash during delegate initialization. Rebuild the export/runtime " +
             "from the same stack and enable it explicitly."
+    private const val qnnDelegateInitFailedBlocker = "qnn_delegate_init_failed"
+    private const val qnnDspTransportFailedBlocker = "qnn_dsp_transport_failed"
+    private const val qnnForwardRetryBackoffMs = 5_000L
+    private const val qnnForwardRetryThreshold = 3
   }
 
   private data class NativeDriveYoloBackendSupport(
@@ -162,6 +312,7 @@ internal class NativeDriveExecuTorchRuntime(
   private var modelPath: String? = null
   private var modelSource: String? = null
   private var candidatePaths: List<String> = emptyList()
+  private var modelMetadata: NativeDriveYoloModelMetadata = NativeDriveYoloModelMetadata()
   private var backendSupport = NativeDriveYoloBackendSupport()
   private var qnnRuntimeDir: String? = null
   private var qnnEnvReady: Boolean = false
@@ -186,6 +337,9 @@ internal class NativeDriveExecuTorchRuntime(
   private var parserMaxClassScore: Double? = null
   private var parsedDetectionsPreview: List<String> = emptyList()
   private var parsedDetections: List<Map<String, Any?>> = emptyList()
+  private var lastForwardFailureSignature: String? = null
+  private var repeatedForwardFailureCount = 0
+  private var qnnRetryBlockedUntilElapsedMs = 0L
   private var reusableInputBuffer: FloatBuffer? = null
   private var reusablePixels: IntArray? = null
   private var reusableInputShape: LongArray = longArrayOf(1, 3, 0, 0)
@@ -199,6 +353,7 @@ internal class NativeDriveExecuTorchRuntime(
       stage = "idle"
       blocker = "disabled"
       candidatePaths = emptyList()
+      modelMetadata = NativeDriveYoloModelMetadata()
       backendSupport = NativeDriveYoloBackendSupport()
       qnnRuntimeDir = null
       qnnEnvReady = false
@@ -221,6 +376,7 @@ internal class NativeDriveExecuTorchRuntime(
     parserMaxClassScore = null
     parsedDetectionsPreview = emptyList()
     parsedDetections = emptyList()
+    resetForwardFailureTracking()
     reusableInputBuffer = null
       reusablePixels = null
       reusableInputShape = longArrayOf(1, 3, 0, 0)
@@ -233,6 +389,7 @@ internal class NativeDriveExecuTorchRuntime(
       blocker = "unsafe_runtime_disabled"
       lastError = null
       candidatePaths = emptyList()
+      modelMetadata = NativeDriveYoloModelMetadata()
       qnnRuntimeDir = null
       qnnEnvReady = false
       inferenceRequests = 0
@@ -253,6 +410,7 @@ internal class NativeDriveExecuTorchRuntime(
       parserMaxClassScore = null
       parsedDetectionsPreview = emptyList()
       parsedDetections = emptyList()
+      resetForwardFailureTracking()
       reusableInputBuffer = null
       reusablePixels = null
       reusableInputShape = longArrayOf(1, 3, 0, 0)
@@ -264,8 +422,10 @@ internal class NativeDriveExecuTorchRuntime(
       blocker = backendSupport.reason ?: "backend_unavailable"
       lastError = null
       candidatePaths = emptyList()
+      modelMetadata = NativeDriveYoloModelMetadata()
       qnnRuntimeDir = null
       qnnEnvReady = false
+      resetForwardFailureTracking()
       reusableInputBuffer = null
       reusablePixels = null
       reusableInputShape = longArrayOf(1, 3, 0, 0)
@@ -321,6 +481,10 @@ internal class NativeDriveExecuTorchRuntime(
       applyQnnLoweredRuntimeGuard()
       return
     }
+    if (isQnnRetryBackoffActive(config)) {
+      applyQnnRetryBackoffState()
+      return
+    }
     pixelFramesConsumed += 1
     lastRequestedFrameId = frame.frameId
     if (module == null) {
@@ -351,6 +515,7 @@ internal class NativeDriveExecuTorchRuntime(
       val outputs = module!!.forward(EValue.from(inputTensor))
       lastForwardMs = elapsedMs(forwardStartNs)
       forwardSuccesses += 1
+      resetForwardFailureTracking()
       updateOutputDiagnostics(outputs)
       val parseResult =
           NativeDriveYoloParser.parse(
@@ -415,14 +580,37 @@ internal class NativeDriveExecuTorchRuntime(
       }
     } catch (t: Throwable) {
       forwardFailures += 1
-      lastError = t.stackTraceToString().lineSequence().firstOrNull()?.trim().orEmpty()
-          .ifBlank { t.message ?: t::class.java.simpleName }
+      val failureMessage =
+          t.stackTraceToString().lineSequence().firstOrNull()?.trim().orEmpty()
+              .ifBlank { t.message ?: t::class.java.simpleName }
+      lastError = failureMessage
       if (!preprocessDone) {
+        resetForwardFailureTracking()
         stage = "preprocess_failed"
         blocker = "preprocess_error"
       } else {
-        stage = "inference_failed"
-        blocker = "executorch_forward_failed"
+        val qnnForwardIssue = classifyQnnForwardFailure(config, failureMessage)
+        if (qnnForwardIssue != null) {
+          noteForwardFailure(qnnForwardIssue.blocker)
+          if (repeatedForwardFailureCount >= qnnForwardRetryThreshold) {
+            qnnRetryBlockedUntilElapsedMs =
+                SystemClock.elapsedRealtime() + qnnForwardRetryBackoffMs
+            stage = "backend_unavailable"
+            blocker = qnnDspTransportFailedBlocker
+            lastError =
+                "Repeated QNN delegate failures. " +
+                    "Backing off for ${qnnForwardRetryBackoffMs}ms. " +
+                    "Last error: $failureMessage"
+          } else {
+            stage = qnnForwardIssue.stage
+            blocker = qnnForwardIssue.blocker
+            lastError = qnnForwardIssue.message
+          }
+        } else {
+          resetForwardFailureTracking()
+          stage = "inference_failed"
+          blocker = "executorch_forward_failed"
+        }
       }
       parsedDetections = emptyList()
     }
@@ -450,6 +638,17 @@ internal class NativeDriveExecuTorchRuntime(
         modelPath = modelPath,
         modelSource = modelSource,
         modelSearchPaths = candidatePaths,
+        modelMetadataPath = modelMetadata.metadataPath,
+        modelMetadataSource = modelMetadata.metadataSource,
+        modelMetadataOutputName = modelMetadata.outputName,
+        modelMetadataSoc = modelMetadata.soc,
+        modelMetadataQnnSdkVersion = modelMetadata.qnnSdkVersion,
+        modelMetadataExecutorchRef = modelMetadata.executorchRef,
+        modelMetadataUseFp16 = modelMetadata.useFp16,
+        modelMetadataOnlinePrepare = modelMetadata.onlinePrepare,
+        modelMetadataImgsz = modelMetadata.imgsz,
+        modelMetadataBatch = modelMetadata.batch,
+        modelMetadataParseError = modelMetadata.parseError,
         lastError = lastError,
         forwardSuccesses = forwardSuccesses,
         forwardFailures = forwardFailures,
@@ -475,10 +674,12 @@ internal class NativeDriveExecuTorchRuntime(
     stage = "idle"
     blocker = "disabled"
     candidatePaths = emptyList()
+    modelMetadata = NativeDriveYoloModelMetadata()
     backendSupport = NativeDriveYoloBackendSupport()
     qnnRuntimeDir = null
     qnnEnvReady = false
     lastError = null
+    resetForwardFailureTracking()
     inferenceRequests = 0
     lastRequestedFrameId = -1
     pixelFramesConsumed = 0
@@ -510,6 +711,8 @@ internal class NativeDriveExecuTorchRuntime(
       stage = "runtime_disabled"
       blocker = "unsafe_runtime_disabled"
       lastError = null
+      modelMetadata = NativeDriveYoloModelMetadata()
+      resetForwardFailureTracking()
       return
     }
     if (!backendSupport.available) {
@@ -517,6 +720,8 @@ internal class NativeDriveExecuTorchRuntime(
       stage = "backend_unavailable"
       blocker = backendSupport.reason ?: "backend_unavailable"
       lastError = null
+      modelMetadata = NativeDriveYoloModelMetadata()
+      resetForwardFailureTracking()
       return
     }
     if (shouldGuardQnnLoweredRuntime(config)) {
@@ -532,6 +737,8 @@ internal class NativeDriveExecuTorchRuntime(
         stage = "backend_environment_unavailable"
         blocker = prepared.reason ?: "qnn_environment_unavailable"
         lastError = null
+        modelMetadata = NativeDriveYoloModelMetadata()
+        resetForwardFailureTracking()
         return
       }
     } else {
@@ -544,12 +751,25 @@ internal class NativeDriveExecuTorchRuntime(
     candidatePaths = resolved.candidatePaths
     modelPath = resolved.modelPath
     modelSource = resolved.modelSource
+    modelMetadata = NativeDriveYoloModelLocator.resolveMetadata(appContext, config, resolved)
 
     if (!resolved.found) {
       releaseModule()
       stage = "awaiting_model_asset"
       blocker = "model_asset_missing"
       lastError = null
+      modelMetadata = NativeDriveYoloModelMetadata(candidatePaths = modelMetadata.candidatePaths)
+      resetForwardFailureTracking()
+      return
+    }
+
+    val metadataIssue = validateQnnModelCompatibility(config, modelMetadata)
+    if (metadataIssue != null) {
+      releaseModule()
+      stage = metadataIssue.stage
+      blocker = metadataIssue.blocker
+      lastError = metadataIssue.message
+      resetForwardFailureTracking()
       return
     }
 
@@ -566,11 +786,13 @@ internal class NativeDriveExecuTorchRuntime(
       // produced native SIGSEGV crashes in libexecutorch_jni.so. We keep the
       // module loaded and let the first forward() own method initialization.
       lastError = null
+      resetForwardFailureTracking()
       stage = "awaiting_preprocess_pipeline"
       blocker = "preprocess_missing"
     } catch (t: Throwable) {
       releaseModule()
       lastError = t.message ?: t::class.java.simpleName
+      resetForwardFailureTracking()
       stage = "module_load_failed"
       blocker = "executorch_module_load_failed"
     }
@@ -586,9 +808,170 @@ internal class NativeDriveExecuTorchRuntime(
     return NativeDriveYoloModelCatalog.isQnnLoweredReference(config.modelVariant)
   }
 
+  private data class NativeDriveYoloRuntimeIssue(
+      val stage: String,
+      val blocker: String,
+      val message: String,
+  )
+
+  private fun validateQnnModelCompatibility(
+      config: NativeDriveYoloConfig,
+      metadata: NativeDriveYoloModelMetadata,
+  ): NativeDriveYoloRuntimeIssue? {
+    if (!config.runtimeBackend.contains("qnn", ignoreCase = true) &&
+        NativeDriveYoloModelCatalog.isQnnLoweredReference(config.modelVariant)) {
+      return NativeDriveYoloRuntimeIssue(
+          stage = "backend_unavailable",
+          blocker = "qnn_model_requires_qnn_backend",
+          message =
+              "QNN-lowered model ${config.modelVariant} requires the ExecuTorch QNN backend.",
+      )
+    }
+    if (!config.runtimeBackend.contains("qnn", ignoreCase = true)) {
+      return null
+    }
+    if (!NativeDriveYoloModelCatalog.isQnnLoweredReference(config.modelVariant)) {
+      return null
+    }
+    if (!metadata.present) {
+      return NativeDriveYoloRuntimeIssue(
+          stage = "awaiting_model_metadata",
+          blocker = "qnn_model_metadata_missing",
+          message =
+              "QNN model metadata is missing. Re-export the model so " +
+                  "<model>.metadata.json is packaged next to the .pte.",
+      )
+    }
+    if (!metadata.parseError.isNullOrBlank()) {
+      return NativeDriveYoloRuntimeIssue(
+          stage = "awaiting_model_metadata",
+          blocker = "qnn_model_metadata_invalid",
+          message =
+              "QNN model metadata could not be parsed: ${metadata.parseError}",
+      )
+    }
+
+    val expectedNames =
+        NativeDriveYoloModelCatalog
+            .candidateBaseNamesFor(config.modelVariant)
+            .map { NativeDriveYoloModelCatalog.normalize(it) }
+            .toSet()
+    val metadataOutputName = NativeDriveYoloModelCatalog.normalize(metadata.outputName)
+    if (metadataOutputName.isBlank()) {
+      return NativeDriveYoloRuntimeIssue(
+          stage = "awaiting_model_metadata",
+          blocker = "qnn_model_metadata_incomplete",
+          message = "QNN model metadata is missing output_name.",
+      )
+    }
+    if (metadataOutputName !in expectedNames) {
+      return NativeDriveYoloRuntimeIssue(
+          stage = "awaiting_model_metadata",
+          blocker = "qnn_model_variant_mismatch",
+          message =
+              "QNN model metadata output_name=${metadata.outputName} does not match " +
+                  "requested variant=${config.modelVariant}.",
+      )
+    }
+
+    val exportedSdkVersion = metadata.qnnSdkVersion?.trim().orEmpty()
+    if (exportedSdkVersion.isBlank()) {
+      return NativeDriveYoloRuntimeIssue(
+          stage = "awaiting_model_metadata",
+          blocker = "qnn_model_metadata_incomplete",
+          message = "QNN model metadata is missing qnn_sdk_version.",
+      )
+    }
+
+    val packagedSdkVersion = BuildConfig.QNN_SDK_VERSION.trim()
+    if (packagedSdkVersion.isNotEmpty() && packagedSdkVersion != exportedSdkVersion) {
+      return NativeDriveYoloRuntimeIssue(
+          stage = "backend_unavailable",
+          blocker = "qnn_sdk_version_mismatch",
+          message =
+              "QNN export/runtime mismatch. Model was lowered with QNN SDK " +
+                  "$exportedSdkVersion but the app packages $packagedSdkVersion.",
+      )
+    }
+
+    return null
+  }
+
+  private fun classifyQnnForwardFailure(
+      config: NativeDriveYoloConfig,
+      failureMessage: String,
+  ): NativeDriveYoloRuntimeIssue? {
+    if (!config.runtimeBackend.contains("qnn", ignoreCase = true)) {
+      return null
+    }
+    if (!NativeDriveYoloModelCatalog.isQnnLoweredReference(config.modelVariant)) {
+      return null
+    }
+    val normalized = failureMessage.lowercase()
+    if (!normalized.contains("execution failed for method: forward") &&
+        !normalized.contains("internal error")) {
+      return null
+    }
+    return NativeDriveYoloRuntimeIssue(
+        stage = "inference_failed",
+        blocker = qnnDelegateInitFailedBlocker,
+        message =
+            "QNN delegate initialization failed during forward(). " +
+                "If this persists, inspect device logcat for QnnDsp transport/skel load errors.",
+    )
+  }
+
+  private fun noteForwardFailure(signature: String) {
+    if (lastForwardFailureSignature == signature) {
+      repeatedForwardFailureCount += 1
+    } else {
+      lastForwardFailureSignature = signature
+      repeatedForwardFailureCount = 1
+    }
+  }
+
+  private fun resetForwardFailureTracking() {
+    lastForwardFailureSignature = null
+    repeatedForwardFailureCount = 0
+    qnnRetryBlockedUntilElapsedMs = 0L
+  }
+
+  private fun isQnnRetryBackoffActive(config: NativeDriveYoloConfig): Boolean {
+    if (!config.runtimeBackend.contains("qnn", ignoreCase = true)) {
+      return false
+    }
+    if (!NativeDriveYoloModelCatalog.isQnnLoweredReference(config.modelVariant)) {
+      return false
+    }
+    val until = qnnRetryBlockedUntilElapsedMs
+    if (until <= 0L) {
+      return false
+    }
+    val now = SystemClock.elapsedRealtime()
+    if (now >= until) {
+      qnnRetryBlockedUntilElapsedMs = 0L
+      repeatedForwardFailureCount = 0
+      lastForwardFailureSignature = null
+      return false
+    }
+    return true
+  }
+
+  private fun applyQnnRetryBackoffState() {
+    val remainingMs =
+        (qnnRetryBlockedUntilElapsedMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+    stage = "backend_unavailable"
+    blocker = qnnDspTransportFailedBlocker
+    lastError =
+        "QNN delegate retries are temporarily paused after repeated failures. " +
+            "Retrying in ${remainingMs}ms."
+  }
+
   private fun applyQnnLoweredRuntimeGuard() {
     releaseModule()
+    modelMetadata = NativeDriveYoloModelMetadata()
     lastError = qnnLoweredRuntimeGuardMessage
+    resetForwardFailureTracking()
     stage = "backend_unavailable"
     blocker = qnnLoweredRuntimeGuardBlocker
   }
@@ -691,8 +1074,7 @@ internal class NativeDriveExecuTorchRuntime(
     }
     if (backend.contains("xnnpack")) {
       return NativeDriveYoloBackendSupport(
-          available = false,
-          reason = "xnnpack_runtime_not_validated",
+          available = true,
           nativeLibs = nativeLibs,
           nativeLibDir = nativeDirPath,
           packagingMode = packagingMode,

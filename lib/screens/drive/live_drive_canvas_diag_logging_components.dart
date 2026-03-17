@@ -334,4 +334,97 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
     _driveDiagStaleEnterWindow = 0;
     _driveDiagStaleAccumulatedUsWindow = 0;
   }
+
+  Map<String, dynamic> _driveDiagnosticsClipboardPayload() {
+    final nowUs = _renderClock.elapsedMicroseconds;
+    final lastFrameAgeMs = _lastCameraFrameEventUs <= 0
+        ? null
+        : math.max(0, ((nowUs - _lastCameraFrameEventUs) / 1000).round());
+    return <String, dynamic>{
+      'capturedAt': DateTime.now().toIso8601String(),
+      'hostIp': _hostIp,
+      'modeTag': _modeTagLabel,
+      'overlayMode': _openpilotOverlayMode,
+      'nativeCameraMode': _useNativeLiveCamera,
+      'liveCamera': _liveCameraName,
+      'camera': <String, dynamic>{
+        'loading': _cameraLoading,
+        'error': _cameraError,
+        'lastFrameId': _lastCameraFrameId,
+        'lastFrameAgeMs': lastFrameAgeMs,
+        'sourceSize': <String, dynamic>{
+          'width': _cameraSourceSize.width.round(),
+          'height': _cameraSourceSize.height.round(),
+        },
+      },
+      'overlay': <String, dynamic>{
+        'fps': double.parse(_overlayDebugFps.toStringAsFixed(2)),
+        'dropCountTotal': _overlayDropCount,
+        'modelCameraGapLatest': _overlayModelCameraGap,
+        'staleActive': _overlayStaleActive,
+        'staleReason': _overlayStaleReason,
+        'lastPublishedModelFrameId': _lastPublishedModelFrameId,
+      },
+      'sidecar': <String, dynamic>{
+        'connected': _sidecarConnected,
+        'phase': _sidecarPhase.name,
+        'phaseMessage': _sidecarPhaseMessage,
+      },
+      'logs': <String, dynamic>{
+        'driveDiagnostics': _driveDiagFilePath,
+        'cameraDiagnostics': _lastCameraDiagFilePath,
+      },
+      'nativeCameraDiag': _lastNativeCameraDiag,
+    };
+  }
+
+  Future<String> _readDriveDiagTail({int maxLines = 80}) async {
+    final path = _driveDiagFilePath;
+    if (path == null || path.trim().isEmpty) {
+      return '(활성 drive diagnostics 로그 파일 없음)';
+    }
+    try {
+      final file = File(path);
+      if (!await file.exists()) {
+        return '(로그 파일을 찾을 수 없음)';
+      }
+      final lines = await file.readAsLines();
+      if (lines.isEmpty) {
+        return '(로그 내용 없음)';
+      }
+      final start = math.max(0, lines.length - maxLines);
+      return lines.sublist(start).join('\n');
+    } catch (e) {
+      return '(로그 읽기 실패: $e)';
+    }
+  }
+
+  Future<void> _copyDriveDiagnosticsLogImpl() async {
+    _emitDriveDiagSummary();
+    final sink = _driveDiagSink;
+    if (sink != null) {
+      try {
+        await sink.flush();
+      } catch (_) {}
+    }
+    final payload = _driveDiagnosticsClipboardPayload();
+    final tail = await _readDriveDiagTail();
+    final text = '''
+=== drive_diagnostics_summary ===
+${const JsonEncoder.withIndent('  ').convert(payload)}
+
+=== drive_diagnostics_tail ===
+$tail
+''';
+    await Clipboard.setData(ClipboardData(text: text));
+    _appendDriveDiagEvent(
+      'log_copied',
+      <String, dynamic>{
+        'logFile': _driveDiagFilePath,
+        'cameraDiagFile': _lastCameraDiagFilePath,
+      },
+    );
+    if (!mounted) return;
+    _toast('주행 로그를 복사했습니다.');
+  }
 }

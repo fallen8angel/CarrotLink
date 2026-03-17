@@ -93,6 +93,31 @@ enum YoloModelVariant {
 
   bool get isQnnLowered => family == YoloModelFamily.qnnLowered;
 
+  bool get isLargeModel =>
+      this == YoloModelVariant.yolo26s || this == YoloModelVariant.yolo26sQnn;
+
+  YoloModelVariant get genericVariant {
+    switch (this) {
+      case YoloModelVariant.yolo26n:
+      case YoloModelVariant.yolo26nQnn:
+        return YoloModelVariant.yolo26n;
+      case YoloModelVariant.yolo26s:
+      case YoloModelVariant.yolo26sQnn:
+        return YoloModelVariant.yolo26s;
+    }
+  }
+
+  YoloModelVariant get qnnVariant {
+    switch (this) {
+      case YoloModelVariant.yolo26n:
+      case YoloModelVariant.yolo26nQnn:
+        return YoloModelVariant.yolo26nQnn;
+      case YoloModelVariant.yolo26s:
+      case YoloModelVariant.yolo26sQnn:
+        return YoloModelVariant.yolo26sQnn;
+    }
+  }
+
   String get primaryAssetFileName => '${assetBaseNames.first}.pte';
 
   String get assetFileHint =>
@@ -121,9 +146,8 @@ enum YoloModelVariant {
       return '$base · QNN backend 전환 후 사용 · 예: $assetFileHint';
     }
     final base = family.selectorDescription;
-    if (backend == YoloRuntimeBackend.executorchQnn &&
-        family == YoloModelFamily.genericExecutorch) {
-      return '$base · playback QNN debug에서는 blocker 처리됨';
+    if (backend == YoloRuntimeBackend.executorchQnn) {
+      return '$base · XNNPACK backend에서 사용';
     }
     return base;
   }
@@ -192,7 +216,9 @@ Map<String, List<YoloModelSelectorChoice>> buildYoloModelSelectorSections({
             variant: variant,
             title: variant.label,
             subtitle: variant.selectorSubtitle(backend: backend),
-            enabled: true,
+            enabled: backend == YoloRuntimeBackend.executorchQnn
+                ? variant.isQnnLowered
+                : !variant.isQnnLowered,
           ),
       ],
   };

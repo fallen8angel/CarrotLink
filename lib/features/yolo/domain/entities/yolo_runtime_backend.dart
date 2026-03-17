@@ -14,6 +14,6 @@ enum YoloRuntimeBackend {
         return backend;
       }
     }
-    return YoloRuntimeBackend.executorchQnn;
+    return YoloRuntimeBackend.executorchXnnpack;
   }
 }

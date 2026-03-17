@@ -268,6 +268,22 @@ YOLO box overlay를 위해 새로 만들 필요가 없는 stock 모드 자산도
 - 최초 설치 후 첫 실행 또는 설정 진입 시 짧은 벤치마크 실행
 - 평균 inference 시간, frame drop, thermal signal, UI jank를 측정
 - 기준 미달이면 detection 기능 비활성화 또는 `n`으로 강등
+
+### 8.3 2026-03-17 backend 운영 정책 보정
+
+- 기기 모델명보다 `SoC` 기준으로 backend를 고른다.
+- `Snapdragon Galaxy`
+  - 1차 시도: `YOLO26n_qnn + ExecuTorch QNN`
+  - 반복 blocker가 `qnn_*` 계열이면 즉시 `YOLO26n + ExecuTorch XNNPACK`으로 강등
+- `Exynos Galaxy`
+  - 현재 앱 기준 기본 backend는 `ExecuTorch XNNPACK`
+  - QNN은 대상 backend로 보지 않는다.
+- `YOLO26s`는 아래 중 하나를 만족할 때만 기본 허용 후보다.
+  - `SM8550`
+  - `SM8650`
+  - `SM8750`
+  - `Exynos 2400`
+- 그 외 Galaxy는 기본 `YOLO26n`으로 시작하고, 실제 기기 벤치 통과 시에만 `s`를 올린다.
 - 사용자에게는 `성능 우선` / `정확도 우선` 정도만 노출
 
 ### 8.3 1차 성능 목표

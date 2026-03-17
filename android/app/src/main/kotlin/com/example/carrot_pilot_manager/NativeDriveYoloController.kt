@@ -11,9 +11,11 @@ class NativeDriveYoloController(
       NativeDriveYoloPixelSampler(
           surfaceView = surfaceView,
           onPixelSampled = { frame, bitmap ->
-            runtime.onPixelFrame(frame, bitmap)
-            lastSkipReason = "pixel_ready"
-            emitState(force = true, reason = "pixel_sample_ready")
+            if (config.enabled) {
+              runtime.onPixelFrame(frame, bitmap)
+              lastSkipReason = "pixel_ready"
+              emitState(force = true, reason = "pixel_sample_ready")
+            }
           },
       )
   private var config: NativeDriveYoloConfig = NativeDriveYoloConfig.disabled
@@ -33,6 +35,11 @@ class NativeDriveYoloController(
     runtime.updateConfig(next)
     pixelSampler.updateConfig(next)
     if (!next.enabled) {
+      framesSeen = 0
+      framesSampled = 0
+      framesSkipped = 0
+      lastFrameId = -1
+      lastFramePtsUs = 0L
       lastSamplePtsUs = Long.MIN_VALUE
       lastSkipReason = "disabled"
     } else if (!wasEnabled) {
@@ -43,15 +50,12 @@ class NativeDriveYoloController(
   }
 
   fun onFrameRendered(frame: NativeDriveYoloFrame) {
+    if (!config.enabled) {
+      return
+    }
     framesSeen += 1
     lastFrameId = frame.frameId
     lastFramePtsUs = frame.ptsUs
-
-    if (!config.enabled) {
-      lastSkipReason = "disabled"
-      emitState(reason = "disabled")
-      return
-    }
     if (frame.sourceWidth < 32 || frame.sourceHeight < 32) {
       framesSkipped += 1
       lastSkipReason = "source_size_missing"

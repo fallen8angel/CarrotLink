@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -52,6 +53,22 @@ def _parse_args() -> argparse.Namespace:
       help=(
           "Export with QNN online_prepare so the graph is composed on-device "
           "instead of relying on a serialized precompiled context binary."
+      ),
+  )
+  parser.add_argument(
+      "--qnn-sdk-version",
+      default="",
+      help=(
+          "QNN SDK version used for lowering. Defaults to QNN_SDK_VERSION env "
+          "when omitted."
+      ),
+  )
+  parser.add_argument(
+      "--executorch-ref",
+      default="",
+      help=(
+          "ExecuTorch git ref used for lowering. Defaults to EXECUTORCH_REF env "
+          "when omitted."
       ),
   )
   return parser.parse_args()
@@ -273,6 +290,8 @@ def _write_metadata(
     weights_path: Path,
     output_name: str,
     soc: str,
+    qnn_sdk_version: str,
+    executorch_ref: str,
     use_fp16: bool,
     online_prepare: bool,
     imgsz: int,
@@ -282,6 +301,8 @@ def _write_metadata(
       "weights": str(weights_path),
       "output_name": output_name,
       "soc": soc,
+      "qnn_sdk_version": qnn_sdk_version,
+      "executorch_ref": executorch_ref,
       "use_fp16": use_fp16,
       "online_prepare": online_prepare,
       "imgsz": imgsz,
@@ -323,6 +344,12 @@ def main() -> int:
   output_dir = Path(args.output_dir).resolve()
   output_dir.mkdir(parents=True, exist_ok=True)
   output_name = args.output_name.strip() or f"{weights_path.stem}_qnn"
+  qnn_sdk_version = args.qnn_sdk_version.strip() or os.environ.get(
+      "QNN_SDK_VERSION", ""
+  ).strip()
+  executorch_ref = args.executorch_ref.strip() or os.environ.get(
+      "EXECUTORCH_REF", ""
+  ).strip()
 
   print(f"[qnn-export] weights={weights_path}")
   print(f"[qnn-export] output_dir={output_dir}")
@@ -331,6 +358,10 @@ def main() -> int:
       f"[qnn-export] soc={args.soc} use_fp16={args.use_fp16} "
       f"online_prepare={args.online_prepare}"
   )
+  if qnn_sdk_version:
+    print(f"[qnn-export] qnn_sdk_version={qnn_sdk_version}")
+  if executorch_ref:
+    print(f"[qnn-export] executorch_ref={executorch_ref}")
 
   module = _resolve_ultralytics_module(weights_path, yolo_cls)
   example_inputs = (
@@ -370,6 +401,8 @@ def main() -> int:
       weights_path=weights_path,
       output_name=output_name,
       soc=args.soc,
+      qnn_sdk_version=qnn_sdk_version,
+      executorch_ref=executorch_ref,
       use_fp16=args.use_fp16,
       online_prepare=args.online_prepare,
       imgsz=args.imgsz,

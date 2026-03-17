@@ -114,7 +114,8 @@ void onStart(ServiceInstance service) async {
   int profilePort = 22;
   late void Function(String ip, {String source}) acceptCandidateIp;
 
-  bool manualDisconnectRequested = false;
+bool manualDisconnectRequested = false;
+String manualDisconnectReason = 'none';
   int reconnectAttempt = 0;
   int noBroadcastWaitAttempt = 0;
   late Future<void> Function(
@@ -544,6 +545,9 @@ void onStart(ServiceInstance service) async {
     disconnectedSinceAt ??= DateTime.now();
     if (manual) {
       manualDisconnectRequested = true;
+      manualDisconnectReason = 'until_boot_change';
+    } else {
+      manualDisconnectReason = 'none';
     }
     emitConnectionState(isConnected: false, reason: reason);
     emitDiscoveryState(source: reason);
@@ -917,6 +921,7 @@ void onStart(ServiceInstance service) async {
     profilePort = port;
     autoReconnectEnabled = true;
     manualDisconnectRequested = false;
+    manualDisconnectReason = 'none';
     emitDiscoveryState(source: 'manual_connect');
     if (isValidIpv4(ip)) {
       await connectTo(ip, reason: 'manual_connect');
@@ -947,6 +952,7 @@ void onStart(ServiceInstance service) async {
     }
     if (event['resumeAutoReconnect'] == true) {
       manualDisconnectRequested = false;
+      manualDisconnectReason = 'none';
     }
 
     emitDiscoveryState(source: 'configure');
@@ -964,6 +970,7 @@ void onStart(ServiceInstance service) async {
 
   service.on('resumeAutoReconnect').listen((event) {
     manualDisconnectRequested = false;
+    manualDisconnectReason = 'none';
     autoReconnectEnabled = true;
     emitDiscoveryState(source: 'resume_auto_reconnect');
     if ((sshClient == null || sshClient!.isClosed) && hasConnectProfile()) {
@@ -1001,6 +1008,8 @@ void onStart(ServiceInstance service) async {
     lastUdpCandidateSeenAt = null;
     lastSuccessfulIp = null;
     lastSuccessfulSeenAt = null;
+    manualDisconnectRequested = false;
+    manualDisconnectReason = 'none';
     disconnectedSinceAt = DateTime.now();
     activeScanHitCount.clear();
     reconnectAttempt = 0;
@@ -1087,6 +1096,7 @@ void onStart(ServiceInstance service) async {
       'listening': discoveryListening,
       'autoReconnectEnabled': autoReconnectEnabled,
       'manualDisconnectRequested': manualDisconnectRequested,
+      'manualDisconnectReason': manualDisconnectReason,
       'appForeground': appForeground,
     });
     emitDiscoveryState(source: 'status');

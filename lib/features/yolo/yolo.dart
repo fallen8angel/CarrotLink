@@ -1,6 +1,8 @@
 export 'application/yolo_debug_settings_store.dart';
+export 'application/yolo_device_profile_service.dart';
 export 'application/yolo_native_config_payload_builder.dart';
 export 'application/yolo_offline_debug_runner.dart';
+export 'application/yolo_runtime_policy.dart';
 export 'application/yolo_runtime_status_store.dart';
 export 'application/yolo_stock_debug_playback_store.dart';
 export 'domain/entities/yolo_detection.dart';

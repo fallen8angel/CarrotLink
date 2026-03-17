@@ -119,6 +119,7 @@ $pretty
 $tmuxTail
 ''',
       );
+      _lastCameraDiagFilePath = file.path;
       debugPrint(
           '[DriveCanvas][diag] camera_error snapshot saved: ${file.path}');
     } catch (e) {

@@ -553,6 +553,7 @@ class SSHService extends ChangeNotifier {
     if (_isConnecting) return;
 
     _manualDisconnectRequested = false;
+    unawaited(_storage.delete(key: 'ssh_manual_disconnect_boot_id'));
     _isConnecting = true;
     _disconnectedSince ??= DateTime.now();
     _targetIp = ip; // Set target IP immediately
@@ -664,7 +665,7 @@ class SSHService extends ChangeNotifier {
     Duration socketTimeout = const Duration(seconds: 2),
     Duration authTimeout = const Duration(seconds: 3),
   }) async {
-    if (_manualDisconnectRequested || isConnected || _isConnecting) {
+    if (isConnected || _isConnecting) {
       return false;
     }
 
@@ -687,6 +688,21 @@ class SSHService extends ChangeNotifier {
     final targetIp = _pickReconnectTarget(storedLastIp: storedLastIp);
     if (targetIp == null) {
       return false;
+    }
+
+    if (_manualDisconnectRequested) {
+      final resumed = await _tryResumeAfterRemoteReboot(
+        ip: targetIp,
+        username: username,
+        port: port,
+        password: password,
+        privateKey: privateKey,
+        socketTimeout: socketTimeout,
+        authTimeout: authTimeout,
+      );
+      if (!resumed) {
+        return false;
+      }
     }
 
     FlutterBackgroundService().invoke('candidateHint', {
@@ -735,6 +751,7 @@ class SSHService extends ChangeNotifier {
     _heartbeatTimer?.cancel();
     _heartbeatFailureCount = 0;
     _heartbeatInFlight = false;
+    unawaited(_refreshConnectedRemoteBootId());
 
     _heartbeatTimer = Timer.periodic(_heartbeatInterval, (timer) async {
       if (_client == null) {
@@ -793,6 +810,9 @@ class SSHService extends ChangeNotifier {
           "Connection lost - updating state immediately (reason: $reason)");
       _diag.warn('ssh', 'Disconnected reason=$reason manual=$manual');
       _manualDisconnectRequested = manual;
+      if (manual) {
+        unawaited(_persistManualDisconnectBootContext());
+      }
       _isConnecting = false;
       _heartbeatTimer?.cancel();
       _heartbeatTimer = null;
@@ -1160,6 +1180,101 @@ class SSHService extends ChangeNotifier {
     }
   }
 
+  Future<void> _refreshConnectedRemoteBootId() async {
+    final client = _client;
+    if (client == null || client.isClosed) return;
+    try {
+      final raw = await client
+          .run('cat /proc/sys/kernel/random/boot_id')
+          .timeout(const Duration(seconds: 2));
+      final bootId = String.fromCharCodes(raw).trim();
+      if (bootId.isEmpty) return;
+      await _storage.write(key: 'ssh_remote_boot_id', value: bootId);
+      if (!_manualDisconnectRequested) {
+        await _storage.delete(key: 'ssh_manual_disconnect_boot_id');
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _persistManualDisconnectBootContext() async {
+    final bootId = await _storage.read(key: 'ssh_remote_boot_id');
+    if (bootId == null || bootId.trim().isEmpty) return;
+    await _storage.write(
+      key: 'ssh_manual_disconnect_boot_id',
+      value: bootId.trim(),
+    );
+  }
+
+  Future<String?> _probeRemoteBootId({
+    required String ip,
+    required String username,
+    required int port,
+    String? password,
+    String? privateKey,
+    Duration socketTimeout = const Duration(seconds: 2),
+    Duration authTimeout = const Duration(seconds: 3),
+  }) async {
+    SSHSocket? socket;
+    SSHClient? client;
+    try {
+      socket = await SSHSocket.connect(ip, port, timeout: socketTimeout);
+      client = SSHClient(
+        socket,
+        username: username,
+        onPasswordRequest: () => password ?? 'comma',
+      );
+      final result = await client
+          .run('cat /proc/sys/kernel/random/boot_id')
+          .timeout(authTimeout);
+      final bootId = String.fromCharCodes(result).trim();
+      return bootId.isEmpty ? null : bootId;
+    } catch (_) {
+      return null;
+    } finally {
+      try {
+        client?.close();
+      } catch (_) {}
+      try {
+        socket?.destroy();
+      } catch (_) {}
+    }
+  }
+
+  Future<bool> _tryResumeAfterRemoteReboot({
+    required String ip,
+    required String username,
+    required int port,
+    String? password,
+    String? privateKey,
+    Duration socketTimeout = const Duration(seconds: 2),
+    Duration authTimeout = const Duration(seconds: 3),
+  }) async {
+    final previousBootId =
+        (await _storage.read(key: 'ssh_manual_disconnect_boot_id'))?.trim();
+    if (previousBootId == null || previousBootId.isEmpty) {
+      return false;
+    }
+    final currentBootId = await _probeRemoteBootId(
+      ip: ip,
+      username: username,
+      port: port,
+      password: password,
+      privateKey: privateKey,
+      socketTimeout: socketTimeout,
+      authTimeout: authTimeout,
+    );
+    if (currentBootId == null || currentBootId == previousBootId) {
+      return false;
+    }
+    _manualDisconnectRequested = false;
+    _disconnectedSince = DateTime.now();
+    _connectionStatus = '세션 복구 중...';
+    await _storage.write(key: 'ssh_remote_boot_id', value: currentBootId);
+    await _storage.delete(key: 'ssh_manual_disconnect_boot_id');
+    await syncAutoConnectProfile(resumeAutoReconnect: true);
+    return true;
+  }
+
   Future<void> disconnect({bool fromService = false}) async {
     _handleDisconnect(
       notifyService: !fromService,
@@ -1170,10 +1285,14 @@ class SSHService extends ChangeNotifier {
 
   void resumeAutoReconnect() {
     FlutterBackgroundService().invoke('resumeAutoReconnect');
+    unawaited(_storage.delete(key: 'ssh_manual_disconnect_boot_id'));
     unawaited(syncAutoConnectProfile(resumeAutoReconnect: true));
   }
 
   void notifyNetworkChanged({String source = 'ui'}) {
+    _manualDisconnectRequested = false;
+    _connectionStatus = '세션 복구 중...';
+    unawaited(_storage.delete(key: 'ssh_manual_disconnect_boot_id'));
     _serviceCandidateIp = null;
     _serviceCandidateSeenAt = null;
     _serviceLastSuccessfulIp = null;
@@ -1183,6 +1302,7 @@ class SSHService extends ChangeNotifier {
     _disconnectedSince = DateTime.now();
     FlutterBackgroundService().invoke('networkChanged', {'source': source});
     _diag.info('connectivity', 'Network changed source=$source');
+    notifyListeners();
     notifyListeners();
   }
 

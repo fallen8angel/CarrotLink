@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -23,6 +24,10 @@ class HomeTab extends StatefulWidget {
 }
 
 class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
+  static const String _defaultSshUsername = 'comma';
+  static const int _defaultSshPort = 22;
+
+  final FlutterSecureStorage _storage = const FlutterSecureStorage();
   String _branch = "--";
   String _commit = "--";
   String _dongleId = "--";
@@ -36,11 +41,16 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   bool _hasGitHubLogin = false;
   bool _hasActiveSshKey = false;
   bool _overlayRunning = false;
+  bool _manualIpDialogOpen = false;
   String? _overlaySyncedHost;
   DateTime? _overlayLastProbeAt;
+  DateTime? _homeDiscoveryUiHoldUntil;
+  DateTime? _homeConnectionUiHoldUntil;
   bool _appForeground = true;
   Timer? _prereqTimer;
   Timer? _overlaySyncTimer;
+  Timer? _homeDiscoveryUiHoldTimer;
+  Timer? _homeConnectionUiHoldTimer;
 
   @override
   void initState() {
@@ -65,6 +75,8 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _prereqTimer?.cancel();
     _overlaySyncTimer?.cancel();
+    _homeDiscoveryUiHoldTimer?.cancel();
+    _homeConnectionUiHoldTimer?.cancel();
     super.dispose();
   }
 
@@ -204,8 +216,25 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   }
 
   void _handleObservedSshState(SSHService ssh) {
+    if (!ssh.isConnected && !ssh.isConnecting && ssh.isDiscoveryActive) {
+      _holdHomeDiscoveryUi(const Duration(seconds: 3));
+    } else if (ssh.isConnected || ssh.isConnecting) {
+      _clearHomeDiscoveryUiHold();
+    }
+
     final connectedHost = (ssh.connectedIp ?? '').trim();
     final serviceHost = (ssh.serviceConnectedIp ?? '').trim();
+    final hasActiveConnectionSignal = ssh.isConnected ||
+        ssh.isConnecting ||
+        connectedHost.isNotEmpty ||
+        serviceHost.isNotEmpty ||
+        ssh.connectionStatus.startsWith("Connecting") ||
+        ssh.connectionStatus.contains("세션 복구");
+    if (hasActiveConnectionSignal) {
+      _holdHomeConnectionUi(const Duration(seconds: 4));
+    } else if (ssh.manualDisconnectRequested) {
+      _clearHomeConnectionUiHold();
+    }
     final metadataSignature = _metadataSignature(ssh.cachedConnectionMetadata);
     final changed = _lastObservedIsConnected != ssh.isConnected ||
         _lastObservedConnectedHost != connectedHost ||
@@ -223,6 +252,77 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
         ssh.cachedConnectionMetadata != null) {
       _queueImmediateStatusRefresh(ssh);
     }
+  }
+
+  void _holdHomeDiscoveryUi(Duration duration) {
+    final nextUntil = DateTime.now().add(duration);
+    if (_homeDiscoveryUiHoldUntil != null &&
+        _homeDiscoveryUiHoldUntil!.isAfter(nextUntil)) {
+      return;
+    }
+    _homeDiscoveryUiHoldUntil = nextUntil;
+    _homeDiscoveryUiHoldTimer?.cancel();
+    _homeDiscoveryUiHoldTimer = Timer(duration, () {
+      if (!mounted) return;
+      if (_homeDiscoveryUiHoldUntil != null &&
+          DateTime.now().isAfter(_homeDiscoveryUiHoldUntil!)) {
+        setState(() {
+          _homeDiscoveryUiHoldUntil = null;
+        });
+      }
+    });
+  }
+
+  void _clearHomeDiscoveryUiHold() {
+    if (_homeDiscoveryUiHoldUntil == null) return;
+    _homeDiscoveryUiHoldTimer?.cancel();
+    _homeDiscoveryUiHoldTimer = null;
+    _homeDiscoveryUiHoldUntil = null;
+  }
+
+  void _holdHomeConnectionUi(Duration duration) {
+    final nextUntil = DateTime.now().add(duration);
+    if (_homeConnectionUiHoldUntil != null &&
+        _homeConnectionUiHoldUntil!.isAfter(nextUntil)) {
+      return;
+    }
+    _homeConnectionUiHoldUntil = nextUntil;
+    _homeConnectionUiHoldTimer?.cancel();
+    _homeConnectionUiHoldTimer = Timer(duration, () {
+      if (!mounted) return;
+      if (_homeConnectionUiHoldUntil != null &&
+          DateTime.now().isAfter(_homeConnectionUiHoldUntil!)) {
+        setState(() {
+          _homeConnectionUiHoldUntil = null;
+        });
+      }
+    });
+  }
+
+  void _clearHomeConnectionUiHold() {
+    if (_homeConnectionUiHoldUntil == null) return;
+    _homeConnectionUiHoldTimer?.cancel();
+    _homeConnectionUiHoldTimer = null;
+    _homeConnectionUiHoldUntil = null;
+  }
+
+  bool _showHomeDiscoverySearching(SSHService ssh) {
+    if (ssh.isConnected || ssh.isConnecting) return false;
+    if (ssh.isDiscoveryActive) return true;
+    final holdUntil = _homeDiscoveryUiHoldUntil;
+    return holdUntil != null && DateTime.now().isBefore(holdUntil);
+  }
+
+  bool _showHomeConnectionSettling(SSHService ssh) {
+    if (ssh.manualDisconnectRequested || _showHomeDiscoverySearching(ssh)) {
+      return false;
+    }
+    if (ssh.isConnected || ssh.isConnecting) return false;
+    if ((ssh.serviceConnectedIp ?? '').trim().isNotEmpty) {
+      return true;
+    }
+    final holdUntil = _homeConnectionUiHoldUntil;
+    return holdUntil != null && DateTime.now().isBefore(holdUntil);
   }
 
   Future<void> _refreshStatus() async {
@@ -273,23 +373,27 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
   String _statusHeadline(SSHService ssh) {
     if (!_hasGitHubLogin) return "GitHub 연동 필요";
     if (!_hasActiveSshKey) return "SSH 개인키 적용 필요";
+    if (_showHomeDiscoverySearching(ssh)) {
+      return "IP 검색 중";
+    }
     if (ssh.manualDisconnectRequested) return "연결 해제";
     if (ssh.isConnected) return "연결됨";
-    if ((ssh.serviceConnectedIp ?? '').trim().isNotEmpty) {
-      return "연결 동기화 중";
-    }
     if (ssh.connectionStatus.startsWith("Connecting")) return "연결 중...";
+    if (_showHomeConnectionSettling(ssh)) return "세션 복구 중";
     if (ssh.connectionStatus.contains("Error")) return "연결 실패";
     return "재연결 대기";
   }
 
   Color _statusColor(BuildContext context, SSHService ssh) {
     if (!_hasGitHubLogin || !_hasActiveSshKey) return Colors.grey;
+    if (_showHomeDiscoverySearching(ssh)) {
+      return Theme.of(context).colorScheme.primary;
+    }
     if (ssh.manualDisconnectRequested) return Colors.grey;
     if (ssh.isConnected || ssh.connectionStatus.startsWith("Connecting")) {
       return Theme.of(context).colorScheme.primary;
     }
-    if ((ssh.serviceConnectedIp ?? '').trim().isNotEmpty) {
+    if (_showHomeConnectionSettling(ssh)) {
       return Theme.of(context).colorScheme.primary;
     }
     if (ssh.connectionStatus.contains("Error")) return Colors.grey;
@@ -351,6 +455,150 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
     );
   }
 
+  bool _hasFreshDiscoveryCandidate(SSHService ssh) {
+    final candidate = (ssh.serviceCandidateIp ?? '').trim();
+    final seenAt = ssh.serviceCandidateSeenAt;
+    if (candidate.isEmpty || seenAt == null) return false;
+    return DateTime.now().difference(seenAt) <= const Duration(minutes: 2);
+  }
+
+  String? _preferredHomeIp(SSHService ssh) {
+    final connected = (ssh.connectedIp ?? '').trim();
+    if (connected.isNotEmpty) return connected;
+    final serviceConnected = (ssh.serviceConnectedIp ?? '').trim();
+    if (serviceConnected.isNotEmpty) return serviceConnected;
+    final target = (ssh.targetIp ?? '').trim();
+    if (target.isNotEmpty) return target;
+    if (_hasFreshDiscoveryCandidate(ssh)) {
+      return ssh.serviceCandidateIp!.trim();
+    }
+    return null;
+  }
+
+  Future<void> _runHomeGuidedDiscovery(SSHService ssh) async {
+    if (!_hasActiveSshKey) {
+      CustomToast.show(context, 'SSH 개인키를 먼저 준비하세요.', isError: true);
+      return;
+    }
+    if (ssh.isConnected) {
+      CustomToast.show(context, '이미 연결되어 있습니다.');
+      return;
+    }
+    _holdHomeDiscoveryUi(const Duration(seconds: 65));
+    ssh.resumeAutoReconnect();
+    final started = await ssh.startDiscovery(
+      forceRestart: true,
+      timeout: const Duration(seconds: 60),
+      source: 'home_manual',
+      manualSession: true,
+    );
+    if (!mounted) return;
+    if (!started) {
+      CustomToast.show(context, '이미 검색 중입니다.');
+      return;
+    }
+    CustomToast.show(context, 'IP 자동 검색을 시작합니다.');
+  }
+
+  Future<void> _connectManualIp(SSHService ssh, String rawIp) async {
+    if (ssh.isConnecting) {
+      CustomToast.show(context, '이미 연결 시도 중입니다.');
+      return;
+    }
+    if (ssh.isConnected) {
+      CustomToast.show(context, '이미 연결되어 있습니다.');
+      return;
+    }
+
+    final ip = rawIp.trim();
+    if (ip.isEmpty) {
+      CustomToast.show(context, 'IP 주소를 입력하세요.', isError: true);
+      return;
+    }
+    final parsedIp = InternetAddress.tryParse(ip);
+    if (parsedIp == null || parsedIp.type != InternetAddressType.IPv4) {
+      CustomToast.show(context, '올바른 IPv4 주소를 입력하세요.', isError: true);
+      return;
+    }
+
+    final privateKey = await _storage.read(key: 'current_private_key');
+    if (privateKey == null || privateKey.trim().isEmpty) {
+      if (!mounted) return;
+      CustomToast.show(context, 'SSH 개인키를 먼저 준비하세요.', isError: true);
+      return;
+    }
+
+    final username =
+        (await _storage.read(key: 'ssh_username'))?.trim().isNotEmpty == true
+            ? (await _storage.read(key: 'ssh_username'))!.trim()
+            : _defaultSshUsername;
+    final port =
+        int.tryParse((await _storage.read(key: 'ssh_port'))?.trim() ?? '') ??
+            _defaultSshPort;
+
+    try {
+      _clearHomeDiscoveryUiHold();
+      ssh.resumeAutoReconnect();
+      await ssh.connect(
+        ip,
+        username,
+        port: port,
+        password: null,
+        privateKey: privateKey.trim(),
+      );
+      if (!mounted) return;
+      CustomToast.show(context, '연결 성공');
+      unawaited(_refreshStatus());
+    } catch (e) {
+      if (!mounted) return;
+      CustomToast.show(context, '연결 실패: $e', isError: true);
+    }
+  }
+
+  Future<void> _openManualIpDialog(SSHService ssh) async {
+    if (_manualIpDialogOpen || !mounted) return;
+    final rootNavigator = Navigator.of(context, rootNavigator: true);
+    final controller = TextEditingController(text: _preferredHomeIp(ssh) ?? '');
+    _manualIpDialogOpen = true;
+    try {
+      final result = await showDialog<String>(
+        context: rootNavigator.context,
+        useRootNavigator: true,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('수동 IP 연결'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            keyboardType: TextInputType.number,
+            textInputAction: TextInputAction.done,
+            decoration: const InputDecoration(
+              labelText: 'IPv4 주소',
+              hintText: '예: 172.30.1.90',
+            ),
+            onSubmitted: (value) =>
+                Navigator.of(dialogContext).pop(value.trim()),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('취소'),
+            ),
+            FilledButton(
+              onPressed: () =>
+                  Navigator.of(dialogContext).pop(controller.text.trim()),
+              child: const Text('연결'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted || result == null || result.trim().isEmpty) return;
+      await _connectManualIp(ssh, result);
+    } finally {
+      controller.dispose();
+      _manualIpDialogOpen = false;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final tokens = UiLayoutTokens.of(context);
@@ -388,18 +636,27 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
           UiWindowClass.expanded => 38.0,
           UiWindowClass.large || UiWindowClass.extraLarge => 40.0,
         };
+        final hasDiscoveryCandidate = _hasFreshDiscoveryCandidate(ssh);
+        final discoverySearching =
+            _showHomeDiscoverySearching(ssh) && !hasDiscoveryCandidate;
         final hasIp = ssh.isConnected ||
             (ssh.serviceConnectedIp ?? '').trim().isNotEmpty ||
+            hasDiscoveryCandidate ||
             (ssh.connectionStatus.startsWith("Connecting") &&
                 (ssh.targetIp ?? '').trim().isNotEmpty);
         final ipFieldText = hasIp
             ? (ssh.connectedIp ??
                 ssh.serviceConnectedIp ??
+                (hasDiscoveryCandidate ? ssh.serviceCandidateIp : null) ??
                 ssh.targetIp ??
                 "Unknown")
             : (!_hasGitHubLogin || !_hasActiveSshKey
                 ? "연동 필요"
-                : (ssh.manualDisconnectRequested ? "연결 해제" : "재연결 대기"));
+                : (discoverySearching
+                    ? "자동 검색 중"
+                : (_showHomeConnectionSettling(ssh)
+                    ? "세션 복구 중"
+                    : (ssh.manualDisconnectRequested ? "연결 해제" : "재연결 대기"))));
         final isLandscape = window.isLandscape;
         final homeContentMaxWidth = switch (window.windowClass) {
           UiWindowClass.compact => double.infinity,
@@ -547,6 +804,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                         SizedBox(height: blockGap),
                         _buildIpField(
                           context: context,
+                          ssh: ssh,
                           blockGap: blockGap,
                           ipChipLabelSize: ipChipLabelSize,
                           ipFieldText: ipFieldText,
@@ -588,6 +846,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
                           flex: 5,
                           child: _buildIpField(
                             context: context,
+                            ssh: ssh,
                             blockGap: blockGap,
                             ipChipLabelSize: ipChipLabelSize,
                             ipFieldText: ipFieldText,
@@ -919,6 +1178,7 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
 
   Widget _buildIpField({
     required BuildContext context,
+    required SSHService ssh,
     required double blockGap,
     required double ipChipLabelSize,
     required String ipFieldText,
@@ -948,17 +1208,39 @@ class _HomeTabState extends State<HomeTab> with WidgetsBindingObserver {
           ),
           SizedBox(width: blockGap * 0.7),
           Expanded(
-            child: Text(
-              ipFieldText,
-              textAlign: TextAlign.right,
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    color: Colors.white.withValues(alpha: 0.9),
-                    fontWeight: FontWeight.w700,
-                    fontSize: ipFontSize,
-                    height: 1.0,
-                  ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => unawaited(_openManualIpDialog(ssh)),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Text(
+                  ipFieldText,
+                  textAlign: TextAlign.right,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        color: Colors.white.withValues(alpha: 0.9),
+                        fontWeight: FontWeight.w700,
+                        fontSize: ipFontSize,
+                        height: 1.0,
+                      ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ),
+          ),
+          SizedBox(width: blockGap * 0.2),
+          SizedBox(
+            width: 34,
+            height: 34,
+            child: IconButton(
+              padding: EdgeInsets.zero,
+              tooltip: 'IP 자동 검색',
+              iconSize: ipFontSize + 2,
+              color: Colors.white70,
+              onPressed: ssh.isConnecting
+                  ? null
+                  : () => unawaited(_runHomeGuidedDiscovery(ssh)),
+              icon: const Icon(Icons.search_rounded),
             ),
           ),
         ],

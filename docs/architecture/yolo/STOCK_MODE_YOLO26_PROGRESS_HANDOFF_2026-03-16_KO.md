@@ -6,6 +6,16 @@
 
 이 문서는 2026-03-16 기준 YOLO/QNN 작업의 실제 상태, 검증된 사실, 남은 작업, 다음 작업 순서를 빠르게 이어받기 위한 최신 handoff 문서다.
 
+2026-03-17 보정:
+
+- 실제 앱 번들에는 이제 `yolo26n_qnn.pte`, `yolo26s_qnn.pte`와 companion metadata가 들어간다.
+- 현재 기기 실검증 기준 QNN-lowered 경로는 `qnn_dsp_transport_failed`에서 막힌다.
+- 즉 문제는 모델 누락보다 `QnnDsp transport / skel load` 계층으로 좁혀졌다.
+- 운영 정책은 아래로 보정한다.
+  - `Snapdragon Galaxy`: `QNN` 우선, 반복 `qnn_*` blocker면 `XNNPACK` 자동 폴백
+  - `Exynos Galaxy`: 현재 앱 기준 `XNNPACK` 기본
+  - 모델은 계속 `YOLO26n first`, `YOLO26s later`
+
 관련 문서:
 
 - `docs/architecture/yolo/STOCK_MODE_YOLO26_QNN_BRINGUP_2026-03-15_KO.md`

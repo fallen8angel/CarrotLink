@@ -236,8 +236,7 @@ class _DashboardScreenState extends State<DashboardScreen>
         return;
       }
       final ssh = Provider.of<SSHService>(context, listen: false);
-      if (ssh.manualDisconnectRequested ||
-          ssh.isConnected ||
+      if (ssh.isConnected ||
           ssh.isConnecting ||
           (ssh.serviceConnectedIp ?? '').trim().isNotEmpty) {
         _lastForegroundReconnectRunAt = null;
@@ -347,9 +346,6 @@ class _DashboardScreenState extends State<DashboardScreen>
     Duration timeout = const Duration(seconds: 45),
   }) {
     final ssh = Provider.of<SSHService>(context, listen: false);
-    if (ssh.manualDisconnectRequested) {
-      return;
-    }
     debugPrint(
       '[Dashboard] Starting IP discovery... force=$force aggressive=$aggressive timeout=${timeout.inSeconds}s',
     );
@@ -550,7 +546,6 @@ class _DashboardScreenState extends State<DashboardScreen>
   }) async {
     if (!mounted) return;
     final ssh = Provider.of<SSHService>(context, listen: false);
-    if (ssh.manualDisconnectRequested) return;
     if (ssh.isConnected || ssh.isConnecting || _isAutoConnectRunning) return;
 
     _isAutoConnectRunning = true;
@@ -560,8 +555,7 @@ class _DashboardScreenState extends State<DashboardScreen>
         await Future.delayed(const Duration(milliseconds: 500));
       }
 
-      if (ssh.manualDisconnectRequested ||
-          ssh.isConnected ||
+      if (ssh.isConnected ||
           ssh.isConnecting) {
         return;
       }

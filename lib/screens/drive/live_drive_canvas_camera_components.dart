@@ -4,6 +4,52 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
   bool get _cameraErrorGraceActive =>
       _renderClock.elapsedMicroseconds <= _cameraErrorGraceUntilUs;
 
+  bool get _cameraAttachPendingBeforeFirstFrame =>
+      _lastCameraFrameId == null &&
+      _cameraAttachPhase != _CameraAttachPhase.idle &&
+      _cameraAttachPhase != _CameraAttachPhase.streaming;
+
+  void _setCameraAttachPhase(
+    _CameraAttachPhase phase, {
+    String? reason,
+  }) {
+    if (_cameraAttachPhase == phase) return;
+    _cameraAttachPhase = phase;
+    debugPrint(
+      '[DriveCanvas][native] attach-phase=${phase.name}${reason == null ? '' : ' reason=$reason'}',
+    );
+  }
+
+  String? _cameraAttachNoticeMessage() {
+    if (!_cameraAttachPendingBeforeFirstFrame) return null;
+    return switch (_cameraAttachPhase) {
+      _CameraAttachPhase.surfaceReady => '로드카메라 화면을 준비하는 중입니다.',
+      _CameraAttachPhase.socketConnecting => '로드카메라 연결 중입니다.',
+      _CameraAttachPhase.socketConnected => '카메라 스트림 연결을 확인하는 중입니다.',
+      _CameraAttachPhase.waitingFirstFrame => '로드카메라 첫 프레임 대기 중입니다.',
+      _CameraAttachPhase.retrying => '로드카메라 연결 재시도 중입니다.',
+      _ => null,
+    };
+  }
+
+  void _beginCameraAttachSession({
+    required String reason,
+  }) {
+    _cameraAttachStartedUs = _renderClock.elapsedMicroseconds;
+    _cameraStartupSocketFailureCount = 0;
+    _setCameraAttachPhase(_CameraAttachPhase.surfaceReady, reason: reason);
+    debugPrint('[DriveCanvas][native] attach-session begin reason=$reason');
+  }
+
+  void _settleCameraAttachSession({
+    required String reason,
+  }) {
+    _cameraAttachStartedUs = 0;
+    _cameraStartupSocketFailureCount = 0;
+    _setCameraAttachPhase(_CameraAttachPhase.streaming, reason: reason);
+    debugPrint('[DriveCanvas][native] attach-session settled reason=$reason');
+  }
+
   bool _isTransientCameraRuntimeErrorReason(String reason) {
     final normalized = reason.trim().toLowerCase();
     if (normalized.isEmpty) return false;
@@ -39,6 +85,31 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     _cameraTransientErrorSource = null;
     _cameraTransientErrorReason = null;
     _cameraTransientErrorMessage = null;
+  }
+
+  bool _shouldSuppressStartupSocketFailure({
+    required String source,
+    required String reason,
+  }) {
+    final normalized = reason.trim().toLowerCase();
+    if (!normalized.startsWith('socket_failure:')) return false;
+    if (_lastCameraFrameId != null || _lastCameraFrameEventUs > 0) return false;
+    if (_cameraAttachStartedUs <= 0) return false;
+    final elapsedUs = _renderClock.elapsedMicroseconds - _cameraAttachStartedUs;
+    if (elapsedUs < 0 ||
+        elapsedUs >
+            _LiveDriveCanvasScreenState
+                ._cameraStartupSocketFailureSuppressWindowUs) {
+      return false;
+    }
+    _cameraStartupSocketFailureCount += 1;
+    if (_cameraStartupSocketFailureCount != 1) {
+      return false;
+    }
+    debugPrint(
+      '[DriveCanvas][$source] suppressed first startup socket failure: $reason',
+    );
+    return true;
   }
 
   void _surfaceCameraRuntimeError({
@@ -127,6 +198,36 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     required String reason,
     required String message,
   }) {
+    final normalized = reason.trim().toLowerCase();
+    final startupSocketFailure =
+        normalized.startsWith('socket_failure:') &&
+        _cameraAttachPendingBeforeFirstFrame;
+    if (startupSocketFailure) {
+      _setCameraAttachPhase(
+        _CameraAttachPhase.retrying,
+        reason: 'socket_failure',
+      );
+      if (mounted) {
+        _safeSetState(() {
+          _cameraLoading = true;
+          _cameraError = null;
+        });
+      } else {
+        _cameraLoading = true;
+        _cameraError = null;
+      }
+      _setSidecarPhase(
+        _SidecarPhase.verifying,
+        message: '로드카메라 연결 재시도 중입니다.',
+      );
+      if (_shouldSuppressStartupSocketFailure(source: source, reason: reason)) {
+        return;
+      }
+      return;
+    }
+    if (_shouldSuppressStartupSocketFailure(source: source, reason: reason)) {
+      return;
+    }
     final unsupported = reason.contains('invalid_ws_url') ||
         reason.contains('decoder_init_failed');
     final transient = _isTransientCameraRuntimeErrorReason(reason);
@@ -232,6 +333,8 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     if (type == 'camera_frame') {
       final frameId = _DriveOverlaySnapshot._asInt(map['frameId']);
       if (frameId != null) {
+        final firstVisibleFrame =
+            _lastCameraFrameId == null || _cameraLoading;
         _handleCameraFrameEvent(
           frameId,
           source: 'native',
@@ -249,6 +352,21 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
           _cameraError = null;
         }
         _beginStartupProvisionalSync(reason: 'camera_frame:native');
+        if (firstVisibleFrame) {
+          _settleCameraAttachSession(reason: 'first_native_camera_frame');
+          SchedulerBinding.instance.addPostFrameCallback((_) {
+            if (!mounted || _lastCameraFrameId == null) return;
+            if (_useNativeOverlayRenderer) {
+              unawaited(
+                _pushNativeOverlay(
+                  _overlayNotifier.value,
+                  force: true,
+                ),
+              );
+            }
+            unawaited(_pushNativeYoloConfig(force: true));
+          });
+        }
       }
       return;
     }
@@ -274,11 +392,15 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
       if (!mounted) return;
       _clearDeferredTransientCameraError();
       _safeSetState(() {
-        _cameraLoading = false;
         _cameraError = null;
       });
+      if (_cameraAttachPendingBeforeFirstFrame) {
+        _setCameraAttachPhase(
+          _CameraAttachPhase.waitingFirstFrame,
+          reason: 'camera_meta',
+        );
+      }
       _beginStartupProvisionalSync(reason: 'camera_meta');
-      unawaited(_pushNativeYoloConfig(force: true));
       return;
     }
     if (type == 'yolo_config') {
@@ -291,28 +413,88 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
       return;
     }
     if (type == 'yolo_state') {
+      final payload = Map<String, dynamic>.from(map);
       unawaited(
-        YoloRuntimeStatusStore.saveState(Map<String, dynamic>.from(map)),
+        YoloRuntimeStatusStore.saveState(payload),
       );
+      final snapshot = YoloRuntimeStatusSnapshot(
+        config: _driveYoloRuntimeStatus.config,
+        state: payload,
+        updatedAt: DateTime.now(),
+      );
+      unawaited(_maybeAutoFallbackDriveYoloFromRuntimeStatus(snapshot));
       return;
     }
     if (type == 'camera_state') {
       final state = map['state']?.toString() ?? '';
       debugPrint('[DriveCanvas][native] state=$state');
       if (!mounted) return;
-      if (state == 'connected' || state.startsWith('decoder_configured')) {
+      switch (state) {
+        case 'surface_created':
+          _setCameraAttachPhase(
+            _CameraAttachPhase.surfaceReady,
+            reason: 'camera_state:$state',
+          );
+          break;
+        case 'connecting':
+          _setCameraAttachPhase(
+            _CameraAttachPhase.socketConnecting,
+            reason: 'camera_state:$state',
+          );
+          break;
+        case 'connected':
+          if (_lastCameraFrameId == null) {
+            _setCameraAttachPhase(
+              _CameraAttachPhase.socketConnected,
+              reason: 'camera_state:$state',
+            );
+          }
+          break;
+      }
+      if (state == 'connected' ||
+          state.startsWith('decoder_configured') ||
+          state.startsWith('waiting_sync_frame_')) {
+        final hadVisibleFrame = _lastCameraFrameId != null;
         _sidecarTransitionTimer?.cancel();
         _clearDeferredTransientCameraError();
+        if (!hadVisibleFrame) {
+          _setCameraAttachPhase(
+            (state.startsWith('decoder_configured') ||
+                    state.startsWith('waiting_sync_frame_'))
+                ? _CameraAttachPhase.waitingFirstFrame
+                : _CameraAttachPhase.socketConnected,
+            reason: 'camera_state:$state',
+          );
+        } else {
+          _setCameraAttachPhase(
+            _CameraAttachPhase.streaming,
+            reason: 'camera_state:$state',
+          );
+        }
         _safeSetState(() {
-          _cameraLoading = false;
+          _cameraLoading = !hadVisibleFrame;
           _suppressCameraErrors = false;
           _cameraError = null;
         });
         _beginStartupProvisionalSync(reason: 'camera_state:$state');
         _setSidecarPhase(
-          _openpilotOverlayMode ? _SidecarPhase.running : _SidecarPhase.idle,
-          message: '카메라 스트림 연결이 확인되었습니다.',
+          _openpilotOverlayMode
+              ? (hadVisibleFrame
+                  ? _SidecarPhase.running
+                  : _SidecarPhase.verifying)
+              : _SidecarPhase.idle,
+          message: hadVisibleFrame
+              ? '카메라 스트림 연결이 확인되었습니다.'
+              : '로드카메라 첫 프레임을 기다리는 중입니다.',
         );
+      }
+      if (state == 'surface_destroyed' || state.startsWith('closed:')) {
+        if (_lastCameraFrameId == null) {
+          _setCameraAttachPhase(
+            _CameraAttachPhase.retrying,
+            reason: 'camera_state:$state',
+          );
+        }
       }
       return;
     }
@@ -354,6 +536,8 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     if (type == 'camera_frame') {
       final frameId = _DriveOverlaySnapshot._asInt(map['frameId']);
       if (frameId != null) {
+        final firstVisibleFrame =
+            _lastCameraFrameId == null || _cameraLoading;
         _handleCameraFrameEvent(
           frameId,
           source: 'web',
@@ -369,6 +553,10 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
         } else {
           _cameraLoading = false;
           _cameraError = null;
+        }
+        if (firstVisibleFrame) {
+          _settleCameraAttachSession(reason: 'first_web_camera_frame');
+          unawaited(_pushNativeYoloConfig(force: true));
         }
       }
       return;
@@ -395,25 +583,34 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
       _clearDeferredTransientCameraError();
       _safeSetState(() {
         _updateSourceSize(next, kind: eventCameraKind);
-        _cameraLoading = false;
         _cameraError = null;
       });
       return;
     }
     if (type == 'camera_error') {
       final reason = map['reason']?.toString().trim() ?? '';
-      if (reason.isEmpty || !mounted) return;
       if (_sidecarTransitioning ||
           _suppressCameraErrors ||
           _cameraErrorGraceActive) {
         debugPrint('[DriveCanvas] suppressed camera_error reason=$reason');
         return;
       }
-      _handleCameraRuntimeError(
-        source: 'web',
-        reason: reason,
-        message: '카메라 뷰어 오류: $reason',
-      );
+      final displayReason = switch (reason) {
+        final r when r.startsWith('startup_keyframe_timeout_') =>
+          '로드카메라 첫 프레임 재요청 중입니다.',
+        final r when r.startsWith('startup_sync_frame_timeout_') =>
+          '로드카메라 첫 프레임 재요청 중입니다.',
+        final r when r.startsWith('frame_stall_') && _lastCameraFrameId == null =>
+          '로드카메라 첫 프레임 재요청 중입니다.',
+        final r when r.startsWith('frame_stall_') => '카메라 스트림 재동기화 중입니다.',
+        _ => reason,
+      };
+      if (displayReason.isEmpty || !mounted) return;
+      _clearDeferredTransientCameraError();
+      _safeSetState(() {
+        _cameraLoading = false;
+        _cameraError = displayReason;
+      });
       return;
     }
     if (type == 'camera_timeline_ready') {
@@ -444,6 +641,9 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
           !_cameraSuspendedByLifecycle;
       _beginStartupProvisionalSync(reason: 'load_camera_source');
       _startCameraErrorGrace(reason: 'native_camera_attach');
+      if (!preserveVisibleNativeCamera) {
+        _beginCameraAttachSession(reason: 'load_camera_source');
+      }
       if (mounted) {
         _safeSetState(() {
           _cameraLoading = !preserveVisibleNativeCamera;

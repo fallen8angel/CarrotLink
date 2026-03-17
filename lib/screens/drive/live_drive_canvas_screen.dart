@@ -63,6 +63,16 @@ enum _SidecarPhase {
   failed
 }
 
+enum _CameraAttachPhase {
+  idle,
+  surfaceReady,
+  socketConnecting,
+  socketConnected,
+  waitingFirstFrame,
+  retrying,
+  streaming,
+}
+
 enum _AdaptiveCameraQualityMode {
   lowLatency,
 }
@@ -213,6 +223,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const int _overlaySyncMaxDeltaLive = 8;
   static const bool _strictFrameLock = true;
   static const int _strictFrameHoldUs = 120000;
+  static const int _staleDegradedPublishAfterUs = 900000;
   static const int _cameraFrameStaleUs = 350000;
   static const int _cameraHealthyFrameAgeUs = 1200000;
   static const int _startupProvisionalSyncWindowUs = 4000000;
@@ -222,6 +233,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const Duration _cameraDiagCaptureCooldown = Duration(seconds: 12);
   static const Duration _cameraTransientErrorEscalationDelay =
       Duration(seconds: 5);
+  static const int _cameraStartupSocketFailureSuppressWindowUs = 6000000;
   static const Duration _lifecycleSuspendDelay = Duration(milliseconds: 3200);
   static const Duration _sidecarWarmProcessKeepAlive = Duration(seconds: 35);
   static const Duration _backgroundProcessKeepAlive = Duration(seconds: 45);
@@ -251,6 +263,7 @@ fi
   Timer? _driveDiagSummaryTimer;
   DateTime? _driveDiagSessionStartedAt;
   Map<String, dynamic>? _lastNativeCameraDiag;
+  String? _lastCameraDiagFilePath;
   int _driveDiagOverlayPushCallsWindow = 0;
   int _driveDiagOverlayPushSentWindow = 0;
   int _driveDiagOverlayPushCoalescedWindow = 0;
@@ -272,6 +285,9 @@ fi
   int? _lastCameraFrameId;
   int _lastCameraFrameEventUs = 0;
   int _cameraErrorGraceUntilUs = 0;
+  int _cameraAttachStartedUs = 0;
+  int _cameraStartupSocketFailureCount = 0;
+  _CameraAttachPhase _cameraAttachPhase = _CameraAttachPhase.idle;
   Timer? _cameraTransientErrorTimer;
   String? _cameraTransientErrorSource;
   String? _cameraTransientErrorReason;
@@ -366,6 +382,7 @@ fi
   int _lastCameraFallbackLogUs = 0;
   bool _overlayStaleActive = false;
   String _overlayStaleReason = '';
+  int _overlayStaleStartedUs = 0;
   int _lastConsumedSharedOverlayFrameSequence = 0;
   bool _startupProvisionalSyncEnabled = false;
   int _startupProvisionalSyncUntilUs = 0;
@@ -510,9 +527,11 @@ fi
             });
           },
           onPageFinished: (_) {
-            _safeSetState(() {
-              _cameraLoading = false;
-            });
+            if (_lastCameraFrameId != null) {
+              _safeSetState(() {
+                _cameraLoading = false;
+              });
+            }
           },
           onWebResourceError: (error) {
             _safeSetState(() {
@@ -694,6 +713,9 @@ fi
     _lastCameraFrameId = null;
     _lastCameraFrameEventUs = 0;
     _cameraErrorGraceUntilUs = 0;
+    _cameraAttachStartedUs = 0;
+    _cameraStartupSocketFailureCount = 0;
+    _cameraAttachPhase = _CameraAttachPhase.idle;
     _lastPublishedModelFrameId = null;
     _lastSyncHitUs = 0;
     _lastOverlayPublishUs = 0;
@@ -817,8 +839,15 @@ fi
   Future<void> _copyDriveYoloRuntimeStatus() =>
       _copyDriveYoloRuntimeStatusImpl();
 
+  Future<void> _copyDriveDiagnosticsLog() => _copyDriveDiagnosticsLogImpl();
+
   Future<void> _setDriveYoloDebugSettings(YoloDebugSettings next) =>
       _setDriveYoloDebugSettingsImpl(next);
+
+  Future<void> _maybeAutoFallbackDriveYoloFromRuntimeStatus(
+    YoloRuntimeStatusSnapshot snapshot,
+  ) =>
+      _maybeAutoFallbackDriveYoloFromRuntimeStatusImpl(snapshot);
 
   String _driveYoloValue(String key) => _driveYoloValueImpl(key);
 

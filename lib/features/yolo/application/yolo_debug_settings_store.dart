@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../presentation/models/yolo_debug_settings.dart';
+import 'yolo_runtime_policy.dart';
 
 class YoloDebugSettingsStore {
   YoloDebugSettingsStore._();
@@ -19,24 +20,40 @@ class YoloDebugSettingsStore {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_prefKey);
     if (raw != null && raw.trim().isNotEmpty) {
-      return _decode(raw);
+      final decoded = _decode(raw);
+      final normalized = await YoloRuntimePolicy.normalizeForProfile(decoded);
+      if (normalized != decoded) {
+        await prefs.setString(_prefKey, jsonEncode(normalized.toJson()));
+      }
+      return normalized;
     }
 
     final migrated = prefs.getBool(_migratedPrefKey) ?? false;
     if (!migrated) {
       final migratedSettings = await _migrateLegacyIfNeeded(prefs);
       if (migratedSettings != null) {
-        return migratedSettings;
+        final normalized =
+            await YoloRuntimePolicy.normalizeForProfile(migratedSettings);
+        if (normalized != migratedSettings) {
+          await prefs.setString(_prefKey, jsonEncode(normalized.toJson()));
+        }
+        return normalized;
       }
     }
 
-    return _defaults;
+    final recommended =
+        await YoloRuntimePolicy.recommendedDefaults(base: _defaults);
+    await prefs.setString(_prefKey, jsonEncode(recommended.toJson()));
+    await prefs.setBool(_migratedPrefKey, true);
+    return recommended;
   }
 
-  static Future<void> save(YoloDebugSettings settings) async {
+  static Future<YoloDebugSettings> save(YoloDebugSettings settings) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_prefKey, jsonEncode(settings.toJson()));
+    final normalized = await YoloRuntimePolicy.normalizeForProfile(settings);
+    await prefs.setString(_prefKey, jsonEncode(normalized.toJson()));
     await prefs.setBool(_migratedPrefKey, true);
+    return normalized;
   }
 
   static Future<YoloDebugSettings?> _migrateLegacyIfNeeded(

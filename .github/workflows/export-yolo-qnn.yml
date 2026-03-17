@@ -54,6 +54,7 @@ jobs:
       EXECUTORCH_BUILD_DIR: ${{ github.workspace }}/.cache/executorch-build-qnn
       QNN_STAGING_DIR: ${{ github.workspace }}/.cache/qnn-staging
       QNN_SDK_ROOT: ${{ github.workspace }}/.cache/qnn-staging/sdk
+      EXECUTORCH_REF: ${{ inputs.executorch_ref }}
       EXPORT_DIR: ${{ github.workspace }}/build/qnn_export
       PYTHONUNBUFFERED: "1"
     steps:
@@ -160,6 +161,8 @@ jobs:
               --output-dir "$EXPORT_DIR"
               --output-name "$output_name"
               --soc "${{ inputs.soc }}"
+              --qnn-sdk-version "${{ inputs.qnn_sdk_version }}"
+              --executorch-ref "${{ inputs.executorch_ref }}"
               --imgsz 416
               --batch 1
             )

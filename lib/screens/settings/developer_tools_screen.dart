@@ -281,10 +281,15 @@ class _DeveloperToolsScreenState extends State<DeveloperToolsScreen> {
       _yoloSettings = next;
     });
     try {
-      await YoloDebugSettingsStore.save(next);
+      final saved = await YoloDebugSettingsStore.save(next);
+      if (mounted) {
+        setState(() => _yoloSettings = saved);
+      } else {
+        _yoloSettings = saved;
+      }
       _diag.info(
         'developer_tools',
-        'yolo settings updated enabled=${next.enabled} backend=${next.runtimeBackend.wireValue} model=${next.modelVariant.wireValue} boxes=${next.showBoxes}',
+        'yolo settings updated enabled=${saved.enabled} backend=${saved.runtimeBackend.wireValue} model=${saved.modelVariant.wireValue} boxes=${saved.showBoxes}',
       );
     } catch (e) {
       _diag.error('developer_tools', 'save yolo settings failed: $e');
@@ -602,8 +607,11 @@ class _DeveloperToolsScreenState extends State<DeveloperToolsScreen> {
                 value: _yoloSettings.enabled,
                 enabled: !_yoloBusy,
                 onChanged: (value) {
+                  final next = value
+                      ? _yoloSettings.enableMaster()
+                      : _yoloSettings.disableAll();
                   _updateYoloSettings(
-                    _yoloSettings.copyWith(enabled: value),
+                    next,
                   );
                 },
               ),

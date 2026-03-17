@@ -17,7 +17,7 @@ data class NativeDriveYoloConfig(
     val samplePeriodMs: Int = DEFAULT_SAMPLE_PERIOD_MS,
 ) {
   companion object {
-    const val DEFAULT_RUNTIME_BACKEND = "executorch_qnn"
+    const val DEFAULT_RUNTIME_BACKEND = "executorch_xnnpack"
     const val DEFAULT_MODEL_VARIANT = "yolo26n"
     private const val DEFAULT_CAMERA = "road"
     private const val DEFAULT_SOURCE_WIDTH = 1928
@@ -30,7 +30,8 @@ data class NativeDriveYoloConfig(
 
     fun fromPayload(payload: Map<String, Any?>?): NativeDriveYoloConfig {
       if (payload == null) return disabled
-      return NativeDriveYoloConfig(
+      val parsed =
+          NativeDriveYoloConfig(
           enabled = readBoolean(payload, "yoloEnabled"),
           unsafeRuntimeEnabled = readBoolean(payload, "unsafeRuntimeEnabled"),
           showBoxes = readBoolean(payload, "yoloBoxes"),
@@ -48,6 +49,17 @@ data class NativeDriveYoloConfig(
           samplePeriodMs =
               readInt(payload, "samplePeriodMs", DEFAULT_SAMPLE_PERIOD_MS),
       )
+      return if (parsed.enabled) {
+        parsed
+      } else {
+        parsed.copy(
+            unsafeRuntimeEnabled = false,
+            showBoxes = false,
+            showLabels = false,
+            showTrafficLights = false,
+            showStats = false,
+        )
+      }
     }
 
     private fun readBoolean(payload: Map<String, Any?>, key: String): Boolean {

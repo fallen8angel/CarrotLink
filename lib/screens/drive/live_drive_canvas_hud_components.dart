@@ -34,10 +34,12 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
     if (_cameraSuspendedByLifecycle) {
       return const ColoredBox(color: Colors.black);
     }
-    if (!_hudModeLoaded) {
-      return const ColoredBox(color: Colors.black);
-    }
-    if (_useNativeLiveCamera) {
+    final nativeCameraPrewarm =
+        !_hudModeLoaded &&
+        _canUseNativeCamera &&
+        !_nativeCameraUnsupported &&
+        _hudDefaultMode == HudDriveSettingsService.modeOpenpilotOverlay;
+    if (_useNativeLiveCamera || nativeCameraPrewarm) {
       return AndroidView(
         key: ValueKey<String>(
           'native-live-$_hostIp-$_liveCameraName',
@@ -51,22 +53,20 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
           if (!mounted) {
             return;
           }
+          _beginCameraAttachSession(reason: 'native_platform_view_created');
           _safeSetState(() {
             _nativeCameraViewId = viewId;
             _cameraLoading = true;
             _cameraError = null;
           });
-          if (_useNativeOverlayRenderer) {
-            unawaited(
-              _pushNativeOverlay(
-                _overlayNotifier.value,
-                force: true,
-              ),
-            );
-          }
-          unawaited(_pushNativeYoloConfig(force: true));
+          _lastCameraFrameId = null;
+          _lastCameraFrameEventUs = 0;
+          _beginStartupProvisionalSync(reason: 'native_platform_view_created');
         },
       );
+    }
+    if (!_hudModeLoaded) {
+      return const ColoredBox(color: Colors.black);
     }
     if (_openpilotOverlayMode && !_nativeCameraAttachReady) {
       return const ColoredBox(color: Colors.black);
@@ -94,6 +94,10 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
         !_nativeCameraAttachReady) {
       return '카메라/그래픽 연결 대기 중입니다.';
     }
+    final attachNotice = _cameraAttachNoticeMessage();
+    if (attachNotice != null && attachNotice.isNotEmpty) {
+      return attachNotice;
+    }
     final err = _cameraError?.trim();
     if (err != null && err.isNotEmpty) {
       return err;
@@ -103,9 +107,15 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
       return notice;
     }
     if (_openpilotOverlayMode &&
+        _cameraLoading &&
+        _nativeCameraAttachReady &&
+        _lastCameraFrameId == null) {
+      return '로드카메라 첫 프레임 대기 중입니다.';
+    }
+    if (_openpilotOverlayMode &&
         !_cameraLoading &&
         _lastCameraFrameId == null) {
-      return '로드카메라 프레임 대기 중입니다.';
+      return '카메라 스트림 재동기화 중입니다.';
     }
     return null;
   }

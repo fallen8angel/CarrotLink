@@ -16,12 +16,36 @@ extension _LiveDriveCanvasYoloComponents on _LiveDriveCanvasScreenState {
     unawaited(_pushNativeYoloConfig(force: true));
   }
 
+  Future<void> _maybeAutoFallbackDriveYoloFromRuntimeStatusImpl(
+    YoloRuntimeStatusSnapshot snapshot,
+  ) async {
+    final current = _driveYoloDebugSettings;
+    if (_isDeveloperPlaybackRequested || !_canUseNativeCamera) {
+      return;
+    }
+    if (!current.enabled) {
+      return;
+    }
+    if (!YoloRuntimePolicy.shouldFallbackFromRuntimeFailure(current, snapshot)) {
+      return;
+    }
+    final fallback = YoloRuntimePolicy.fallbackFromQnnFailure(current);
+    if (fallback == current) {
+      return;
+    }
+    await _setDriveYoloDebugSettingsImpl(fallback);
+    if (mounted) {
+      _toast('QNN 실패로 ExecuTorch XNNPACK으로 전환했습니다.');
+    }
+  }
+
   Future<YoloDebugSettings> _currentYoloDebugSettingsForNativeImpl() async {
     if (_isDeveloperPlaybackRequested || !_canUseNativeCamera) {
       return YoloDebugSettings.empty;
     }
     try {
-      return await YoloDebugSettingsStore.load();
+      final settings = await YoloDebugSettingsStore.load();
+      return settings.enabled ? settings : YoloDebugSettings.empty;
     } catch (_) {
       return YoloDebugSettings.empty;
     }
@@ -32,7 +56,16 @@ extension _LiveDriveCanvasYoloComponents on _LiveDriveCanvasScreenState {
     _safeSetState(() {
       _driveYoloDebugSettings = next;
     });
-    await YoloDebugSettingsStore.save(next);
+    final saved = await YoloDebugSettingsStore.save(next);
+    if (saved != next) {
+      if (mounted) {
+        _safeSetState(() {
+          _driveYoloDebugSettings = saved;
+        });
+      } else {
+        _driveYoloDebugSettings = saved;
+      }
+    }
     if (_isDeveloperPlaybackRequested) {
       _syncDeveloperPlaybackLoop();
     } else {
@@ -58,6 +91,7 @@ extension _LiveDriveCanvasYoloComponents on _LiveDriveCanvasScreenState {
       _driveYoloRuntimeStatus = snapshot;
       _developerPlaybackStatusUpdatedAt = snapshot.updatedAt;
     }
+    await _maybeAutoFallbackDriveYoloFromRuntimeStatusImpl(snapshot);
   }
 
   String _driveYoloValueImpl(String key) {

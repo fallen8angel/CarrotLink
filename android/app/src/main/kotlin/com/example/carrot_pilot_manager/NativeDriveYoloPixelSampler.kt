@@ -53,6 +53,14 @@ class NativeDriveYoloPixelSampler(
 
   fun updateConfig(config: NativeDriveYoloConfig) {
     this.config = config
+    if (!config.enabled) {
+      copyInFlight = false
+      copyRequests = 0
+      copySuccesses = 0
+      copyFailures = 0
+      copySkippedBusy = 0
+      lastCopyResult = "disabled"
+    }
   }
 
   fun trySample(frame: NativeDriveYoloFrame): Boolean {

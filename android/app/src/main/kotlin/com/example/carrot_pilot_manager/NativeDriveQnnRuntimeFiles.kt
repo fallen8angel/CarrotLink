@@ -77,11 +77,22 @@ internal object NativeDriveQnnRuntimeFiles {
 
     val extracted =
         runCatching {
+              val expectedFiles = assetFiles.toSet()
+              runtimeDir.listFiles()?.forEach { existing ->
+                if (existing.isFile && existing.name.endsWith(".so") && existing.name !in expectedFiles) {
+                  existing.delete()
+                }
+              }
               assetFiles.forEach { fileName ->
                 context.assets.open("$assetRoot/$fileName").use { input ->
+                  val assetBytes = input.readBytes()
                   val outFile = File(runtimeDir, fileName)
-                  if (!outFile.exists() || outFile.length() <= 0L) {
-                    outFile.outputStream().use { output -> input.copyTo(output) }
+                  val shouldRewrite =
+                      !outFile.exists() ||
+                          outFile.length() != assetBytes.size.toLong() ||
+                          !runCatching { outFile.readBytes().contentEquals(assetBytes) }.getOrDefault(false)
+                  if (shouldRewrite) {
+                    outFile.outputStream().use { output -> output.write(assetBytes) }
                   }
                 }
               }

@@ -38,6 +38,7 @@ class MainActivity : FlutterActivity() {
   private val overlayChannelName = "carrotlink/overlay_hud"
   private val oauthChannelName = "carrotlink/github_oauth_ui"
   private val displayTuningChannelName = "carrotlink/display_tuning"
+  private val deviceProfileChannelName = "carrotlink/device_profile"
   private var nativeDriveVideoPlugin: NativeDriveVideoPlugin? = null
   private var oauthCodeHudView: View? = null
   private var oauthCodeHudParams: WindowManager.LayoutParams? = null
@@ -197,6 +198,13 @@ class MainActivity : FlutterActivity() {
             else -> result.notImplemented()
           }
         }
+    MethodChannel(flutterEngine.dartExecutor.binaryMessenger, deviceProfileChannelName)
+        .setMethodCallHandler { call: MethodCall, result: MethodChannel.Result ->
+          when (call.method) {
+            "getAndroidDeviceProfile" -> result.success(getAndroidDeviceProfile())
+            else -> result.notImplemented()
+          }
+        }
     stopLegacyOverlayService()
     Log.i(TAG, "configureFlutterEngine:end +${elapsedSinceLaunch()}ms")
   }
@@ -210,6 +218,26 @@ class MainActivity : FlutterActivity() {
   private fun hasOverlayPermission(): Boolean {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
     return Settings.canDrawOverlays(this)
+  }
+
+  private fun getAndroidDeviceProfile(): Map<String, Any> {
+    val profile =
+        linkedMapOf<String, Any>(
+            "platform" to "android",
+            "manufacturer" to Build.MANUFACTURER.orEmpty(),
+            "brand" to Build.BRAND.orEmpty(),
+            "model" to Build.MODEL.orEmpty(),
+            "device" to Build.DEVICE.orEmpty(),
+            "hardware" to Build.HARDWARE.orEmpty(),
+            "board" to Build.BOARD.orEmpty(),
+            "product" to Build.PRODUCT.orEmpty(),
+            "supportedAbis" to Build.SUPPORTED_ABIS.toList(),
+        )
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      profile["socModel"] = Build.SOC_MODEL.orEmpty()
+      profile["socManufacturer"] = Build.SOC_MANUFACTURER.orEmpty()
+    }
+    return profile
   }
 
   private fun requestOverlayPermission() {

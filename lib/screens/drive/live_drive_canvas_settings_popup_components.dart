@@ -382,9 +382,12 @@ extension _LiveDriveCanvasSettingsPopupComponents
                     title: '활성화',
                     value: _driveYoloDebugSettings.enabled,
                     onChanged: (value) {
+                      final next = value
+                          ? _driveYoloDebugSettings.enableMaster()
+                          : _driveYoloDebugSettings.disableAll();
                       unawaited(
                         _setDriveYoloDebugSettings(
-                          _driveYoloDebugSettings.copyWith(enabled: value),
+                          next,
                         ).then((_) => refreshPopup()),
                       );
                     },
@@ -715,6 +718,24 @@ extension _LiveDriveCanvasSettingsPopupComponents
                               ),
                             ),
                           ),
+                          if (_driveSettingsPopupGroup ==
+                              _DriveSettingsPopupGroup.graphics)
+                            TextButton(
+                              onPressed: () =>
+                                  unawaited(_copyDriveDiagnosticsLog()),
+                              style: TextButton.styleFrom(
+                                foregroundColor: Colors.white,
+                                backgroundColor: _driveMenuNavBg,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                  side: const BorderSide(color: Colors.white12),
+                                ),
+                              ),
+                              child: const Text('로그'),
+                            ),
+                          if (_driveSettingsPopupGroup ==
+                              _DriveSettingsPopupGroup.graphics)
+                            const SizedBox(width: 8),
                           if (_driveSettingsPopupGroup ==
                               _DriveSettingsPopupGroup.graphics)
                             TextButton(

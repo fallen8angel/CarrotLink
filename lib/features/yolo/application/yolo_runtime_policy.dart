@@ -1,0 +1,110 @@
+import '../domain/entities/yolo_model_variant.dart';
+import '../domain/entities/yolo_runtime_backend.dart';
+import '../presentation/models/yolo_debug_settings.dart';
+import 'yolo_device_profile_service.dart';
+import 'yolo_runtime_status_store.dart';
+
+class YoloRuntimePolicy {
+  YoloRuntimePolicy._();
+
+  static const Set<String> _qnnFatalBlockers = <String>{
+    'backend_environment_unavailable',
+    'qnn_backend_bridge_missing',
+    'qnn_backend_not_packaged',
+    'qnn_delegate_init_failed',
+    'qnn_dsp_transport_failed',
+    'qnn_env_config_failed',
+    'qnn_htp_runtime_missing',
+    'qnn_htp_stub_missing',
+    'qnn_lowered_runtime_guarded',
+    'qnn_model_metadata_incomplete',
+    'qnn_model_metadata_invalid',
+    'qnn_model_metadata_missing',
+    'qnn_model_requires_qnn_backend',
+    'qnn_model_variant_mismatch',
+    'qnn_runtime_dir_unavailable',
+    'qnn_runtime_libs_missing',
+    'qnn_sdk_version_mismatch',
+    'qnn_skel_assets_missing',
+    'qnn_skel_extract_failed',
+    'qnn_system_runtime_missing',
+  };
+
+  static Future<YoloDebugSettings> recommendedDefaults({
+    YoloDebugSettings base = YoloDebugSettings.empty,
+  }) async {
+    final profile = await YoloDeviceProfileService.load();
+    final backend = profile.supportsQnn
+        ? YoloRuntimeBackend.executorchQnn
+        : YoloRuntimeBackend.executorchXnnpack;
+    final model = backend == YoloRuntimeBackend.executorchQnn
+        ? YoloModelVariant.yolo26nQnn
+        : YoloModelVariant.yolo26n;
+    return normalizeForProfile(
+      base.copyWith(
+        runtimeBackend: backend,
+        modelVariant: model,
+      ),
+    );
+  }
+
+  static Future<YoloDebugSettings> normalizeForProfile(
+    YoloDebugSettings settings,
+  ) async {
+    final profile = await YoloDeviceProfileService.load();
+    var next = _normalizeBackendModelPair(settings);
+    if (!profile.supportsQnn &&
+        next.runtimeBackend == YoloRuntimeBackend.executorchQnn) {
+      next = next.copyWith(
+        runtimeBackend: YoloRuntimeBackend.executorchXnnpack,
+        modelVariant: next.modelVariant.genericVariant,
+      );
+    }
+    if (!profile.allowsYolo26sByDefault && next.modelVariant.isLargeModel) {
+      next = next.copyWith(
+        modelVariant: next.runtimeBackend == YoloRuntimeBackend.executorchQnn
+            ? YoloModelVariant.yolo26nQnn
+            : YoloModelVariant.yolo26n,
+      );
+    }
+    return next;
+  }
+
+  static bool shouldFallbackFromRuntimeFailure(
+    YoloDebugSettings settings,
+    YoloRuntimeStatusSnapshot snapshot,
+  ) {
+    if (settings.runtimeBackend != YoloRuntimeBackend.executorchQnn) {
+      return false;
+    }
+    final rawBlocker =
+        snapshot.state['runtimeBlocker'] ?? snapshot.state['blocker'];
+    final blocker = rawBlocker?.toString().trim().toLowerCase() ?? '';
+    if (blocker.isEmpty) {
+      return false;
+    }
+    return _qnnFatalBlockers.contains(blocker) || blocker.startsWith('qnn_');
+  }
+
+  static YoloDebugSettings fallbackFromQnnFailure(YoloDebugSettings settings) {
+    final normalized = _normalizeBackendModelPair(settings);
+    return normalized.copyWith(
+      runtimeBackend: YoloRuntimeBackend.executorchXnnpack,
+      modelVariant: normalized.modelVariant.genericVariant,
+    );
+  }
+
+  static YoloDebugSettings _normalizeBackendModelPair(YoloDebugSettings settings) {
+    if (settings.runtimeBackend == YoloRuntimeBackend.executorchQnn &&
+        !settings.modelVariant.isQnnLowered) {
+      return settings.copyWith(modelVariant: settings.modelVariant.qnnVariant);
+    }
+    if (settings.runtimeBackend == YoloRuntimeBackend.executorchXnnpack &&
+        settings.modelVariant.isQnnLowered) {
+      return settings.copyWith(
+        modelVariant: settings.modelVariant.genericVariant,
+      );
+    }
+    return settings;
+  }
+}

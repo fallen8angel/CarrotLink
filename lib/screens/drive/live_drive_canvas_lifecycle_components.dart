@@ -33,7 +33,19 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
         if (!_sidecarConnected) {
           unawaited(_ensureSidecarRuntime(reason: 'resume_quick'));
         } else {
-          _setSidecarPhase(_SidecarPhase.running, message: '사이드카 실행 중');
+          _setSidecarPhase(
+            _lastCameraFrameId != null
+                ? _SidecarPhase.running
+                : _SidecarPhase.verifying,
+            message: _lastCameraFrameId != null
+                ? '사이드카 실행 중'
+                : '복귀 후 첫 프레임을 확인하는 중입니다.',
+          );
+          if (_nativeCameraViewId == null || _cameraSourceKey == null) {
+            _setNativeCameraAttachReady(true);
+            _beginStartupProvisionalSync(reason: 'resume_quick_camera_attach');
+            unawaited(_loadCameraSource(force: true));
+          }
         }
       } else {
         unawaited(_loadCameraSource(force: false));

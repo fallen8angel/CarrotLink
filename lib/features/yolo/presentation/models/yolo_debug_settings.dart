@@ -14,7 +14,7 @@ class YoloDebugSettings {
   const YoloDebugSettings({
     this.enabled = false,
     this.unsafeRuntimeEnabled = false,
-    this.runtimeBackend = YoloRuntimeBackend.executorchQnn,
+    this.runtimeBackend = YoloRuntimeBackend.executorchXnnpack,
     this.modelVariant = YoloModelVariant.yolo26n,
     this.showBoxes = false,
     this.showLabels = false,
@@ -23,6 +23,28 @@ class YoloDebugSettings {
   });
 
   static const empty = YoloDebugSettings();
+
+  YoloDebugSettings disableAll() {
+    return copyWith(
+      enabled: false,
+      unsafeRuntimeEnabled: false,
+      showBoxes: false,
+      showLabels: false,
+      showTrafficLights: false,
+      showStats: false,
+    );
+  }
+
+  YoloDebugSettings enableMaster() {
+    return copyWith(
+      enabled: true,
+      unsafeRuntimeEnabled: true,
+      showBoxes: true,
+      showLabels: true,
+      showTrafficLights: true,
+      showStats: true,
+    );
+  }
 
   YoloDebugSettings copyWith({
     bool? enabled,
@@ -47,15 +69,16 @@ class YoloDebugSettings {
   }
 
   Map<String, dynamic> toJson() {
+    final effective = enabled ? this : disableAll();
     return <String, dynamic>{
-      'yoloEnabled': enabled,
-      'unsafeRuntimeEnabled': unsafeRuntimeEnabled,
-      'runtimeBackend': runtimeBackend.wireValue,
-      'modelVariant': modelVariant.wireValue,
-      'yoloBoxes': showBoxes,
-      'yoloLabels': showLabels,
-      'yoloTrafficLights': showTrafficLights,
-      'yoloStats': showStats,
+      'yoloEnabled': effective.enabled,
+      'unsafeRuntimeEnabled': effective.unsafeRuntimeEnabled,
+      'runtimeBackend': effective.runtimeBackend.wireValue,
+      'modelVariant': effective.modelVariant.wireValue,
+      'yoloBoxes': effective.showBoxes,
+      'yoloLabels': effective.showLabels,
+      'yoloTrafficLights': effective.showTrafficLights,
+      'yoloStats': effective.showStats,
     };
   }
 
@@ -71,7 +94,7 @@ class YoloDebugSettings {
       return false;
     }
 
-    return YoloDebugSettings(
+    final settings = YoloDebugSettings(
       enabled: readBool('yoloEnabled'),
       unsafeRuntimeEnabled: readBool('unsafeRuntimeEnabled'),
       runtimeBackend: YoloRuntimeBackend.fromWireValue(
@@ -85,5 +108,32 @@ class YoloDebugSettings {
       showTrafficLights: readBool('yoloTrafficLights'),
       showStats: readBool('yoloStats'),
     );
+    return settings.enabled ? settings : settings.disableAll();
   }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        other is YoloDebugSettings &&
+            enabled == other.enabled &&
+            unsafeRuntimeEnabled == other.unsafeRuntimeEnabled &&
+            runtimeBackend == other.runtimeBackend &&
+            modelVariant == other.modelVariant &&
+            showBoxes == other.showBoxes &&
+            showLabels == other.showLabels &&
+            showTrafficLights == other.showTrafficLights &&
+            showStats == other.showStats;
+  }
+
+  @override
+  int get hashCode => Object.hash(
+        enabled,
+        unsafeRuntimeEnabled,
+        runtimeBackend,
+        modelVariant,
+        showBoxes,
+        showLabels,
+        showTrafficLights,
+        showStats,
+      );
 }
