@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -10,6 +11,7 @@ import 'ssh_service.dart';
 class SidecarService {
   static final SidecarService shared = SidecarService();
   static const String hudBootstrapProfile = 'p1';
+  static const String c4HudBootstrapProfile = 'p1c4';
   static const String driveRuntimeProfile = 'p2';
 
   SidecarService({DiagnosticsService? diagnostics})
@@ -18,6 +20,8 @@ class SidecarService {
   final DiagnosticsService _diag;
   String? _cachedLocalRevision;
   final Map<String, Future<void>> _inFlightEnsureByHost =
+      <String, Future<void>>{};
+  final Map<String, Future<void>> _inFlightStartBarrierByHost =
       <String, Future<void>>{};
   final Map<String, DateTime> _lastEnsureSucceededAtByHost =
       <String, DateTime>{};
@@ -64,6 +68,7 @@ class SidecarService {
   static const Set<String> _supportedProfiles = <String>{
     'p0',
     'p1',
+    c4HudBootstrapProfile,
     'p2',
     'p3',
     'p4',
@@ -90,6 +95,44 @@ class SidecarService {
 
   String _normalizeProfile(String profile) =>
       _supportedProfiles.contains(profile) ? profile : _defaultProfile;
+
+  String _preferredBootstrapProfile({
+    required String variant,
+    required String repoFlavor,
+  }) {
+    return variant == c4SafeVariant && repoFlavor == repoFlavorC4
+        ? c4HudBootstrapProfile
+        : hudBootstrapProfile;
+  }
+
+  String _resolveRequestedProfile(
+    String profile, {
+    required String variant,
+    required String repoFlavor,
+  }) {
+    final normalizedProfile = _normalizeProfile(profile);
+    if (!isBootstrapProfile(normalizedProfile)) {
+      return normalizedProfile;
+    }
+    return _preferredBootstrapProfile(
+      variant: variant,
+      repoFlavor: repoFlavor,
+    );
+  }
+
+  static bool isBootstrapProfile(String? profile) {
+    switch ((profile ?? '').trim().toLowerCase()) {
+      case 'p0':
+      case hudBootstrapProfile:
+      case c4HudBootstrapProfile:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  static bool profileOmitsCarState(String? profile) =>
+      (profile ?? '').trim().toLowerCase() == c4HudBootstrapProfile;
 
   String _normalizeVariant(String? variant) {
     final normalized = (variant ?? '').trim().toLowerCase();
@@ -204,7 +247,7 @@ curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null || true
         variant != normalizedExpectedVariant) {
       return false;
     }
-    if (profile == hudBootstrapProfile || profile == 'p0') {
+    if (isBootstrapProfile(profile)) {
       return health['hudReady'] == true;
     }
     final freshVisionCore = serviceFresh('modelV2') &&
@@ -706,7 +749,6 @@ fi
     if (!ssh.isConnected) {
       return Future<void>.value();
     }
-    final normalizedProfile = _normalizeProfile(profile);
     final hostKey = (ssh.connectedIp ?? ssh.targetIp ?? 'connected').trim();
     final inFlight = _inFlightEnsureByHost[hostKey];
     if (inFlight != null) {
@@ -717,9 +759,15 @@ fi
     if (lastOk != null && now.difference(lastOk) < _recentEnsureCooldown) {
       final future = () async {
         final expectedVariant = await _resolveSidecarVariant(ssh);
+        final expectedRepoFlavor = await _resolveRemoteRepoFlavor(ssh);
+        final resolvedProfile = _resolveRequestedProfile(
+          profile,
+          variant: expectedVariant,
+          repoFlavor: expectedRepoFlavor,
+        );
         final healthy = await _isEndToEndHealthy(
           ssh,
-          expectedProfile: normalizedProfile,
+          expectedProfile: resolvedProfile,
           expectedVariant: expectedVariant,
         );
         if (healthy) {
@@ -729,7 +777,7 @@ fi
         final warmedUp = await _waitUntilEndToEndHealthy(
           ssh,
           timeout: _postStartHealthGrace,
-          expectedProfile: normalizedProfile,
+          expectedProfile: resolvedProfile,
           expectedVariant: expectedVariant,
         );
         if (warmedUp) {
@@ -739,7 +787,7 @@ fi
         await _ensureRunningInternal(
           ssh,
           hostKey: hostKey,
-          profile: normalizedProfile,
+          profile: resolvedProfile,
           variant: expectedVariant,
         );
       }();
@@ -752,10 +800,16 @@ fi
     }
     final future = () async {
       final expectedVariant = await _resolveSidecarVariant(ssh);
+      final expectedRepoFlavor = await _resolveRemoteRepoFlavor(ssh);
+      final resolvedProfile = _resolveRequestedProfile(
+        profile,
+        variant: expectedVariant,
+        repoFlavor: expectedRepoFlavor,
+      );
       await _ensureRunningInternal(
         ssh,
         hostKey: hostKey,
-        profile: normalizedProfile,
+        profile: resolvedProfile,
         variant: expectedVariant,
       );
     }();
@@ -1432,14 +1486,19 @@ fi
       throw Exception('기기와 연결되어 있지 않습니다.');
     }
 
+    final hostKey = (ssh.connectedIp ?? ssh.targetIp ?? 'connected').trim();
+    return _withHostStartBarrier(hostKey, () async {
     final remoteBase = await _resolveRemoteBase(ssh);
-    final normalizedProfile =
-        _supportedProfiles.contains(profile) ? profile : _defaultProfile;
     final normalizedVariant = _normalizeVariant(
       variant ?? await _resolveSidecarVariant(ssh, remoteBase: remoteBase),
     );
     final normalizedRepoFlavor = _normalizeRepoFlavor(
       repoFlavor ?? await _resolveRemoteRepoFlavor(ssh, remoteBase: remoteBase),
+    );
+    final normalizedProfile = _resolveRequestedProfile(
+      profile,
+      variant: normalizedVariant,
+      repoFlavor: normalizedRepoFlavor,
     );
     final switched = await _switchProfileInPlace(
       ssh,
@@ -1682,6 +1741,25 @@ echo "sidecar_port_pids=\$SIDE_PORT_PIDS"
     }
     _diag.info('sidecar', 'Start success output=${result.output}');
     return result.output.isEmpty ? 'SIDECAR_STARTED' : result.output;
+    });
+  }
+
+  Future<T> _withHostStartBarrier<T>(
+    String hostKey,
+    Future<T> Function() action,
+  ) {
+    final previous = _inFlightStartBarrierByHost[hostKey] ?? Future<void>.value();
+    final completer = Completer<void>();
+    final current = previous.catchError((_) {}).then((_) => completer.future);
+    _inFlightStartBarrierByHost[hostKey] = current;
+    return previous.catchError((_) {}).then((_) => action()).whenComplete(() {
+      if (!completer.isCompleted) {
+        completer.complete();
+      }
+      if (identical(_inFlightStartBarrierByHost[hostKey], current)) {
+        _inFlightStartBarrierByHost.remove(hostKey);
+      }
+    });
   }
 
   Future<String> stop(

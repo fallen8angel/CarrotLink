@@ -1,6 +1,48 @@
 part of 'live_drive_canvas_screen.dart';
 
 extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
+  Map<String, dynamic> _diagStringKeyMap(Object? raw) {
+    if (raw is Map<String, dynamic>) {
+      return Map<String, dynamic>.from(raw);
+    }
+    if (raw is Map) {
+      return raw.map((key, value) => MapEntry(key.toString(), value));
+    }
+    return <String, dynamic>{};
+  }
+
+  List<dynamic> _diagList(Object? raw) {
+    if (raw is List) {
+      return List<dynamic>.from(raw);
+    }
+    return const <dynamic>[];
+  }
+
+  Map<String, dynamic> _selectedSidecarServiceHealth() {
+    final raw = _diagStringKeyMap(_sidecarHealthSnapshot['serviceHealth']);
+    if (raw.isEmpty) {
+      return <String, dynamic>{};
+    }
+    const names = <String>[
+      'carState',
+      'selfdriveState',
+      'controlsState',
+      'modelV2',
+      'roadCameraState',
+      'wideRoadCameraState',
+      'radarState',
+      'liveCalibration',
+    ];
+    final out = <String, dynamic>{};
+    for (final name in names) {
+      final entry = _diagStringKeyMap(raw[name]);
+      if (entry.isNotEmpty) {
+        out[name] = entry;
+      }
+    }
+    return out;
+  }
+
   String _driveDiagTimestampForFileName(DateTime now) {
     String two(int n) => n.toString().padLeft(2, '0');
     return '${now.year}${two(now.month)}${two(now.day)}_'
@@ -312,6 +354,21 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
           'connected': _sidecarConnected,
           'phase': _sidecarPhase.name,
           'phaseMessage': _sidecarPhaseMessage,
+          'profile': _sidecarHealthSnapshot['profile'] ??
+              _sidecarProfileSnapshot['profile'],
+          'variant': _sidecarHealthSnapshot['variant'] ??
+              _sidecarProfileSnapshot['variant'] ??
+              _sidecarVariantHint,
+          'repoFlavor': _sidecarHealthSnapshot['repoFlavor'] ??
+              _sidecarProfileSnapshot['repoFlavor'] ??
+              _sidecarRepoFlavorHint,
+          'startupProtectionActive':
+              _sidecarHealthSnapshot['startupProtectionActive'],
+          'radarReady': _sidecarHealthSnapshot['radarReady'],
+          'radarFreshStable': _sidecarHealthSnapshot['radarFreshStable'],
+          'staleReasons': _diagList(_sidecarHealthSnapshot['staleReasons']),
+          'missingFields': _diagList(_sidecarHealthSnapshot['missingFields']),
+          'serviceHealth': _selectedSidecarServiceHealth(),
         },
         'logFile': _driveDiagFilePath,
       },
@@ -340,6 +397,22 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
     final lastFrameAgeMs = _lastCameraFrameEventUs <= 0
         ? null
         : math.max(0, ((nowUs - _lastCameraFrameEventUs) / 1000).round());
+    final sidecarHealth = _diagStringKeyMap(_sidecarHealthSnapshot);
+    final sidecarProfile = _diagStringKeyMap(_sidecarProfileSnapshot);
+    final repoFlavor = (sidecarHealth['repoFlavor'] ??
+            sidecarProfile['repoFlavor'] ??
+            _sidecarRepoFlavorHint)
+        .toString()
+        .trim();
+    final variant = (sidecarHealth['variant'] ??
+            sidecarProfile['variant'] ??
+            _sidecarVariantHint)
+        .toString()
+        .trim();
+    final activeProfile = (sidecarHealth['profile'] ?? sidecarProfile['profile'])
+        .toString()
+        .trim()
+        .toLowerCase();
     return <String, dynamic>{
       'capturedAt': DateTime.now().toIso8601String(),
       'hostIp': _hostIp,
@@ -347,6 +420,15 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
       'overlayMode': _openpilotOverlayMode,
       'nativeCameraMode': _useNativeLiveCamera,
       'liveCamera': _liveCameraName,
+      'flavorContext': <String, dynamic>{
+        'repoFlavor': repoFlavor,
+        'variant': variant,
+        'profile': activeProfile,
+        'bootstrapProfile': SidecarService.isBootstrapProfile(activeProfile),
+        'profileOmitsCarState':
+            SidecarService.profileOmitsCarState(activeProfile),
+        'c4ReaderPressureRisk': repoFlavor == SidecarService.repoFlavorC4,
+      },
       'camera': <String, dynamic>{
         'loading': _cameraLoading,
         'error': _cameraError,
@@ -369,6 +451,16 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
         'connected': _sidecarConnected,
         'phase': _sidecarPhase.name,
         'phaseMessage': _sidecarPhaseMessage,
+        'profile': sidecarHealth['profile'] ?? sidecarProfile['profile'],
+        'variant': variant,
+        'repoFlavor': repoFlavor,
+        'startupProtectionActive': sidecarHealth['startupProtectionActive'],
+        'radarReady': sidecarHealth['radarReady'],
+        'radarFreshStable': sidecarHealth['radarFreshStable'],
+        'staleReasons': _diagList(sidecarHealth['staleReasons']),
+        'missingFields': _diagList(sidecarHealth['missingFields']),
+        'serviceHealth': _selectedSidecarServiceHealth(),
+        'process': Map<String, String>.from(_sidecarProcessSnapshot),
       },
       'logs': <String, dynamic>{
         'driveDiagnostics': _driveDiagFilePath,
@@ -378,28 +470,47 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
     };
   }
 
-  Future<String> _readDriveDiagTail({int maxLines = 80}) async {
+  Future<List<dynamic>> _readDriveDiagTailEvents({int maxLines = 80}) async {
     final path = _driveDiagFilePath;
     if (path == null || path.trim().isEmpty) {
-      return '(활성 drive diagnostics 로그 파일 없음)';
+      return const <dynamic>[];
     }
     try {
       final file = File(path);
       if (!await file.exists()) {
-        return '(로그 파일을 찾을 수 없음)';
+        return const <dynamic>[];
       }
       final lines = await file.readAsLines();
       if (lines.isEmpty) {
-        return '(로그 내용 없음)';
+        return const <dynamic>[];
       }
       final start = math.max(0, lines.length - maxLines);
-      return lines.sublist(start).join('\n');
-    } catch (e) {
-      return '(로그 읽기 실패: $e)';
+      final events = <dynamic>[];
+      for (final line in lines.sublist(start)) {
+        final trimmed = line.trim();
+        if (trimmed.isEmpty) continue;
+        try {
+          events.add(jsonDecode(trimmed));
+        } catch (_) {
+          events.add(<String, dynamic>{'raw': trimmed});
+        }
+      }
+      return events;
+    } catch (_) {
+      return const <dynamic>[];
     }
   }
 
-  Future<void> _copyDriveDiagnosticsLogImpl() async {
+  Future<Directory> _resolveDriveDiagExportDir() async {
+    final base = await _resolveDriveDiagDir();
+    final exportDir = Directory('${base.path}/exports');
+    if (!await exportDir.exists()) {
+      await exportDir.create(recursive: true);
+    }
+    return exportDir;
+  }
+
+  Future<void> _shareDriveDiagnosticsLogImpl() async {
     _emitDriveDiagSummary();
     final sink = _driveDiagSink;
     if (sink != null) {
@@ -408,23 +519,64 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
       } catch (_) {}
     }
     final payload = _driveDiagnosticsClipboardPayload();
-    final tail = await _readDriveDiagTail();
-    final text = '''
-=== drive_diagnostics_summary ===
-${const JsonEncoder.withIndent('  ').convert(payload)}
+    final tailEvents = await _readDriveDiagTailEvents();
+    final exportDir = await _resolveDriveDiagExportDir();
+    final now = DateTime.now();
+    final exportFile = File(
+      '${exportDir.path}/drive_diag_export_${_driveDiagTimestampForFileName(now)}.json',
+    );
+    final exportPayload = <String, dynamic>{
+      'schema': 'carrotlink.drive_diagnostics.export.v1',
+      'exportedAt': now.toIso8601String(),
+      'summary': payload,
+      'tailEvents': tailEvents,
+      'attachments': <String, dynamic>{
+        'driveDiagnostics': _driveDiagFilePath,
+        'cameraDiagnostics': _lastCameraDiagFilePath,
+      },
+    };
+    await exportFile.writeAsString(
+      const JsonEncoder.withIndent('  ').convert(exportPayload),
+    );
 
-=== drive_diagnostics_tail ===
-$tail
-''';
-    await Clipboard.setData(ClipboardData(text: text));
+    final files = <XFile>[
+      XFile(exportFile.path, mimeType: 'application/json'),
+    ];
+    final drivePath = _driveDiagFilePath;
+    if (drivePath != null && drivePath.trim().isNotEmpty) {
+      final driveFile = File(drivePath);
+      if (await driveFile.exists()) {
+        files.add(XFile(driveFile.path, mimeType: 'application/x-ndjson'));
+      }
+    }
+    final cameraDiagPath = _lastCameraDiagFilePath;
+    if (cameraDiagPath != null && cameraDiagPath.trim().isNotEmpty) {
+      final cameraFile = File(cameraDiagPath);
+      if (await cameraFile.exists()) {
+        files.add(XFile(cameraFile.path, mimeType: 'text/plain'));
+      }
+    }
+
+    final result = await Share.shareXFiles(
+      files,
+      subject: 'CarrotLink drive diagnostics',
+      text: 'CarrotLink 주행 진단 로그입니다. host=$_hostIp mode=$_modeTagLabel',
+    );
     _appendDriveDiagEvent(
-      'log_copied',
+      'log_shared',
       <String, dynamic>{
+        'exportFile': exportFile.path,
         'logFile': _driveDiagFilePath,
         'cameraDiagFile': _lastCameraDiagFilePath,
+        'shareStatus': result.status.name,
+        'shareRaw': result.raw,
       },
     );
     if (!mounted) return;
-    _toast('주행 로그를 복사했습니다.');
+    if (result.status == ShareResultStatus.dismissed) {
+      _toast('로그 공유가 취소되었습니다.');
+      return;
+    }
+    _toast('주행 로그 공유 창을 열었습니다.');
   }
 }

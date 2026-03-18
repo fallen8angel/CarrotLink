@@ -694,6 +694,10 @@ class SidecarApp:
             "selfdriveState",
             "liveCalibration",
         ],
+        "p1c4": [
+            "selfdriveState",
+            "liveCalibration",
+        ],
         "p2": [
             "carState",
             "selfdriveState",
@@ -745,6 +749,7 @@ class SidecarApp:
     PROFILE_SM_UPDATE_INTERVAL = {
         "p0": 0.08,
         "p1": 0.06,
+        "p1c4": 0.08,
         "p2": 0.033,
         "p3": 0.033,
         "p4": 0.025,
@@ -753,6 +758,7 @@ class SidecarApp:
     PROFILE_LIVE_INTERVAL = {
         "p0": 0.16,
         "p1": 0.12,
+        "p1c4": 0.16,
         "p2": 0.033,
         "p3": 0.033,
         "p4": 0.025,
@@ -761,6 +767,7 @@ class SidecarApp:
     PROFILE_LIVE_CACHE_INTERVAL = {
         "p0": 0.12,
         "p1": 0.08,
+        "p1c4": 0.12,
         "p2": 0.033,
         "p3": 0.033,
         "p4": 0.025,
@@ -769,17 +776,19 @@ class SidecarApp:
     PROFILE_HUD_INTERVAL = {
         "p0": 0.10,
         "p1": 0.08,
+        "p1c4": 0.10,
         "p2": 0.08,
         "p3": 0.08,
         "p4": 0.08,
     }
 
     SUPPORTED_VARIANTS = {"default", "c4_safe"}
-    # Keep the C4-safe flag wire-compatible, but disable its special runtime
-    # behavior so C4 now follows the same runtime policy as C3/default.
+    C4_SAFE_BOOTSTRAP_NO_CARSTATE_PROFILES = ("p1c4",)
+    # C4-safe uses a lighter bootstrap profile without carState and only
+    # graduates to live profiles after HUD/camera health stabilizes.
     C4_SAFE_RELAXATION_ENABLED = False
     C4_SAFE_LIVE_PROFILES = ("p2", "p3", "p4")
-    C4_SAFE_RADAR_MONITOR_PROFILES = ("p1", "p2", "p3", "p4")
+    C4_SAFE_RADAR_MONITOR_PROFILES = ("p1", "p1c4", "p2", "p3", "p4")
     C4_SAFE_STARTUP_GRACE_SEC = 12.0
     C4_SAFE_RADAR_STABLE_SEC = 1.5
     C4_SAFE_SM_UPDATE_INTERVAL = {
@@ -1211,10 +1220,18 @@ class SidecarApp:
         camera_status: dict[str, Any],
     ) -> dict[str, Any]:
         process_ready = self.sm is not None and self.messaging is not None
+        hud_requires_car_state = (
+            self.profile not in self.C4_SAFE_BOOTSTRAP_NO_CARSTATE_PROFILES
+        )
         hud_ready = process_ready and self._service_ready(
-            "carState",
+            "selfdriveState",
             require_updated=True,
-        ) and self._service_ready("selfdriveState", require_updated=True)
+        )
+        if hud_ready and hud_requires_car_state:
+            hud_ready = self._service_ready(
+                "carState",
+                require_updated=True,
+            )
         carrot_ready = self._service_ready("carrotMan", require_updated=True)
         plan_ready = self._service_ready(
             "longitudinalPlan",
@@ -1244,7 +1261,7 @@ class SidecarApp:
         semantic_ready = hud_ready and carrot_ready
         assist_ready = hud_ready and (carrot_ready or plan_ready)
         signal_ready = hud_ready and (plan_ready or carrot_ready)
-        ready = hud_ready if self.profile in ("p0", "p1") else live_ready
+        ready = hud_ready if self.profile in ("p0", "p1", "p1c4") else live_ready
         return {
             "processReady": process_ready,
             "transportReady": process_ready and self._camera_hub is not None,

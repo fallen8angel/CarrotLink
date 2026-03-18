@@ -275,6 +275,31 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     if (snapshot['startupProtectionActive'] == true) {
       return true;
     }
+    final profile =
+        (snapshot['profile'] ?? _currentSidecarProfile).toString().trim();
+    final staleReasons = ((snapshot['staleReasons'] as List?) ?? const <dynamic>[])
+        .map((e) => e.toString().trim().toLowerCase())
+        .toSet();
+    final missingFields =
+        ((snapshot['missingFields'] as List?) ?? const <dynamic>[])
+            .map((e) => e.toString().trim().toLowerCase())
+            .toSet();
+    final rawServiceHealth = snapshot['serviceHealth'];
+    final serviceHealth =
+        rawServiceHealth is Map ? Map<String, dynamic>.from(rawServiceHealth) : null;
+    final carStateFresh = (() {
+      final raw = serviceHealth?['carState'];
+      if (raw is Map<String, dynamic>) return raw['isFresh'] == true;
+      if (raw is Map) return raw['isFresh'] == true;
+      return null;
+    })();
+    final carStatePressure = !SidecarService.profileOmitsCarState(profile) &&
+        (staleReasons.contains('vehicle.carstate.stale') ||
+            missingFields.contains('vehicle.carstate') ||
+            carStateFresh == false);
+    if (carStatePressure) {
+      return true;
+    }
     return snapshot['radarFreshStable'] != true ||
         snapshot['radarReady'] != true;
   }
@@ -296,15 +321,42 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     if (snapshot.isEmpty) {
       return false;
     }
+    final staleReasons = ((snapshot['staleReasons'] as List?) ?? const <dynamic>[])
+        .map((e) => e.toString().trim().toLowerCase())
+        .toSet();
+    final missingFields =
+        ((snapshot['missingFields'] as List?) ?? const <dynamic>[])
+            .map((e) => e.toString().trim().toLowerCase())
+            .toSet();
+    final rawServiceHealth = snapshot['serviceHealth'];
+    final serviceHealth =
+        rawServiceHealth is Map ? Map<String, dynamic>.from(rawServiceHealth) : null;
+    final carStateFresh = (() {
+      final raw = serviceHealth?['carState'];
+      if (raw is Map<String, dynamic>) return raw['isFresh'] == true;
+      if (raw is Map) return raw['isFresh'] == true;
+      return null;
+    })();
     return snapshot['startupProtectionActive'] == true ||
         snapshot['radarFreshStable'] != true ||
         snapshot['radarReady'] != true ||
+        staleReasons.contains('vehicle.carstate.stale') ||
+        missingFields.contains('vehicle.carstate') ||
+        carStateFresh == false ||
         snapshot['liveReady'] != true;
   }
 
   String get _currentSidecarProfile =>
       _sidecarProfileName(_sidecarProfileSnapshot) ??
       SidecarService.hudBootstrapProfile;
+
+  String _preferredBootstrapProfile([Map<String, dynamic>? health]) {
+    if (_sidecarVariantOf(health) == SidecarService.c4SafeVariant &&
+        _sidecarRepoFlavorOf(health) == SidecarService.repoFlavorC4) {
+      return SidecarService.c4HudBootstrapProfile;
+    }
+    return SidecarService.hudBootstrapProfile;
+  }
 
   bool _sidecarHealthServiceFresh(
     Map<String, dynamic> health,
@@ -396,12 +448,12 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     Map<String, dynamic>? health,
   }) {
     if (_healthUsesC4SafeBootstrap(health)) {
-      return SidecarService.hudBootstrapProfile;
+      return _preferredBootstrapProfile(health);
     }
     return (_hasDriveRuntimeProcesses(procs) ||
             _sidecarHealthIndicatesLiveRuntimeReady(health))
         ? SidecarService.driveRuntimeProfile
-        : SidecarService.hudBootstrapProfile;
+        : _preferredBootstrapProfile(health);
   }
 
   Future<Map<String, String>> _loadDriveRuntimeCriticalProcStatus(
@@ -673,8 +725,12 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       if (raw is! Map || raw.isEmpty) {
         return true;
       }
-      final hudCoreFresh = serviceFresh(health, 'carState') &&
-          serviceFresh(health, 'selfdriveState');
+      final reportedProfile =
+          (health['profile'] ?? profile).toString().trim().toLowerCase();
+      final hudCoreFresh =
+          serviceFresh(health, 'selfdriveState') &&
+              (SidecarService.profileOmitsCarState(reportedProfile) ||
+                  serviceFresh(health, 'carState'));
       if (!hudCoreFresh) {
         return false;
       }
@@ -973,7 +1029,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
           listening &&
           (currentProfile == desiredProfile ||
               (currentProfile == null &&
-                  desiredProfile == SidecarService.hudBootstrapProfile));
+                  SidecarService.isBootstrapProfile(desiredProfile)));
       if (reuseExistingRuntime) {
         // Reuse the live runtime when possible, but still verify readiness
         // briefly so the first Stock attach does not race camera/live startup.
@@ -988,7 +1044,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
         }
         _setSidecarPhase(
           _SidecarPhase.running,
-          message: desiredProfile == SidecarService.hudBootstrapProfile
+          message: SidecarService.isBootstrapProfile(desiredProfile)
               ? '주행 대기 중: HUD 전용 모드 유지 중'
               : '사이드카 실행 중',
         );
@@ -1015,7 +1071,9 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
           if (requiresLiveRuntime) {
             _setSidecarPhase(
               _SidecarPhase.running,
-              message: '카메라/그래픽 연결 대기 중...',
+              message: SidecarService.isBootstrapProfile(desiredProfile)
+                  ? 'HUD 전용 연결 대기 중...'
+                  : '카메라/그래픽 연결 대기 중...',
             );
             _scheduleSidecarRuntimeRecovery(reason: 'ready_deferred_reuse');
           }
@@ -1023,7 +1081,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       } else {
         _setSidecarPhase(
           _SidecarPhase.starting,
-          message: desiredProfile == SidecarService.hudBootstrapProfile
+          message: SidecarService.isBootstrapProfile(desiredProfile)
               ? '주행 대기 중: HUD 전용 모드 유지 중...'
               : (running || listening ? '사이드카 런타임 복구 중...' : '사이드카 시작 중...'),
         );
@@ -1051,7 +1109,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
             if (recoveredByBootstrap) {
               _setSidecarPhase(
                 _SidecarPhase.starting,
-                message: desiredProfile == SidecarService.hudBootstrapProfile
+                message: SidecarService.isBootstrapProfile(desiredProfile)
                     ? '주행 대기 중: HUD 전용 모드 유지 중...'
                     : '사이드카 시작 중...',
               );
@@ -1079,7 +1137,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
             _pushSidecarHistory('AUTO_DEPLOY', 'ok');
             _setSidecarPhase(
               _SidecarPhase.starting,
-              message: desiredProfile == SidecarService.hudBootstrapProfile
+              message: SidecarService.isBootstrapProfile(desiredProfile)
                   ? '주행 대기 중: HUD 전용 모드 유지 중...'
                   : '사이드카 시작 중...',
             );
@@ -1106,7 +1164,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
         }
         _setSidecarPhase(
           _SidecarPhase.verifying,
-          message: desiredProfile == SidecarService.hudBootstrapProfile
+          message: SidecarService.isBootstrapProfile(desiredProfile)
               ? 'HUD 전용 연결 확인 중...'
               : '카메라 스트림 연결 확인 중...',
         );
@@ -1128,7 +1186,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
           }
           _setSidecarPhase(
             _SidecarPhase.running,
-            message: desiredProfile == SidecarService.hudBootstrapProfile
+            message: SidecarService.isBootstrapProfile(desiredProfile)
                 ? '주행 대기 중: HUD 전용 모드 유지 중'
                 : '사이드카 실행 중',
           );
@@ -1136,7 +1194,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
           _pushSidecarHistory('READY_DEFER', '$e');
           _setSidecarPhase(
             _SidecarPhase.running,
-            message: desiredProfile == SidecarService.hudBootstrapProfile
+            message: SidecarService.isBootstrapProfile(desiredProfile)
                 ? 'HUD 전용 연결 대기 중...'
                 : '사이드카 연결 대기 중...',
           );
@@ -1147,7 +1205,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       }
       await _refreshSidecarProcessStatus();
       final keepBootstrapForC4 =
-          desiredProfile == SidecarService.hudBootstrapProfile &&
+          desiredProfile == SidecarService.c4HudBootstrapProfile &&
               _healthUsesC4SafeBootstrap(_sidecarHealthSnapshot);
       final downgradeLiveForC4 =
           _shouldDowngradeLiveRuntimeForC4Safe(_sidecarHealthSnapshot);

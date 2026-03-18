@@ -14,6 +14,7 @@ import 'package:msgpack_dart/msgpack_dart.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -849,7 +850,7 @@ fi
   Future<void> _copyDriveYoloRuntimeStatus() =>
       _copyDriveYoloRuntimeStatusImpl();
 
-  Future<void> _copyDriveDiagnosticsLog() => _copyDriveDiagnosticsLogImpl();
+  Future<void> _shareDriveDiagnosticsLog() => _shareDriveDiagnosticsLogImpl();
 
   Future<void> _setDriveYoloDebugSettings(YoloDebugSettings next) =>
       _setDriveYoloDebugSettingsImpl(next);

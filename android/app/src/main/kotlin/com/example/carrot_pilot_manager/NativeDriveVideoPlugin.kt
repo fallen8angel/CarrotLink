@@ -863,6 +863,7 @@ class NativeDriveVideoView(
   @Volatile private var syntheticFrameEmitCount = 0
   @Volatile private var syntheticSyncActive = false
   @Volatile private var lastSourceFrameKey = ""
+  @Volatile private var lastSourceFrameCandidates = ""
   @Volatile private var lastMetaKeySummary = ""
 
   private var reconnectRunnable: Runnable? = null
@@ -906,6 +907,7 @@ class NativeDriveVideoView(
   private data class SourceFrameIdResult(
       val frameId: Int,
       val key: String?,
+      val candidatesSummary: String,
   )
 
   init {
@@ -1228,6 +1230,7 @@ class NativeDriveVideoView(
     syntheticFrameEmitCount = 0
     syntheticSyncActive = false
     lastSourceFrameKey = ""
+    lastSourceFrameCandidates = ""
     lastMetaKeySummary = ""
     pendingDecodeTasks.set(0)
     pendingFrames.clear()
@@ -1267,6 +1270,7 @@ class NativeDriveVideoView(
     val meta = parsed.meta
     val sourceFrame = extractSourceFrameId(meta)
     val sourceFrameId = sourceFrame.frameId
+    lastSourceFrameCandidates = sourceFrame.candidatesSummary
     if (!sourceFrame.key.isNullOrBlank()) {
       lastSourceFrameKey = sourceFrame.key
     } else {
@@ -1645,13 +1649,24 @@ class NativeDriveVideoView(
             "frame_index",
             "index",
         )
+    val candidates = mutableListOf<String>()
     for (key in keys) {
-      val parsed = parseIntLike(meta.opt(key))
+      if (!meta.has(key)) continue
+      val raw = meta.opt(key)
+      val parsed = parseIntLike(raw)
+      if (candidates.size < 8) {
+        candidates.add(
+            if (parsed != null) {
+              "$key=${summarizeMetaValue(raw)}->$parsed"
+            } else {
+              "$key=${summarizeMetaValue(raw)}"
+            })
+      }
       if (parsed != null && parsed >= 0) {
-        return SourceFrameIdResult(parsed, key)
+        return SourceFrameIdResult(parsed, key, candidates.joinToString("|"))
       }
     }
-    return SourceFrameIdResult(-1, null)
+    return SourceFrameIdResult(-1, null, candidates.joinToString("|"))
   }
 
   private fun parseIntLike(value: Any?): Int? {
@@ -1671,6 +1686,25 @@ class NativeDriveVideoView(
     }
     keys.sort()
     return keys.joinToString(",")
+  }
+
+  private fun summarizeMetaValue(value: Any?): String {
+    return when (value) {
+      null, JSONObject.NULL -> "null"
+      is String -> {
+        val trimmed = value.trim()
+        if (trimmed.length <= 40) {
+          "\"$trimmed\""
+        } else {
+          "\"${trimmed.take(37)}...\""
+        }
+      }
+      is Number, is Boolean -> value.toString()
+      else -> {
+        val raw = value.toString().trim()
+        if (raw.length <= 40) raw else "${raw.take(37)}..."
+      }
+    }
   }
 
   private fun emitError(reason: String) {
@@ -1747,14 +1781,23 @@ class NativeDriveVideoView(
             "decodedWindow" to decoded,
             "packetBytesWindow" to packetBytes,
             "connectAttempts" to connectAttempts,
+            "socketConnected" to (webSocket != null),
+            "surfaceValid" to (surface?.isValid == true),
             "codecConfigured" to codecConfigured,
             "waitingKeyFrame" to waitingKeyFrame,
+            "currentWidth" to currentWidth,
+            "currentHeight" to currentHeight,
+            "pendingFrames" to pendingFrames.size,
             "lastSourceFrameId" to lastSourceFrameId,
             "lastSourceFrameKey" to lastSourceFrameKey,
+            "sourceFrameCandidates" to lastSourceFrameCandidates,
             "missingSourceFrameIds" to missingSourceFrameIdCount,
             "syntheticSyncActive" to syntheticSyncActive,
             "syntheticFrameEmits" to syntheticFrameEmitCount,
             "startupSyncFrameStrikes" to startupSyncFrameStrikes,
+            "lastFrameEmitAgeMs" to if (lastFrameEmitAtMs <= 0L) -1L else (now - lastFrameEmitAtMs),
+            "firstDecodedWithoutSyncAgeMs" to
+                if (firstDecodedWithoutSyncAtMs <= 0L) -1L else (now - firstDecodedWithoutSyncAtMs),
             "metaKeySummary" to lastMetaKeySummary,
             "lastError" to lastErrorReason,
             "lastErrorAgeMs" to errorAgeMs,

@@ -722,7 +722,7 @@ extension _LiveDriveCanvasSettingsPopupComponents
                               _DriveSettingsPopupGroup.graphics)
                             TextButton(
                               onPressed: () =>
-                                  unawaited(_copyDriveDiagnosticsLog()),
+                                  unawaited(_shareDriveDiagnosticsLog()),
                               style: TextButton.styleFrom(
                                 foregroundColor: Colors.white,
                                 backgroundColor: _driveMenuNavBg,
