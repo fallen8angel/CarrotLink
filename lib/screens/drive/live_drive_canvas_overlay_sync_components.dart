@@ -196,6 +196,88 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     return true;
   }
 
+  bool _nativeCameraSyntheticSyncLikelyActive() {
+    final diag = _lastNativeCameraDiag;
+    if (diag == null) {
+      return false;
+    }
+    if (diag['syntheticSyncActive'] == true) {
+      return true;
+    }
+    final state = diag['state']?.toString() ?? '';
+    return state.startsWith('synthetic_sync_frame_');
+  }
+
+  bool _shouldPreferSyntheticSyncOverlayFallback() {
+    if (!_openpilotOverlayMode || !_sidecarConnected) {
+      return false;
+    }
+    if (_cameraLoading || _lastCameraFrameId == null) {
+      return false;
+    }
+    if (!_nativeCameraSyntheticSyncLikelyActive()) {
+      return false;
+    }
+    return _sidecarHealthIndicatesGraphicsRuntimeReady(
+            _sidecarHealthSnapshot) ||
+        _isOverlaySnapshotRenderable(_latestOverlaySnapshot);
+  }
+
+  bool _tryPublishLatestOverlayDuringSyntheticSync({
+    required int nowUs,
+    required String reason,
+  }) {
+    if (!_shouldPreferSyntheticSyncOverlayFallback()) {
+      return false;
+    }
+    final latest = _latestOverlaySnapshot;
+    final modelFrameId = latest.modelFrameId;
+    if (modelFrameId == null || !_isOverlaySnapshotRenderable(latest)) {
+      return false;
+    }
+    if (_lastPublishedModelFrameId != null &&
+        modelFrameId <= _lastPublishedModelFrameId!) {
+      return false;
+    }
+    _markOverlayStale(reason: reason);
+    _recordDebugPlotSample(latest);
+    _setRenderTarget(latest, nowUs: nowUs);
+    _lastPublishedModelFrameId = modelFrameId;
+    return true;
+  }
+
+  bool _tryPublishLatestOverlayUsingGraphicsReady({
+    required int nowUs,
+    required String reason,
+    bool allowBeforeFirstCameraFrame = false,
+  }) {
+    if (!_openpilotOverlayMode || !_sidecarConnected) {
+      return false;
+    }
+    if (!_sidecarHealthIndicatesGraphicsRuntimeReady(_sidecarHealthSnapshot)) {
+      return false;
+    }
+    if (!allowBeforeFirstCameraFrame &&
+        (_lastCameraFrameId == null || _cameraLoading)) {
+      return false;
+    }
+    final latest = _latestOverlaySnapshot;
+    final modelFrameId = latest.modelFrameId;
+    if (!_isOverlaySnapshotRenderable(latest)) {
+      return false;
+    }
+    if (_lastPublishedModelFrameId != null &&
+        modelFrameId != null &&
+        modelFrameId <= _lastPublishedModelFrameId!) {
+      return false;
+    }
+    _markOverlayStale(reason: reason);
+    _recordDebugPlotSample(latest);
+    _setRenderTarget(latest, nowUs: nowUs);
+    _lastPublishedModelFrameId = modelFrameId;
+    return true;
+  }
+
   bool _isOverlaySnapshotRenderable(_DriveOverlaySnapshot snapshot) {
     return snapshot.modelFrameId != null ||
         snapshot.path.length >= 2 ||
@@ -210,7 +292,9 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       return false;
     }
     return _openpilotOverlayMode &&
-        (_sidecarConnected || _startupProvisionalSyncActive || _overlayStaleActive);
+        (_sidecarConnected ||
+            _startupProvisionalSyncActive ||
+            _overlayStaleActive);
   }
 
   bool _tryPublishLatestOverlayDuringStartup(int nowUs) {
@@ -295,10 +379,6 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
           _cameraError == null &&
           !_cameraSuspendedByLifecycle;
       _clearSidecarRecoverySchedule();
-      _setSidecarPhase(
-        _SidecarPhase.verifying,
-        message: '사이드카 런타임 상태를 확인합니다.',
-      );
       _startAdaptiveCameraQualityLoop();
       _suppressCameraErrors = true;
       if (!preserveVisibleNativeCamera) {
@@ -326,7 +406,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     }
     _clearSidecarRecoverySchedule();
     _suppressCameraErrors = false;
-    _setSidecarPhase(
+    _setHardSidecarPhase(
       _SidecarPhase.idle,
       message: '사이드카 그래픽 모드를 종료했습니다. 잠시 후 유휴 정리합니다.',
     );
@@ -882,6 +962,13 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
       if (_tryPublishLatestOverlayDuringStartup(nowUs)) {
         return;
       }
+      if (_tryPublishLatestOverlayUsingGraphicsReady(
+        nowUs: nowUs,
+        reason: '그래픽 준비 상태 유지 중',
+        allowBeforeFirstCameraFrame: _shouldUseDegradedOverlayFallbackUi(),
+      )) {
+        return;
+      }
       if (_LiveDriveCanvasScreenState._strictFrameLock) {
         if (_lastPublishedModelFrameId != null &&
             (nowUs - math.max(_lastOverlayPublishUs, _lastSyncHitUs)) >
@@ -914,6 +1001,18 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     );
     if (synced == null) {
       if (_tryPublishLatestOverlayDuringStartup(nowUs)) {
+        return;
+      }
+      if (_tryPublishLatestOverlayDuringSyntheticSync(
+        nowUs: nowUs,
+        reason: '카메라 정합 임시 유지 중',
+      )) {
+        return;
+      }
+      if (_tryPublishLatestOverlayUsingGraphicsReady(
+        nowUs: nowUs,
+        reason: '모델/카메라 임시 정합 유지 중',
+      )) {
         return;
       }
       // If exact sync is temporarily unavailable, keep using the newest model

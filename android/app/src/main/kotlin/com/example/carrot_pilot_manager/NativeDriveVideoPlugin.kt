@@ -865,6 +865,10 @@ class NativeDriveVideoView(
   @Volatile private var lastSourceFrameKey = ""
   @Volatile private var lastSourceFrameCandidates = ""
   @Volatile private var lastMetaKeySummary = ""
+  @Volatile private var lastParsedMetaPreview = ""
+  @Volatile private var lastParsedMetaLength = -1
+  @Volatile private var lastParsedFrameIdRaw = ""
+  @Volatile private var lastParsedFrameFieldSummary = ""
 
   private var reconnectRunnable: Runnable? = null
   private var frameWatchdogRunnable: Runnable? = null
@@ -1232,6 +1236,10 @@ class NativeDriveVideoView(
     lastSourceFrameKey = ""
     lastSourceFrameCandidates = ""
     lastMetaKeySummary = ""
+    lastParsedMetaPreview = ""
+    lastParsedMetaLength = -1
+    lastParsedFrameIdRaw = ""
+    lastParsedFrameFieldSummary = ""
     pendingDecodeTasks.set(0)
     pendingFrames.clear()
     pendingSyncFrameCount = 0
@@ -1252,6 +1260,7 @@ class NativeDriveVideoView(
   private data class ParsedPacket(
       val meta: JSONObject,
       val payload: ByteArray,
+      val metaText: String,
   )
 
   private fun noteBacklogDrop(reason: String, backlog: Int) {
@@ -1268,6 +1277,7 @@ class NativeDriveVideoView(
 
     val parsed = parsePacket(packet) ?: return
     val meta = parsed.meta
+    rememberParsedMeta(meta, parsed.metaText)
     val sourceFrame = extractSourceFrameId(meta)
     val sourceFrameId = sourceFrame.frameId
     lastSourceFrameCandidates = sourceFrame.candidatesSummary
@@ -1493,10 +1503,44 @@ class NativeDriveVideoView(
       val metaText = String(packet, 4, metaLen, Charsets.UTF_8)
       val meta = JSONObject(metaText)
       val payload = packet.copyOfRange(offset, packet.size)
-      ParsedPacket(meta, payload)
+      ParsedPacket(meta, payload, metaText)
     } catch (_: Throwable) {
       null
     }
+  }
+
+  private fun rememberParsedMeta(meta: JSONObject, metaText: String) {
+    lastParsedMetaLength = metaText.length
+    val compact = metaText.replace('\n', ' ').replace('\r', ' ').trim()
+    lastParsedMetaPreview = if (compact.length <= 240) compact else "${compact.take(237)}..."
+    lastParsedFrameIdRaw =
+        if (meta.has("frameId")) {
+          summarizeMetaValue(meta.opt("frameId"))
+        } else {
+          "<absent>"
+        }
+    val keys =
+        arrayOf(
+            "frameId",
+            "frame_id",
+            "cameraFrameId",
+            "camera",
+            "width",
+            "height",
+            "keyFrame",
+            "flags",
+            "encodeId",
+            "segmentId",
+            "timestampSof",
+            "timestampEof",
+        )
+    val parts = mutableListOf<String>()
+    for (key in keys) {
+      if (!meta.has(key)) continue
+      parts.add("$key=${summarizeMetaValue(meta.opt(key))}")
+      if (parts.size >= 8) break
+    }
+    lastParsedFrameFieldSummary = parts.joinToString("|")
   }
 
   private fun hasStartCode(data: ByteArray): Boolean {
@@ -1799,6 +1843,10 @@ class NativeDriveVideoView(
             "firstDecodedWithoutSyncAgeMs" to
                 if (firstDecodedWithoutSyncAtMs <= 0L) -1L else (now - firstDecodedWithoutSyncAtMs),
             "metaKeySummary" to lastMetaKeySummary,
+            "parsedMetaLength" to lastParsedMetaLength,
+            "parsedMetaPreview" to lastParsedMetaPreview,
+            "parsedFrameIdRaw" to lastParsedFrameIdRaw,
+            "parsedMetaFields" to lastParsedFrameFieldSummary,
             "lastError" to lastErrorReason,
             "lastErrorAgeMs" to errorAgeMs,
         ))

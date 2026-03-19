@@ -78,6 +78,30 @@ enum _AdaptiveCameraQualityMode {
   lowLatency,
 }
 
+enum _DriveBannerKind {
+  error,
+  reconnecting,
+  graphicsDelayed,
+  preparing,
+  notice,
+}
+
+class _DriveBannerState {
+  const _DriveBannerState({
+    required this.kind,
+    required this.title,
+    this.detail,
+    required this.icon,
+    required this.color,
+  });
+
+  final _DriveBannerKind kind;
+  final String title;
+  final String? detail;
+  final IconData icon;
+  final Color color;
+}
+
 enum _DriveViewportZoomPreset {
   zoomOut,
   fit,
@@ -230,8 +254,8 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const int _cameraHealthyFrameAgeUs = 1200000;
   static const int _startupProvisionalSyncWindowUs = 4000000;
   static const int _cameraFirstFrameDegradedHoldUs = 12000000;
-  static const int _cameraFirstFrameForceReattachUs = 6500000;
-  static const int _cameraFirstFrameRecoveryCooldownUs = 8000000;
+  static const int _cameraFirstFrameForceReattachUs = 9000000;
+  static const int _cameraFirstFrameRecoveryCooldownUs = 12000000;
   static const int _startupProvisionalNativeSettleFrames = 3;
   static const int _interpMinUs = 6000;
   static const int _interpMaxUs = 50000;
@@ -791,7 +815,7 @@ fi
     _cancelDelayedSidecarStop();
     _stopAdaptiveCameraQualityLoop(resetMode: true);
     _stopSidecarLoop();
-    _setSidecarPhase(
+    _setHardSidecarPhase(
       _SidecarPhase.idle,
       message: 'SSH 연결을 기다리는 중입니다.',
     );

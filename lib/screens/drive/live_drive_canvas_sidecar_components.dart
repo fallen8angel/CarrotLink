@@ -175,14 +175,6 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
         _setNativeCameraAttachReady(true);
         _startCameraErrorGrace(reason: 'shared_runtime_connected');
       }
-      _setSidecarPhase(
-        _lastCameraFrameId != null
-            ? _SidecarPhase.running
-            : _SidecarPhase.verifying,
-        message: _lastCameraFrameId != null
-            ? '사이드카 연결이 복구되었습니다.'
-            : '사이드카 연결 후 첫 프레임을 기다리는 중입니다.',
-      );
       if (!_adaptiveCameraQualitySynced) {
         unawaited(
           _setAdaptiveCameraQualityMode(
@@ -204,22 +196,18 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
     if (_openpilotOverlayMode && !_cameraSuspendedByLifecycle) {
       _setNativeCameraAttachReady(false);
       if (allowRecovery) {
-        _setSidecarPhase(
-          _SidecarPhase.verifying,
-          message: '사이드카 재연결을 시도합니다.',
-        );
         if (!_isSidecarBusy) {
           _scheduleSidecarRuntimeRecovery(
               reason: 'shared_runtime_disconnected');
         }
       } else {
-        _setSidecarPhase(_SidecarPhase.idle);
+        _setHardSidecarPhase(_SidecarPhase.idle);
       }
       return;
     }
 
     if (!_openpilotOverlayMode) {
-      _setSidecarPhase(_SidecarPhase.idle);
+      _setHardSidecarPhase(_SidecarPhase.idle);
     }
   }
 

@@ -69,7 +69,7 @@ extension _LiveDriveCanvasSidecarBootstrapComponents
       'AUTO_REV',
       'mismatch local=${_shortSidecarRevision(localRevision)} remote=${_shortSidecarRevision(remoteRevision)}',
     );
-    _setSidecarPhase(
+    _setHardSidecarPhase(
       _SidecarPhase.deploying,
       message: '사이드카 업데이트 중...',
     );
@@ -109,7 +109,7 @@ extension _LiveDriveCanvasSidecarBootstrapComponents
     } else {
       _pushSidecarHistory('AUTO_BOOTSTRAP', 'first-run deploy requested');
     }
-    _setSidecarPhase(
+    _setHardSidecarPhase(
       _SidecarPhase.deploying,
       message: '사이드카 최초 설정을 적용하는 중...',
     );

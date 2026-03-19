@@ -129,14 +129,13 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
   }
 
   bool _profileRequiresLiveRuntime(String? profile) {
-    switch ((profile ?? '').trim().toLowerCase()) {
-      case 'p2':
-      case 'p3':
-      case 'p4':
-        return true;
-      default:
-        return false;
-    }
+    return SidecarService.profileProvidesGraphicsRuntime(profile);
+  }
+
+  String _preferredDriveRuntimeProfile([Map<String, dynamic>? health]) {
+    return SidecarService.driveRuntimeProfileForFlavor(_sidecarRepoFlavorOf(
+      health,
+    ));
   }
 
   String _normalizeSidecarVariant(String? variant) {
@@ -223,26 +222,6 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     }
   }
 
-  String _sidecarVariantOf([Map<String, dynamic>? snapshot]) {
-    final candidates = <dynamic>[
-      snapshot?['variant'],
-      _sidecarHealthSnapshot['variant'],
-      _sidecarProfileSnapshot['variant'],
-      _sidecarVariantHint,
-    ];
-    for (final raw in candidates) {
-      final text = raw?.toString().trim();
-      if (text == null || text.isEmpty) {
-        continue;
-      }
-      final normalized = _normalizeSidecarVariant(text);
-      if (normalized.isNotEmpty) {
-        return normalized;
-      }
-    }
-    return SidecarService.defaultVariant;
-  }
-
   String _sidecarRepoFlavorOf([Map<String, dynamic>? snapshot]) {
     final candidates = <dynamic>[
       snapshot?['repoFlavor'],
@@ -263,96 +242,12 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     return SidecarService.repoFlavorUnknown;
   }
 
-  bool _healthUsesC4SafeBootstrap([Map<String, dynamic>? health]) {
-    final snapshot = health ?? _sidecarHealthSnapshot;
-    if (_sidecarVariantOf(snapshot) != SidecarService.c4SafeVariant ||
-        _sidecarRepoFlavorOf(snapshot) != SidecarService.repoFlavorC4) {
-      return false;
-    }
-    if (snapshot.isEmpty) {
-      return true;
-    }
-    if (snapshot['startupProtectionActive'] == true) {
-      return true;
-    }
-    final profile =
-        (snapshot['profile'] ?? _currentSidecarProfile).toString().trim();
-    final staleReasons = ((snapshot['staleReasons'] as List?) ?? const <dynamic>[])
-        .map((e) => e.toString().trim().toLowerCase())
-        .toSet();
-    final missingFields =
-        ((snapshot['missingFields'] as List?) ?? const <dynamic>[])
-            .map((e) => e.toString().trim().toLowerCase())
-            .toSet();
-    final rawServiceHealth = snapshot['serviceHealth'];
-    final serviceHealth =
-        rawServiceHealth is Map ? Map<String, dynamic>.from(rawServiceHealth) : null;
-    final carStateFresh = (() {
-      final raw = serviceHealth?['carState'];
-      if (raw is Map<String, dynamic>) return raw['isFresh'] == true;
-      if (raw is Map) return raw['isFresh'] == true;
-      return null;
-    })();
-    final carStatePressure = !SidecarService.profileOmitsCarState(profile) &&
-        (staleReasons.contains('vehicle.carstate.stale') ||
-            missingFields.contains('vehicle.carstate') ||
-            carStateFresh == false);
-    if (carStatePressure) {
-      return true;
-    }
-    return snapshot['radarFreshStable'] != true ||
-        snapshot['radarReady'] != true;
-  }
-
-  bool _healthRequiresC4SafeLiveStability([Map<String, dynamic>? health]) =>
-      _sidecarVariantOf(health) == SidecarService.c4SafeVariant &&
-      _sidecarRepoFlavorOf(health) == SidecarService.repoFlavorC4;
-
-  bool _shouldDowngradeLiveRuntimeForC4Safe([Map<String, dynamic>? health]) {
-    final snapshot = health ?? _sidecarHealthSnapshot;
-    if (!_healthRequiresC4SafeLiveStability(snapshot)) {
-      return false;
-    }
-    final profile =
-        (snapshot['profile'] ?? _currentSidecarProfile).toString().trim();
-    if (!_profileRequiresLiveRuntime(profile)) {
-      return false;
-    }
-    if (snapshot.isEmpty) {
-      return false;
-    }
-    final staleReasons = ((snapshot['staleReasons'] as List?) ?? const <dynamic>[])
-        .map((e) => e.toString().trim().toLowerCase())
-        .toSet();
-    final missingFields =
-        ((snapshot['missingFields'] as List?) ?? const <dynamic>[])
-            .map((e) => e.toString().trim().toLowerCase())
-            .toSet();
-    final rawServiceHealth = snapshot['serviceHealth'];
-    final serviceHealth =
-        rawServiceHealth is Map ? Map<String, dynamic>.from(rawServiceHealth) : null;
-    final carStateFresh = (() {
-      final raw = serviceHealth?['carState'];
-      if (raw is Map<String, dynamic>) return raw['isFresh'] == true;
-      if (raw is Map) return raw['isFresh'] == true;
-      return null;
-    })();
-    return snapshot['startupProtectionActive'] == true ||
-        snapshot['radarFreshStable'] != true ||
-        snapshot['radarReady'] != true ||
-        staleReasons.contains('vehicle.carstate.stale') ||
-        missingFields.contains('vehicle.carstate') ||
-        carStateFresh == false ||
-        snapshot['liveReady'] != true;
-  }
-
   String get _currentSidecarProfile =>
       _sidecarProfileName(_sidecarProfileSnapshot) ??
       SidecarService.hudBootstrapProfile;
 
   String _preferredBootstrapProfile([Map<String, dynamic>? health]) {
-    if (_sidecarVariantOf(health) == SidecarService.c4SafeVariant &&
-        _sidecarRepoFlavorOf(health) == SidecarService.repoFlavorC4) {
+    if (_sidecarRepoFlavorOf(health) == SidecarService.repoFlavorC4) {
       return SidecarService.c4HudBootstrapProfile;
     }
     return SidecarService.hudBootstrapProfile;
@@ -376,26 +271,50 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     return false;
   }
 
-  bool _sidecarHealthIndicatesLiveRuntimeReady([Map<String, dynamic>? health]) {
+  bool _sidecarHealthIndicatesGraphicsRuntimeReady([
+    Map<String, dynamic>? health,
+  ]) {
     final snapshot = health ?? _sidecarHealthSnapshot;
     if (snapshot.isEmpty) {
       return false;
     }
+    if (snapshot['graphicsReady'] == true) {
+      return true;
+    }
     final expectedCameraService = _liveCameraName == 'wideRoad'
         ? 'wideRoadCameraState'
         : 'roadCameraState';
-    final hudReady = snapshot['hudReady'] == true;
-    final liveReady = snapshot['liveReady'] == true;
-    final modelFresh = _sidecarHealthServiceFresh(snapshot, 'modelV2');
-    final cameraFresh =
+    return snapshot['hudReady'] == true &&
+        snapshot['liveReady'] == true &&
+        _sidecarHealthServiceFresh(snapshot, 'liveCalibration') &&
+        _sidecarHealthServiceFresh(snapshot, 'modelV2') &&
         _sidecarHealthServiceFresh(snapshot, expectedCameraService);
-    if (_healthRequiresC4SafeLiveStability(snapshot) &&
-        (snapshot['startupProtectionActive'] == true ||
-            snapshot['radarReady'] != true ||
-            snapshot['radarFreshStable'] != true)) {
+  }
+
+  bool _sidecarHealthIndicatesDriveRuntimeReady(
+      [Map<String, dynamic>? health]) {
+    final snapshot = health ?? _sidecarHealthSnapshot;
+    if (snapshot.isEmpty) {
       return false;
     }
-    return hudReady && liveReady && modelFresh && cameraFresh;
+    if (snapshot['driveReady'] == true) {
+      return true;
+    }
+    return _sidecarHealthIndicatesGraphicsRuntimeReady(snapshot) &&
+        _sidecarHealthServiceFresh(snapshot, 'carState') &&
+        _sidecarHealthServiceFresh(snapshot, 'controlsState');
+  }
+
+  bool _sidecarHealthIndicatesFullRuntimeReady([Map<String, dynamic>? health]) {
+    final snapshot = health ?? _sidecarHealthSnapshot;
+    if (snapshot.isEmpty) {
+      return false;
+    }
+    if (snapshot['fullReady'] == true) {
+      return true;
+    }
+    return _sidecarHealthIndicatesDriveRuntimeReady(snapshot) &&
+        _sidecarHealthServiceFresh(snapshot, 'radarState');
   }
 
   bool _shouldRecoverSidecarForOverlayStall() {
@@ -405,7 +324,62 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
         _startupProvisionalSyncActive) {
       return false;
     }
-    return !_sidecarHealthIndicatesLiveRuntimeReady();
+    return !_sidecarHealthIndicatesGraphicsRuntimeReady();
+  }
+
+  bool _shouldEscalateToSidecarRecovery({
+    bool graphicsCritical = false,
+    bool vehicleCritical = false,
+    bool fullCritical = false,
+  }) {
+    if (!_openpilotOverlayMode || _cameraSuspendedByLifecycle) {
+      return false;
+    }
+    if (_sidecarAutoManaging) {
+      return false;
+    }
+    final hasFallback = _hasRenderableOverlayFallback();
+    final graphicsReady =
+        _sidecarHealthIndicatesGraphicsRuntimeReady(_sidecarHealthSnapshot);
+    final driveReady =
+        _sidecarHealthIndicatesDriveRuntimeReady(_sidecarHealthSnapshot);
+    final fullReady = _sidecarHealthIndicatesFullRuntimeReady(
+      _sidecarHealthSnapshot,
+    );
+
+    if (graphicsCritical && graphicsReady && hasFallback) {
+      return false;
+    }
+    if (vehicleCritical && driveReady && hasFallback) {
+      return false;
+    }
+    if (fullCritical && !_overlayStaleActive && hasFallback && fullReady) {
+      return false;
+    }
+    if (_sidecarConnected &&
+        _shouldHoldRunningPhaseForTransientReconnect &&
+        hasFallback &&
+        !_overlayStaleActive) {
+      if (graphicsCritical || vehicleCritical) {
+        return false;
+      }
+    }
+    if (!_sidecarConnected) {
+      return true;
+    }
+    if (_overlayStaleActive) {
+      return true;
+    }
+    if (!hasFallback && (graphicsCritical || vehicleCritical)) {
+      return true;
+    }
+    return fullCritical && !fullReady;
+  }
+
+  String _bootstrapModeLabel(String profile) {
+    return SidecarService.isC4GraphicsBootstrapProfile(profile)
+        ? '그래픽 부트스트랩 모드'
+        : 'HUD 부트스트랩 모드';
   }
 
   void _setNativeCameraAttachReady(bool value) {
@@ -432,27 +406,38 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
   bool _isSidecarCriticalProcUp(Map<String, String> procs, String name) =>
       (procs[name] ?? '').trim().startsWith('up:');
 
-  bool _hasDriveRuntimeProcesses(Map<String, String> procs) {
+  bool _hasVehicleRuntimeProcesses(Map<String, String> procs) {
     final hasControlCore = _isSidecarCriticalProcUp(procs, 'selfdrived') &&
         (_isSidecarCriticalProcUp(procs, 'controlsd') ||
             _isSidecarCriticalProcUp(procs, 'plannerd'));
     final hasVisionCore = _isSidecarCriticalProcUp(procs, 'stream_encoderd') &&
         _isSidecarCriticalProcUp(procs, 'modeld') &&
         _isSidecarCriticalProcUp(procs, 'camerad');
-    final hasRadarCore = _isSidecarCriticalProcUp(procs, 'radard');
-    return hasControlCore && hasVisionCore && hasRadarCore;
+    return hasControlCore && hasVisionCore;
+  }
+
+  bool _hasDriveRuntimeProcesses(Map<String, String> procs) {
+    return _hasVehicleRuntimeProcesses(procs) &&
+        _isSidecarCriticalProcUp(procs, 'radard');
   }
 
   String _selectDriveRuntimeProfile(
     Map<String, String> procs, {
     Map<String, dynamic>? health,
   }) {
-    if (_healthUsesC4SafeBootstrap(health)) {
-      return _preferredBootstrapProfile(health);
-    }
-    return (_hasDriveRuntimeProcesses(procs) ||
-            _sidecarHealthIndicatesLiveRuntimeReady(health))
-        ? SidecarService.driveRuntimeProfile
+    final desiredProfile = _preferredDriveRuntimeProfile(health);
+    final runtimeProcessReady = SidecarService.profileRequiresFullRuntime(
+      desiredProfile,
+    )
+        ? _hasDriveRuntimeProcesses(procs)
+        : _hasVehicleRuntimeProcesses(procs);
+    final runtimeHealthReady = SidecarService.profileRequiresFullRuntime(
+      desiredProfile,
+    )
+        ? _sidecarHealthIndicatesFullRuntimeReady(health)
+        : _sidecarHealthIndicatesDriveRuntimeReady(health);
+    return (runtimeProcessReady || runtimeHealthReady)
+        ? desiredProfile
         : _preferredBootstrapProfile(health);
   }
 
@@ -572,64 +557,261 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       _sidecarPhase == _SidecarPhase.verifying ||
       _sidecarPhase == _SidecarPhase.stopping;
 
-  bool get _showSidecarStatusBanner =>
-      (!_isDeveloperPlaybackRequested &&
-          (_isSidecarBusy ||
-              _sidecarPhase == _SidecarPhase.failed ||
-              (_openpilotOverlayMode && !_sidecarConnected) ||
-              (_openpilotOverlayMode && _overlayStaleActive)));
+  bool get _isSidecarHardBusy =>
+      _sidecarPhase == _SidecarPhase.deploying ||
+      _sidecarPhase == _SidecarPhase.starting ||
+      _sidecarPhase == _SidecarPhase.stopping;
 
-  String _sidecarStatusTitle() {
-    if (_sidecarPhase == _SidecarPhase.failed) return '사이드카 준비 실패';
-    if (_isSidecarBusy) return '사이드카 준비 중...';
-    if (_openpilotOverlayMode && !_sidecarConnected) {
-      return '사이드카 연결 대기 중...';
+  bool get _driveStatusIsError {
+    final cameraError = (_cameraError ?? '').trim();
+    if (cameraError.isNotEmpty) {
+      final lower = cameraError.toLowerCase();
+      final retryLike = cameraError.contains('재요청') ||
+          cameraError.contains('재동기화') ||
+          cameraError.contains('재시도');
+      if (!retryLike &&
+          !lower.startsWith('socket_failure:') &&
+          !cameraError.startsWith('네이티브 뷰어 오류: socket_failure:')) {
+        return true;
+      }
     }
-    if (_openpilotOverlayMode && _overlayStaleActive) {
-      return '오버레이 업데이트 지연';
-    }
-    if (_sidecarPhase == _SidecarPhase.running) return '사이드카 실행 중';
-    return '사이드카 비활성';
+    return _hudNoticeIsError;
   }
 
-  String? _sidecarStatusDetailMessage() {
-    if (_openpilotOverlayMode && _overlayStaleActive) {
-      final reason = _overlayStaleReason.trim();
-      if (reason.isEmpty) {
-        return '마지막 정상 스냅샷을 잠시 유지합니다.';
-      }
-      return '마지막 정상 스냅샷 유지 중 · $reason';
+  bool get _driveStatusIsReconnecting {
+    if (_shouldSuppressTransientReconnectBanner) {
+      return false;
     }
-    final message = (_sidecarPhaseMessage ?? '').trim();
-    if (message.isEmpty) {
+    if (_cameraAttachPendingBeforeFirstFrame &&
+        _cameraAttachPhase == _CameraAttachPhase.retrying) {
+      return true;
+    }
+    final cameraError = (_cameraError ?? '').trim();
+    if (cameraError.contains('재요청') ||
+        cameraError.contains('재동기화') ||
+        cameraError.contains('재시도')) {
+      return true;
+    }
+    if (_sidecarPhase == _SidecarPhase.running &&
+        _openpilotOverlayMode &&
+        !_sidecarConnected) {
+      return true;
+    }
+    return false;
+  }
+
+  bool get _shouldSuppressTransientReconnectBanner {
+    if (!_openpilotOverlayMode) return false;
+    if (_cameraAttachPhase != _CameraAttachPhase.retrying) return false;
+    if (_cameraAttachStartedUs <= 0) return false;
+    if (_lastCameraFrameId == null && !_hasRenderableOverlayFallback()) {
+      return false;
+    }
+    final elapsedUs = _renderClock.elapsedMicroseconds - _cameraAttachStartedUs;
+    return elapsedUs >= 0 && elapsedUs < 2500000;
+  }
+
+  bool get _shouldSuppressTransientGraphicsDelayedBanner {
+    if (!_openpilotOverlayMode || !_overlayStaleActive) return false;
+    if (_overlayStaleStartedUs <= 0) return false;
+    if (!_hasRenderableOverlayFallback()) return false;
+    if (!_overlayPublicationLooksHealthy(maxAgeUs: 2400000)) return false;
+    final elapsedUs = _renderClock.elapsedMicroseconds - _overlayStaleStartedUs;
+    return elapsedUs >= 0 && elapsedUs < 2200000;
+  }
+
+  bool get _shouldHoldRunningPhaseForTransientReconnect =>
+      _openpilotOverlayMode &&
+      _sidecarPhase == _SidecarPhase.running &&
+      (_lastCameraFrameId != null || _hasRenderableOverlayFallback());
+
+  bool get _driveStatusIsPreparing {
+    if (!_hudModeLoaded) return true;
+    if (_openpilotOverlayMode && !_sidecarConnected) return true;
+    if (_isSidecarHardBusy) return true;
+    if (_openpilotOverlayMode &&
+        _profileRequiresLiveRuntime(_currentSidecarProfile) &&
+        !_nativeCameraAttachReady) {
+      return true;
+    }
+    if (_cameraAttachPendingBeforeFirstFrame &&
+        !_shouldUseDegradedOverlayFallbackUi()) {
+      return true;
+    }
+    if (_openpilotOverlayMode &&
+        _cameraLoading &&
+        _nativeCameraAttachReady &&
+        _lastCameraFrameId == null &&
+        !_shouldUseDegradedOverlayFallbackUi()) {
+      return true;
+    }
+    return false;
+  }
+
+  _DriveBannerState? _currentDriveBannerState() {
+    if (_isDeveloperPlaybackRequested) {
       return null;
     }
-    return message;
+    if (_sidecarPhase == _SidecarPhase.failed || _driveStatusIsError) {
+      final cameraError = (_cameraError ?? '').trim();
+      final notice = (_hudNoticeMessage ?? '').trim();
+      final detail = cameraError.isNotEmpty
+          ? (cameraError.startsWith('네이티브 뷰어 오류:')
+              ? '카메라 연결에 문제가 있어 다시 시도하고 있습니다.'
+              : cameraError)
+          : (notice.isEmpty ? '주행 화면 연결을 복구하는 중입니다.' : notice);
+      return _DriveBannerState(
+        kind: _DriveBannerKind.error,
+        title: '연결 오류',
+        detail: detail,
+        icon: Icons.error_outline,
+        color: const Color(0xCC7A1010),
+      );
+    }
+    if (_driveStatusIsReconnecting) {
+      return const _DriveBannerState(
+        kind: _DriveBannerKind.reconnecting,
+        title: '재연결 중',
+        detail: '카메라 또는 그래픽 연결을 다시 시도하고 있습니다.',
+        icon: Icons.refresh_rounded,
+        color: Color(0xCC6A4312),
+      );
+    }
+    if (_openpilotOverlayMode &&
+        _overlayStaleActive &&
+        !_shouldSuppressTransientGraphicsDelayedBanner) {
+      return const _DriveBannerState(
+        kind: _DriveBannerKind.graphicsDelayed,
+        title: '그래픽 지연',
+        detail: '마지막 정상 그래픽을 유지한 채 갱신을 다시 시도하고 있습니다.',
+        icon: Icons.sync_problem_rounded,
+        color: Color(0xCC6A4312),
+      );
+    }
+    if (_driveStatusIsPreparing ||
+        _isSidecarHardBusy ||
+        (_openpilotOverlayMode && !_sidecarConnected)) {
+      String detail = '주행 데이터를 준비하는 중입니다.';
+      if (!_hudModeLoaded) {
+        detail = '주행 화면을 초기화하는 중입니다.';
+      } else if (_openpilotOverlayMode && !_sidecarConnected) {
+        detail = '주행 데이터를 연결하는 중입니다.';
+      } else if (_openpilotOverlayMode &&
+          _profileRequiresLiveRuntime(_currentSidecarProfile) &&
+          !_nativeCameraAttachReady) {
+        detail = '로드카메라와 그래픽을 준비하는 중입니다.';
+      } else if ((_cameraAttachPendingBeforeFirstFrame &&
+              !_shouldUseDegradedOverlayFallbackUi()) ||
+          (_openpilotOverlayMode &&
+              _cameraLoading &&
+              _nativeCameraAttachReady &&
+              _lastCameraFrameId == null &&
+              !_shouldUseDegradedOverlayFallbackUi())) {
+        detail = '로드카메라 첫 화면을 불러오는 중입니다.';
+      } else if (_isSidecarHardBusy &&
+          _profileRequiresLiveRuntime(_currentSidecarProfile)) {
+        detail = '로드카메라와 그래픽을 준비하는 중입니다.';
+      }
+      return _DriveBannerState(
+        kind: _DriveBannerKind.preparing,
+        title: '연결 준비 중',
+        detail: detail,
+        icon: Icons.hourglass_top_rounded,
+        color: const Color(0xCC4A2E12),
+      );
+    }
+    final notice = (_hudNoticeMessage ?? '').trim();
+    if (notice.isNotEmpty) {
+      return _DriveBannerState(
+        kind: _DriveBannerKind.notice,
+        title: '알림',
+        detail: notice,
+        icon: Icons.info_outline_rounded,
+        color: const Color(0xCC1E3A2A),
+      );
+    }
+    return null;
   }
 
-  IconData _sidecarStatusIcon() {
-    if (_sidecarPhase == _SidecarPhase.failed) {
-      return Icons.error_outline;
+  bool get _showSidecarStatusBanner => _currentDriveBannerState() != null;
+
+  String _sidecarStatusTitle() => _currentDriveBannerState()?.title ?? '대기 중';
+
+  String? _sidecarStatusDetailMessage() => _currentDriveBannerState()?.detail;
+
+  IconData _sidecarStatusIcon() =>
+      _currentDriveBannerState()?.icon ?? Icons.hourglass_top_rounded;
+
+  Color _sidecarStatusColor() =>
+      _currentDriveBannerState()?.color ?? const Color(0xCC1E3A2A);
+
+  bool get _shouldPresentRunningSidecarPhase {
+    if (!_openpilotOverlayMode) {
+      return false;
     }
-    if (_openpilotOverlayMode && _overlayStaleActive) {
-      return Icons.sync_problem_rounded;
+    if (_shouldHoldRunningPhaseForTransientReconnect) {
+      return true;
     }
-    if (_sidecarPhase == _SidecarPhase.stopping) {
-      return Icons.stop_circle_outlined;
+    if (_lastCameraFrameId != null) {
+      return true;
     }
-    if (_sidecarPhase == _SidecarPhase.running) {
-      return Icons.check_circle_outline;
+    if (_hasRenderableOverlayFallback()) {
+      return true;
     }
-    return Icons.hourglass_top_rounded;
+    return _sidecarHealthIndicatesGraphicsRuntimeReady(_sidecarHealthSnapshot);
   }
 
-  Color _sidecarStatusColor() {
-    if (_sidecarPhase == _SidecarPhase.failed) return const Color(0xCC7A1010);
-    if (_isSidecarBusy) return const Color(0xCC4A2E12);
-    if (_openpilotOverlayMode && _overlayStaleActive) {
-      return const Color(0xCC6A4312);
+  void _setOperationalSidecarPhase({
+    String? runningMessage,
+    String? waitingMessage,
+    String? idleMessage,
+    bool preferRunning = false,
+    bool clearHardBusy = false,
+  }) {
+    final canOverrideHardBusy = clearHardBusy &&
+        (_sidecarPhase == _SidecarPhase.starting ||
+            _sidecarPhase == _SidecarPhase.deploying);
+    if ((!canOverrideHardBusy && _isSidecarHardBusy) ||
+        _sidecarPhase == _SidecarPhase.failed) {
+      return;
     }
-    return const Color(0xCC1E3A2A);
+    if (!_openpilotOverlayMode) {
+      _setSidecarPhase(_SidecarPhase.idle, message: idleMessage);
+      return;
+    }
+    final shouldRun = preferRunning || _shouldPresentRunningSidecarPhase;
+    if (shouldRun) {
+      _setSidecarPhase(_SidecarPhase.running, message: runningMessage);
+      return;
+    }
+    final shouldVerify = _sidecarConnected ||
+        _nativeCameraAttachReady ||
+        _cameraAttachPendingBeforeFirstFrame ||
+        _cameraLoading ||
+        _profileRequiresLiveRuntime(_currentSidecarProfile);
+    if (shouldVerify) {
+      _setSidecarPhase(
+        _SidecarPhase.verifying,
+        message: waitingMessage ?? runningMessage,
+      );
+      return;
+    }
+    _setSidecarPhase(_SidecarPhase.idle, message: idleMessage);
+  }
+
+  void _setHardSidecarPhase(
+    _SidecarPhase phase, {
+    String? message,
+  }) {
+    assert(
+      phase == _SidecarPhase.idle ||
+          phase == _SidecarPhase.deploying ||
+          phase == _SidecarPhase.starting ||
+          phase == _SidecarPhase.stopping ||
+          phase == _SidecarPhase.failed,
+      'hard sidecar phase must be idle/deploying/starting/stopping/failed',
+    );
+    _setSidecarPhase(phase, message: message);
   }
 
   void _setSidecarPhase(
@@ -646,7 +828,15 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       _sidecarTransitioning = busy;
       return;
     }
-    if (_sidecarPhase != phase || _sidecarPhaseMessage != message) {
+    final oldPhase = _sidecarPhase;
+    final oldMessage = _sidecarPhaseMessage;
+    final suppressNoisyRunningTransition =
+        oldPhase == _SidecarPhase.running &&
+            phase == _SidecarPhase.running &&
+            _isNoisySteadyRunningPhaseMessage(oldMessage) &&
+            _isNoisySteadyRunningPhaseMessage(message);
+    if ((_sidecarPhase != phase || _sidecarPhaseMessage != message) &&
+        !suppressNoisyRunningTransition) {
       _appendDriveDiagEvent(
         'sidecar_phase',
         <String, dynamic>{
@@ -673,6 +863,13 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
         _cameraError = null;
       }
     }
+  }
+
+  bool _isNoisySteadyRunningPhaseMessage(String? message) {
+    final text = (message ?? '').trim();
+    if (text.isEmpty) return false;
+    return text == '사이드카 연결이 복구되었습니다.' ||
+        text == '카메라 스트림 연결이 확인되었습니다.';
   }
 
   Future<void> _waitForSidecarReady({
@@ -727,24 +924,37 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       }
       final reportedProfile =
           (health['profile'] ?? profile).toString().trim().toLowerCase();
-      final hudCoreFresh =
-          serviceFresh(health, 'selfdriveState') &&
+      final graphicsReady = health['graphicsReady'] == true ||
+          (serviceFresh(health, 'selfdriveState') &&
+              serviceFresh(health, 'liveCalibration') &&
+              serviceFresh(health, 'modelV2') &&
+              serviceFresh(health, expectedCameraService));
+      final vehicleReady = health['vehicleReady'] == true ||
+          (serviceFresh(health, 'selfdriveState') &&
               (SidecarService.profileOmitsCarState(reportedProfile) ||
-                  serviceFresh(health, 'carState'));
+                  serviceFresh(health, 'carState')));
+      final controlsReady = health['controlsReady'] == true ||
+          serviceFresh(health, 'controlsState');
+      final driveReady = health['driveReady'] == true ||
+          (graphicsReady && vehicleReady && controlsReady);
+      final fullReady = health['fullReady'] == true ||
+          (driveReady && serviceFresh(health, 'radarState'));
+      final hudCoreFresh = serviceFresh(health, 'selfdriveState') &&
+          (SidecarService.profileOmitsCarState(reportedProfile) ||
+              serviceFresh(health, 'carState'));
       if (!hudCoreFresh) {
         return false;
       }
-      if (!requiresLiveRuntime) {
-        return true;
+      if (SidecarService.profileRequiresFullRuntime(reportedProfile)) {
+        return fullReady;
       }
-      if (_healthRequiresC4SafeLiveStability(health) &&
-          (health['startupProtectionActive'] == true ||
-              health['radarReady'] != true ||
-              health['radarFreshStable'] != true)) {
-        return false;
+      if (SidecarService.profileProvidesVehicleRuntime(reportedProfile)) {
+        return driveReady;
       }
-      return serviceFresh(health, 'modelV2') &&
-          serviceFresh(health, expectedCameraService);
+      if (!SidecarService.profileProvidesGraphicsRuntime(reportedProfile)) {
+        return vehicleReady || hudCoreFresh;
+      }
+      return graphicsReady;
     }
 
     Future<Map<String, dynamic>> probeHealth() async {
@@ -776,10 +986,23 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
         if (reportedProfile.isNotEmpty && reportedProfile != expectedProfile) {
           throw Exception('health profile mismatch: $reportedProfile');
         }
-        final ready = requiresLiveRuntime
-            ? (health['ready'] == true ||
-                (health['hudReady'] == true && health['liveReady'] == true))
-            : (health['ready'] == true || health['hudReady'] == true);
+        final effectiveProfile =
+            reportedProfile.isEmpty ? expectedProfile : reportedProfile;
+        final driveReady = health['driveReady'] == true ||
+            ((health['graphicsReady'] == true) &&
+                (health['vehicleReady'] == true) &&
+                (health['controlsReady'] == true ||
+                    serviceFresh(health, 'controlsState')));
+        final ready = health['ready'] == true ||
+            (SidecarService.profileRequiresFullRuntime(effectiveProfile)
+                ? health['fullReady'] == true
+                : SidecarService.profileProvidesVehicleRuntime(effectiveProfile)
+                    ? driveReady
+                    : SidecarService.profileProvidesGraphicsRuntime(
+                            effectiveProfile)
+                        ? health['graphicsReady'] == true
+                        : (health['vehicleReady'] == true ||
+                            health['hudReady'] == true));
         if (!ready) {
           throw Exception('health not ready');
         }
@@ -995,9 +1218,8 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     );
     _beginStartupProvisionalSync(reason: 'sidecar_runtime_start');
     _pushSidecarHistory('AUTO_RUNTIME', 'start reason=$reason');
-    _setSidecarPhase(
-      _SidecarPhase.verifying,
-      message: '사이드카 런타임 상태를 확인하는 중입니다.',
+    _setOperationalSidecarPhase(
+      waitingMessage: '사이드카 런타임 상태를 확인하는 중입니다.',
     );
     if (mounted) {
       _safeSetState(() => _cameraLoading = !preserveVisibleNativeCamera);
@@ -1023,30 +1245,33 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
         health: _sidecarHealthSnapshot,
       );
       final requiresLiveRuntime = _profileRequiresLiveRuntime(desiredProfile);
-      final currentProfile =
+      final runningProfile =
           running && listening ? await _loadRunningSidecarProfile() : null;
       final reuseExistingRuntime = running &&
           listening &&
-          (currentProfile == desiredProfile ||
-              (currentProfile == null &&
+          (runningProfile == desiredProfile ||
+              (runningProfile == null &&
                   SidecarService.isBootstrapProfile(desiredProfile)));
       if (reuseExistingRuntime) {
         // Reuse the live runtime when possible, but still verify readiness
         // briefly so the first Stock attach does not race camera/live startup.
         _pushSidecarHistory(
           'AUTO_RUNTIME',
-          'reuse running/listening runtime profile=${currentProfile ?? desiredProfile}',
+          'reuse running/listening runtime profile=${runningProfile ?? desiredProfile}',
         );
         if (requiresLiveRuntime) {
           _startSidecarLoop();
         } else {
           _stopSidecarLoop(resetSession: true);
         }
-        _setSidecarPhase(
-          _SidecarPhase.running,
-          message: SidecarService.isBootstrapProfile(desiredProfile)
-              ? '주행 대기 중: HUD 전용 모드 유지 중'
+        _setOperationalSidecarPhase(
+          runningMessage: SidecarService.isBootstrapProfile(desiredProfile)
+              ? '주행 대기 중: ${_bootstrapModeLabel(desiredProfile)} 유지 중'
               : '사이드카 실행 중',
+          waitingMessage: SidecarService.isBootstrapProfile(desiredProfile)
+              ? '${_bootstrapModeLabel(desiredProfile)} 연결 확인 중...'
+              : '카메라 스트림 연결 확인 중...',
+          preferRunning: true,
         );
         try {
           await _waitForSidecarReady(
@@ -1069,20 +1294,26 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
         } catch (e) {
           _pushSidecarHistory('READY_DEFER', '$e');
           if (requiresLiveRuntime) {
-            _setSidecarPhase(
-              _SidecarPhase.running,
-              message: SidecarService.isBootstrapProfile(desiredProfile)
-                  ? 'HUD 전용 연결 대기 중...'
+            _setOperationalSidecarPhase(
+              runningMessage: SidecarService.isBootstrapProfile(desiredProfile)
+                  ? '${_bootstrapModeLabel(desiredProfile)} 연결 대기 중...'
                   : '카메라/그래픽 연결 대기 중...',
+              waitingMessage:
+                  SidecarService.isBootstrapProfile(desiredProfile)
+                      ? '${_bootstrapModeLabel(desiredProfile)} 연결 확인 중...'
+                      : '카메라 스트림 연결 확인 중...',
+              preferRunning: true,
             );
-            _scheduleSidecarRuntimeRecovery(reason: 'ready_deferred_reuse');
+            if (_shouldEscalateToSidecarRecovery(graphicsCritical: true)) {
+              _scheduleSidecarRuntimeRecovery(reason: 'ready_deferred_reuse');
+            }
           }
         }
       } else {
-        _setSidecarPhase(
+        _setHardSidecarPhase(
           _SidecarPhase.starting,
           message: SidecarService.isBootstrapProfile(desiredProfile)
-              ? '주행 대기 중: HUD 전용 모드 유지 중...'
+              ? '주행 대기 중: ${_bootstrapModeLabel(desiredProfile)} 유지 중...'
               : (running || listening ? '사이드카 런타임 복구 중...' : '사이드카 시작 중...'),
         );
         try {
@@ -1107,10 +1338,10 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
               startError: startError,
             );
             if (recoveredByBootstrap) {
-              _setSidecarPhase(
+              _setHardSidecarPhase(
                 _SidecarPhase.starting,
                 message: SidecarService.isBootstrapProfile(desiredProfile)
-                    ? '주행 대기 중: HUD 전용 모드 유지 중...'
+                    ? '주행 대기 중: ${_bootstrapModeLabel(desiredProfile)} 유지 중...'
                     : '사이드카 시작 중...',
               );
               await _sidecarService.start(
@@ -1129,16 +1360,16 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
           if (recoveredByBootstrap) {
             // no-op; startup recovered
           } else if (_LiveDriveCanvasScreenState._autoDeployDuringHudRuntime) {
-            _setSidecarPhase(
+            _setHardSidecarPhase(
               _SidecarPhase.deploying,
               message: '사이드카 배포/복구 중...',
             );
             await _sidecarService.deploy(ssh);
             _pushSidecarHistory('AUTO_DEPLOY', 'ok');
-            _setSidecarPhase(
+            _setHardSidecarPhase(
               _SidecarPhase.starting,
               message: SidecarService.isBootstrapProfile(desiredProfile)
-                  ? '주행 대기 중: HUD 전용 모드 유지 중...'
+                  ? '주행 대기 중: ${_bootstrapModeLabel(desiredProfile)} 유지 중...'
                   : '사이드카 시작 중...',
             );
             await _sidecarService.start(
@@ -1162,11 +1393,14 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
         } else {
           _stopSidecarLoop(resetSession: true);
         }
-        _setSidecarPhase(
-          _SidecarPhase.verifying,
-          message: SidecarService.isBootstrapProfile(desiredProfile)
-              ? 'HUD 전용 연결 확인 중...'
+        _setOperationalSidecarPhase(
+          runningMessage: SidecarService.isBootstrapProfile(desiredProfile)
+              ? '주행 대기 중: ${_bootstrapModeLabel(desiredProfile)} 유지 중'
+              : '사이드카 실행 중',
+          waitingMessage: SidecarService.isBootstrapProfile(desiredProfile)
+              ? '${_bootstrapModeLabel(desiredProfile)} 연결 확인 중...'
               : '카메라 스트림 연결 확인 중...',
+          clearHardBusy: true,
         );
         try {
           await _waitForSidecarReady(
@@ -1184,70 +1418,113 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
               unawaited(_loadCameraSource(force: true));
             }
           }
-          _setSidecarPhase(
-            _SidecarPhase.running,
-            message: SidecarService.isBootstrapProfile(desiredProfile)
-                ? '주행 대기 중: HUD 전용 모드 유지 중'
+          _setOperationalSidecarPhase(
+            runningMessage: SidecarService.isBootstrapProfile(desiredProfile)
+                ? '주행 대기 중: ${_bootstrapModeLabel(desiredProfile)} 유지 중'
                 : '사이드카 실행 중',
+            waitingMessage: SidecarService.isBootstrapProfile(desiredProfile)
+                ? '${_bootstrapModeLabel(desiredProfile)} 연결 확인 중...'
+                : '카메라 스트림 연결 확인 중...',
+            preferRunning: true,
+            clearHardBusy: true,
           );
         } catch (e) {
           _pushSidecarHistory('READY_DEFER', '$e');
-          _setSidecarPhase(
-            _SidecarPhase.running,
-            message: SidecarService.isBootstrapProfile(desiredProfile)
-                ? 'HUD 전용 연결 대기 중...'
+          _setOperationalSidecarPhase(
+            runningMessage: SidecarService.isBootstrapProfile(desiredProfile)
+                ? '${_bootstrapModeLabel(desiredProfile)} 연결 대기 중...'
                 : '사이드카 연결 대기 중...',
+            waitingMessage: SidecarService.isBootstrapProfile(desiredProfile)
+                ? '${_bootstrapModeLabel(desiredProfile)} 연결 확인 중...'
+                : '카메라 스트림 연결 확인 중...',
+            preferRunning: true,
+            clearHardBusy: true,
           );
-          if (requiresLiveRuntime) {
+          if (requiresLiveRuntime &&
+              _shouldEscalateToSidecarRecovery(graphicsCritical: true)) {
             _scheduleSidecarRuntimeRecovery(reason: 'ready_deferred');
           }
         }
       }
       await _refreshSidecarProcessStatus();
-      final keepBootstrapForC4 =
-          desiredProfile == SidecarService.c4HudBootstrapProfile &&
-              _healthUsesC4SafeBootstrap(_sidecarHealthSnapshot);
-      final downgradeLiveForC4 =
-          _shouldDowngradeLiveRuntimeForC4Safe(_sidecarHealthSnapshot);
-      if (keepBootstrapForC4) {
+      final activeProfile = _currentSidecarProfile;
+      final waitingForGraphics = _profileRequiresLiveRuntime(activeProfile) &&
+          !_sidecarHealthIndicatesGraphicsRuntimeReady(_sidecarHealthSnapshot);
+      final waitingForDriveRuntime =
+          SidecarService.profileProvidesVehicleRuntime(activeProfile) &&
+              !SidecarService.profileRequiresFullRuntime(activeProfile) &&
+              !_sidecarHealthIndicatesDriveRuntimeReady(_sidecarHealthSnapshot);
+      final waitingForFullRuntime =
+          SidecarService.profileRequiresFullRuntime(activeProfile) &&
+              !_sidecarHealthIndicatesFullRuntimeReady(_sidecarHealthSnapshot);
+      if (waitingForGraphics) {
         _pushSidecarHistory(
-          'C4_SAFE_HOLD',
-          'profile=p1 waiting radar startupProtection='
-              '${_sidecarHealthSnapshot['startupProtectionActive']} '
-              'radarFreshStable=${_sidecarHealthSnapshot['radarFreshStable']}',
+          'GRAPHICS_BOOTSTRAP_WAIT',
+          'profile=$activeProfile graphicsReady='
+              '${_sidecarHealthIndicatesGraphicsRuntimeReady(_sidecarHealthSnapshot)}',
         );
-        _setSidecarPhase(
-          _SidecarPhase.running,
-          message: 'c4 안정화 대기 중: HUD 전용 모드 유지 중',
+        _setOperationalSidecarPhase(
+          runningMessage: SidecarService.isBootstrapProfile(activeProfile)
+              ? '${_bootstrapModeLabel(activeProfile)} 연결 대기 중...'
+              : '카메라/그래픽 연결 대기 중...',
+          waitingMessage: SidecarService.isBootstrapProfile(activeProfile)
+              ? '${_bootstrapModeLabel(activeProfile)} 연결 확인 중...'
+              : '카메라 스트림 연결 확인 중...',
+          preferRunning: true,
         );
-        _scheduleSidecarRuntimeRecovery(
-          reason: 'c4_safe_bootstrap_hold',
-          minDelay: const Duration(milliseconds: 1200),
-          preferSooner: true,
-        );
-      } else if (downgradeLiveForC4) {
+        if (_shouldEscalateToSidecarRecovery(graphicsCritical: true)) {
+          _scheduleSidecarRuntimeRecovery(
+            reason: 'graphics_bootstrap_wait',
+            minDelay: const Duration(milliseconds: 1200),
+            preferSooner: true,
+          );
+        }
+      } else if (waitingForDriveRuntime) {
         _pushSidecarHistory(
-          'C4_SAFE_DOWNGRADE',
-          'profile=$_currentSidecarProfile startupProtection='
-              '${_sidecarHealthSnapshot['startupProtectionActive']} '
-              'radarFreshStable=${_sidecarHealthSnapshot['radarFreshStable']}',
+          'DRIVE_RUNTIME_WAIT',
+          'profile=$activeProfile carStateFresh='
+              '${_sidecarHealthServiceFresh(_sidecarHealthSnapshot, 'carState')} '
+              'controlsFresh=${_sidecarHealthServiceFresh(_sidecarHealthSnapshot, 'controlsState')}',
         );
-        _setSidecarPhase(
-          _SidecarPhase.running,
-          message: 'c4 런타임 안정화 재시도 중...',
+        _setOperationalSidecarPhase(
+          runningMessage: '차량 상태 연결을 다시 맞추는 중입니다.',
+          waitingMessage: '주행 데이터를 연결하는 중입니다.',
+          preferRunning: true,
         );
-        _scheduleSidecarRuntimeRecovery(
-          reason: 'c4_safe_live_unstable',
-          minDelay: const Duration(milliseconds: 900),
-          preferSooner: true,
+        if (_shouldEscalateToSidecarRecovery(vehicleCritical: true)) {
+          _scheduleSidecarRuntimeRecovery(
+            reason: 'drive_runtime_unstable',
+            minDelay: const Duration(milliseconds: 900),
+            preferSooner: true,
+          );
+        }
+      } else if (waitingForFullRuntime) {
+        _pushSidecarHistory(
+          'FULL_RUNTIME_WAIT',
+          'profile=$activeProfile carStateFresh='
+              '${_sidecarHealthServiceFresh(_sidecarHealthSnapshot, 'carState')} '
+              'controlsFresh=${_sidecarHealthServiceFresh(_sidecarHealthSnapshot, 'controlsState')} '
+              'radarFresh=${_sidecarHealthServiceFresh(_sidecarHealthSnapshot, 'radarState')}',
         );
+        _setOperationalSidecarPhase(
+          runningMessage: '고급 주행 상태를 다시 확인하는 중입니다.',
+          waitingMessage: '주행 데이터를 연결하는 중입니다.',
+          preferRunning: true,
+        );
+        if (_shouldEscalateToSidecarRecovery(fullCritical: true)) {
+          _scheduleSidecarRuntimeRecovery(
+            reason: 'full_runtime_unstable',
+            minDelay: const Duration(milliseconds: 900),
+            preferSooner: true,
+          );
+        }
       } else {
         _clearSidecarRecoverySchedule();
       }
       _suppressCameraErrors = false;
     } catch (e) {
       _pushSidecarHistory('FAIL', 'auto runtime: $e');
-      _setSidecarPhase(
+      _setHardSidecarPhase(
         _SidecarPhase.failed,
         message: '사이드카 준비가 지연되어 자동 복구를 재시도하는 중입니다.',
       );
@@ -1261,7 +1538,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     if (_sidecarAutoManaging) return;
     if (_LiveDriveCanvasScreenState._residentSidecarManaged && !force) {
       _pushSidecarHistory('AUTO_STOP_SKIP', 'resident sidecar mode');
-      _setSidecarPhase(_SidecarPhase.idle);
+      _setHardSidecarPhase(_SidecarPhase.idle);
       return;
     }
     _cancelDelayedSidecarStop();
@@ -1269,12 +1546,12 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     final ssh = _sshService ??
         (mounted ? Provider.of<SSHService>(context, listen: false) : null);
     if (ssh == null || !ssh.isConnected) {
-      _setSidecarPhase(_SidecarPhase.idle);
+      _setHardSidecarPhase(_SidecarPhase.idle);
       return;
     }
     _sidecarAutoManaging = true;
     _pushSidecarHistory('AUTO_STOP', 'start');
-    _setSidecarPhase(
+    _setHardSidecarPhase(
       _SidecarPhase.stopping,
       message: '사이드카 프로세스를 중지하는 중입니다.',
     );
@@ -1286,8 +1563,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       // Ignore stop errors during lifecycle transitions.
     } finally {
       _sidecarAutoManaging = false;
-      _setSidecarPhase(_SidecarPhase.idle);
+      _setHardSidecarPhase(_SidecarPhase.idle);
     }
   }
-
 }

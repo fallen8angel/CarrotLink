@@ -43,6 +43,91 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
     return out;
   }
 
+  String? _diagNormalizedPhaseMessage(String phase, String? message) {
+    final text = (message ?? '').trim();
+    if (text.isEmpty) return null;
+    if (phase == _SidecarPhase.running.name &&
+        (text == '사이드카 연결이 복구되었습니다.' || text == '카메라 스트림 연결이 확인되었습니다.')) {
+      return null;
+    }
+    return text;
+  }
+
+  Map<String, dynamic> _diagCameraRelaySummary(
+      Map<String, dynamic> sidecarHealth) {
+    final relay = _diagStringKeyMap(sidecarHealth['cameraRelay']);
+    final cameras = _diagStringKeyMap(relay['cameras']);
+    final road = _diagStringKeyMap(cameras['road']);
+    return <String, dynamic>{
+      'mode': relay['mode'],
+      'qualityMode': relay['qualityMode'],
+      'transport': relay['transport'],
+      'port': relay['port'],
+      'road': <String, dynamic>{
+        'service': road['service'],
+        'frames': road['frames'],
+        'lastFrameId': road['lastFrameId'],
+        'nullFrameIdCount': road['nullFrameIdCount'],
+        'lastFrameAgeMs': road['lastFrameAgeMs'],
+        'queueDrops': road['queueDrops'],
+        'sendDrops': road['sendDrops'],
+        'rawFrame': _diagStringKeyMap(road['rawFrame']),
+        'packedMeta': _diagStringKeyMap(road['packedMeta']),
+      },
+    };
+  }
+
+  String _diagNativeSyncMode(Map<String, dynamic> native) {
+    if (native['syntheticSyncActive'] == true) {
+      return 'synthetic';
+    }
+    final sourceFrameId = (native['lastSourceFrameId'] as num?)?.toInt() ?? -1;
+    if (sourceFrameId >= 0) {
+      return 'source';
+    }
+    return 'unknown';
+  }
+
+  String? _diagFrameIdRootCauseHint({
+    required Map<String, dynamic> native,
+    required Map<String, dynamic> sidecarHealth,
+    required Map<String, dynamic> serviceHealth,
+  }) {
+    final candidates = (native['sourceFrameCandidates'] ?? '').toString();
+    final parsedFrameIdRaw = (native['parsedFrameIdRaw'] ?? '').toString();
+    final relay = _diagCameraRelaySummary(sidecarHealth);
+    final relayRoad = _diagStringKeyMap(relay['road']);
+    final relayLastFrameId = (relayRoad['lastFrameId'] as num?)?.toInt() ?? -1;
+    final relayRawFrame = _diagStringKeyMap(relayRoad['rawFrame']);
+    final relayPackedMeta = _diagStringKeyMap(relayRoad['packedMeta']);
+    final relayRawFrameId = (relayRawFrame['frameId'] as num?)?.toInt() ?? -1;
+    final relayPackedFrameId =
+        (relayPackedMeta['frameId'] as num?)?.toInt() ?? -1;
+    final roadCameraState = _diagStringKeyMap(serviceHealth['roadCameraState']);
+    final roadCameraFrameId =
+        (roadCameraState['frameId'] as num?)?.toInt() ?? -1;
+    if (candidates.contains('frameId=null') &&
+        roadCameraFrameId >= 0 &&
+        relayRawFrameId < 0 &&
+        relayLastFrameId < 0) {
+      return 'roadCameraState.frameId는 있으나 cameraRelay raw frame 샘플과 lastFrameId가 비어 있습니다. relay producer가 받는 frame 객체 경계에서 frameId가 빠지는 쪽이 가장 유력합니다.';
+    }
+    if (candidates.contains('frameId=null') &&
+        relayRawFrameId >= 0 &&
+        relayPackedFrameId < 0) {
+      return 'cameraRelay raw frame 샘플에는 frameId가 있으나 packed meta에선 비어 있습니다. sidecar packet packing 경계를 확인해야 합니다.';
+    }
+    if (candidates.contains('frameId=null') &&
+        relayPackedFrameId >= 0 &&
+        parsedFrameIdRaw.contains('null')) {
+      return 'cameraRelay packed meta에는 frameId가 있으나 native가 파싱한 최근 meta.frameId는 null입니다. websocket packet 전달 또는 native parse 경계를 확인해야 합니다.';
+    }
+    if (candidates.contains('frameId=null') && roadCameraFrameId < 0) {
+      return 'camera service 자체에서 frameId가 비어 들어올 가능성이 있습니다.';
+    }
+    return null;
+  }
+
   String _driveDiagTimestampForFileName(DateTime now) {
     String two(int n) => n.toString().padLeft(2, '0');
     return '${now.year}${two(now.month)}${two(now.day)}_'
@@ -291,6 +376,8 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
     final nowUs = _renderClock.elapsedMicroseconds;
     _rollDriveDiagStaleWindow(nowUs);
     final native = _lastNativeCameraDiag;
+    final sidecarHealth = _diagStringKeyMap(_sidecarHealthSnapshot);
+    final serviceHealth = _selectedSidecarServiceHealth();
     final syncGapSamples = _driveDiagSyncGapSamplesWindow;
     final interpSamples = _driveDiagInterpSamplesWindow;
     _appendDriveDiagEvent(
@@ -307,6 +394,9 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
           'lastFrameId': _lastCameraFrameId,
           'frameEventsWindow': _driveDiagCameraFrameEventsWindow,
           'native': native,
+          'syncMode': native == null
+              ? 'unknown'
+              : _diagNativeSyncMode(_diagStringKeyMap(native)),
         },
         'overlay': <String, dynamic>{
           'fps': double.parse(_overlayDebugFps.toStringAsFixed(2)),
@@ -353,22 +443,34 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
         'sidecar': <String, dynamic>{
           'connected': _sidecarConnected,
           'phase': _sidecarPhase.name,
-          'phaseMessage': _sidecarPhaseMessage,
-          'profile': _sidecarHealthSnapshot['profile'] ??
-              _sidecarProfileSnapshot['profile'],
-          'variant': _sidecarHealthSnapshot['variant'] ??
+          'phaseMessage': _diagNormalizedPhaseMessage(
+              _sidecarPhase.name, _sidecarPhaseMessage),
+          'phaseMessageRaw': _sidecarPhaseMessage,
+          'profile':
+              sidecarHealth['profile'] ?? _sidecarProfileSnapshot['profile'],
+          'variant': sidecarHealth['variant'] ??
               _sidecarProfileSnapshot['variant'] ??
               _sidecarVariantHint,
-          'repoFlavor': _sidecarHealthSnapshot['repoFlavor'] ??
+          'repoFlavor': sidecarHealth['repoFlavor'] ??
               _sidecarProfileSnapshot['repoFlavor'] ??
               _sidecarRepoFlavorHint,
-          'startupProtectionActive':
-              _sidecarHealthSnapshot['startupProtectionActive'],
-          'radarReady': _sidecarHealthSnapshot['radarReady'],
-          'radarFreshStable': _sidecarHealthSnapshot['radarFreshStable'],
-          'staleReasons': _diagList(_sidecarHealthSnapshot['staleReasons']),
-          'missingFields': _diagList(_sidecarHealthSnapshot['missingFields']),
-          'serviceHealth': _selectedSidecarServiceHealth(),
+          'startupProtectionActive': sidecarHealth['startupProtectionActive'],
+          'radarReady': sidecarHealth['radarReady'],
+          'radarFreshStable': sidecarHealth['radarFreshStable'],
+          'radarExpected': SidecarService.profileRequiresFullRuntime(
+              (sidecarHealth['profile'] ?? _sidecarProfileSnapshot['profile'])
+                  ?.toString()),
+          'staleReasons': _diagList(sidecarHealth['staleReasons']),
+          'missingFields': _diagList(sidecarHealth['missingFields']),
+          'serviceHealth': serviceHealth,
+          'cameraRelay': _diagCameraRelaySummary(sidecarHealth),
+          'frameIdRootCauseHint': native == null
+              ? null
+              : _diagFrameIdRootCauseHint(
+                  native: _diagStringKeyMap(native),
+                  sidecarHealth: sidecarHealth,
+                  serviceHealth: serviceHealth,
+                ),
         },
         'logFile': _driveDiagFilePath,
       },
@@ -409,10 +511,13 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
             _sidecarVariantHint)
         .toString()
         .trim();
-    final activeProfile = (sidecarHealth['profile'] ?? sidecarProfile['profile'])
-        .toString()
-        .trim()
-        .toLowerCase();
+    final activeProfile =
+        (sidecarHealth['profile'] ?? sidecarProfile['profile'])
+            .toString()
+            .trim()
+            .toLowerCase();
+    final serviceHealth = _selectedSidecarServiceHealth();
+    final nativeCameraDiag = _diagStringKeyMap(_lastNativeCameraDiag);
     return <String, dynamic>{
       'capturedAt': DateTime.now().toIso8601String(),
       'hostIp': _hostIp,
@@ -434,6 +539,7 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
         'error': _cameraError,
         'lastFrameId': _lastCameraFrameId,
         'lastFrameAgeMs': lastFrameAgeMs,
+        'syncMode': _diagNativeSyncMode(nativeCameraDiag),
         'sourceSize': <String, dynamic>{
           'width': _cameraSourceSize.width.round(),
           'height': _cameraSourceSize.height.round(),
@@ -450,16 +556,26 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
       'sidecar': <String, dynamic>{
         'connected': _sidecarConnected,
         'phase': _sidecarPhase.name,
-        'phaseMessage': _sidecarPhaseMessage,
+        'phaseMessage': _diagNormalizedPhaseMessage(
+            _sidecarPhase.name, _sidecarPhaseMessage),
+        'phaseMessageRaw': _sidecarPhaseMessage,
         'profile': sidecarHealth['profile'] ?? sidecarProfile['profile'],
         'variant': variant,
         'repoFlavor': repoFlavor,
         'startupProtectionActive': sidecarHealth['startupProtectionActive'],
         'radarReady': sidecarHealth['radarReady'],
         'radarFreshStable': sidecarHealth['radarFreshStable'],
+        'radarExpected':
+            SidecarService.profileRequiresFullRuntime(activeProfile),
         'staleReasons': _diagList(sidecarHealth['staleReasons']),
         'missingFields': _diagList(sidecarHealth['missingFields']),
-        'serviceHealth': _selectedSidecarServiceHealth(),
+        'serviceHealth': serviceHealth,
+        'cameraRelay': _diagCameraRelaySummary(sidecarHealth),
+        'frameIdRootCauseHint': _diagFrameIdRootCauseHint(
+          native: nativeCameraDiag,
+          sidecarHealth: sidecarHealth,
+          serviceHealth: serviceHealth,
+        ),
         'process': Map<String, String>.from(_sidecarProcessSnapshot),
       },
       'logs': <String, dynamic>{

@@ -33,14 +33,6 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
         if (!_sidecarConnected) {
           unawaited(_ensureSidecarRuntime(reason: 'resume_quick'));
         } else {
-          _setSidecarPhase(
-            _lastCameraFrameId != null
-                ? _SidecarPhase.running
-                : _SidecarPhase.verifying,
-            message: _lastCameraFrameId != null
-                ? '사이드카 실행 중'
-                : '복귀 후 첫 프레임을 확인하는 중입니다.',
-          );
           if (_nativeCameraViewId == null || _cameraSourceKey == null) {
             _setNativeCameraAttachReady(true);
             _beginStartupProvisionalSync(reason: 'resume_quick_camera_attach');
@@ -142,7 +134,7 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
         _sidecarProcessStopTimer = null;
         final shouldStop = _cameraSuspendedByLifecycle;
         if (!shouldStop) return;
-        _setSidecarPhase(
+        _setHardSidecarPhase(
           _SidecarPhase.stopping,
           message: '백그라운드 유지 시간이 지나 사이드카를 중지합니다.',
         );
@@ -169,7 +161,7 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
         final shouldStop =
             !_openpilotOverlayMode && !_cameraSuspendedByLifecycle;
         if (!shouldStop) return;
-        _setSidecarPhase(
+        _setHardSidecarPhase(
           _SidecarPhase.stopping,
           message: '유휴 시간이 지나 사이드카를 중지합니다.',
         );

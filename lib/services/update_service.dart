@@ -321,21 +321,80 @@ class UpdateService extends ChangeNotifier {
     return null;
   }
 
+  Future<List<String>> _candidateUpdateFilePaths(Object? tagName) async {
+    final tag = (tagName ?? '').toString().trim();
+    if (tag.isEmpty) {
+      return <String>[];
+    }
+    final paths = <String>[];
+    final seen = <String>{};
+
+    void addPath(String path) {
+      final normalized = path.trim();
+      if (normalized.isEmpty || !seen.add(normalized)) {
+        return;
+      }
+      paths.add(normalized);
+    }
+
+    addPath('/storage/emulated/0/Download/CarrotLink/update_$tag.apk');
+
+    final extDir = await getExternalStorageDirectory();
+    if (extDir != null) {
+      addPath('${extDir.path}/update_$tag.apk');
+    }
+
+    final docsDir = await getApplicationDocumentsDirectory();
+    addPath('${docsDir.path}/update_$tag.apk');
+
+    return paths;
+  }
+
+  Future<Directory> _resolveUpdateDownloadDir() async {
+    final preferred = Directory('/storage/emulated/0/Download/CarrotLink');
+    try {
+      if (!await preferred.exists()) {
+        await preferred.create(recursive: true);
+      }
+      if (await preferred.exists()) {
+        return preferred;
+      }
+    } catch (_) {}
+
+    final extDir = await getExternalStorageDirectory();
+    if (extDir != null) {
+      try {
+        if (!await extDir.exists()) {
+          await extDir.create(recursive: true);
+        }
+        if (await extDir.exists()) {
+          return extDir;
+        }
+      } catch (_) {}
+    }
+
+    final docsDir = await getApplicationDocumentsDirectory();
+    if (!await docsDir.exists()) {
+      await docsDir.create(recursive: true);
+    }
+    return docsDir;
+  }
+
   Future<void> _checkExistingFile(Map<String, dynamic> releaseData) async {
     final tagName = releaseData['tag_name'];
-    final dir = await getExternalStorageDirectory() ??
-        await getApplicationDocumentsDirectory();
-    final filePath = "${dir.path}/update_$tagName.apk";
-    final file = File(filePath);
-    if (await file.exists()) {
-      _downloadedFilePath = filePath;
-      _statusMessage = "다운로드 완료";
-      _downloadProgress = 1.0;
-    } else {
-      _downloadedFilePath = null;
-      _downloadProgress = 0.0;
-      _statusMessage = "";
+    final candidatePaths = await _candidateUpdateFilePaths(tagName);
+    for (final filePath in candidatePaths) {
+      final file = File(filePath);
+      if (await file.exists()) {
+        _downloadedFilePath = filePath;
+        _statusMessage = "다운로드 완료";
+        _downloadProgress = 1.0;
+        return;
+      }
     }
+    _downloadedFilePath = null;
+    _downloadProgress = 0.0;
+    _statusMessage = "";
   }
 
   Future<void> downloadUpdate() async {
@@ -367,8 +426,7 @@ class UpdateService extends ChangeNotifier {
     IOSink? sink;
     try {
       final tagName = _latestRelease!['tag_name'];
-      final dir = await getExternalStorageDirectory() ??
-          await getApplicationDocumentsDirectory();
+      final dir = await _resolveUpdateDownloadDir();
       await dir.create(recursive: true);
       final filePath = "${dir.path}/update_$tagName.apk";
       final file = File(filePath);

@@ -12,7 +12,9 @@ class SidecarService {
   static final SidecarService shared = SidecarService();
   static const String hudBootstrapProfile = 'p1';
   static const String c4HudBootstrapProfile = 'p1c4';
-  static const String driveRuntimeProfile = 'p2';
+  static const String c4DriveRuntimeProfile = 'p2c4';
+  static const String driveRuntimeProfile = 'p2d';
+  static const String fullRuntimeProfile = 'p2';
 
   SidecarService({DiagnosticsService? diagnostics})
       : _diag = diagnostics ?? DiagnosticsService.instance;
@@ -69,6 +71,8 @@ class SidecarService {
     'p0',
     'p1',
     c4HudBootstrapProfile,
+    c4DriveRuntimeProfile,
+    driveRuntimeProfile,
     'p2',
     'p3',
     'p4',
@@ -100,7 +104,7 @@ class SidecarService {
     required String variant,
     required String repoFlavor,
   }) {
-    return variant == c4SafeVariant && repoFlavor == repoFlavorC4
+    return repoFlavor == repoFlavorC4
         ? c4HudBootstrapProfile
         : hudBootstrapProfile;
   }
@@ -131,8 +135,55 @@ class SidecarService {
     }
   }
 
-  static bool profileOmitsCarState(String? profile) =>
+  static bool isC4GraphicsBootstrapProfile(String? profile) =>
       (profile ?? '').trim().toLowerCase() == c4HudBootstrapProfile;
+
+  static bool profileProvidesGraphicsRuntime(String? profile) {
+    switch ((profile ?? '').trim().toLowerCase()) {
+      case c4HudBootstrapProfile:
+      case c4DriveRuntimeProfile:
+      case driveRuntimeProfile:
+      case fullRuntimeProfile:
+      case 'p3':
+      case 'p4':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  static bool profileProvidesVehicleRuntime(String? profile) {
+    switch ((profile ?? '').trim().toLowerCase()) {
+      case c4DriveRuntimeProfile:
+      case driveRuntimeProfile:
+      case fullRuntimeProfile:
+      case 'p3':
+      case 'p4':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  static bool profileRequiresFullRuntime(String? profile) {
+    switch ((profile ?? '').trim().toLowerCase()) {
+      case fullRuntimeProfile:
+      case 'p3':
+      case 'p4':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  static bool profileOmitsCarState(String? profile) =>
+      isC4GraphicsBootstrapProfile(profile);
+
+  static String driveRuntimeProfileForFlavor(String? repoFlavor) {
+    return (repoFlavor ?? '').trim().toLowerCase() == repoFlavorC4
+        ? c4DriveRuntimeProfile
+        : driveRuntimeProfile;
+  }
 
   String _normalizeVariant(String? variant) {
     final normalized = (variant ?? '').trim().toLowerCase();
@@ -247,15 +298,34 @@ curl -fsS --max-time 1 "http://127.0.0.1:\$SIDE_PORT/health" 2>/dev/null || true
         variant != normalizedExpectedVariant) {
       return false;
     }
-    if (isBootstrapProfile(profile)) {
-      return health['hudReady'] == true;
-    }
     final freshVisionCore = serviceFresh('modelV2') &&
+        serviceFresh('liveCalibration') &&
         (serviceFresh('roadCameraState') ||
             serviceFresh('wideRoadCameraState'));
-    return health['hudReady'] == true &&
-        health['liveReady'] == true &&
-        (health['cameraReady'] == true || freshVisionCore);
+    final graphicsReady = health['graphicsReady'] == true ||
+        (health['liveReady'] == true &&
+            (health['cameraReady'] == true || freshVisionCore));
+    final vehicleReady = health['vehicleReady'] == true ||
+        (health['hudReady'] == true && serviceFresh('carState'));
+    final controlsReady =
+        health['controlsReady'] == true || serviceFresh('controlsState');
+    final driveReady = health['driveReady'] == true ||
+        (graphicsReady && vehicleReady && controlsReady);
+    final fullReady = health['fullReady'] == true ||
+        (driveReady && serviceFresh('radarState'));
+    if (profileRequiresFullRuntime(profile)) {
+      return fullReady;
+    }
+    if (profileProvidesVehicleRuntime(profile)) {
+      return driveReady;
+    }
+    if (profileProvidesGraphicsRuntime(profile)) {
+      return graphicsReady;
+    }
+    if (isBootstrapProfile(profile)) {
+      return vehicleReady || health['hudReady'] == true;
+    }
+    return fullReady;
   }
 
   Future<bool> _isClientReachable(
@@ -367,6 +437,11 @@ variant = str(health.get("variant") or "default").strip().lower()
 if expect_variant and variant != expect_variant:
     raise SystemExit(1)
 hud_ready = health.get("hudReady") is True
+graphics_ready = health.get("graphicsReady") is True
+vehicle_ready = health.get("vehicleReady") is True
+full_ready = health.get("fullReady") is True
+controls_ready = health.get("controlsReady") is True
+drive_ready = health.get("driveReady") is True
 live_ready = health.get("liveReady") is True
 camera_ready = health.get("cameraReady") is True
 service_health = health.get("serviceHealth") or {}
@@ -375,15 +450,22 @@ def service_fresh(name: str) -> bool:
     raw = service_health.get(name)
     return isinstance(raw, dict) and raw.get("isFresh") is True
 
-fresh_vision_core = service_fresh("modelV2") and (
+fresh_vision_core = service_fresh("modelV2") and service_fresh("liveCalibration") and (
     service_fresh("roadCameraState") or service_fresh("wideRoadCameraState")
 )
+graphics_ready = graphics_ready or (live_ready and (camera_ready or fresh_vision_core))
+vehicle_ready = vehicle_ready or (hud_ready and service_fresh("carState"))
+controls_ready = controls_ready or service_fresh("controlsState")
+drive_ready = drive_ready or (graphics_ready and vehicle_ready and controls_ready)
+full_ready = full_ready or (drive_ready and service_fresh("radarState"))
 
 if profile in ("p2", "p3", "p4"):
-    raise SystemExit(
-        0 if (hud_ready and live_ready and (camera_ready or fresh_vision_core)) else 1
-    )
-raise SystemExit(0 if hud_ready else 1)
+    raise SystemExit(0 if full_ready else 1)
+if profile in ("p2d", "p2c4"):
+    raise SystemExit(0 if drive_ready else 1)
+if profile in ("p1c4",):
+    raise SystemExit(0 if graphics_ready else 1)
+raise SystemExit(0 if (vehicle_ready or hud_ready) else 1)
 PY
 }
 
@@ -706,15 +788,16 @@ printf 'flavor=%s\n' ${_q(repoFlavorUnknown)}
     return revision;
   }
 
-  Future<String?> remoteRevision(SSHService ssh) async {
+  Future<String?> remoteRevision(SSHService ssh, {String? remoteBase}) async {
     if (!ssh.isConnected) {
       throw Exception('기기와 연결되어 있지 않습니다.');
     }
-    final remoteBase = await _resolveRemoteBase(ssh, strict: false);
+    final resolvedRemoteBase =
+        remoteBase ?? await _resolveRemoteBase(ssh, strict: false);
     final result = await ssh.executeCommandResult(
       _bash(
         '''
-BASE=${_q(remoteBase)}
+BASE=${_q(resolvedRemoteBase)}
 REV_FILE="\$BASE/$_revisionFileName"
 if [ -f "\$REV_FILE" ]; then
   tr -d '\r' < "\$REV_FILE" | head -n 1
@@ -740,6 +823,82 @@ fi
     final rev = result.output.trim();
     if (rev.isEmpty) return null;
     return rev;
+  }
+
+  Future<bool> _remoteDeployArtifactsReady(
+    SSHService ssh, {
+    required String remoteBase,
+  }) async {
+    final result = await ssh.executeCommandResult(
+      _bash(
+        '''
+BASE=${_q(remoteBase)}
+PY_FILE="\$BASE/$_pythonFileName"
+SH_FILE="\$BASE/$_runScriptName"
+if [ -f "\$PY_FILE" ] && [ -f "\$SH_FILE" ] && [ -x "\$PY_FILE" ] && [ -x "\$SH_FILE" ]; then
+  echo "SIDECAR_ARTIFACTS_READY"
+fi
+''',
+      ),
+      timeout: const Duration(seconds: 8),
+    );
+    return result.isSuccess &&
+        result.output
+            .split('\n')
+            .map((line) => line.trim())
+            .contains('SIDECAR_ARTIFACTS_READY');
+  }
+
+  Future<String> _ensureMsgpackReady(
+    SSHService ssh, {
+    required String remoteBase,
+  }) async {
+    final msgpackInstall = await ssh.executeCommandResult(
+      _bash(
+        '''
+BASE=${_q(remoteBase)}
+PYDEPS="\$BASE/$_pythonDepsFolderName"
+mkdir -p "\$PYDEPS"
+
+check_msgpack() {
+  TARGET_DIR="\$1"
+  PYTHONPATH="\$TARGET_DIR" python3 - "\$TARGET_DIR" <<'PY'
+import os
+import sys
+
+try:
+    import msgpack
+except Exception:
+    raise SystemExit(1)
+
+target_dir = os.path.abspath(sys.argv[1])
+module_path = os.path.abspath(getattr(msgpack, "__file__", ""))
+if not module_path.startswith(target_dir + os.sep):
+    raise SystemExit(1)
+
+print(f"MSGPACK_OK version={getattr(msgpack, '__version__', '?')} path={module_path}")
+PY
+}
+
+if check_msgpack "\$PYDEPS"; then
+  echo "MSGPACK_STATUS already_ready"
+else
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "MSGPACK_STATUS python3_missing"
+    exit 21
+  fi
+  python3 -m pip install --disable-pip-version-check --no-input --target "\$PYDEPS" --upgrade msgpack
+  check_msgpack "\$PYDEPS"
+  echo "MSGPACK_STATUS installed"
+fi
+''',
+      ),
+      timeout: const Duration(minutes: 3),
+    );
+    if (!msgpackInstall.isSuccess) {
+      throw Exception('msgpack 설치 실패: ${msgpackInstall.output}');
+    }
+    return msgpackInstall.output.trim();
   }
 
   Future<void> ensureRunning(
@@ -1385,14 +1544,7 @@ echo "\$BASE"
     await _maybeCleanupLegacyInstall(ssh);
     _diag.info('sidecar', 'Deploy start');
     final remoteBase = await _resolveRemoteBase(ssh);
-    final py =
-        _toUnixText(await rootBundle.loadString('assets/sidecar/sidecar.py'));
-    final sh =
-        _toUnixText(await rootBundle.loadString('assets/sidecar/sidecar.sh'));
-    final revision = _buildRevisionFromTexts(
-      sidecarPy: py,
-      runScript: sh,
-    );
+    final revision = await localRevision();
 
     final mkdir = await ssh.executeCommandResult(
       _bash(
@@ -1407,6 +1559,29 @@ mkdir -p "\$BASE" "\$BASE/logs" "\$BASE/$_pythonDepsFolderName"
       throw Exception('배포 경로 생성 실패: ${mkdir.output}');
     }
 
+    final remoteRevisionValue = await remoteRevision(
+      ssh,
+      remoteBase: remoteBase,
+    ).catchError((_) => null);
+    final reuseExistingArtifacts = remoteRevisionValue == revision &&
+        await _remoteDeployArtifactsReady(ssh, remoteBase: remoteBase);
+    if (reuseExistingArtifacts) {
+      final msgpackStatus = await _ensureMsgpackReady(
+        ssh,
+        remoteBase: remoteBase,
+      );
+      _diag.info(
+        'sidecar',
+        'Deploy skipped base=$remoteBase rev=${shortRevision(revision)}',
+      );
+      return '배포 생략: 최신 파일 유지 $remoteBase '
+          '(rev=${shortRevision(revision)})\n$msgpackStatus';
+    }
+
+    final py =
+        _toUnixText(await rootBundle.loadString('assets/sidecar/sidecar.py'));
+    final sh =
+        _toUnixText(await rootBundle.loadString('assets/sidecar/sidecar.sh'));
     await ssh.writeTextFile('$remoteBase/$_pythonFileName', py);
     await ssh.writeTextFile('$remoteBase/$_runScriptName', sh);
     await ssh.writeTextFile('$remoteBase/$_revisionFileName', '$revision\n');
@@ -1424,55 +1599,14 @@ chmod 755 "\$BASE/$_runScriptName" "\$BASE/$_pythonFileName"
       throw Exception('실행 권한 설정 실패: ${chmod.output}');
     }
 
-    final msgpackInstall = await ssh.executeCommandResult(
-      _bash(
-        '''
-BASE=${_q(remoteBase)}
-PYDEPS="\$BASE/$_pythonDepsFolderName"
-mkdir -p "\$PYDEPS"
-
-check_msgpack() {
-  TARGET_DIR="\$1"
-  PYTHONPATH="\$TARGET_DIR" python3 - "\$TARGET_DIR" <<'PY'
-import os
-import sys
-
-try:
-    import msgpack
-except Exception:
-    raise SystemExit(1)
-
-target_dir = os.path.abspath(sys.argv[1])
-module_path = os.path.abspath(getattr(msgpack, "__file__", ""))
-if not module_path.startswith(target_dir + os.sep):
-    raise SystemExit(1)
-
-print(f"MSGPACK_OK version={getattr(msgpack, '__version__', '?')} path={module_path}")
-PY
-}
-
-if check_msgpack "\$PYDEPS"; then
-  echo "MSGPACK_STATUS already_ready"
-else
-  if ! command -v python3 >/dev/null 2>&1; then
-    echo "MSGPACK_STATUS python3_missing"
-    exit 21
-  fi
-  python3 -m pip install --disable-pip-version-check --no-input --target "\$PYDEPS" --upgrade msgpack
-  check_msgpack "\$PYDEPS"
-  echo "MSGPACK_STATUS installed"
-fi
-''',
-      ),
-      timeout: const Duration(minutes: 3),
+    final msgpackStatus = await _ensureMsgpackReady(
+      ssh,
+      remoteBase: remoteBase,
     );
-    if (!msgpackInstall.isSuccess) {
-      throw Exception('msgpack 설치 실패: ${msgpackInstall.output}');
-    }
 
     _diag.info('sidecar', 'Deploy success base=$remoteBase');
     return '배포 완료: $remoteBase (rev=${shortRevision(revision)})\n'
-        '${msgpackInstall.output.trim()}';
+        '$msgpackStatus';
   }
 
   Future<String> start(
@@ -1488,38 +1622,39 @@ fi
 
     final hostKey = (ssh.connectedIp ?? ssh.targetIp ?? 'connected').trim();
     return _withHostStartBarrier(hostKey, () async {
-    final remoteBase = await _resolveRemoteBase(ssh);
-    final normalizedVariant = _normalizeVariant(
-      variant ?? await _resolveSidecarVariant(ssh, remoteBase: remoteBase),
-    );
-    final normalizedRepoFlavor = _normalizeRepoFlavor(
-      repoFlavor ?? await _resolveRemoteRepoFlavor(ssh, remoteBase: remoteBase),
-    );
-    final normalizedProfile = _resolveRequestedProfile(
-      profile,
-      variant: normalizedVariant,
-      repoFlavor: normalizedRepoFlavor,
-    );
-    final switched = await _switchProfileInPlace(
-      ssh,
-      port: port,
-      profile: normalizedProfile,
-      expectedVariant: normalizedVariant,
-    );
-    if (switched != null) {
-      _diag.info('sidecar', 'Start reused output=$switched');
-      return switched;
-    }
-    _diag.info(
-      'sidecar',
-      'Start request profile=$normalizedProfile variant=$normalizedVariant '
-          'repoFlavor=$normalizedRepoFlavor '
-          'port=$port',
-    );
-    final result = await ssh.executeCommandResult(
-      _bash(
-        // ignore: unnecessary_string_escapes
-        '''
+      final remoteBase = await _resolveRemoteBase(ssh);
+      final normalizedVariant = _normalizeVariant(
+        variant ?? await _resolveSidecarVariant(ssh, remoteBase: remoteBase),
+      );
+      final normalizedRepoFlavor = _normalizeRepoFlavor(
+        repoFlavor ??
+            await _resolveRemoteRepoFlavor(ssh, remoteBase: remoteBase),
+      );
+      final normalizedProfile = _resolveRequestedProfile(
+        profile,
+        variant: normalizedVariant,
+        repoFlavor: normalizedRepoFlavor,
+      );
+      final switched = await _switchProfileInPlace(
+        ssh,
+        port: port,
+        profile: normalizedProfile,
+        expectedVariant: normalizedVariant,
+      );
+      if (switched != null) {
+        _diag.info('sidecar', 'Start reused output=$switched');
+        return switched;
+      }
+      _diag.info(
+        'sidecar',
+        'Start request profile=$normalizedProfile variant=$normalizedVariant '
+            'repoFlavor=$normalizedRepoFlavor '
+            'port=$port',
+      );
+      final result = await ssh.executeCommandResult(
+        _bash(
+          // ignore: unnecessary_string_escapes
+          '''
 BASE=${_q(remoteBase)}
 SESSION=${_q(_sessionName)}
 PROFILE=${_q(normalizedProfile)}
@@ -1602,6 +1737,11 @@ if expect_variant and variant != expect_variant:
     raise SystemExit(1)
 
 hud_ready = health.get("hudReady") is True
+graphics_ready = health.get("graphicsReady") is True
+vehicle_ready = health.get("vehicleReady") is True
+full_ready = health.get("fullReady") is True
+controls_ready = health.get("controlsReady") is True
+drive_ready = health.get("driveReady") is True
 live_ready = health.get("liveReady") is True
 camera_ready = health.get("cameraReady") is True
 service_health = health.get("serviceHealth") or {}
@@ -1610,25 +1750,22 @@ def service_fresh(name: str) -> bool:
     raw = service_health.get(name)
     return isinstance(raw, dict) and raw.get("isFresh") is True
 
-fresh_vision_core = service_fresh("modelV2") and (
+fresh_vision_core = service_fresh("modelV2") and service_fresh("liveCalibration") and (
     service_fresh("roadCameraState") or service_fresh("wideRoadCameraState")
 )
+graphics_ready = graphics_ready or (live_ready and (camera_ready or fresh_vision_core))
+vehicle_ready = vehicle_ready or (hud_ready and service_fresh("carState"))
+controls_ready = controls_ready or service_fresh("controlsState")
+drive_ready = drive_ready or (graphics_ready and vehicle_ready and controls_ready)
+full_ready = full_ready or (drive_ready and service_fresh("radarState"))
 
 if profile in ("p2", "p3", "p4"):
-    if (
-        variant == ${jsonEncode(c4SafeVariant)}
-        and repo_flavor == ${jsonEncode(repoFlavorC4)}
-        and (
-            startup_protection_active
-            or not radar_ready
-            or not radar_fresh_stable
-        )
-    ):
-        raise SystemExit(1)
-    raise SystemExit(
-        0 if (hud_ready and live_ready and (camera_ready or fresh_vision_core)) else 1
-    )
-raise SystemExit(0 if hud_ready else 1)
+    raise SystemExit(0 if full_ready else 1)
+if profile in ("p2d", "p2c4"):
+    raise SystemExit(0 if drive_ready else 1)
+if profile == "p1c4":
+    raise SystemExit(0 if graphics_ready else 1)
+raise SystemExit(0 if (vehicle_ready or hud_ready) else 1)
 PY
 }
 
@@ -1732,15 +1869,15 @@ SIDE_PORT_PIDS=\$(port_pids "\$PORT" | tr '\n' ',' | sed 's/,\$//' || true)
 echo "SIDECAR_STARTED profile=\$PROFILE variant=\$VARIANT port=\$PORT base=\$BASE"
 echo "sidecar_port_pids=\$SIDE_PORT_PIDS"
 ''',
-      ),
-      timeout: const Duration(seconds: 60),
-    );
-    if (!result.isSuccess) {
-      _diag.warn('sidecar', 'Start failed output=${result.output}');
-      throw Exception('사이드카 시작 실패: ${result.output}');
-    }
-    _diag.info('sidecar', 'Start success output=${result.output}');
-    return result.output.isEmpty ? 'SIDECAR_STARTED' : result.output;
+        ),
+        timeout: const Duration(seconds: 60),
+      );
+      if (!result.isSuccess) {
+        _diag.warn('sidecar', 'Start failed output=${result.output}');
+        throw Exception('사이드카 시작 실패: ${result.output}');
+      }
+      _diag.info('sidecar', 'Start success output=${result.output}');
+      return result.output.isEmpty ? 'SIDECAR_STARTED' : result.output;
     });
   }
 
@@ -1748,7 +1885,8 @@ echo "sidecar_port_pids=\$SIDE_PORT_PIDS"
     String hostKey,
     Future<T> Function() action,
   ) {
-    final previous = _inFlightStartBarrierByHost[hostKey] ?? Future<void>.value();
+    final previous =
+        _inFlightStartBarrierByHost[hostKey] ?? Future<void>.value();
     final completer = Completer<void>();
     final current = previous.catchError((_) {}).then((_) => completer.future);
     _inFlightStartBarrierByHost[hostKey] = current;

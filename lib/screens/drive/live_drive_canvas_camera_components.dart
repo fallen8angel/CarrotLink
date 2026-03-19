@@ -20,18 +20,6 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     );
   }
 
-  String? _cameraAttachNoticeMessage() {
-    if (!_cameraAttachPendingBeforeFirstFrame) return null;
-    return switch (_cameraAttachPhase) {
-      _CameraAttachPhase.surfaceReady => '로드카메라 화면을 준비하는 중입니다.',
-      _CameraAttachPhase.socketConnecting => '로드카메라 연결 중입니다.',
-      _CameraAttachPhase.socketConnected => '카메라 스트림 연결을 확인하는 중입니다.',
-      _CameraAttachPhase.waitingFirstFrame => '로드카메라 첫 프레임 대기 중입니다.',
-      _CameraAttachPhase.retrying => '로드카메라 연결 재시도 중입니다.',
-      _ => null,
-    };
-  }
-
   bool _hasRenderableOverlayFallback() {
     return _openpilotOverlayMode &&
         (_lastPublishedModelFrameId != null ||
@@ -50,6 +38,38 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
 
   bool _shouldShowCameraLoadingOverlay() {
     return _cameraLoading && !_shouldUseDegradedOverlayFallbackUi();
+  }
+
+  bool _overlayPublicationLooksHealthy({
+    int maxAgeUs = 1800000,
+  }) {
+    if (_lastPublishedModelFrameId == null) {
+      return false;
+    }
+    final referenceUs = math.max(_lastOverlayPublishUs, _lastSyncHitUs);
+    if (referenceUs <= 0) {
+      return false;
+    }
+    final ageUs = _renderClock.elapsedMicroseconds - referenceUs;
+    return ageUs >= 0 && ageUs <= maxAgeUs;
+  }
+
+  bool _overlayRecoveryActuallyStalled() {
+    if (_overlayStaleActive) {
+      return true;
+    }
+    if (_lastPublishedModelFrameId == null) {
+      return true;
+    }
+    return !_overlayPublicationLooksHealthy();
+  }
+
+  bool _syntheticSyncSteadyStateLooksHealthy() {
+    if (!_openpilotOverlayMode) return false;
+    if (!_sidecarConnected || !_nativeCameraAttachReady) return false;
+    if (_overlayStaleActive) return false;
+    if (!_hasRenderableOverlayFallback()) return false;
+    return _overlayPublicationLooksHealthy(maxAgeUs: 2400000);
   }
 
   void _forceRestartNativeCameraAttach({
@@ -104,8 +124,10 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     }
     _lastCameraFrameId = null;
     _lastCameraFrameEventUs = 0;
-    _lastPublishedModelFrameId = null;
-    unawaited(_clearNativeOverlay());
+    if (!_hasRenderableOverlayFallback()) {
+      _lastPublishedModelFrameId = null;
+      unawaited(_clearNativeOverlay());
+    }
     unawaited(_loadCameraSource(force: true));
   }
 
@@ -119,19 +141,50 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     final decodedWindow = (payload['decodedWindow'] as num?)?.toInt() ?? 0;
     final codecConfigured = payload['codecConfigured'] == true;
     final syncWaitState = state.startsWith('waiting_sync_frame_');
-    final firstFramePending =
-        _lastCameraFrameId == null &&
+    final syntheticSyncActive = payload['syntheticSyncActive'] == true ||
+        state.startsWith('synthetic_sync_frame_');
+    final firstDecodedWithoutSyncAgeMs =
+        (payload['firstDecodedWithoutSyncAgeMs'] as num?)?.toInt() ?? -1;
+    final hasRenderableFallback = _hasRenderableOverlayFallback();
+    final firstFramePending = _lastCameraFrameId == null &&
         (_cameraAttachPendingBeforeFirstFrame ||
             syncWaitState ||
             (codecConfigured && decodedWindow > 0));
     if (!firstFramePending) {
+      if (!syntheticSyncActive || !hasRenderableFallback) {
+        return;
+      }
+      _beginStartupProvisionalSync(
+        reason: 'camera_diag:synthetic_sync',
+        windowUs: _LiveDriveCanvasScreenState._cameraFirstFrameDegradedHoldUs,
+      );
+      if (_syntheticSyncSteadyStateLooksHealthy()) {
+        return;
+      }
+      final nowUs = _renderClock.elapsedMicroseconds;
+      if (_cameraAttachStartedUs <= 0) {
+        return;
+      }
+      final attachElapsedUs = nowUs - _cameraAttachStartedUs;
+      final cooldownElapsedUs = nowUs - _lastCameraFirstFrameRecoveryUs;
+      if (firstDecodedWithoutSyncAgeMs < 9000 ||
+          attachElapsedUs <
+              _LiveDriveCanvasScreenState._cameraFirstFrameForceReattachUs ||
+          cooldownElapsedUs <
+              _LiveDriveCanvasScreenState._cameraFirstFrameRecoveryCooldownUs) {
+        return;
+      }
+      if (!_overlayRecoveryActuallyStalled()) {
+        return;
+      }
+      _forceRestartNativeCameraAttach(reason: 'synthetic_sync_stuck_flutter');
       return;
     }
     _beginStartupProvisionalSync(
       reason: 'camera_diag:$state',
       windowUs: _LiveDriveCanvasScreenState._cameraFirstFrameDegradedHoldUs,
     );
-    if (!_hasRenderableOverlayFallback()) {
+    if (!hasRenderableFallback) {
       return;
     }
     final nowUs = _renderClock.elapsedMicroseconds;
@@ -146,8 +199,13 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
             _LiveDriveCanvasScreenState._cameraFirstFrameRecoveryCooldownUs) {
       return;
     }
+    if (!_overlayRecoveryActuallyStalled()) {
+      return;
+    }
     _forceRestartNativeCameraAttach(
-      reason: syncWaitState ? 'sync_frame_stuck_flutter' : 'first_frame_stuck_flutter',
+      reason: syncWaitState
+          ? 'sync_frame_stuck_flutter'
+          : 'first_frame_stuck_flutter',
     );
   }
 
@@ -318,8 +376,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     required String message,
   }) {
     final normalized = reason.trim().toLowerCase();
-    final startupSocketFailure =
-        normalized.startsWith('socket_failure:') &&
+    final startupSocketFailure = normalized.startsWith('socket_failure:') &&
         _cameraAttachPendingBeforeFirstFrame;
     if (startupSocketFailure) {
       _setCameraAttachPhase(
@@ -335,10 +392,6 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
         _cameraLoading = true;
         _cameraError = null;
       }
-      _setSidecarPhase(
-        _SidecarPhase.verifying,
-        message: '로드카메라 연결 재시도 중입니다.',
-      );
       if (_shouldSuppressStartupSocketFailure(source: source, reason: reason)) {
         return;
       }
@@ -453,8 +506,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     if (type == 'camera_frame') {
       final frameId = _DriveOverlaySnapshot._asInt(map['frameId']);
       if (frameId != null) {
-        final firstVisibleFrame =
-            _lastCameraFrameId == null || _cameraLoading;
+        final firstVisibleFrame = _lastCameraFrameId == null || _cameraLoading;
         _handleCameraFrameEvent(
           frameId,
           source: 'native',
@@ -597,16 +649,6 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
           _cameraError = null;
         });
         _beginStartupProvisionalSync(reason: 'camera_state:$state');
-        _setSidecarPhase(
-          _openpilotOverlayMode
-              ? (hadVisibleFrame
-                  ? _SidecarPhase.running
-                  : _SidecarPhase.verifying)
-              : _SidecarPhase.idle,
-          message: hadVisibleFrame
-              ? '카메라 스트림 연결이 확인되었습니다.'
-              : '로드카메라 첫 프레임을 기다리는 중입니다.',
-        );
       }
       if (state == 'surface_destroyed' || state.startsWith('closed:')) {
         if (_lastCameraFrameId == null) {
@@ -656,8 +698,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     if (type == 'camera_frame') {
       final frameId = _DriveOverlaySnapshot._asInt(map['frameId']);
       if (frameId != null) {
-        final firstVisibleFrame =
-            _lastCameraFrameId == null || _cameraLoading;
+        final firstVisibleFrame = _lastCameraFrameId == null || _cameraLoading;
         _handleCameraFrameEvent(
           frameId,
           source: 'web',
@@ -720,7 +761,8 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
           '로드카메라 첫 프레임 재요청 중입니다.',
         final r when r.startsWith('startup_sync_frame_timeout_') =>
           '로드카메라 첫 프레임 재요청 중입니다.',
-        final r when r.startsWith('frame_stall_') && _lastCameraFrameId == null =>
+        final r
+            when r.startsWith('frame_stall_') && _lastCameraFrameId == null =>
           '로드카메라 첫 프레임 재요청 중입니다.',
         final r when r.startsWith('frame_stall_') => '카메라 스트림 재동기화 중입니다.',
         _ => reason,

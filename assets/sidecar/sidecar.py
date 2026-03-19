@@ -312,6 +312,15 @@ class CameraRelayHub:
         self._last_frame_id: dict[str, int] = {
             cam: -1 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
         }
+        self._null_frame_id_count: dict[str, int] = {
+            cam: 0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+        }
+        self._last_raw_frame_sample: dict[str, dict[str, Any]] = {
+            cam: {} for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+        }
+        self._last_packed_meta_sample: dict[str, dict[str, Any]] = {
+            cam: {} for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+        }
         self._last_send_batch_ms: dict[str, float] = {
             cam: 0.0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
         }
@@ -359,6 +368,15 @@ class CameraRelayHub:
             self._last_frame_id = {
                 cam: -1 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
             }
+            self._null_frame_id_count = {
+                cam: 0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._last_raw_frame_sample = {
+                cam: {} for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._last_packed_meta_sample = {
+                cam: {} for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
             self._last_send_batch_ms = {
                 cam: 0.0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
             }
@@ -380,11 +398,13 @@ class CameraRelayHub:
         # quality mode: prefer full encode first, then livestream fallback.
         return list(reversed(base))
 
-    def _pack_frame(self, camera: str, frame: Any) -> bytes:
-        header = getattr(frame, "header", b"") or b""
-        data = getattr(frame, "data", b"") or b""
-        payload = bytes(header) + bytes(data)
-
+    def _build_frame_sample(
+        self,
+        frame: Any,
+        *,
+        service: str = "",
+        which: str = "",
+    ) -> dict[str, Any]:
         frame_id = _safe_int(getattr(frame, "frameId", None))
         sof = _safe_int(getattr(frame, "timestampSof", None))
         eof = _safe_int(getattr(frame, "timestampEof", None))
@@ -403,6 +423,42 @@ class CameraRelayHub:
                 frame_type = str(getattr(idx, "type", ""))
         except Exception:
             pass
+        return {
+            "service": service,
+            "which": which,
+            "frameId": frame_id,
+            "timestampSof": sof,
+            "timestampEof": eof,
+            "width": width,
+            "height": height,
+            "flags": flags,
+            "encodeId": encode_id,
+            "segmentId": segment_id,
+            "frameType": frame_type,
+        }
+
+    def _pack_frame(
+        self,
+        camera: str,
+        frame: Any,
+        frame_sample: dict[str, Any] | None = None,
+    ) -> bytes:
+        header = getattr(frame, "header", b"") or b""
+        data = getattr(frame, "data", b"") or b""
+        payload = bytes(header) + bytes(data)
+
+        sample = frame_sample or self._build_frame_sample(frame)
+        frame_id = _safe_int(sample.get("frameId"))
+        sof = _safe_int(sample.get("timestampSof"))
+        eof = _safe_int(sample.get("timestampEof"))
+        width = _safe_int(sample.get("width"))
+        height = _safe_int(sample.get("height"))
+        flags = _safe_int(sample.get("flags"))
+        encode_id = _safe_int(sample.get("encodeId"))
+        segment_id = _safe_int(sample.get("segmentId"))
+        frame_type = (
+            str(sample.get("frameType", "")).strip() if sample.get("frameType") else None
+        )
         # loggerd uses V4L2_BUF_FLAG_KEYFRAME(0x8) in EncodeIndex.flags
         if flags is not None:
             is_key = bool(flags & 0x8)
@@ -431,6 +487,7 @@ class CameraRelayHub:
             "size": len(payload),
             "ts": time.time(),
         }
+        self._last_packed_meta_sample[camera] = dict(meta)
         meta_bytes = json.dumps(meta, separators=(",", ":"), ensure_ascii=False).encode(
             "utf-8"
         )
@@ -500,8 +557,16 @@ class CameraRelayHub:
                     await asyncio.sleep(0.001)
                     continue
 
-                frame_id = _safe_int(getattr(frame, "frameId", None))
-                packet = self._pack_frame(camera, frame)
+                frame_sample = self._build_frame_sample(
+                    frame,
+                    service=source_service,
+                    which=which,
+                )
+                self._last_raw_frame_sample[camera] = dict(frame_sample)
+                frame_id = _safe_int(frame_sample.get("frameId"))
+                if frame_id is None or frame_id < 0:
+                    self._null_frame_id_count[camera] += 1
+                packet = self._pack_frame(camera, frame, frame_sample)
                 if queue.full():
                     try:
                         queue.get_nowait()
@@ -672,9 +737,12 @@ class CameraRelayHub:
                 "queueDrops": self._queue_drop_count.get(camera, 0),
                 "sendDrops": self._send_drop_count.get(camera, 0),
                 "lastFrameId": self._last_frame_id.get(camera, -1),
+                "nullFrameIdCount": self._null_frame_id_count.get(camera, 0),
                 "lastFrameAgeMs": last_frame_age_ms,
                 "lastSendBatchMs": round(self._last_send_batch_ms.get(camera, 0.0), 1),
                 "service": self._selected_service.get(camera, ""),
+                "rawFrame": dict(self._last_raw_frame_sample.get(camera, {})),
+                "packedMeta": dict(self._last_packed_meta_sample.get(camera, {})),
             }
         return {
             "mode": "queued_multi_sub_fanout",
@@ -697,6 +765,30 @@ class SidecarApp:
         "p1c4": [
             "selfdriveState",
             "liveCalibration",
+            "modelV2",
+            "roadCameraState",
+            "wideRoadCameraState",
+        ],
+        "p2c4": [
+            "carState",
+            "selfdriveState",
+            "controlsState",
+            "longitudinalPlan",
+            "liveCalibration",
+            "modelV2",
+            "roadCameraState",
+            "wideRoadCameraState",
+        ],
+        "p2d": [
+            "carState",
+            "selfdriveState",
+            "controlsState",
+            "longitudinalPlan",
+            "liveCalibration",
+            "modelV2",
+            "radarState",
+            "roadCameraState",
+            "wideRoadCameraState",
         ],
         "p2": [
             "carState",
@@ -750,6 +842,8 @@ class SidecarApp:
         "p0": 0.08,
         "p1": 0.06,
         "p1c4": 0.08,
+        "p2c4": 0.05,
+        "p2d": 0.05,
         "p2": 0.033,
         "p3": 0.033,
         "p4": 0.025,
@@ -759,6 +853,8 @@ class SidecarApp:
         "p0": 0.16,
         "p1": 0.12,
         "p1c4": 0.16,
+        "p2c4": 0.05,
+        "p2d": 0.05,
         "p2": 0.033,
         "p3": 0.033,
         "p4": 0.025,
@@ -768,6 +864,8 @@ class SidecarApp:
         "p0": 0.12,
         "p1": 0.08,
         "p1c4": 0.12,
+        "p2c4": 0.05,
+        "p2d": 0.05,
         "p2": 0.033,
         "p3": 0.033,
         "p4": 0.025,
@@ -777,6 +875,8 @@ class SidecarApp:
         "p0": 0.10,
         "p1": 0.08,
         "p1c4": 0.10,
+        "p2c4": 0.08,
+        "p2d": 0.08,
         "p2": 0.08,
         "p3": 0.08,
         "p4": 0.08,
@@ -784,24 +884,30 @@ class SidecarApp:
 
     SUPPORTED_VARIANTS = {"default", "c4_safe"}
     C4_SAFE_BOOTSTRAP_NO_CARSTATE_PROFILES = ("p1c4",)
-    # C4-safe uses a lighter bootstrap profile without carState and only
-    # graduates to live profiles after HUD/camera health stabilizes.
+    # C4 bootstrap keeps graphics-critical feeds but still omits carState to
+    # reduce reader pressure on c4 while preserving overlay rendering.
     C4_SAFE_RELAXATION_ENABLED = False
-    C4_SAFE_LIVE_PROFILES = ("p2", "p3", "p4")
-    C4_SAFE_RADAR_MONITOR_PROFILES = ("p1", "p1c4", "p2", "p3", "p4")
+    C4_SAFE_LIVE_PROFILES = ("p2c4", "p2d", "p2", "p3", "p4")
+    C4_SAFE_RADAR_MONITOR_PROFILES = ("p1", "p1c4", "p2c4", "p2d", "p2", "p3", "p4")
     C4_SAFE_STARTUP_GRACE_SEC = 12.0
     C4_SAFE_RADAR_STABLE_SEC = 1.5
     C4_SAFE_SM_UPDATE_INTERVAL = {
+        "p2c4": 0.06,
+        "p2d": 0.06,
         "p2": 0.06,
         "p3": 0.06,
         "p4": 0.05,
     }
     C4_SAFE_LIVE_INTERVAL = {
+        "p2c4": 0.06,
+        "p2d": 0.06,
         "p2": 0.06,
         "p3": 0.06,
         "p4": 0.05,
     }
     C4_SAFE_LIVE_CACHE_INTERVAL = {
+        "p2c4": 0.06,
+        "p2d": 0.06,
         "p2": 0.06,
         "p3": 0.06,
         "p4": 0.05,
@@ -809,7 +915,7 @@ class SidecarApp:
 
 
     def __init__(self, profile: str, variant: str = "default"):
-        self.profile = profile if profile in self.PROFILE_SERVICES else "p2"
+        self.profile = profile if profile in self.PROFILE_SERVICES else "p2d"
         normalized_variant = str(variant or "").strip().lower()
         self.variant = (
             normalized_variant
@@ -1011,6 +1117,39 @@ class SidecarApp:
             services.append("radarState")
         return services
 
+    def _optional_services_for_profile(self, profile: str) -> list[str]:
+        normalized = (profile or "").strip().lower()
+        services = [
+            "deviceState",
+            "peripheralState",
+            "gpsLocationExternal",
+            "gpsLocation",
+        ]
+        if normalized in ("p1c4", "p2c4", "p2d", "p2", "p3", "p4"):
+            services.append("lateralPlan")
+        if normalized in ("p2c4", "p2d", "p2", "p3", "p4"):
+            services.extend(["carrotMan", "navInstructionCarrot"])
+        return services
+
+    def _profile_has_graphics_runtime(self, profile: str | None = None) -> bool:
+        normalized = (profile or self.profile or "").strip().lower()
+        return normalized in ("p1c4", "p2c4", "p2d", "p2", "p3", "p4")
+
+    def _profile_has_vehicle_runtime(self, profile: str | None = None) -> bool:
+        normalized = (profile or self.profile or "").strip().lower()
+        return normalized in ("p2c4", "p2d", "p2", "p3", "p4")
+
+    def _profile_has_full_runtime(self, profile: str | None = None) -> bool:
+        normalized = (profile or self.profile or "").strip().lower()
+        return normalized in ("p2", "p3", "p4")
+
+    def _profile_has_radar_overlay_runtime(
+        self,
+        profile: str | None = None,
+    ) -> bool:
+        normalized = (profile or self.profile or "").strip().lower()
+        return normalized in ("p2d", "p2", "p3", "p4")
+
     def _variant_interval_override(
         self,
         interval_table: dict[str, float],
@@ -1032,12 +1171,8 @@ class SidecarApp:
 
             self.messaging = messaging
             services = self._services_for_profile(self.profile)
-            # Merge optional/hud services that Flutter still consumes.
-            for s in [
-                "deviceState", "peripheralState",
-                "gpsLocationExternal", "gpsLocation",
-                "lateralPlan", "carrotMan", "navInstructionCarrot",
-            ]:
+            # Merge optional/hud services that the current profile still needs.
+            for s in self._optional_services_for_profile(self.profile):
                 if s not in services:
                     services.append(s)
             self._service_last_alive_mono = {name: 0.0 for name in services}
@@ -1215,34 +1350,62 @@ class SidecarApp:
             reasons.append("transport.smUpdate.stale")
         return reasons
 
+    def _graphics_stale_reasons(self) -> list[str]:
+        reasons: list[str] = []
+
+        def append_if_stale(service: str, code: str) -> None:
+            diag = self._service_health(service)
+            if diag.get("alive", False) and not diag.get("isFresh", False):
+                reasons.append(code)
+
+        append_if_stale("liveCalibration", "graphics.liveCalibration.stale")
+        append_if_stale("modelV2", "graphics.modelV2.stale")
+        append_if_stale("roadCameraState", "graphics.roadCameraState.stale")
+        append_if_stale(
+            "wideRoadCameraState",
+            "graphics.wideRoadCameraState.stale",
+        )
+        return reasons
+
+    def _runtime_service_ages(self) -> dict[str, int | None]:
+        names = (
+            "selfdriveState",
+            "carState",
+            "controlsState",
+            "liveCalibration",
+            "modelV2",
+            "radarState",
+            "roadCameraState",
+            "wideRoadCameraState",
+            "longitudinalPlan",
+            "carrotMan",
+            "navInstructionCarrot",
+        )
+        ages: dict[str, int | None] = {}
+        for name in names:
+            ages[name] = self._service_health(name).get("updatedAgeMs")
+        return ages
+
     def _runtime_health_flags(
         self,
         camera_status: dict[str, Any],
     ) -> dict[str, Any]:
         process_ready = self.sm is not None and self.messaging is not None
-        hud_requires_car_state = (
-            self.profile not in self.C4_SAFE_BOOTSTRAP_NO_CARSTATE_PROFILES
-        )
         hud_ready = process_ready and self._service_ready(
             "selfdriveState",
             require_updated=True,
         )
-        if hud_ready and hud_requires_car_state:
-            hud_ready = self._service_ready(
-                "carState",
-                require_updated=True,
-            )
+        vehicle_ready = hud_ready and self._service_ready(
+            "carState",
+            require_updated=True,
+        )
         carrot_ready = self._service_ready("carrotMan", require_updated=True)
         plan_ready = self._service_ready(
             "longitudinalPlan",
             require_updated=True,
         )
         nav_ready = self._service_ready("navInstructionCarrot", require_updated=True)
-        live_ready = hud_ready and self._service_ready(
-            "modelV2",
-            require_updated=True,
-            require_frame=True,
-        ) and self._service_ready(
+        road_camera_ready = self._service_ready(
             "roadCameraState",
             require_updated=True,
             require_frame=True,
@@ -1252,29 +1415,79 @@ class SidecarApp:
             require_updated=True,
             require_frame=True,
         )
+        graphics_ready = hud_ready and self._service_ready(
+            "liveCalibration",
+            require_updated=True,
+        ) and self._service_ready(
+            "modelV2",
+            require_updated=True,
+            require_frame=True,
+        ) and (road_camera_ready or wide_ready)
+        controls_ready = self._service_ready(
+            "controlsState",
+            require_updated=True,
+        )
+        radar_ready = self._service_ready("radarState", require_updated=True)
+        drive_ready = graphics_ready and vehicle_ready and controls_ready
+        full_ready = drive_ready and radar_ready
         road_camera = camera_status.get("cameras", {}).get("road", {})
         camera_ready = (
-            live_ready
+            graphics_ready
             and isinstance(road_camera, dict)
             and bool(str(road_camera.get("service", "")).strip())
         )
-        semantic_ready = hud_ready and carrot_ready
-        assist_ready = hud_ready and (carrot_ready or plan_ready)
-        signal_ready = hud_ready and (plan_ready or carrot_ready)
-        ready = hud_ready if self.profile in ("p0", "p1", "p1c4") else live_ready
+        semantic_ready = vehicle_ready and carrot_ready
+        assist_ready = vehicle_ready and (carrot_ready or plan_ready)
+        signal_ready = vehicle_ready and (plan_ready or carrot_ready)
+        if self._profile_has_full_runtime():
+            ready = full_ready
+        elif self._profile_has_vehicle_runtime():
+            ready = drive_ready
+        elif self._profile_has_graphics_runtime():
+            ready = graphics_ready
+        else:
+            ready = vehicle_ready
+        stale_reasons = list(
+            dict.fromkeys(self._hud_stale_reasons() + self._graphics_stale_reasons())
+        )
+        missing_services: list[str] = []
+        for service in (
+            "selfdriveState",
+            "liveCalibration",
+            "modelV2",
+            "roadCameraState",
+        ):
+            if not self._service_health(service).get("subscribed", False):
+                missing_services.append(service)
+        if self._profile_has_vehicle_runtime():
+            for service in ("carState", "controlsState"):
+                if not self._service_health(service).get("subscribed", False):
+                    missing_services.append(service)
+        if self._profile_has_full_runtime():
+            for service in ("radarState",):
+                if not self._service_health(service).get("subscribed", False):
+                    missing_services.append(service)
         return {
             "processReady": process_ready,
             "transportReady": process_ready and self._camera_hub is not None,
             "hudReady": hud_ready,
+            "vehicleReady": vehicle_ready,
+            "controlsReady": controls_ready,
+            "driveReady": drive_ready,
             "semanticHudReady": semantic_ready,
             "assistReady": assist_ready,
             "signalReady": signal_ready,
             "carrotReady": carrot_ready,
             "planReady": plan_ready,
             "navReady": nav_ready,
-            "liveReady": live_ready,
+            "graphicsReady": graphics_ready,
+            "liveReady": graphics_ready,
             "wideLiveReady": wide_ready,
             "cameraReady": camera_ready,
+            "fullReady": full_ready,
+            "staleReasons": stale_reasons,
+            "missingServices": missing_services,
+            "serviceAges": self._runtime_service_ages(),
             "ready": ready,
         }
 
@@ -2540,7 +2753,7 @@ class SidecarApp:
                     )
             except Exception:
                 pass
-            if self.profile in ("p2", "p3", "p4"):
+            if self.profile in ("p2d", "p2", "p3", "p4"):
                 try:
                     if sm.alive.get("carrotMan", False):
                         optional["carrotMan"] = self._payload_carrot_man(
@@ -2642,7 +2855,7 @@ class SidecarApp:
         except Exception:
             pass
         try:
-            if payload_mode != "camera_only" and self.profile in ("p2", "p3", "p4"):
+            if payload_mode != "camera_only" and self._profile_has_full_runtime():
                 stock_debug = self._payload_stock_debug()
                 if stock_debug is not None:
                     payload["stockDebug"] = stock_debug
@@ -2677,13 +2890,13 @@ class SidecarApp:
                 )
         except Exception:
             pass
-        if payload_mode != "camera_only" and self.profile in ("p2", "p3", "p4"):
+        if payload_mode != "camera_only" and self._profile_has_graphics_runtime():
             try:
                 if self.sm.alive.get("modelV2", False):
                     payload["modelV2"] = self._payload_model_v2(self.sm["modelV2"])
             except Exception:
                 pass
-        if payload_mode != "camera_only" and self.profile in ("p2", "p3", "p4"):
+        if payload_mode != "camera_only" and self._profile_has_radar_overlay_runtime():
             try:
                 if self.sm.alive.get("radarState", False):
                     payload["radarState"] = self._payload_radar_state(
@@ -3151,9 +3364,15 @@ class SidecarApp:
                 "carrotReady": health_flags["carrotReady"],
                 "planReady": health_flags["planReady"],
                 "navReady": health_flags["navReady"],
+                "graphicsReady": health_flags["graphicsReady"],
                 "liveReady": health_flags["liveReady"],
                 "wideLiveReady": health_flags["wideLiveReady"],
                 "cameraReady": health_flags["cameraReady"],
+                "vehicleReady": health_flags["vehicleReady"],
+                "fullReady": health_flags["fullReady"],
+                "staleReasons": health_flags["staleReasons"],
+                "missingServices": health_flags["missingServices"],
+                "serviceAges": health_flags["serviceAges"],
                 "profile": self.profile,
                 "variant": self.variant,
                 "repoFlavor": self.repo_flavor,
@@ -3276,8 +3495,8 @@ class SidecarApp:
                 },
                 "serviceHealth": {
                     name: self._service_health(name) for name in (
-                        "selfdriveState", "carState", "liveCalibration",
-                        "modelV2", "radarState", "roadCameraState",
+                        "selfdriveState", "carState", "controlsState",
+                        "liveCalibration", "modelV2", "radarState", "roadCameraState",
                         "wideRoadCameraState", "gpsLocationExternal",
                         "longitudinalPlan", "carrotMan",
                         "navInstructionCarrot",
@@ -3361,7 +3580,7 @@ class SidecarApp:
 
 
 def main() -> None:
-    profile = os.environ.get("CARROTLINK_SIDECAR_PROFILE", "p2").strip().lower()
+    profile = os.environ.get("CARROTLINK_SIDECAR_PROFILE", "p2d").strip().lower()
     variant = os.environ.get("CARROTLINK_SIDECAR_VARIANT", "default").strip().lower()
     port = int(os.environ.get("CARROTLINK_SIDECAR_PORT", "7766"))
     host = os.environ.get("CARROTLINK_SIDECAR_HOST", "0.0.0.0").strip() or "0.0.0.0"

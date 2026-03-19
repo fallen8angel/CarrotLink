@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 
 import '../../features/hud/hud.dart';
 import '../../services/device_action_service.dart';
+import '../../services/hud_install_progress_service.dart';
 import '../../services/hud_feature_settings_service.dart';
 import '../../services/sidecar_service.dart';
 import '../../services/ssh_service.dart';
@@ -17,14 +18,14 @@ class HudSettingsScreen extends StatefulWidget {
   State<HudSettingsScreen> createState() => _HudSettingsScreenState();
 }
 
-class _HudSettingsScreenState extends State<HudSettingsScreen> {
+class _HudSettingsScreenState extends State<HudSettingsScreen>
+    with AutomaticKeepAliveClientMixin<HudSettingsScreen> {
   final SidecarService _sidecar = SidecarService.shared;
   final DeviceActionService _actionService = DeviceActionService();
+  final HudInstallProgressService _progress = HudInstallProgressService.shared;
   final ScrollController _terminalScrollController = ScrollController();
   static const Duration _installHudBootstrapTimeout = Duration(seconds: 8);
-  bool _busy = false;
-  final List<_StepLog> _steps = <_StepLog>[];
-  final List<String> _terminalLines = <String>[];
+  int _lastTerminalLineCount = 0;
 
   SSHService get _ssh => Provider.of<SSHService>(context, listen: false);
   HudFeatureSettingsService get _featureSettings =>
@@ -33,18 +34,42 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
       Provider.of<SharedRuntimeManager>(context, listen: false);
 
   @override
+  bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    _lastTerminalLineCount = _progress.terminalLines.length;
+    _progress.addListener(_handleProgressChanged);
+  }
+
+  @override
   void dispose() {
+    _progress.removeListener(_handleProgressChanged);
     _terminalScrollController.dispose();
     super.dispose();
   }
 
-  Future<void> _setFeatureEnabled(bool enabled) async {
-    if (_busy) return;
-    final ssh = _ssh;
-    setState(() {
-      _busy = true;
-      _steps.clear();
+  void _handleProgressChanged() {
+    if (!mounted) return;
+    final nextCount = _progress.terminalLines.length;
+    final shouldScroll = nextCount > _lastTerminalLineCount;
+    _lastTerminalLineCount = nextCount;
+    if (!shouldScroll) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_terminalScrollController.hasClients) return;
+      _terminalScrollController.animateTo(
+        _terminalScrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+      );
     });
+  }
+
+  Future<void> _setFeatureEnabled(bool enabled) async {
+    if (_progress.busy) return;
+    final ssh = _ssh;
+    _progress.beginRun();
     _clearTerminal();
     _appendTerminal(
       'FEATURE',
@@ -104,14 +129,12 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
       _updateLastStep(status: _StepStatus.fail, detail: '$e');
       _showSnack('설정 변경 실패: $e', isError: true);
     } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
+      _progress.finishRun();
     }
   }
 
   Future<void> _installSidecar() async {
-    if (_busy) return;
+    if (_progress.busy) return;
     final ssh = _ssh;
     if (!ssh.isConnected) {
       _showSnack('SSH 연결이 되어있지 않습니다.', isError: true);
@@ -127,10 +150,7 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
     );
     if (!confirmed) return;
 
-    setState(() {
-      _busy = true;
-      _steps.clear();
-    });
+    _progress.beginRun();
     _clearTerminal();
 
     try {
@@ -186,10 +206,18 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
         detail: deployOut.trim(),
       );
 
+      final repoFlavor = await _sidecar.resolveRemoteRepoFlavor(ssh);
+      final bootstrapProfile = repoFlavor == SidecarService.repoFlavorC4
+          ? SidecarService.c4HudBootstrapProfile
+          : SidecarService.hudBootstrapProfile;
+      final driveProfile = SidecarService.driveRuntimeProfileForFlavor(
+        repoFlavor,
+      );
+
       _addStep('사이드카 시작', status: _StepStatus.running);
       final startOut = await _sidecar.start(
         ssh,
-        profile: SidecarService.hudBootstrapProfile,
+        profile: bootstrapProfile,
       );
       _appendTerminal('START', startOut);
       _updateLastStep(
@@ -215,12 +243,12 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
         _addStep('주행 그래픽 예열', status: _StepStatus.running);
         final driveStartOut = await _sidecar.start(
           ssh,
-          profile: SidecarService.driveRuntimeProfile,
+          profile: driveProfile,
         );
         _appendTerminal('DRIVE_PREWARM', driveStartOut);
         _updateLastStep(
           status: _StepStatus.ok,
-          detail: 'p2 런타임을 미리 준비했습니다.',
+          detail: '$driveProfile 런타임을 미리 준비했습니다.',
         );
       }
 
@@ -281,14 +309,12 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
       _updateLastStep(status: _StepStatus.fail, detail: '$e');
       _showSnack('설치 실패: $e', isError: true);
     } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
+      _progress.finishRun();
     }
   }
 
   Future<void> _deleteSidecar() async {
-    if (_busy) return;
+    if (_progress.busy) return;
     final ssh = _ssh;
     if (!ssh.isConnected) {
       _showSnack('SSH 연결이 되어있지 않습니다.', isError: true);
@@ -303,10 +329,7 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
     );
     if (!confirmed) return;
 
-    setState(() {
-      _busy = true;
-      _steps.clear();
-    });
+    _progress.beginRun();
     _clearTerminal();
 
     try {
@@ -380,37 +403,16 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
       _updateLastStep(status: _StepStatus.fail, detail: '$e');
       _showSnack('삭제 실패: $e', isError: true);
     } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
+      _progress.finishRun();
     }
   }
 
   void _clearTerminal() {
-    if (!mounted) return;
-    setState(() => _terminalLines.clear());
+    _progress.clearTerminal();
   }
 
   void _appendTerminal(String section, String output) {
-    final now = DateTime.now();
-    String two(int value) => value.toString().padLeft(2, '0');
-    final stamp =
-        '${two(now.hour)}:${two(now.minute)}:${two(now.second)}.${now.millisecond.toString().padLeft(3, '0')}';
-    final normalized = output.trim().isEmpty ? '(출력 없음)' : output.trim();
-    if (!mounted) return;
-    setState(() {
-      _terminalLines.add('[$stamp] $section');
-      _terminalLines.add(normalized);
-      _terminalLines.add('');
-    });
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_terminalScrollController.hasClients) return;
-      _terminalScrollController.animateTo(
-        _terminalScrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 180),
-        curve: Curves.easeOut,
-      );
-    });
+    _progress.appendTerminal(section, output);
   }
 
   String _summarizeOutput(String output) {
@@ -456,22 +458,29 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
   }
 
   void _addStep(String label, {_StepStatus status = _StepStatus.pending}) {
-    if (!mounted) return;
-    setState(() {
-      _steps.add(_StepLog(label: label, status: status, detail: null));
-    });
+    _progress.addStep(
+      label,
+      status: switch (status) {
+        _StepStatus.pending => HudInstallStepStatus.pending,
+        _StepStatus.running => HudInstallStepStatus.running,
+        _StepStatus.ok => HudInstallStepStatus.ok,
+        _StepStatus.warn => HudInstallStepStatus.warn,
+        _StepStatus.fail => HudInstallStepStatus.fail,
+      },
+    );
   }
 
   void _updateLastStep({required _StepStatus status, String? detail}) {
-    if (!mounted || _steps.isEmpty) return;
-    setState(() {
-      final last = _steps.last;
-      _steps[_steps.length - 1] = _StepLog(
-        label: last.label,
-        status: status,
-        detail: detail,
-      );
-    });
+    _progress.updateLastStep(
+      status: switch (status) {
+        _StepStatus.pending => HudInstallStepStatus.pending,
+        _StepStatus.running => HudInstallStepStatus.running,
+        _StepStatus.ok => HudInstallStepStatus.ok,
+        _StepStatus.warn => HudInstallStepStatus.warn,
+        _StepStatus.fail => HudInstallStepStatus.fail,
+      },
+      detail: detail,
+    );
   }
 
   void _showSnack(String message, {bool isError = false}) {
@@ -526,6 +535,18 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
       'REBOOT_NOTICE',
       '설치가 완료되었습니다. 안정적인 반영을 위해 openpilot 기기 재부팅이 필요합니다.',
     );
+
+    if (!mounted) {
+      _appendTerminal(
+        'REBOOT_NOTICE',
+        '화면이 닫혀 있어 재부팅 확인을 생략했습니다. 다음 사용 전 수동 재부팅이 필요합니다.',
+      );
+      _updateLastStep(
+        status: _StepStatus.warn,
+        detail: '설치는 완료됨 · 다음 사용 전 기기 재부팅이 필요합니다.',
+      );
+      return;
+    }
 
     final confirmed = await _confirm(
       title: '재부팅 필요',
@@ -649,12 +670,18 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
 
-    return Consumer<HudFeatureSettingsService>(
-      builder: (context, featureSettings, _) {
+    return AnimatedBuilder(
+      animation: _progress,
+      builder: (context, _) {
+        final featureSettings = Provider.of<HudFeatureSettingsService>(context);
         final enabled = featureSettings.enabled;
+        final busy = _progress.busy;
+        final steps = _progress.steps;
+        final terminalLines = _progress.terminalLines;
         return SettingsSubpageScaffold(
           title: 'HUD',
           children: [
@@ -669,7 +696,7 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
                     title: const Text('활성화'),
                     trailing: Switch.adaptive(
                       value: enabled,
-                      onChanged: _busy ? null : _setFeatureEnabled,
+                      onChanged: busy ? null : _setFeatureEnabled,
                     ),
                   ),
                 ],
@@ -682,27 +709,27 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
                 children: [
                   SettingsActionRow(
                     title: '설치',
-                    onTap: _busy ? null : _installSidecar,
+                    onTap: busy ? null : _installSidecar,
                   ),
                   SettingsActionRow(
                     title: '삭제',
-                    onTap: _busy ? null : _deleteSidecar,
+                    onTap: busy ? null : _deleteSidecar,
                     destructive: true,
                   ),
                 ],
               ),
             ),
-            if (_steps.isNotEmpty)
+            if (steps.isNotEmpty)
               SettingsSection(
                 title: '작업 요약',
                 bottomSpacing: 20,
                 child: SettingsItemGroup(
                   children: [
-                    for (final step in _steps) _buildStepRow(context, step),
+                    for (final step in steps) _buildStepRow(context, step),
                   ],
                 ),
               ),
-            if (_terminalLines.isNotEmpty)
+            if (terminalLines.isNotEmpty)
               SettingsSection(
                 title: '터미널 로그',
                 bottomSpacing: 20,
@@ -721,7 +748,7 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
                         controller: _terminalScrollController,
                         padding: const EdgeInsets.all(12),
                         child: SelectableText(
-                          _terminalLines.join('\n'),
+                          terminalLines.join('\n'),
                           style: textTheme.bodySmall?.copyWith(
                             fontFamily: 'monospace',
                             height: 1.35,
@@ -739,21 +766,27 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
     );
   }
 
-  Widget _buildStepRow(BuildContext context, _StepLog step) {
+  Widget _buildStepRow(BuildContext context, HudInstallStepLog step) {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
 
     final (IconData icon, Color color) = switch (step.status) {
-      _StepStatus.pending => (Icons.circle_outlined, scheme.onSurfaceVariant),
-      _StepStatus.running => (Icons.sync_rounded, scheme.primary),
-      _StepStatus.ok => (Icons.check_circle_rounded, Colors.green),
-      _StepStatus.warn => (Icons.warning_amber_rounded, Colors.orange),
-      _StepStatus.fail => (Icons.error_rounded, scheme.error),
+      HudInstallStepStatus.pending => (
+          Icons.circle_outlined,
+          scheme.onSurfaceVariant,
+        ),
+      HudInstallStepStatus.running => (Icons.sync_rounded, scheme.primary),
+      HudInstallStepStatus.ok => (Icons.check_circle_rounded, Colors.green),
+      HudInstallStepStatus.warn => (
+          Icons.warning_amber_rounded,
+          Colors.orange,
+        ),
+      HudInstallStepStatus.fail => (Icons.error_rounded, scheme.error),
     };
 
     return ListTile(
       contentPadding: EdgeInsets.zero,
-      leading: step.status == _StepStatus.running
+      leading: step.status == HudInstallStepStatus.running
           ? SizedBox(
               width: 18,
               height: 18,
@@ -786,15 +819,3 @@ class _HudSettingsScreenState extends State<HudSettingsScreen> {
 }
 
 enum _StepStatus { pending, running, ok, warn, fail }
-
-class _StepLog {
-  const _StepLog({
-    required this.label,
-    required this.status,
-    this.detail,
-  });
-
-  final String label;
-  final _StepStatus status;
-  final String? detail;
-}

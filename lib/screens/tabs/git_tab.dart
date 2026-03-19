@@ -16,6 +16,7 @@ import '../../widgets/custom_toast.dart';
 enum _GitToolsMenuAction {
   quickSetupFromLink,
   showDetails,
+  logDisplaySettings,
   clearLogs,
   advancedSettings,
   changeOrigin,
@@ -51,6 +52,12 @@ class GitTab extends StatefulWidget {
 class _GitTabState extends State<GitTab> {
   static const String _gitLogsPrefKey = 'git_logs';
   static const String _gitRepoPathPrefKey = 'git_repo_path_override';
+  static const String _gitLogFontSizePtPrefKey = 'git_log_font_size_pt';
+  static const String _gitLogWrapPrefKey = 'git_log_wrap';
+  static const String _gitLogDimOldPrefKey = 'git_log_dim_old';
+  static const String _gitLogAutoScrollPrefKey = 'git_log_auto_scroll';
+  static const String _gitLogHighContrastPrefKey = 'git_log_high_contrast';
+  static const String _gitLogEmphasisLevelPrefKey = 'git_log_emphasis_level';
 
   bool _isLoading = false;
   bool _isLoadingSourceInfo = false;
@@ -59,6 +66,11 @@ class _GitTabState extends State<GitTab> {
   final DeviceActionService _actionService = DeviceActionService();
   GitBranchSnapshot? _gitSnapshot;
   String _repoPathOverride = '';
+  double _gitLogFontSizePt = 12.0;
+  bool _gitLogWrap = true;
+  bool _gitLogDimOld = true;
+  bool _gitLogAutoScroll = true;
+  int _gitLogEmphasisLevel = 0;
 
   String? get _preferredRepoPath {
     final trimmed = _repoPathOverride.trim();
@@ -68,6 +80,7 @@ class _GitTabState extends State<GitTab> {
   @override
   void initState() {
     super.initState();
+    unawaited(_loadLogViewSettings());
     unawaited(_loadLogs());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -96,16 +109,46 @@ class _GitTabState extends State<GitTab> {
           }).toList();
         });
         // Scroll to bottom after loading
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_scrollController.hasClients) {
-            _scrollController
-                .jumpTo(_scrollController.position.maxScrollExtent);
-          }
-        });
+        if (_gitLogAutoScroll) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (_scrollController.hasClients) {
+              _scrollController
+                  .jumpTo(_scrollController.position.maxScrollExtent);
+            }
+          });
+        }
       } catch (e) {
         debugPrint("Error loading logs: $e");
       }
     }
+  }
+
+  Future<void> _loadLogViewSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _gitLogFontSizePt = prefs.getDouble(_gitLogFontSizePtPrefKey) ?? 12.0;
+      _gitLogWrap = prefs.getBool(_gitLogWrapPrefKey) ?? true;
+      _gitLogDimOld = prefs.getBool(_gitLogDimOldPrefKey) ?? true;
+      _gitLogAutoScroll = prefs.getBool(_gitLogAutoScrollPrefKey) ?? true;
+      final storedLevel = prefs.getInt(_gitLogEmphasisLevelPrefKey);
+      if (storedLevel != null) {
+        _gitLogEmphasisLevel = storedLevel.clamp(0, 2);
+      } else {
+        _gitLogEmphasisLevel =
+            (prefs.getBool(_gitLogHighContrastPrefKey) ?? false) ? 1 : 0;
+      }
+    });
+  }
+
+  Future<void> _saveLogViewSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_gitLogFontSizePtPrefKey, _gitLogFontSizePt);
+    await prefs.setBool(_gitLogWrapPrefKey, _gitLogWrap);
+    await prefs.setBool(_gitLogDimOldPrefKey, _gitLogDimOld);
+    await prefs.setBool(_gitLogAutoScrollPrefKey, _gitLogAutoScroll);
+    await prefs.setInt(_gitLogEmphasisLevelPrefKey, _gitLogEmphasisLevel);
+    await prefs.setBool(_gitLogHighContrastPrefKey, _gitLogEmphasisLevel > 0);
   }
 
   Future<void> _saveLogs() async {
@@ -128,15 +171,17 @@ class _GitTabState extends State<GitTab> {
       _logs.add({'time': time, 'message': message, 'isOld': 'false'});
     });
     _saveLogs(); // Save on every log add
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
-      }
-    });
+    if (_gitLogAutoScroll) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollController.hasClients) {
+          _scrollController.animateTo(
+            _scrollController.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOut,
+          );
+        }
+      });
+    }
   }
 
   Future<void> _clearLogs() async {
@@ -699,6 +744,203 @@ class _GitTabState extends State<GitTab> {
     );
   }
 
+  String _formatPt(double value) {
+    final rounded = (value * 10).round() / 10;
+    if (rounded == rounded.roundToDouble()) {
+      return '${rounded.toStringAsFixed(0)}pt';
+    }
+    return '${rounded.toStringAsFixed(1)}pt';
+  }
+
+  String _emphasisLabel(int level) {
+    switch (level) {
+      case 1:
+        return '보통';
+      case 2:
+        return '강하게';
+      default:
+        return '끔';
+    }
+  }
+
+  Future<void> _showLogDisplaySettingsSheet() async {
+    if (!mounted) return;
+    final window = UiWindowInfo.of(context);
+    final tokens = UiLayoutTokens.of(context);
+    final sheetHorizontalPadding = window.isCompact
+        ? 0.0
+        : tokens.screenPadding.clamp(0.0, 18.0).toDouble();
+    final titleFontSize = switch (window.windowClass) {
+      UiWindowClass.compact => 15.0,
+      UiWindowClass.medium => 15.0,
+      UiWindowClass.expanded => 16.0,
+      UiWindowClass.large => 16.0,
+      UiWindowClass.extraLarge => 16.0,
+    };
+    var draftFontSize = _gitLogFontSizePt;
+    var draftWrap = _gitLogWrap;
+    var draftDimOld = _gitLogDimOld;
+    var draftAutoScroll = _gitLogAutoScroll;
+    var draftEmphasisLevel = _gitLogEmphasisLevel;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: false,
+      builder: (sheetCtx) {
+        final bottomDockGap = MediaQuery.viewPaddingOf(sheetCtx).bottom + 12.0;
+        return StatefulBuilder(
+          builder: (sheetCtx, setSheetState) {
+            return SafeArea(
+              top: false,
+              child: Padding(
+                padding:
+                    EdgeInsets.symmetric(horizontal: sheetHorizontalPadding),
+                child: ListView(
+                  shrinkWrap: true,
+                  padding: EdgeInsets.only(bottom: bottomDockGap),
+                  children: [
+                    ListTile(
+                      dense: true,
+                      title: Text(
+                        "로그 표시 설정",
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: titleFontSize,
+                        ),
+                      ),
+                      subtitle: Text(
+                        "현재 폰트: ${_formatPt(draftFontSize)}",
+                      ),
+                    ),
+                    ListTile(
+                      title: const Text("폰트 크기"),
+                      subtitle: Text(
+                        "${_formatPt(draftFontSize)} · 10pt ~ 20pt",
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Row(
+                        children: [
+                          IconButton(
+                            tooltip: "작게",
+                            onPressed: draftFontSize <= 10.0
+                                ? null
+                                : () {
+                                    setSheetState(() {
+                                      draftFontSize = (draftFontSize - 0.5)
+                                          .clamp(10.0, 20.0);
+                                    });
+                                  },
+                            icon: const Icon(Icons.remove_circle_outline),
+                          ),
+                          Expanded(
+                            child: Slider(
+                              value: draftFontSize,
+                              min: 10.0,
+                              max: 20.0,
+                              divisions: 20,
+                              label: _formatPt(draftFontSize),
+                              onChanged: (value) {
+                                setSheetState(() {
+                                  draftFontSize = ((value * 2).round() / 2)
+                                      .clamp(10.0, 20.0);
+                                });
+                              },
+                            ),
+                          ),
+                          IconButton(
+                            tooltip: "크게",
+                            onPressed: draftFontSize >= 20.0
+                                ? null
+                                : () {
+                                    setSheetState(() {
+                                      draftFontSize = (draftFontSize + 0.5)
+                                          .clamp(10.0, 20.0);
+                                    });
+                                  },
+                            icon: const Icon(Icons.add_circle_outline),
+                          ),
+                        ],
+                      ),
+                    ),
+                    SwitchListTile.adaptive(
+                      title: const Text("자동 줄바꿈"),
+                      subtitle: const Text("끄면 가로 스크롤로 한 줄 유지"),
+                      value: draftWrap,
+                      onChanged: (value) {
+                        setSheetState(() => draftWrap = value);
+                      },
+                    ),
+                    SwitchListTile.adaptive(
+                      title: const Text("오래된 로그 흐리게"),
+                      subtitle: const Text("이전 세션 로그를 더 연하게 표시"),
+                      value: draftDimOld,
+                      onChanged: (value) {
+                        setSheetState(() => draftDimOld = value);
+                      },
+                    ),
+                    SwitchListTile.adaptive(
+                      title: const Text("최신 로그 자동 스크롤"),
+                      subtitle: const Text("새 로그가 들어오면 맨 아래로 이동"),
+                      value: draftAutoScroll,
+                      onChanged: (value) {
+                        setSheetState(() => draftAutoScroll = value);
+                      },
+                    ),
+                    ListTile(
+                      title: const Text("강조 강도"),
+                      subtitle: Text(
+                        "현재: ${_emphasisLabel(draftEmphasisLevel)}",
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                      child: SegmentedButton<int>(
+                        segments: const [
+                          ButtonSegment<int>(value: 0, label: Text('끔')),
+                          ButtonSegment<int>(value: 1, label: Text('보통')),
+                          ButtonSegment<int>(value: 2, label: Text('강하게')),
+                        ],
+                        selected: <int>{draftEmphasisLevel},
+                        onSelectionChanged: (selection) {
+                          setSheetState(() {
+                            draftEmphasisLevel = selection.first;
+                          });
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                      child: FilledButton(
+                        onPressed: () async {
+                          setState(() {
+                            _gitLogFontSizePt = draftFontSize;
+                            _gitLogWrap = draftWrap;
+                            _gitLogDimOld = draftDimOld;
+                            _gitLogAutoScroll = draftAutoScroll;
+                            _gitLogEmphasisLevel = draftEmphasisLevel;
+                          });
+                          await _saveLogViewSettings();
+                          if (!mounted) return;
+                          Navigator.pop(sheetCtx);
+                          CustomToast.show(context, "로그 표시 설정 저장 완료");
+                        },
+                        child: const Text("적용"),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   Future<void> _showGitDetailsSheet() async {
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
@@ -974,6 +1216,44 @@ class _GitTabState extends State<GitTab> {
     }
   }
 
+  Future<void> _refreshGitHeadState({bool silent = false}) async {
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    if (!ssh.isConnected) {
+      return;
+    }
+
+    try {
+      final headSnapshot = await _actionService.loadGitHeadSnapshot(
+        ssh,
+        preferredRepoPath: _preferredRepoPath,
+      );
+      if (!mounted) return;
+      setState(() {
+        final current = _gitSnapshot;
+        _gitSnapshot = current == null
+            ? headSnapshot
+            : current.copyWith(
+                repoPath: headSnapshot.repoPath,
+                requestedRepoPath: headSnapshot.requestedRepoPath,
+                repoPathSource: headSnapshot.repoPathSource,
+                repoUrl: headSnapshot.repoUrl,
+                originUrl: headSnapshot.originUrl,
+                primaryRemoteName: headSnapshot.primaryRemoteName,
+                currentBranch: headSnapshot.currentBranch,
+                defaultBranch: headSnapshot.defaultBranch,
+                upstreamRef: headSnapshot.upstreamRef,
+                upstreamRemote: headSnapshot.upstreamRemote,
+                upstreamBranch: headSnapshot.upstreamBranch,
+                rawOutput: headSnapshot.rawOutput,
+              );
+      });
+    } catch (e) {
+      if (!silent && mounted) {
+        _addLog("Git 상태 갱신 실패: $e");
+      }
+    }
+  }
+
   Future<void> _openCurrentRepoInBrowser() async {
     final snapshot = _gitSnapshot;
     if (snapshot == null) return;
@@ -1193,7 +1473,7 @@ class _GitTabState extends State<GitTab> {
             action == DeviceActionType.gitPull ||
             action == DeviceActionType.gitSync ||
             action == DeviceActionType.gitResetHardClean) {
-          unawaited(_refreshGitSourceInfo(silent: true));
+          unawaited(_refreshGitHeadState(silent: true));
         }
       } else {
         CustomToast.show(
@@ -1731,6 +2011,9 @@ class _GitTabState extends State<GitTab> {
       case _GitToolsMenuAction.showDetails:
         await _showGitDetailsSheet();
         break;
+      case _GitToolsMenuAction.logDisplaySettings:
+        await _showLogDisplaySettingsSheet();
+        break;
       case _GitToolsMenuAction.clearLogs:
         await _clearLogs();
         break;
@@ -1811,8 +2094,7 @@ class _GitTabState extends State<GitTab> {
         compactLandscapeLayout ? 6.0 : (window.isCompact ? 8.0 : 10.0);
     final logContainerRadius =
         compactLandscapeLayout ? 8.0 : (window.isCompact ? 8.0 : 10.0);
-    final logLineFontSize =
-        compactLandscapeLayout ? 11.0 : (window.isCompact ? 12.0 : 13.0);
+    final logLineFontSize = _gitLogFontSizePt;
     final actionSpacing = compactLandscapeLayout
         ? 8.0
         : (window.isCompact ? tokens.itemGap + 2 : 10.0);
@@ -1943,6 +2225,11 @@ class _GitTabState extends State<GitTab> {
                     ),
                     const PopupMenuDivider(),
                     const PopupMenuItem(
+                      value: _GitToolsMenuAction.logDisplaySettings,
+                      child: Text("로그 표시 설정"),
+                    ),
+                    const PopupMenuDivider(),
+                    const PopupMenuItem(
                       value: _GitToolsMenuAction.clearLogs,
                       child: Text("로그 지우기"),
                     ),
@@ -2006,7 +2293,8 @@ class _GitTabState extends State<GitTab> {
                                 textAlign: TextAlign.center,
                                 style: TextStyle(
                                   color: Colors.grey[400],
-                                  fontSize: compactLandscapeLayout ? 12.0 : 13.0,
+                                  fontSize:
+                                      compactLandscapeLayout ? 12.0 : 13.0,
                                   fontWeight: FontWeight.w500,
                                 ),
                               ),
@@ -2017,32 +2305,116 @@ class _GitTabState extends State<GitTab> {
                               itemBuilder: (context, index) {
                                 final log = _logs[index];
                                 final isOld = log['isOld'] == 'true';
+                                final emphasisActive = _gitLogEmphasisLevel > 0;
+                                final messageColor = isOld && _gitLogDimOld
+                                    ? (emphasisActive
+                                        ? Colors.white70
+                                        : Colors.grey)
+                                    : Colors.white;
+                                final timeColor = isOld && _gitLogDimOld
+                                    ? (emphasisActive
+                                        ? Colors.greenAccent.shade100
+                                        : Colors.grey[600])
+                                    : Colors.greenAccent;
+                                final emphasisShadows =
+                                    switch (_gitLogEmphasisLevel) {
+                                  1 => const [
+                                      Shadow(
+                                        color: Colors.black87,
+                                        offset: Offset(1, 0),
+                                        blurRadius: 0,
+                                      ),
+                                      Shadow(
+                                        color: Colors.black87,
+                                        offset: Offset(-1, 0),
+                                        blurRadius: 0,
+                                      ),
+                                      Shadow(
+                                        color: Colors.black87,
+                                        offset: Offset(0, 1),
+                                        blurRadius: 0,
+                                      ),
+                                      Shadow(
+                                        color: Colors.black87,
+                                        offset: Offset(0, -1),
+                                        blurRadius: 0,
+                                      ),
+                                      Shadow(
+                                        color: Colors.black45,
+                                        offset: Offset(0, 0),
+                                        blurRadius: 3,
+                                      ),
+                                    ],
+                                  2 => const [
+                                      Shadow(
+                                        color: Colors.black,
+                                        offset: Offset(1.2, 0),
+                                        blurRadius: 0,
+                                      ),
+                                      Shadow(
+                                        color: Colors.black,
+                                        offset: Offset(-1.2, 0),
+                                        blurRadius: 0,
+                                      ),
+                                      Shadow(
+                                        color: Colors.black,
+                                        offset: Offset(0, 1.2),
+                                        blurRadius: 0,
+                                      ),
+                                      Shadow(
+                                        color: Colors.black,
+                                        offset: Offset(0, -1.2),
+                                        blurRadius: 0,
+                                      ),
+                                      Shadow(
+                                        color: Colors.black87,
+                                        offset: Offset(1, 1),
+                                        blurRadius: 3,
+                                      ),
+                                      Shadow(
+                                        color: Colors.black54,
+                                        offset: Offset(0, 0),
+                                        blurRadius: 6,
+                                      ),
+                                    ],
+                                  _ => null,
+                                };
+                                final text = RichText(
+                                  softWrap: _gitLogWrap,
+                                  overflow: TextOverflow.visible,
+                                  text: TextSpan(
+                                    style: TextStyle(
+                                      fontFamily: 'monospace',
+                                      fontSize: logLineFontSize,
+                                      color: messageColor,
+                                      height: 1.3,
+                                      shadows: emphasisShadows,
+                                    ),
+                                    children: [
+                                      TextSpan(
+                                        text: "[${log['time']}] ",
+                                        style: TextStyle(
+                                          color: timeColor,
+                                          fontWeight: FontWeight.w700,
+                                          shadows: emphasisShadows,
+                                        ),
+                                      ),
+                                      TextSpan(text: log['message']),
+                                    ],
+                                  ),
+                                );
                                 return Padding(
                                   padding: EdgeInsets.symmetric(
                                     vertical: compactLandscapeLayout
                                         ? 1.5
                                         : (window.isCompact ? 2.0 : 3.0),
                                   ),
-                                  child: RichText(
-                                    text: TextSpan(
-                                      style: TextStyle(
-                                        fontFamily: 'monospace',
-                                        fontSize: logLineFontSize,
-                                        color: isOld ? Colors.grey : Colors.white,
-                                      ),
-                                      children: [
-                                        TextSpan(
-                                          text: "[${log['time']}] ",
-                                          style: TextStyle(
-                                            color: isOld
-                                                ? Colors.grey[600]
-                                                : Colors.greenAccent,
-                                          ),
+                                  child: _gitLogWrap
+                                      ? text
+                                      : SingleChildScrollView(
+                                          scrollDirection: Axis.horizontal,
+                                          child: text,
                                         ),
-                                        TextSpan(text: log['message']),
-                                      ],
-                                    ),
-                                  ),
                                 );
                               },
                             ),

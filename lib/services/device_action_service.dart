@@ -80,6 +80,42 @@ class GitBranchSnapshot {
     required this.rawOutput,
   });
 
+  GitBranchSnapshot copyWith({
+    String? repoPath,
+    String? requestedRepoPath,
+    String? repoPathSource,
+    String? repoUrl,
+    String? originUrl,
+    String? primaryRemoteName,
+    String? currentBranch,
+    String? defaultBranch,
+    String? upstreamRef,
+    String? upstreamRemote,
+    String? upstreamBranch,
+    List<GitRemoteInfo>? remotes,
+    List<Map<String, String>>? branches,
+    Map<String, String>? localRefs,
+    String? rawOutput,
+  }) {
+    return GitBranchSnapshot(
+      repoPath: repoPath ?? this.repoPath,
+      requestedRepoPath: requestedRepoPath ?? this.requestedRepoPath,
+      repoPathSource: repoPathSource ?? this.repoPathSource,
+      repoUrl: repoUrl ?? this.repoUrl,
+      originUrl: originUrl ?? this.originUrl,
+      primaryRemoteName: primaryRemoteName ?? this.primaryRemoteName,
+      currentBranch: currentBranch ?? this.currentBranch,
+      defaultBranch: defaultBranch ?? this.defaultBranch,
+      upstreamRef: upstreamRef ?? this.upstreamRef,
+      upstreamRemote: upstreamRemote ?? this.upstreamRemote,
+      upstreamBranch: upstreamBranch ?? this.upstreamBranch,
+      remotes: remotes ?? this.remotes,
+      branches: branches ?? this.branches,
+      localRefs: localRefs ?? this.localRefs,
+      rawOutput: rawOutput ?? this.rawOutput,
+    );
+  }
+
   bool get hasOriginRemote => remotes.any((e) => e.name == 'origin');
   bool get usingConfiguredRepoPath =>
       requestedRepoPath.isNotEmpty &&
@@ -380,6 +416,88 @@ git -C "\$REPO" for-each-ref --format="%(refname:short)|%(objectname)" refs/head
     );
   }
 
+  Future<GitBranchSnapshot> loadGitHeadSnapshot(
+    SSHService ssh, {
+    String? preferredRepoPath,
+  }) async {
+    final script = '''
+${_repoDetectScript(preferredRepoPath: preferredRepoPath)}
+PRIMARY_REMOTE="\$(git -C "\$REPO" remote | head -n1 | tr -d '\\r')"
+CURRENT_BRANCH="\$(git -C "\$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+UPSTREAM_REF="\$(git -C "\$REPO" rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || true)"
+DEFAULT_BRANCH="\$(git -C "\$REPO" remote show -n origin 2>/dev/null | sed -n 's/.*HEAD branch: //p' | head -n1)"
+ORIGIN_URL="\$(git -C "\$REPO" config --get remote.origin.url 2>/dev/null || true)"
+if [ -n "\$ORIGIN_URL" ]; then
+  REPO_URL="\$ORIGIN_URL"
+else
+  REPO_URL="\$(git -C "\$REPO" remote get-url "\$PRIMARY_REMOTE" 2>/dev/null || true)"
+fi
+echo "__META__|\$REPO|\$REPO_SOURCE|\$REQUESTED_REPO|\$CURRENT_BRANCH|\$DEFAULT_BRANCH|\$REPO_URL|\$ORIGIN_URL|\$PRIMARY_REMOTE|\$UPSTREAM_REF"
+''';
+
+    final result = await ssh.executeCommandResult(
+      _bash(script),
+      timeout: const Duration(seconds: 15),
+    );
+
+    if (!result.isSuccess) {
+      throw Exception(
+          result.output.isEmpty ? '브랜치 정보를 가져오지 못했습니다.' : result.output);
+    }
+
+    final lines = result.stdout
+        .split('\n')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    if (lines.isEmpty || !lines.first.startsWith('__META__|')) {
+      throw Exception('브랜치 출력 형식이 올바르지 않습니다.');
+    }
+
+    final meta = lines.first.split('|');
+    final repoPath = meta.length > 1 ? meta[1] : '';
+    final repoPathSource = meta.length > 2 ? meta[2] : '';
+    final requestedRepoPath = meta.length > 3 ? meta[3] : '';
+    final currentBranch = meta.length > 4 ? meta[4] : '';
+    final defaultBranch = meta.length > 5 ? meta[5] : '';
+    var repoUrl = meta.length > 6 ? meta[6] : '';
+    var originUrl = meta.length > 7 ? meta[7] : '';
+    final primaryRemoteName = meta.length > 8 ? meta[8] : '';
+    final upstreamRef = meta.length > 9 ? meta.sublist(9).join('|') : '';
+    if (repoUrl.endsWith('.git')) {
+      repoUrl = repoUrl.substring(0, repoUrl.length - 4);
+    }
+    if (originUrl.endsWith('.git')) {
+      originUrl = originUrl.substring(0, originUrl.length - 4);
+    }
+
+    String upstreamRemote = '';
+    String upstreamBranch = '';
+    if (upstreamRef.contains('/')) {
+      final idx = upstreamRef.indexOf('/');
+      upstreamRemote = upstreamRef.substring(0, idx);
+      upstreamBranch = upstreamRef.substring(idx + 1);
+    }
+
+    return GitBranchSnapshot(
+      repoPath: repoPath,
+      requestedRepoPath: requestedRepoPath,
+      repoPathSource: repoPathSource,
+      repoUrl: repoUrl,
+      originUrl: originUrl,
+      primaryRemoteName: primaryRemoteName,
+      currentBranch: currentBranch,
+      defaultBranch: defaultBranch,
+      upstreamRef: upstreamRef,
+      upstreamRemote: upstreamRemote,
+      upstreamBranch: upstreamBranch,
+      remotes: const [],
+      branches: const [],
+      localRefs: const {},
+      rawOutput: result.stdout,
+    );
+  }
+
   Future<GitRemoteUpdateResult> setGitOriginRemote(
       SSHService ssh, String originUrl,
       {String? preferredRepoPath}) async {
@@ -561,14 +679,26 @@ git -C "\$REPO" pull
         return '''
 ${_repoDetectScript(preferredRepoPath: repoPathOverride)}
 BRANCH="\$(git -C "\$REPO" rev-parse --abbrev-ref HEAD)"
-git -C "\$REPO" fetch --all --prune
 UPSTREAM="\$(git -C "\$REPO" rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || true)"
+PRIMARY_REMOTE="\$(git -C "\$REPO" remote | head -n1 | tr -d '\\r')"
+if [ -n "\$UPSTREAM" ]; then
+  FETCH_REMOTE="\${UPSTREAM%%/*}"
+elif git -C "\$REPO" remote get-url origin >/dev/null 2>&1; then
+  FETCH_REMOTE="origin"
+else
+  FETCH_REMOTE="\$PRIMARY_REMOTE"
+fi
+if [ -z "\$FETCH_REMOTE" ]; then
+  echo "remote not found"
+  exit 3
+fi
+git -C "\$REPO" fetch "\$FETCH_REMOTE" --prune
 if [ -n "\$UPSTREAM" ] && git -C "\$REPO" rev-parse --verify --quiet "\$UPSTREAM" >/dev/null 2>&1; then
   git -C "\$REPO" reset --hard "\$UPSTREAM"
-elif git -C "\$REPO" rev-parse --verify --quiet "origin/\$BRANCH" >/dev/null 2>&1; then
-  git -C "\$REPO" reset --hard "origin/\$BRANCH"
+elif git -C "\$REPO" rev-parse --verify --quiet "\$FETCH_REMOTE/\$BRANCH" >/dev/null 2>&1; then
+  git -C "\$REPO" reset --hard "\$FETCH_REMOTE/\$BRANCH"
 else
-  echo "upstream/origin branch not found, fetch-only done"
+  echo "upstream/remote branch not found, fetch-only done"
 fi
 ''';
       case DeviceActionType.gitResetHardClean:

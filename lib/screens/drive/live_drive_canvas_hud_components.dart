@@ -34,8 +34,7 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
     if (_cameraSuspendedByLifecycle) {
       return const ColoredBox(color: Colors.black);
     }
-    final nativeCameraPrewarm =
-        !_hudModeLoaded &&
+    final nativeCameraPrewarm = !_hudModeLoaded &&
         _canUseNativeCamera &&
         !_nativeCameraUnsupported &&
         _hudDefaultMode == HudDriveSettingsService.modeOpenpilotOverlay;
@@ -84,44 +83,6 @@ extension _LiveDriveCanvasHudComponents on _LiveDriveCanvasScreenState {
         return error;
       }
       return null;
-    }
-    if (!_hudModeLoaded) return 'HUD 모드 설정을 불러오는 중입니다.';
-    if (_openpilotOverlayMode && !_sidecarConnected) {
-      return '사이드카 연결 대기 중입니다.';
-    }
-    if (_openpilotOverlayMode &&
-        _profileRequiresLiveRuntime(_currentSidecarProfile) &&
-        !_nativeCameraAttachReady) {
-      return '카메라/그래픽 연결 대기 중입니다.';
-    }
-    final attachNotice = _cameraAttachNoticeMessage();
-    if (attachNotice != null && attachNotice.isNotEmpty) {
-      if (!_shouldUseDegradedOverlayFallbackUi()) {
-        return attachNotice;
-      }
-    }
-    final err = _cameraError?.trim();
-    if (err != null && err.isNotEmpty) {
-      return err;
-    }
-    final notice = _hudNoticeMessage?.trim();
-    if (notice != null && notice.isNotEmpty) {
-      return notice;
-    }
-    if (_openpilotOverlayMode &&
-        _cameraLoading &&
-        _nativeCameraAttachReady &&
-        _lastCameraFrameId == null) {
-      if (!_shouldUseDegradedOverlayFallbackUi()) {
-        return '로드카메라 첫 프레임 대기 중입니다.';
-      }
-    }
-    if (_openpilotOverlayMode &&
-        !_cameraLoading &&
-        _lastCameraFrameId == null) {
-      if (!_shouldUseDegradedOverlayFallbackUi()) {
-        return '카메라 스트림 재동기화 중입니다.';
-      }
     }
     return null;
   }

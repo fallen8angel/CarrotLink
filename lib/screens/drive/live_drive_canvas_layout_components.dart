@@ -48,13 +48,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
       UiWindowClass.expanded => 16.0,
       UiWindowClass.large || UiWindowClass.extraLarge => 18.0,
     };
-    final hasCenterNotice = _cameraCenterNoticeMessage() != null;
-    final hasBottomStatusBanner = !hasCenterNotice &&
-        (_showSidecarStatusBanner ||
-            !_hudModeLoaded ||
-            (_cameraError?.isNotEmpty ?? false) ||
-            _hudNoticeMessage != null);
-    final fabBottom = hasBottomStatusBanner ? (fabInset + 72.0) : fabInset;
+    final fabBottom = fabInset;
     final settingsFab = FloatingActionButton.small(
       heroTag: isLandscapeLayout
           ? 'drive_settings_fab_landscape'
@@ -376,12 +370,6 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
           UiWindowClass.expanded => window.isLandscape ? 16.0 : 14.0,
           UiWindowClass.large || UiWindowClass.extraLarge => 18.0,
         };
-        final overlayBottomInset = switch (window.windowClass) {
-          UiWindowClass.compact => 12.0,
-          UiWindowClass.medium => 14.0,
-          UiWindowClass.expanded => 16.0,
-          UiWindowClass.large || UiWindowClass.extraLarge => 18.0,
-        };
         final statusBannerMaxWidth = switch (window.windowClass) {
           UiWindowClass.compact => math.min(vw - (overlayInset * 2), 520.0),
           UiWindowClass.medium => math.min(vw * 0.72, 620.0),
@@ -454,7 +442,6 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
         };
         final centerNoticeMessage = _cameraCenterNoticeMessage();
         final hasCenterNotice = centerNoticeMessage != null;
-        final showBottomStatusBanners = !hasCenterNotice;
         final drawSize = Size(drawW, drawH);
         final landscapeHudHeight = isLandscapeLayout && !hideHudForTinyViewport
             ? _computeLandscapeHudOverlayHeight(window, drawSize)
@@ -628,13 +615,13 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                     ),
                   ),
                 ),
-              if (showBottomStatusBanners && _showSidecarStatusBanner)
+              if (_showSidecarStatusBanner)
                 Positioned(
                   left: overlayInset,
                   right: overlayInset,
-                  bottom: overlayBottomInset,
+                  top: overlayInset,
                   child: Align(
-                    alignment: Alignment.bottomCenter,
+                    alignment: Alignment.topCenter,
                     child: ConstrainedBox(
                       constraints: BoxConstraints(
                         maxWidth: statusBannerMaxWidth,
@@ -694,7 +681,7 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                                   ),
                                 ),
                               ),
-                            if (_isSidecarBusy) ...[
+                            if (_isSidecarHardBusy) ...[
                               SizedBox(height: statusBannerGap),
                               ClipRRect(
                                 borderRadius: const BorderRadius.all(
@@ -712,71 +699,6 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                             ],
                           ],
                         ),
-                      ),
-                    ),
-                  ),
-                )
-              else if (showBottomStatusBanners && !_hudModeLoaded)
-                Positioned(
-                  left: overlayInset,
-                  right: overlayInset,
-                  bottom: overlayBottomInset,
-                  child: Container(
-                    padding: EdgeInsets.all(statusAlertPadding),
-                    decoration: BoxDecoration(
-                      color: const Color(0xCC1F1712),
-                      borderRadius: BorderRadius.circular(statusBannerRadius),
-                      border: Border.all(color: Colors.white24),
-                    ),
-                    child: Text(
-                      'HUD 모드 설정을 불러오는 중...',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: statusBannerBodyFont,
-                      ),
-                    ),
-                  ),
-                )
-              else if (showBottomStatusBanners && _cameraError != null)
-                Positioned(
-                  left: overlayInset,
-                  right: overlayInset,
-                  bottom: overlayBottomInset,
-                  child: Container(
-                    padding: EdgeInsets.all(statusAlertPadding),
-                    decoration: BoxDecoration(
-                      color: const Color(0xCC7A1010),
-                      borderRadius: BorderRadius.circular(statusBannerRadius),
-                      border: Border.all(color: Colors.white24),
-                    ),
-                    child: Text(
-                      _cameraError!,
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: statusBannerBodyFont,
-                      ),
-                    ),
-                  ),
-                )
-              else if (showBottomStatusBanners && _hudNoticeMessage != null)
-                Positioned(
-                  left: overlayInset,
-                  right: overlayInset,
-                  bottom: overlayBottomInset,
-                  child: Container(
-                    padding: EdgeInsets.all(statusAlertPadding),
-                    decoration: BoxDecoration(
-                      color: _hudNoticeIsError
-                          ? const Color(0xCC7A1010)
-                          : const Color(0xCC1F1712),
-                      borderRadius: BorderRadius.circular(statusBannerRadius),
-                      border: Border.all(color: Colors.white24),
-                    ),
-                    child: Text(
-                      _hudNoticeMessage!,
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: statusBannerBodyFont,
                       ),
                     ),
                   ),
