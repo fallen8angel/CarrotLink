@@ -62,18 +62,29 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
     } else {
       // Not yet connected — debounce before propagating to avoid flashing
       // "사이드카 연결 대기" for brief WS reconnects (~350 ms).
-      _overlayDisconnectDebounce ??= Timer(
-        const Duration(milliseconds: 1200),
-        () {
-          _overlayDisconnectDebounce = null;
-          if (!mounted) return;
-          _applySidecarConnectionState(
-            false,
-            allowRecovery: _openpilotOverlayMode,
-            provisionalReason: 'shared_overlay_disconnect_debounced',
-          );
-        },
-      );
+      // While _sidecarAutoManaging is true (profile switch / runtime ensure
+      // in progress), suppress the debounce entirely — the runtime ensure
+      // path will reconnect once the switch completes and firing the
+      // debounce mid-switch would needlessly reset camera + trigger a
+      // recovery cycle.
+      if (!_sidecarAutoManaging) {
+        _overlayDisconnectDebounce ??= Timer(
+          const Duration(milliseconds: 2500),
+          () {
+            _overlayDisconnectDebounce = null;
+            if (!mounted) return;
+            // If the runtime ensure started while this timer was pending,
+            // skip the disconnect cascade — the ensure path owns the
+            // lifecycle now.
+            if (_sidecarAutoManaging) return;
+            _applySidecarConnectionState(
+              false,
+              allowRecovery: _openpilotOverlayMode,
+              provisionalReason: 'shared_overlay_disconnect_debounced',
+            );
+          },
+        );
+      }
     }
 
     if (!sameHost) {
@@ -194,7 +205,14 @@ extension _LiveDriveCanvasSidecarComponents on _LiveDriveCanvasScreenState {
     }
 
     if (_openpilotOverlayMode && !_cameraSuspendedByLifecycle) {
-      _setNativeCameraAttachReady(false);
+      // During a profile switch or runtime ensure the overlay WS
+      // disconnects briefly but the camera stream is unaffected.
+      // Preserve the camera view to avoid a visible black-screen flash;
+      // only tear it down when we are NOT in the middle of a managed
+      // lifecycle transition.
+      if (!_sidecarAutoManaging) {
+        _setNativeCameraAttachReady(false);
+      }
       if (allowRecovery) {
         if (!_isSidecarBusy) {
           _scheduleSidecarRuntimeRecovery(

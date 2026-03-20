@@ -252,17 +252,17 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const int _staleDegradedPublishAfterUs = 900000;
   static const int _cameraFrameStaleUs = 350000;
   static const int _cameraHealthyFrameAgeUs = 1200000;
-  static const int _startupProvisionalSyncWindowUs = 4000000;
-  static const int _cameraFirstFrameDegradedHoldUs = 12000000;
-  static const int _cameraFirstFrameForceReattachUs = 9000000;
-  static const int _cameraFirstFrameRecoveryCooldownUs = 12000000;
+  static const int _startupProvisionalSyncWindowUs = 2500000;
+  static const int _cameraFirstFrameDegradedHoldUs = 8000000;
+  static const int _cameraFirstFrameForceReattachUs = 6000000;
+  static const int _cameraFirstFrameRecoveryCooldownUs = 8000000;
   static const int _startupProvisionalNativeSettleFrames = 3;
   static const int _interpMinUs = 6000;
   static const int _interpMaxUs = 50000;
   static const Duration _cameraDiagCaptureCooldown = Duration(seconds: 12);
   static const Duration _cameraTransientErrorEscalationDelay =
       Duration(seconds: 5);
-  static const int _cameraStartupSocketFailureSuppressWindowUs = 6000000;
+  static const int _cameraStartupSocketFailureSuppressWindowUs = 3000000;
   static const Duration _lifecycleSuspendDelay = Duration(milliseconds: 3200);
   static const Duration _sidecarWarmProcessKeepAlive = Duration(seconds: 35);
   static const Duration _backgroundProcessKeepAlive = Duration(seconds: 45);

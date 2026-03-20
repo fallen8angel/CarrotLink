@@ -58,6 +58,7 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
     final relay = _diagStringKeyMap(sidecarHealth['cameraRelay']);
     final cameras = _diagStringKeyMap(relay['cameras']);
     final road = _diagStringKeyMap(cameras['road']);
+    final serviceSamples = _diagStringKeyMap(road['serviceSamples']);
     return <String, dynamic>{
       'mode': relay['mode'],
       'qualityMode': relay['qualityMode'],
@@ -73,6 +74,9 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
         'sendDrops': road['sendDrops'],
         'rawFrame': _diagStringKeyMap(road['rawFrame']),
         'packedMeta': _diagStringKeyMap(road['packedMeta']),
+        'serviceSamples': serviceSamples.map(
+          (key, value) => MapEntry(key, _diagStringKeyMap(value)),
+        ),
       },
     };
   }
@@ -100,12 +104,31 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
     final relayLastFrameId = (relayRoad['lastFrameId'] as num?)?.toInt() ?? -1;
     final relayRawFrame = _diagStringKeyMap(relayRoad['rawFrame']);
     final relayPackedMeta = _diagStringKeyMap(relayRoad['packedMeta']);
+    final serviceSamples = _diagStringKeyMap(relayRoad['serviceSamples']);
+    final relayLiveSample =
+        _diagStringKeyMap(serviceSamples['livestreamRoadEncodeData']);
+    final relayRoadSample = _diagStringKeyMap(serviceSamples['roadEncodeData']);
     final relayRawFrameId = (relayRawFrame['frameId'] as num?)?.toInt() ?? -1;
     final relayPackedFrameId =
         (relayPackedMeta['frameId'] as num?)?.toInt() ?? -1;
+    final relayLiveRaw = _diagStringKeyMap(relayLiveSample['rawFrame']);
+    final relayRoadRaw = _diagStringKeyMap(relayRoadSample['rawFrame']);
+    final relayLiveRawFrameId =
+        (relayLiveRaw['frameId'] as num?)?.toInt() ?? -1;
+    final relayRoadRawFrameId =
+        (relayRoadRaw['frameId'] as num?)?.toInt() ?? -1;
+    final relayLiveFrameId =
+        (relayLiveSample['lastFrameId'] as num?)?.toInt() ?? -1;
+    final relayRoadServiceFrameId =
+        (relayRoadSample['lastFrameId'] as num?)?.toInt() ?? -1;
     final roadCameraState = _diagStringKeyMap(serviceHealth['roadCameraState']);
     final roadCameraFrameId =
         (roadCameraState['frameId'] as num?)?.toInt() ?? -1;
+    if (candidates.contains('frameId=null') &&
+        relayLiveRawFrameId < 0 &&
+        relayRoadRawFrameId >= 0) {
+      return 'livestreamRoadEncodeData raw frameId는 비어 있지만 roadEncodeData raw frameId는 있습니다. stable 모드 선택 스트림의 frameId 누락 가능성이 큽니다.';
+    }
     if (candidates.contains('frameId=null') &&
         roadCameraFrameId >= 0 &&
         relayRawFrameId < 0 &&
@@ -121,6 +144,12 @@ extension _LiveDriveCanvasDiagLoggingComponents on _LiveDriveCanvasScreenState {
         relayPackedFrameId >= 0 &&
         parsedFrameIdRaw.contains('null')) {
       return 'cameraRelay packed meta에는 frameId가 있으나 native가 파싱한 최근 meta.frameId는 null입니다. websocket packet 전달 또는 native parse 경계를 확인해야 합니다.';
+    }
+    if (candidates.contains('frameId=null') &&
+        relayLiveFrameId < 0 &&
+        relayRoadServiceFrameId < 0 &&
+        roadCameraFrameId >= 0) {
+      return 'roadCameraState.frameId는 있으나 livestream/road encode 서비스 raw frameId가 모두 비어 있습니다. camera relay producer 입력 frame 객체 쪽 원인이 가장 유력합니다.';
     }
     if (candidates.contains('frameId=null') && roadCameraFrameId < 0) {
       return 'camera service 자체에서 frameId가 비어 들어올 가능성이 있습니다.';

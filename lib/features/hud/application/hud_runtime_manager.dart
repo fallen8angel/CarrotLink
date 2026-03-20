@@ -114,7 +114,7 @@ Future<void> _overlayRuntimeWorkerMain(Map<String, dynamic> config) async {
     WebSocket? socket;
     try {
       socket = await WebSocket.connect(wsUrl).timeout(
-        const Duration(seconds: 4),
+        const Duration(milliseconds: 2500),
       );
       sendPort.send(<String, dynamic>{'type': 'connected', 'connected': true});
       await for (final event in socket) {

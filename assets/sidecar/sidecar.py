@@ -256,7 +256,7 @@ def _extract_h264_codec(payload: bytes) -> str | None:
 
 
 class CameraRelayHub:
-    CAMERA_QUEUE_MAXSIZE = 2
+    CAMERA_QUEUE_MAXSIZE = 4
     CAMERA_SERVICE_CANDIDATES = {
         "road": [
             "livestreamRoadEncodeData",
@@ -272,6 +272,13 @@ class CameraRelayHub:
         ],
     }
     QUALITY_MODES = ("quality", "stable")
+
+    # Max send FPS per camera.  The cereal encoder may produce 20 fps but
+    # on slow WiFi the client can't keep up — capping the send rate reduces
+    # wasted bandwidth, codec overload, and unnecessary frame drops on the
+    # client side.
+    MAX_SEND_FPS: float = 20.0
+    _MIN_FRAME_INTERVAL: float = 1.0 / MAX_SEND_FPS  # ~50 ms
 
     def __init__(self, messaging: Any):
         self.messaging = messaging
@@ -315,14 +322,65 @@ class CameraRelayHub:
         self._null_frame_id_count: dict[str, int] = {
             cam: 0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
         }
+        # Latest frameId from roadCameraState / wideRoadCameraState (fed by
+        # SidecarBroker SM updates).  Used as a secondary fallback when the
+        # encode stream itself carries no frameId.
+        self._sm_frame_id: dict[str, int] = {}
         self._last_raw_frame_sample: dict[str, dict[str, Any]] = {
             cam: {} for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
         }
         self._last_packed_meta_sample: dict[str, dict[str, Any]] = {
             cam: {} for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
         }
+        self._service_frame_samples: dict[str, dict[str, dict[str, Any]]] = {
+            cam: {
+                service: {}
+                for service in self.CAMERA_SERVICE_CANDIDATES.get(cam, [])
+            }
+            for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+        }
+        self._service_last_frame_id: dict[str, dict[str, int]] = {
+            cam: {
+                service: -1
+                for service in self.CAMERA_SERVICE_CANDIDATES.get(cam, [])
+            }
+            for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+        }
+        self._service_null_frame_id_count: dict[str, dict[str, int]] = {
+            cam: {
+                service: 0
+                for service in self.CAMERA_SERVICE_CANDIDATES.get(cam, [])
+            }
+            for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+        }
+        self._service_frame_count: dict[str, dict[str, int]] = {
+            cam: {
+                service: 0
+                for service in self.CAMERA_SERVICE_CANDIDATES.get(cam, [])
+            }
+            for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+        }
+        self._service_last_frame_at_mono: dict[str, dict[str, float]] = {
+            cam: {
+                service: 0.0
+                for service in self.CAMERA_SERVICE_CANDIDATES.get(cam, [])
+            }
+            for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+        }
+        self._last_service_probe_at_mono: dict[str, float] = {
+            cam: 0.0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+        }
         self._last_send_batch_ms: dict[str, float] = {
             cam: 0.0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+        }
+        self._last_send_at_mono: dict[str, float] = {
+            cam: 0.0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+        }
+        # Adaptive skip: consecutive send failures across all clients.
+        # When failures accumulate, we skip non-keyframes to reduce load
+        # on slow connections.
+        self._consecutive_send_failures: dict[str, int] = {
+            cam: 0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
         }
         self._quality_mode = self._normalize_quality_mode(
             os.environ.get("CARROTLINK_CAMERA_QUALITY_MODE", "quality")
@@ -341,6 +399,12 @@ class CameraRelayHub:
 
     def get_quality_mode(self) -> str:
         return self._quality_mode
+
+    def update_sm_frame_id(self, camera: str, frame_id: int | None) -> None:
+        """Called by SidecarBroker after SM update to cache the latest
+        roadCameraState / wideRoadCameraState frameId."""
+        if frame_id is not None and frame_id > 0:
+            self._sm_frame_id[camera] = frame_id
 
     def rebind_messaging(self, messaging: Any) -> None:
         self.messaging = messaging
@@ -371,14 +435,59 @@ class CameraRelayHub:
             self._null_frame_id_count = {
                 cam: 0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
             }
+            self._sm_frame_id = {}
             self._last_raw_frame_sample = {
                 cam: {} for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
             }
             self._last_packed_meta_sample = {
                 cam: {} for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
             }
+            self._service_frame_samples = {
+                cam: {
+                    service: {}
+                    for service in self.CAMERA_SERVICE_CANDIDATES.get(cam, [])
+                }
+                for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._service_last_frame_id = {
+                cam: {
+                    service: -1
+                    for service in self.CAMERA_SERVICE_CANDIDATES.get(cam, [])
+                }
+                for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._service_null_frame_id_count = {
+                cam: {
+                    service: 0
+                    for service in self.CAMERA_SERVICE_CANDIDATES.get(cam, [])
+                }
+                for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._service_frame_count = {
+                cam: {
+                    service: 0
+                    for service in self.CAMERA_SERVICE_CANDIDATES.get(cam, [])
+                }
+                for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._service_last_frame_at_mono = {
+                cam: {
+                    service: 0.0
+                    for service in self.CAMERA_SERVICE_CANDIDATES.get(cam, [])
+                }
+                for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._last_service_probe_at_mono = {
+                cam: 0.0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
             self._last_send_batch_ms = {
                 cam: 0.0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._last_send_at_mono = {
+                cam: 0.0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._consecutive_send_failures = {
+                cam: 0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
             }
             self._ws_send_failures = {}
             for queue in self._queues.values():
@@ -388,6 +497,81 @@ class CameraRelayHub:
                     except Exception:
                         break
         print(f"[sidecar] camera runtime reset reason={reason}")
+
+    async def soft_reset_for_profile_switch(self, reason: str = "profile_switch") -> None:
+        """Lightweight reset for profile switches.  Preserves camera WS
+        client connections, codec state, and queued frames so that clients
+        experience at most a brief frame gap rather than a full reconnect
+        cycle.  Only counters, frame-id tracking, and cereal sockets are
+        cleared so the producer loop can rebind to new services."""
+        async with self._lock:
+            # Reset cereal sockets so the producer loop re-probes services
+            # after the SubMaster is recreated with the new profile's
+            # service list.
+            self._sockets = {
+                cam: {} for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._selected_service = {
+                cam: "" for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            # Reset frame-id tracking (stale IDs from the old profile's
+            # service subscriptions must not carry over).
+            self._last_frame_id = {
+                cam: -1 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._null_frame_id_count = {
+                cam: 0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._sm_frame_id = {}
+            self._last_raw_frame_sample = {
+                cam: {} for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._last_packed_meta_sample = {
+                cam: {} for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._service_frame_samples = {
+                cam: {
+                    service: {}
+                    for service in self.CAMERA_SERVICE_CANDIDATES.get(cam, [])
+                }
+                for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._service_last_frame_id = {
+                cam: {
+                    service: -1
+                    for service in self.CAMERA_SERVICE_CANDIDATES.get(cam, [])
+                }
+                for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._service_null_frame_id_count = {
+                cam: {
+                    service: 0
+                    for service in self.CAMERA_SERVICE_CANDIDATES.get(cam, [])
+                }
+                for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._service_frame_count = {
+                cam: {
+                    service: 0
+                    for service in self.CAMERA_SERVICE_CANDIDATES.get(cam, [])
+                }
+                for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._service_last_frame_at_mono = {
+                cam: {
+                    service: 0.0
+                    for service in self.CAMERA_SERVICE_CANDIDATES.get(cam, [])
+                }
+                for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            self._last_service_probe_at_mono = {
+                cam: 0.0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
+            }
+            # NOTE: _last_codec, _last_frame_at_mono, _last_send_batch_ms,
+            # _ws_send_failures, and queues are intentionally preserved so
+            # that connected camera WS clients keep receiving frames without
+            # a full reconnect.
+        print(f"[sidecar] camera soft reset reason={reason}")
 
     def _ordered_camera_services(self, camera: str) -> list[str]:
         base = list(self.CAMERA_SERVICE_CANDIDATES.get(camera, []))
@@ -421,6 +605,11 @@ class CameraRelayHub:
                 encode_id = _safe_int(getattr(idx, "encodeId", None))
                 segment_id = _safe_int(getattr(idx, "segmentId", None))
                 frame_type = str(getattr(idx, "type", ""))
+                # EncodeData has no top-level frameId; it lives inside
+                # EncodeIndex (idx).  Fall back to idx.frameId when the
+                # top-level read returned None.
+                if frame_id is None:
+                    frame_id = _safe_int(getattr(idx, "frameId", None))
         except Exception:
             pass
         return {
@@ -436,6 +625,63 @@ class CameraRelayHub:
             "segmentId": segment_id,
             "frameType": frame_type,
         }
+
+    def _remember_service_frame_sample(
+        self,
+        camera: str,
+        service: str,
+        sample: dict[str, Any],
+    ) -> None:
+        if not service:
+            return
+        self._service_frame_samples.setdefault(camera, {})[service] = dict(sample)
+        self._service_frame_count.setdefault(camera, {}).setdefault(service, 0)
+        self._service_frame_count[camera][service] += 1
+        self._service_last_frame_at_mono.setdefault(camera, {})[service] = time.monotonic()
+        frame_id = _safe_int(sample.get("frameId"))
+        if frame_id is None or frame_id < 0:
+            self._service_null_frame_id_count.setdefault(camera, {}).setdefault(service, 0)
+            self._service_null_frame_id_count[camera][service] += 1
+        else:
+            self._service_last_frame_id.setdefault(camera, {})[service] = frame_id
+
+    async def _probe_alternate_camera_services(
+        self,
+        camera: str,
+        primary_service: str,
+    ) -> None:
+        now = time.monotonic()
+        last_probe = self._last_service_probe_at_mono.get(camera, 0.0)
+        if now - last_probe < 0.9:
+            return
+        self._last_service_probe_at_mono[camera] = now
+        for service in self.CAMERA_SERVICE_CANDIDATES.get(camera, []):
+            if service == primary_service:
+                continue
+            sock = await self._get_camera_socket(camera, service)
+            if sock is None:
+                continue
+            try:
+                candidate = self.messaging.recv_one_or_none(sock)
+            except Exception:
+                continue
+            if candidate is None:
+                continue
+            try:
+                which = candidate.which()
+            except Exception:
+                continue
+            if not which:
+                continue
+            frame = getattr(candidate, which, None)
+            if frame is None:
+                continue
+            sample = self._build_frame_sample(
+                frame,
+                service=service,
+                which=which,
+            )
+            self._remember_service_frame_sample(camera, service, sample)
 
     def _pack_frame(
         self,
@@ -508,6 +754,23 @@ class CameraRelayHub:
         except Exception:
             return None
 
+    # Map camera key to the SM service whose frameId signals readiness.
+    _CAMERA_READY_SERVICE: dict[str, str] = {
+        "road": "roadCameraState",
+        "wideRoad": "wideRoadCameraState",
+    }
+
+    def _camera_service_ready(self, camera: str) -> bool:
+        """Return True when the corresponding *CameraState SM service has
+        delivered at least one valid frameId, indicating that the encoder
+        pipeline is actually producing frames."""
+        svc = self._CAMERA_READY_SERVICE.get(camera)
+        if svc is None:
+            # No readiness gate for driver camera – always allow.
+            return True
+        fid = self._sm_frame_id.get(camera)
+        return fid is not None and fid > 0
+
     async def _camera_producer_loop(self, camera: str) -> None:
         if self.messaging is None:
             return
@@ -516,6 +779,14 @@ class CameraRelayHub:
             try:
                 if not self.clients.get(camera):
                     await asyncio.sleep(0.03)
+                    continue
+
+                # Wait until the camera encoder pipeline is actually
+                # producing frames before attempting to read from the
+                # encode service.  This avoids useless socket churn
+                # while openpilot is still booting.
+                if not self._camera_service_ready(camera):
+                    await asyncio.sleep(0.1)
                     continue
 
                 services = self._ordered_camera_services(camera)
@@ -562,11 +833,52 @@ class CameraRelayHub:
                     service=source_service,
                     which=which,
                 )
+                self._remember_service_frame_sample(camera, source_service, frame_sample)
                 self._last_raw_frame_sample[camera] = dict(frame_sample)
                 frame_id = _safe_int(frame_sample.get("frameId"))
                 if frame_id is None or frame_id < 0:
+                    # Secondary fallback: use the latest frameId from
+                    # roadCameraState / wideRoadCameraState pushed by the
+                    # broker SM update loop.
+                    sm_fid = self._sm_frame_id.get(camera)
+                    if sm_fid is not None and sm_fid > 0:
+                        frame_id = sm_fid
+                        frame_sample["frameId"] = frame_id
+                if frame_id is None or frame_id < 0:
                     self._null_frame_id_count[camera] += 1
                 packet = self._pack_frame(camera, frame, frame_sample)
+
+                # --- FPS cap: skip non-keyframes that arrive faster than
+                # MAX_SEND_FPS to avoid flooding slow clients.  Keyframes
+                # are always kept because the decoder needs them to recover.
+                now_mono = time.monotonic()
+                elapsed = now_mono - self._last_send_at_mono.get(camera, 0.0)
+                _flags = _safe_int(frame_sample.get("flags"))
+                is_key = bool(_flags is not None and _flags & 0x8)
+                if not is_key and elapsed < self._MIN_FRAME_INTERVAL:
+                    # Too soon since last queued frame — skip this P-frame.
+                    self._queue_drop_count[camera] += 1
+                    await asyncio.sleep(0.001)
+                    continue
+
+                # --- Adaptive skip: when consecutive send failures are high,
+                # skip P-frames to reduce load on slow connections.
+                # IMPORTANT: CarrotLink frame sync uses maxDelta=8, meaning
+                # the overlay can tolerate up to 8 missing camera frameIds
+                # before sync fails.  Cap skip_ratio so the worst-case gap
+                # between delivered frames stays well within that budget.
+                #   skip_ratio=1 → every 2nd frame → gap ≤ 2  (10 fps)
+                #   skip_ratio=2 → every 3rd frame → gap ≤ 3  (7 fps)
+                # Never go beyond 2 to keep gap safely under maxDelta(8).
+                consec = self._consecutive_send_failures.get(camera, 0)
+                if not is_key and consec >= 3:
+                    skip_ratio = min(consec // 3, 2)  # max skip_ratio=2
+                    fc = self._frame_count.get(camera, 0)
+                    if fc % (skip_ratio + 1) != 0:
+                        self._queue_drop_count[camera] += 1
+                        await asyncio.sleep(0.001)
+                        continue
+
                 if queue.full():
                     try:
                         queue.get_nowait()
@@ -578,12 +890,14 @@ class CameraRelayHub:
                 except Exception:
                     await asyncio.sleep(0.001)
                     continue
+                self._last_send_at_mono[camera] = now_mono
                 self._frame_count[camera] += 1
                 self._last_frame_at_mono[camera] = time.monotonic()
                 if frame_id is not None and frame_id >= 0:
                     self._last_frame_id[camera] = frame_id
                 if source_service:
                     self._selected_service[camera] = source_service
+                await self._probe_alternate_camera_services(camera, source_service)
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -612,14 +926,28 @@ class CameraRelayHub:
                 except asyncio.TimeoutError:
                     continue
 
-                # Low-latency mode prefers the freshest frame over guaranteed
-                # delivery of every queued frame.
+                # Low-latency mode prefers the freshest frame.  When
+                # draining, preserve the latest keyframe so the client
+                # decoder can always resync — dropping a keyframe forces
+                # the client to wait for the next one (~1-2 seconds).
+                last_keyframe_packet = None
                 while not queue.empty():
                     try:
-                        packet = queue.get_nowait()
+                        candidate = queue.get_nowait()
+                        # Check if the outgoing packet we're about to
+                        # replace was a keyframe — save it.
+                        if self._packet_is_keyframe(packet):
+                            last_keyframe_packet = packet
                         self._queue_drop_count[camera] += 1
+                        packet = candidate
                     except Exception:
                         break
+                # If we skipped past a keyframe and the current packet
+                # is NOT a keyframe, prefer the keyframe instead — the
+                # decoder needs it more than a stale P-frame.
+                if (last_keyframe_packet is not None
+                        and not self._packet_is_keyframe(packet)):
+                    packet = last_keyframe_packet
 
                 stale: list[web.WebSocketResponse] = []
                 clients = list(self.clients.get(camera, set()))
@@ -635,16 +963,26 @@ class CameraRelayHub:
                     0.0,
                     (time.monotonic() - send_started) * 1000.0,
                 )
+                any_failure = False
+                any_success = False
                 for ws, result in zip(clients, results):
                     if not isinstance(result, Exception):
                         self._ws_send_failures.pop(ws, None)
+                        any_success = True
                         continue
+                    any_failure = True
                     fail_count = self._ws_send_failures.get(ws, 0) + 1
                     self._ws_send_failures[ws] = fail_count
                     if fail_count >= timeout_fail_limit:
                         stale.append(ws)
                         self._drop_count[camera] += 1
                         self._send_drop_count[camera] += 1
+                # Track consecutive send failures for adaptive skip.
+                if any_failure and not any_success:
+                    prev = self._consecutive_send_failures.get(camera, 0)
+                    self._consecutive_send_failures[camera] = min(prev + 1, 15)
+                elif any_success:
+                    self._consecutive_send_failures[camera] = 0
                 for ws in stale:
                     self.clients[camera].discard(ws)
                     self._ws_send_failures.pop(ws, None)
@@ -656,6 +994,21 @@ class CameraRelayHub:
                 break
             except Exception:
                 await asyncio.sleep(0.01)
+
+    @staticmethod
+    def _packet_is_keyframe(packet: bytes) -> bool:
+        """Check if a packed camera frame packet contains a keyframe by
+        reading the embedded JSON meta header."""
+        try:
+            if len(packet) < 4:
+                return False
+            meta_len = struct.unpack(">I", packet[:4])[0]
+            if len(packet) < 4 + meta_len:
+                return False
+            meta = json.loads(packet[4 : 4 + meta_len])
+            return bool(meta.get("keyFrame", False))
+        except Exception:
+            return False
 
     async def ensure_camera_task(self, camera: str) -> None:
         async with self._lock:
@@ -727,6 +1080,32 @@ class CameraRelayHub:
                 if last_frame_at > 0.0
                 else None
             )
+            service_samples: dict[str, Any] = {}
+            for service in self.CAMERA_SERVICE_CANDIDATES.get(camera, []):
+                service_last_frame_at = self._service_last_frame_at_mono.get(camera, {}).get(
+                    service,
+                    0.0,
+                )
+                service_last_frame_age_ms = (
+                    max(0, int((time.monotonic() - service_last_frame_at) * 1000.0))
+                    if service_last_frame_at > 0.0
+                    else None
+                )
+                service_samples[service] = {
+                    "frames": self._service_frame_count.get(camera, {}).get(service, 0),
+                    "lastFrameId": self._service_last_frame_id.get(camera, {}).get(
+                        service,
+                        -1,
+                    ),
+                    "nullFrameIdCount": self._service_null_frame_id_count.get(camera, {}).get(
+                        service,
+                        0,
+                    ),
+                    "lastFrameAgeMs": service_last_frame_age_ms,
+                    "rawFrame": dict(
+                        self._service_frame_samples.get(camera, {}).get(service, {})
+                    ),
+                }
             cameras[camera] = {
                 "clients": len(self.clients.get(camera, set())),
                 "frames": self._frame_count.get(camera, 0),
@@ -743,6 +1122,7 @@ class CameraRelayHub:
                 "service": self._selected_service.get(camera, ""),
                 "rawFrame": dict(self._last_raw_frame_sample.get(camera, {})),
                 "packedMeta": dict(self._last_packed_meta_sample.get(camera, {})),
+                "serviceSamples": service_samples,
             }
         return {
             "mode": "queued_multi_sub_fanout",
@@ -775,6 +1155,9 @@ class SidecarApp:
             "controlsState",
             "longitudinalPlan",
             "liveCalibration",
+            "liveDelay",
+            "liveParameters",
+            "liveTorqueParameters",
             "modelV2",
             "roadCameraState",
             "wideRoadCameraState",
@@ -785,6 +1168,9 @@ class SidecarApp:
             "controlsState",
             "longitudinalPlan",
             "liveCalibration",
+            "liveDelay",
+            "liveParameters",
+            "liveTorqueParameters",
             "modelV2",
             "radarState",
             "roadCameraState",
@@ -1142,6 +1528,10 @@ class SidecarApp:
     def _profile_has_full_runtime(self, profile: str | None = None) -> bool:
         normalized = (profile or self.profile or "").strip().lower()
         return normalized in ("p2", "p3", "p4")
+
+    def _profile_has_stock_debug_runtime(self, profile: str | None = None) -> bool:
+        normalized = (profile or self.profile or "").strip().lower()
+        return normalized in ("p2c4", "p2d", "p2", "p3", "p4")
 
     def _profile_has_radar_overlay_runtime(
         self,
@@ -1785,6 +2175,22 @@ class SidecarApp:
                     self._service_last_alive_mono[name] = updated_at
                 if bool(updated_map.get(name, False)):
                     self._service_last_updated_mono[name] = updated_at
+            # Push latest camera frameIds to the relay hub so it can use
+            # them as a secondary fallback when encode streams lack frameId.
+            hub = self._camera_hub
+            if hub is not None:
+                for cam_service, cam_key in (
+                    ("roadCameraState", "road"),
+                    ("wideRoadCameraState", "wideRoad"),
+                ):
+                    if bool(alive_map.get(cam_service, False)):
+                        try:
+                            fid = _safe_int(
+                                getattr(sm[cam_service], "frameId", None)
+                            )
+                            hub.update_sm_frame_id(cam_key, fid)
+                        except Exception:
+                            pass
         except Exception as sm_err:
             self.last_error = f"sm update error: {sm_err}"
 
@@ -2855,7 +3261,10 @@ class SidecarApp:
         except Exception:
             pass
         try:
-            if payload_mode != "camera_only" and self._profile_has_full_runtime():
+            if (
+                payload_mode != "camera_only"
+                and self._profile_has_stock_debug_runtime()
+            ):
                 stock_debug = self._payload_stock_debug()
                 if stock_debug is not None:
                     payload["stockDebug"] = stock_debug
@@ -3532,7 +3941,11 @@ class SidecarApp:
                 reason=f"profile_switch:{previous}->{profile}"
             )
             if self._camera_hub is not None:
-                await self._camera_hub.reset_runtime_state(
+                # Use soft reset to preserve camera WS client connections
+                # and codec state during profile switches.  A full reset
+                # would tear down all camera sockets and queued frames,
+                # causing a visible black-screen gap on the client.
+                await self._camera_hub.soft_reset_for_profile_switch(
                     reason=f"profile_switch:{previous}->{profile}"
                 )
             self.profile = profile

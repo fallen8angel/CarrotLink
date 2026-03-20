@@ -10,7 +10,31 @@
       "Bash(python -c \"import importlib.util; spec=importlib.util.find_spec\\(''tensorflow''\\); print\\(spec.origin if spec else ''not found''\\)\")",
       "Bash(python -m pip show tensorflow)",
       "Bash(python -m pip install \"tensorflow==2.18.0\" \"tf-keras==2.18.0\")",
-      "Bash(python -c \":*)"
+      "Bash(python -c \":*)",
+      "Bash(find . -type d -name *carrotlink* -o -type d -name *sidecar*)",
+      "Bash(xargs grep:*)",
+      "Read(//E:/Carrot/**)",
+      "Bash(find . -type f \\\\\\(-name *.py -o -name *.cpp -o -name *.h \\\\\\))",
+      "Bash(grep -r \"get_fps\\\\|rl\\\\.get_fps\\\\|frame.*time\\\\|delta.*time\" /e/Carrot/c4/openpilot/selfdrive/ui --include=*.py)",
+      "Bash(grep -r \"mem\\\\|memory\\\\|heap\\\\|leak\\\\|alloc\\\\|free\" /e/Carrot/c4/openpilot/selfdrive/ui --include=*.py)",
+      "Bash(find . -type f \\\\\\(-name *encode* -o -name *camera* \\\\\\) \\\\\\(-name *.py -o -name *.cpp -o -name *.h \\\\\\))",
+      "Bash(find /e/Carrot/c4 -type f \\\\\\(-name *.py -o -name *.cc -o -name *.h \\\\\\))",
+      "Bash(grep -r \"39\\\\|44\\\\|60.*fps\\\\|FPS.*60\" /e/Carrot/c4/openpilot/selfdrive/ui --include=*.py)",
+      "Bash(find ./openpilot/system/loggerd -type f \\\\\\(-name *.h -o -name *.cpp -o -name *.py \\\\\\))",
+      "Bash(grep -r \"pressureRisk\\\\|PressureRisk\\\\|c4.*Pressure\\\\|Reader.*Pressure\" /e/Carrot/c4/openpilot --include=*.py)",
+      "Bash(find ./openpilot/system/loggerd -type f \\\\\\(-name *.cpp -o -name *.h \\\\\\))",
+      "Bash(grep -E \"\\\\.\\(cpp|cc\\)$\")",
+      "Bash(find /e/Carrot/c4 -name *.capnp -o -name *.proto)",
+      "Bash(grep -n VisionIpcBufExtra ./openpilot -r --include=*.h)",
+      "Bash(grep -n \"LivestreamRoadEncode\\\\|livestreamRoadEncodeData\" ./openpilot/system/loggerd/encoder/*.cc)",
+      "Bash(grep -n \"setFrameId\\\\|frame_id\" ./openpilot/system/loggerd/encoder/*.cc)",
+      "Bash(grep -n \"frame_id\\\\|frameId\" ./openpilot/msgq_repo/msgq/visionipc/*.cc)",
+      "Bash(grep -l \"_applyHudModeRuntimeImpl\" /e/Carrot/CarrotLink/lib/screens/drive/*.dart)",
+      "Bash(python3 -c \":*)",
+      "Bash(python3 \"E:/Carrot/logs/B/drive_diag_20260320_100217.ndjson\")",
+      "Bash(python -c \"print\\(''ok''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''E:/Carrot/CarrotLink/assets/sidecar/sidecar.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''E:/Carrot/CarrotLink/assets/sidecar/sidecar.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''sidecar.py OK''\\)\")"
     ]
   }
 }
