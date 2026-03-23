@@ -1,9 +1,8 @@
 enum YoloRuntimeBackend {
+  liteRtNpu('litert_npu', 'LiteRT NPU'),
   liteRtGpu('litert_gpu', 'LiteRT GPU'),
   liteRtCpu('litert_cpu', 'LiteRT CPU'),
-  executorchXnnpack('executorch_xnnpack', 'ExecuTorch XNNPACK'),
-  // Deprecated: QNN HTP blocked by /dev/fastrpc-cdsp DAC permission on Galaxy.
-  executorchQnn('executorch_qnn', 'ExecuTorch QNN (deprecated)');
+  executorchXnnpack('executorch_xnnpack', 'ExecuTorch XNNPACK');
 
   const YoloRuntimeBackend(this.wireValue, this.label);
 
@@ -11,10 +10,16 @@ enum YoloRuntimeBackend {
   final String label;
 
   bool get isLiteRt =>
+      this == YoloRuntimeBackend.liteRtNpu ||
       this == YoloRuntimeBackend.liteRtGpu ||
       this == YoloRuntimeBackend.liteRtCpu;
 
-  bool get isQnn => this == YoloRuntimeBackend.executorchQnn;
+  static const List<YoloRuntimeBackend> selectableValues = <YoloRuntimeBackend>[
+    YoloRuntimeBackend.liteRtNpu,
+    YoloRuntimeBackend.liteRtGpu,
+    YoloRuntimeBackend.liteRtCpu,
+    YoloRuntimeBackend.executorchXnnpack,
+  ];
 
   static YoloRuntimeBackend fromWireValue(String? raw) {
     final normalized = raw?.trim().toLowerCase();

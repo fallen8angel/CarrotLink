@@ -68,6 +68,7 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
 
   late final CodeLineEditingController _editorController;
   late final CodeFindController _findController;
+  late String _savedContent;
 
   bool _isDirty = false;
   bool _readOnly = true;
@@ -76,7 +77,7 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
   int _currentLine = 1;
   int _currentColumn = 1;
 
-  String get _originalContent => widget.initialContent;
+  String get _originalContent => _savedContent;
   String get _fileName {
     final parts = widget.filePath.split('/');
     return parts.isEmpty ? widget.filePath : parts.last;
@@ -85,6 +86,7 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
   @override
   void initState() {
     super.initState();
+    _savedContent = widget.initialContent;
     _editorController =
         CodeLineEditingController.fromText(widget.initialContent);
     _findController = CodeFindController(_editorController);
@@ -212,12 +214,15 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
     final ssh = Provider.of<SSHService>(context, listen: false);
     try {
       final content = _editorController.text;
-      await ssh.writeTextFile(widget.filePath, content);
       if (createBackup) {
-        await ssh.writeTextFile('${widget.filePath}.backup', content);
+        await ssh.writeTextFile('${widget.filePath}.backup', _savedContent);
       }
+      await ssh.writeTextFile(widget.filePath, content);
       if (!mounted) return;
-      setState(() => _isDirty = false);
+      setState(() {
+        _savedContent = content;
+        _isDirty = false;
+      });
       CustomToast.show(context, createBackup ? '저장 및 백업 완료' : '저장되었습니다.');
     } catch (e) {
       if (!mounted) return;

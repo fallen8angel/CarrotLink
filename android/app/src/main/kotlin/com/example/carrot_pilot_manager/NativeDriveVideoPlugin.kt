@@ -13,6 +13,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.os.PerformanceHintManager
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import android.view.SurfaceHolder
@@ -38,7 +39,6 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -77,6 +77,7 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
         val runtime: NativeDriveYoloRuntime,
         val retriever: MediaMetadataRetriever,
         var activeConfig: NativeDriveYoloConfig,
+        val createdElapsedMs: Long = SystemClock.elapsedRealtime(),
         var sourceWidth: Int = 0,
         var sourceHeight: Int = 0,
         var frameCounter: Int = 0,
@@ -87,93 +88,6 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
         var lastFramePtsUs: Long = 0L,
         var lastSkipReason: String = "idle",
     )
-
-    private fun requiresQnnLoweredPlaybackModel(
-        config: NativeDriveYoloConfig,
-    ): Boolean {
-      val backend = config.runtimeBackend.trim().lowercase()
-      if (!backend.contains("qnn")) return false
-      return !NativeDriveYoloModelCatalog.isQnnLoweredReference(config.modelVariant)
-    }
-
-    private fun buildOfflineQnnModelMismatchResult(
-        config: NativeDriveYoloConfig,
-        path: String,
-        reason: String,
-        positionMs: Long? = null,
-        decodedWidth: Int? = null,
-        decodedHeight: Int? = null,
-        videoDurationMs: Long? = null,
-        videoSampleTimesMs: List<Long>? = null,
-    ): Map<String, Any?> {
-      val suggestedQnnWireValue =
-          NativeDriveYoloModelCatalog.suggestedQnnWireValueFor(config.modelVariant)
-      val suggestedQnnAssetFile =
-          suggestedQnnWireValue?.let { "$it.pte" }
-      Log.w(
-          NATIVE_VIDEO_TAG,
-          "Offline playback blocked reason=$reason backend=${config.runtimeBackend} " +
-              "model=${config.modelVariant} path=$path positionMs=${positionMs ?: -1L}",
-      )
-      val state =
-          NativeDriveYoloRuntimeSnapshot(
-                  runtimeReady = false,
-                  pixelPathReady = false,
-                  stage = "awaiting_qnn_lowered_model",
-                  blocker = "qnn_model_not_lowered",
-                  backend = config.runtimeBackend,
-                  backendAvailable = true,
-                  backendReason = "qnn_model_not_lowered",
-                  modelVariant = config.modelVariant,
-                  lastError =
-                      buildString {
-                        append(
-                            "Generic ExecuTorch/XNNPACK .pte is not safe for offline playback when " +
-                                "runtimeBackend=${config.runtimeBackend}; export or select a " +
-                                "QNN-lowered model",
-                        )
-                        if (!suggestedQnnAssetFile.isNullOrBlank()) {
-                          append(" such as $suggestedQnnAssetFile")
-                        }
-                        append(".")
-                      },
-              )
-              .toPayload()
-              .toMutableMap()
-      state["reason"] = reason
-      state["syncSource"] = "developer_playback"
-      state["inputPath"] = path
-      state["decodedWidth"] = decodedWidth ?: config.sourceWidth
-      state["decodedHeight"] = decodedHeight ?: config.sourceHeight
-      state["videoDurationMs"] = videoDurationMs
-      state["videoSampleTimesMs"] = videoSampleTimesMs
-      state["positionMs"] = positionMs
-      state["playbackRequestedPositionMs"] = positionMs
-      state["framesSeen"] = 0
-      state["framesSampled"] = 0
-      state["framesSkipped"] = 0
-      state["lastFrameId"] = -1
-      state["lastFramePtsUs"] = 0L
-      state["playbackFrameId"] = -1
-      state["playbackFramePtsUs"] = 0L
-      state["playbackFrameToken"] = null
-      state["samplePeriodMs"] = config.samplePeriodMs
-      state["lastSkipReason"] = "qnn_model_not_lowered"
-      state["copyInFlight"] = false
-      state["copyRequests"] = 0
-      state["copySuccesses"] = 0
-      state["copyFailures"] = 0
-      state["copySkippedBusy"] = 0
-      state["lastCopyResult"] = "offline_qnn_model_blocked"
-      state["sessionMode"] = "video_playback"
-      state["sessionFrameCounter"] = 0
-      state["suggestedQnnModelVariant"] = suggestedQnnWireValue
-      state["suggestedQnnAssetFile"] = suggestedQnnAssetFile
-      return mapOf(
-          "config" to config.toPayload(),
-          "state" to state,
-      )
-    }
 
     fun emit(event: Map<String, Any?>) {
       mainHandler.post {
@@ -203,33 +117,7 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
         runtime: NativeDriveYoloRuntime,
         config: NativeDriveYoloConfig,
     ) {
-      val backend = config.runtimeBackend.trim().lowercase()
-      // LiteRT runtimes initialize on their own inference thread; no main-thread dispatch needed.
-      // The main-thread QNN init path only applies to the ExecuTorch QNN backend.
-      if (!backend.contains("qnn") || runtime !is NativeDriveExecuTorchRuntime) {
-        runtime.updateConfig(config)
-        return
-      }
-      if (Looper.myLooper() == Looper.getMainLooper()) {
-        runtime.updateConfig(config)
-        return
-      }
-      val latch = CountDownLatch(1)
-      var failure: Throwable? = null
-      mainHandler.post {
-        try {
-          runtime.updateConfig(config)
-        } catch (t: Throwable) {
-          failure = t
-        } finally {
-          latch.countDown()
-        }
-      }
-      val completed = latch.await(8, TimeUnit.SECONDS)
-      if (!completed) {
-        throw IllegalStateException("offline_qnn_runtime_prepare_timeout")
-      }
-      failure?.let { throw it }
+      runtime.updateConfig(config)
     }
 
     fun registerView(viewId: Int, view: NativeDriveVideoView) {
@@ -268,7 +156,6 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
     ): Map<String, Any?>? {
       val context = appContext ?: return null
       val sourceBitmap = BitmapFactory.decodeFile(path) ?: return null
-      var scaledBitmap: Bitmap? = null
       val baseConfig = NativeDriveYoloConfig.fromPayload(yoloConfig)
       val activeConfig =
           baseConfig.copy(
@@ -276,15 +163,6 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
               sourceWidth = sourceBitmap.width,
               sourceHeight = sourceBitmap.height,
           )
-      if (requiresQnnLoweredPlaybackModel(activeConfig)) {
-        return buildOfflineQnnModelMismatchResult(
-            config = activeConfig,
-            path = path,
-            reason = "offline_image_qnn_model_blocked",
-            decodedWidth = sourceBitmap.width,
-            decodedHeight = sourceBitmap.height,
-        )
-      }
       val runtime = createNativeDriveYoloRuntime(context, activeConfig.runtimeBackend)
       return try {
         prepareOfflineRuntimeForPlayback(runtime, activeConfig)
@@ -298,19 +176,8 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
                 fpsHint = 30f,
             )
         runtime.onSampledFrame(frame)
-        scaledBitmap =
-            if (sourceBitmap.width == activeConfig.inputWidth &&
-                sourceBitmap.height == activeConfig.inputHeight) {
-              sourceBitmap
-            } else {
-              Bitmap.createScaledBitmap(
-                  sourceBitmap,
-                  activeConfig.inputWidth.coerceAtLeast(32),
-                  activeConfig.inputHeight.coerceAtLeast(32),
-                  true,
-              )
-            }
-        runtime.onPixelFrame(frame, scaledBitmap!!)
+        // Pass source bitmap directly — runtime handles letterbox resize.
+        runtime.onPixelFrame(frame, sourceBitmap)
         val state = runtime.snapshot().toPayload().toMutableMap()
         state["reason"] = "offline_image_debug"
         state["inputPath"] = path
@@ -335,9 +202,6 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
         )
       } finally {
         runtime.release()
-        if (scaledBitmap != null && scaledBitmap !== sourceBitmap && !scaledBitmap!!.isRecycled) {
-          scaledBitmap!!.recycle()
-        }
         if (!sourceBitmap.isRecycled) {
           sourceBitmap.recycle()
         }
@@ -384,17 +248,6 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
                 (durationMs * fraction).toLong().coerceIn(0L, durationMs)
               }
             }
-        if (requiresQnnLoweredPlaybackModel(activeConfig)) {
-          return buildOfflineQnnModelMismatchResult(
-              config = activeConfig,
-              path = path,
-              reason = "offline_video_qnn_model_blocked",
-              decodedWidth = sourceWidth,
-              decodedHeight = sourceHeight,
-              videoDurationMs = durationMs,
-              videoSampleTimesMs = sampleTimesMs,
-          )
-        }
         prepareOfflineRuntimeForPlayback(runtime, activeConfig)
 
         var actualFrames = 0
@@ -419,25 +272,11 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
           lastFrameId = frame.frameId
           lastPtsUs = frame.ptsUs
           runtime.onSampledFrame(frame)
-          val scaledBitmap =
-              if (bitmap.width == activeConfig.inputWidth &&
-                  bitmap.height == activeConfig.inputHeight) {
-                bitmap
-              } else {
-                Bitmap.createScaledBitmap(
-                    bitmap,
-                    activeConfig.inputWidth.coerceAtLeast(32),
-                    activeConfig.inputHeight.coerceAtLeast(32),
-                    true,
-                )
-              }
+          // Pass source bitmap directly — runtime handles letterbox resize.
           try {
-            runtime.onPixelFrame(frame, scaledBitmap)
+            runtime.onPixelFrame(frame, bitmap)
             actualFrames += 1
           } finally {
-            if (scaledBitmap !== bitmap && !scaledBitmap.isRecycled) {
-              scaledBitmap.recycle()
-            }
             if (!bitmap.isRecycled) {
               bitmap.recycle()
             }
@@ -489,14 +328,6 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
           "runYoloDebugVideoFrame backend=${baseConfig.runtimeBackend} " +
               "model=${baseConfig.modelVariant} positionMs=$positionMs path=$path",
       )
-      if (requiresQnnLoweredPlaybackModel(baseConfig)) {
-        return buildOfflineQnnModelMismatchResult(
-            config = baseConfig,
-            path = path,
-            reason = "offline_video_frame_qnn_model_blocked",
-            positionMs = positionMs,
-        )
-      }
       val session =
           synchronized(offlineVideoDebugSessionLock) {
             obtainOfflineVideoDebugSessionLocked(path, baseConfig, context)
@@ -523,18 +354,7 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
               sourceWidth = sourceBitmap.width,
               sourceHeight = sourceBitmap.height,
           )
-      val scaledBitmap =
-          if (sourceBitmap.width == activeConfig.inputWidth &&
-              sourceBitmap.height == activeConfig.inputHeight) {
-            sourceBitmap
-          } else {
-            Bitmap.createScaledBitmap(
-                sourceBitmap,
-                activeConfig.inputWidth.coerceAtLeast(32),
-                activeConfig.inputHeight.coerceAtLeast(32),
-                true,
-            )
-          }
+      // Pass source bitmap directly — runtime handles letterbox resize.
       try {
         synchronized(offlineVideoDebugSessionLock) {
           session.activeConfig = activeConfig
@@ -556,7 +376,7 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
           session.lastFrameId = frame.frameId
           session.lastFramePtsUs = frame.ptsUs
           session.runtime.onSampledFrame(frame)
-          session.runtime.onPixelFrame(frame, scaledBitmap)
+          session.runtime.onPixelFrame(frame, sourceBitmap)
           session.lastSkipReason = "offline_video_playback_debug"
           return buildOfflineVideoFrameDebugResultLocked(
               session = session,
@@ -566,9 +386,6 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
           )
         }
       } finally {
-        if (scaledBitmap !== sourceBitmap && !scaledBitmap.isRecycled) {
-          scaledBitmap.recycle()
-        }
         if (!sourceBitmap.isRecycled) {
           sourceBitmap.recycle()
         }
@@ -583,9 +400,17 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
       val signature = buildOfflineVideoDebugConfigSignature(baseConfig)
       val existing = offlineVideoDebugSession
       if (existing != null &&
-          existing.path == path &&
-          existing.baseSignature == signature) {
+          shouldReuseOfflineVideoDebugSession(existing, path, signature)) {
         return existing
+      }
+      if (existing != null) {
+        val snapshot = existing.runtime.snapshot()
+        Log.i(
+            NATIVE_VIDEO_TAG,
+            "Recreating offline YOLO debug session stage=${snapshot.stage} " +
+                "blocker=${snapshot.blocker} backendReason=${snapshot.backendReason} " +
+                "lastFailureStage=${snapshot.lastFailureStage}",
+        )
       }
       releaseOfflineVideoDebugSessionLocked()
       val retriever = MediaMetadataRetriever().apply { setDataSource(path) }
@@ -619,6 +444,25 @@ class NativeDriveVideoPlugin(private val messenger: BinaryMessenger) : EventChan
         }
         throw t
       }
+    }
+
+    private fun shouldReuseOfflineVideoDebugSession(
+        session: OfflineVideoDebugSession,
+        path: String,
+        signature: String,
+    ): Boolean {
+      if (session.path != path || session.baseSignature != signature) {
+        return false
+      }
+      val snapshot = session.runtime.snapshot()
+      if (snapshot.runtimeReady) {
+        return true
+      }
+      if (snapshot.stage == "initializing" && snapshot.blocker == null) {
+        val ageMs = SystemClock.elapsedRealtime() - session.createdElapsedMs
+        return ageMs < 2500L
+      }
+      return false
     }
 
     private fun releaseOfflineVideoDebugSessionLocked() {
@@ -836,7 +680,10 @@ class NativeDriveVideoView(
   private val decodeThread = HandlerThread("CarrotNativeDecode-$viewId").apply { start() }
   private val decodeHandler = Handler(decodeThread.looper)
   private val okHttpClient =
-      OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).build()
+      OkHttpClient.Builder()
+          .readTimeout(15, TimeUnit.SECONDS)
+          .pingInterval(5, TimeUnit.SECONDS)
+          .build()
 
   @Volatile private var webSocket: WebSocket? = null
   @Volatile private var surface: Surface? = null
@@ -878,21 +725,30 @@ class NativeDriveVideoView(
   private val frameStallTimeoutMs = 7000L
   private val frameDecodeStallTimeoutMs = 6500L
   private val frameStallStrikeLimit = 4
-  private val frameHardReconnectMs = 24000L
-  private val frameDecodeHardReconnectMs = 18000L
+  private val frameHardReconnectMs = 12000L
+  private val frameDecodeHardReconnectMs = 10000L
   private val startupFirstFrameSoftTimeoutMs = 2500L
   private val startupFirstFrameHardTimeoutMs = 5000L
   private val startupSyncFrameSoftTimeoutMs = 1400L
   private val startupSyncFrameHardTimeoutMs = 2600L
   private val startupSyncFrameStrikeLimit = 2
   private val frameStallStateEmitEvery = 2
-  private val decodeTaskBacklogLimit = 1
-  private val codecBacklogLimit = 1
+  private val decodeTaskBacklogLimit = 3
+  private val codecBacklogLimit = 4
   private val decodeBacklogStateEmitEvery = 24
   private val diagIntervalMs = 1000L
+  private val videoSmoothingEnabled = true
+  private val videoSmoothingCadenceFactor = 0.92f
+  private val videoSmoothingResetGapNs = 180_000_000L
+  private val videoSmoothingMaxExtraDelayNs = 3_000_000L
   @Volatile private var hintedFrameRate = 30f
   @Volatile private var performanceHintTargetNs = 33_333_333L
   @Volatile private var performanceHintSession: PerformanceHintManager.Session? = null
+  @Volatile private var lastOutputReleaseNs = 0L
+  @Volatile private var lastOutputPtsUs = Long.MIN_VALUE
+  @Volatile private var smoothingFramesWindow = 0
+  @Volatile private var smoothingDelayWindowMs = 0L
+  @Volatile private var smoothingDelayMaxMs = 0L
   @Volatile private var currentStateLabel = "init"
   @Volatile private var stateEnteredAtMs = System.currentTimeMillis()
   @Volatile private var lastErrorReason: String? = null
@@ -1243,6 +1099,11 @@ class NativeDriveVideoView(
     pendingDecodeTasks.set(0)
     pendingFrames.clear()
     pendingSyncFrameCount = 0
+    lastOutputReleaseNs = 0L
+    lastOutputPtsUs = Long.MIN_VALUE
+    smoothingFramesWindow = 0
+    smoothingDelayWindowMs = 0L
+    smoothingDelayMaxMs = 0L
     val c = codec
     codec = null
     if (c != null) {
@@ -1393,7 +1254,11 @@ class NativeDriveVideoView(
   ) {
     val localCodec = codec ?: return
     try {
-      val inputIndex = localCodec.dequeueInputBuffer(0)
+      // Drain any completed output before requesting an input buffer so
+      // that pendingSyncFrameCount is decremented promptly and the backlog
+      // gate in handlePacket does not starve P-frames.
+      drainOutput(localCodec, System.nanoTime())
+      val inputIndex = localCodec.dequeueInputBuffer(8000)
       if (inputIndex < 0) {
         noteBacklogDrop("input", pendingSyncFrameCount)
         return
@@ -1402,6 +1267,15 @@ class NativeDriveVideoView(
       input.clear()
       input.put(frame)
       localCodec.queueInputBuffer(inputIndex, 0, frame.size, ptsUs, 0)
+      // Cap pending frames to avoid unbounded growth when output draining
+      // is slower than input — drop the oldest entry so the queue stays
+      // bounded and frame-sync metadata remains roughly current.
+      while (pendingFrames.size >= 16) {
+        val dropped = pendingFrames.removeFirst()
+        if (dropped.syncFrameId != null && dropped.syncFrameId >= 0) {
+          pendingSyncFrameCount = (pendingSyncFrameCount - 1).coerceAtLeast(0)
+        }
+      }
       pendingFrames.addLast(
           PendingFrame(
               yoloFrameId = yoloFrameId,
@@ -1473,7 +1347,14 @@ class NativeDriveVideoView(
                     fpsHint = hintedFrameRate,
                 ))
           }
-          localCodec.releaseOutputBuffer(outIndex, true)
+          val releaseNs = computeSmoothedReleaseTimeNs(info.presentationTimeUs)
+          if (releaseNs != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            localCodec.releaseOutputBuffer(outIndex, releaseNs)
+          } else {
+            lastOutputReleaseNs = System.nanoTime()
+            lastOutputPtsUs = info.presentationTimeUs
+            localCodec.releaseOutputBuffer(outIndex, true)
+          }
         }
 
         outIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> return
@@ -1487,6 +1368,55 @@ class NativeDriveVideoView(
         else -> return
       }
     }
+  }
+
+  private fun computeSmoothedReleaseTimeNs(presentationTimeUs: Long): Long? {
+    if (!videoSmoothingEnabled || Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+      return null
+    }
+    if (pendingFrames.size > 1 || pendingDecodeTasks.get() > 0 || pendingSyncFrameCount > 1) {
+      return null
+    }
+    val nowNs = System.nanoTime()
+    val baseIntervalNs =
+        (1_000_000_000f / hintedFrameRate.coerceIn(24f, 60f))
+            .toLong()
+            .coerceIn(16_000_000L, 50_000_000L)
+    var cadenceNs = baseIntervalNs
+    if (lastOutputPtsUs != Long.MIN_VALUE && presentationTimeUs > lastOutputPtsUs) {
+      val ptsDeltaNs = (presentationTimeUs - lastOutputPtsUs) * 1000L
+      if (ptsDeltaNs > 0L) {
+        cadenceNs =
+            ptsDeltaNs.coerceIn(
+                (baseIntervalNs * 3L) / 4L,
+                (baseIntervalNs * 5L) / 4L,
+            )
+      }
+    }
+    val previousReleaseNs = lastOutputReleaseNs
+    val cadenceTargetNs =
+        if (previousReleaseNs > 0L && (nowNs - previousReleaseNs) < videoSmoothingResetGapNs) {
+          previousReleaseNs + (cadenceNs * videoSmoothingCadenceFactor).toLong()
+        } else {
+          nowNs
+        }
+    val releaseNs =
+        cadenceTargetNs
+            .coerceAtLeast(nowNs)
+            .coerceAtMost(nowNs + videoSmoothingMaxExtraDelayNs)
+    val delayNs = releaseNs - nowNs
+    lastOutputReleaseNs = releaseNs
+    lastOutputPtsUs = presentationTimeUs
+    if (delayNs < 750_000L) {
+      return null
+    }
+    val delayMs = (delayNs / 1_000_000L).coerceAtLeast(0L)
+    smoothingFramesWindow += 1
+    smoothingDelayWindowMs += delayMs
+    if (delayMs > smoothingDelayMaxMs) {
+      smoothingDelayMaxMs = delayMs
+    }
+    return releaseNs
   }
 
   private fun parsePacket(packet: ByteArray): ParsedPacket? {
@@ -1800,10 +1730,16 @@ class NativeDriveVideoView(
     val decodeAgeMs = if (lastDecodedAtMs <= 0L) -1L else (now - lastDecodedAtMs)
     val stateAgeMs = (now - stateEnteredAtMs).coerceAtLeast(0L)
     val errorAgeMs = if (lastErrorAtMs <= 0L) -1L else (now - lastErrorAtMs)
+    val smoothedFrames = smoothingFramesWindow
+    val smoothingDelayTotalMs = smoothingDelayWindowMs
+    val smoothingDelayPeakMs = smoothingDelayMaxMs
     val packets = packetsWindow
     val decoded = decodedWindow
     val drops = dropsWindow
     val packetBytes = packetBytesWindow
+    smoothingFramesWindow = 0
+    smoothingDelayWindowMs = 0L
+    smoothingDelayMaxMs = 0L
     packetsWindow = 0
     decodedWindow = 0
     dropsWindow = 0
@@ -1824,6 +1760,12 @@ class NativeDriveVideoView(
             "packetsWindow" to packets,
             "decodedWindow" to decoded,
             "packetBytesWindow" to packetBytes,
+            "videoSmoothingEnabled" to videoSmoothingEnabled,
+            "videoSmoothingFramesWindow" to smoothedFrames,
+            "videoSmoothingAvgDelayMsWindow" to
+                if (smoothedFrames <= 0) 0.0
+                else (smoothingDelayTotalMs.toDouble() / smoothedFrames.toDouble()),
+            "videoSmoothingMaxDelayMsWindow" to smoothingDelayPeakMs,
             "connectAttempts" to connectAttempts,
             "socketConnected" to (webSocket != null),
             "surfaceValid" to (surface?.isValid == true),

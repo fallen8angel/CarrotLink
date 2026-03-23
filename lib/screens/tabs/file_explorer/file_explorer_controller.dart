@@ -279,12 +279,18 @@ class FileExplorerController extends ChangeNotifier {
       ..clear()
       ..addAll(_filteredFiles.take(limit));
 
-    final filteredPathSet = _filteredFiles
-        .map((f) => p.posix.join(_currentPath, f.filename))
-        .toSet();
-    _selectedPaths.removeWhere((path) => !filteredPathSet.contains(path));
-    if (_selectedPaths.isEmpty) {
-      _selectionMode = false;
+    // Preserve selections across filter changes — only hide selection
+    // mode when ALL selections are removed by the user, not when items
+    // are temporarily hidden by search.  Selections survive filter
+    // changes and reappear when the filter is cleared.
+    if (_selectedPaths.isNotEmpty && !_isSearching) {
+      final filteredPathSet = _filteredFiles
+          .map((f) => p.posix.join(_currentPath, f.filename))
+          .toSet();
+      _selectedPaths.removeWhere((path) => !filteredPathSet.contains(path));
+      if (_selectedPaths.isEmpty) {
+        _selectionMode = false;
+      }
     }
 
     if (notify) notifyListeners();
@@ -298,9 +304,14 @@ class FileExplorerController extends ChangeNotifier {
     _applyVisibleFilter();
   }
 
+  Timer? _searchDebounce;
+
   void updateSearchQuery(String value) {
-    _searchQuery = value.toLowerCase().trim();
-    _applyVisibleFilter();
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 300), () {
+      _searchQuery = value.toLowerCase().trim();
+      _applyVisibleFilter();
+    });
   }
 
   void toggleShowHidden() {
@@ -375,9 +386,14 @@ class FileExplorerController extends ChangeNotifier {
       }
       _currentPath = normalized;
       unawaited(_persistLastPath(_currentPath));
+      // Cap in-memory file list to prevent excessive memory usage on
+      // directories with tens of thousands of entries.
+      const maxInMemoryFiles = 5000;
+      final entries =
+          listed.where((f) => f.filename != '.' && f.filename != '..').take(maxInMemoryFiles);
       _files
         ..clear()
-        ..addAll(listed.where((f) => f.filename != '.' && f.filename != '..'));
+        ..addAll(entries);
       clearSelection(notify: false);
       _isLoading = false;
       _applyVisibleFilter(notify: false);
@@ -466,6 +482,7 @@ class FileExplorerController extends ChangeNotifier {
 
   void selectAllVisible() {
     _selectionMode = true;
+    // Select ALL filtered items, not just the visible (paginated) subset.
     _selectedPaths
       ..clear()
       ..addAll(_filteredFiles.map((item) => fullPathOf(item)));
@@ -537,12 +554,62 @@ class FileExplorerController extends ChangeNotifier {
     await refresh();
   }
 
+  String _resolveRemotePathInput(String path) {
+    final trimmed = path.trim();
+    if (trimmed.isEmpty) return _currentPath;
+    if (trimmed.startsWith('/')) {
+      return p.posix.normalize(trimmed);
+    }
+    return p.posix.normalize(p.posix.join(_currentPath, trimmed));
+  }
+
+  bool _isSameOrDescendantPath(String candidate, String base) {
+    final normalizedCandidate = p.posix.normalize(candidate);
+    final normalizedBase = p.posix.normalize(base);
+    if (normalizedCandidate == normalizedBase) return true;
+    final relative = p.posix.relative(
+      normalizedCandidate,
+      from: normalizedBase,
+    );
+    return relative.isNotEmpty &&
+        relative != '.' &&
+        relative != '..' &&
+        !relative.startsWith('../');
+  }
+
+  void _validateTransferDestination(
+    Set<String> paths,
+    String targetPath, {
+    required bool move,
+  }) {
+    final normalizedTarget = _resolveRemotePathInput(targetPath);
+    final operation = move ? '이동' : '복사';
+
+    for (final rawSource in paths) {
+      final source = p.posix.normalize(rawSource);
+      final sourceName = p.posix.basename(source);
+      final sourceParent = p.posix.dirname(source);
+
+      if (normalizedTarget == sourceParent) {
+        throw Exception('$sourceName 항목은 이미 대상 폴더에 있습니다.');
+      }
+
+      if (_isSameOrDescendantPath(normalizedTarget, source)) {
+        throw Exception(
+          '$sourceName 항목은 자기 자신 또는 하위 폴더로 $operation할 수 없습니다.',
+        );
+      }
+    }
+  }
+
   Future<void> copyToDirectory(Set<String> paths, String targetPath) async {
     if (paths.isEmpty) return;
+    final resolvedTarget = _resolveRemotePathInput(targetPath);
+    _validateTransferDestination(paths, resolvedTarget, move: false);
     await _runTrackedOperation('파일 복사', () async {
       final sources = paths.map(_shellQuote).join(' ');
       final cmd =
-          "mkdir -p -- ${_shellQuote(targetPath)} && cp -a -- $sources ${_shellQuote('$targetPath/')}";
+          "mkdir -p -- ${_shellQuote(resolvedTarget)} && cp -a -- $sources ${_shellQuote('$resolvedTarget/')}";
       final result =
           await _runCommand(cmd, timeout: const Duration(minutes: 5));
       if (!result.isSuccess) {
@@ -551,33 +618,40 @@ class FileExplorerController extends ChangeNotifier {
             : result.output.trim());
       }
     });
+    await refresh();
   }
 
   Future<void> compressSelected(String archiveName) async {
     if (_selectedPaths.isEmpty) return;
-    await _runTrackedOperation('압축', () async {
-      final trimmedName = archiveName.trim();
-      if (trimmedName.isEmpty) {
-        throw Exception('압축 파일명을 입력하세요.');
-      }
-      final names = _selectedPaths.map((e) => p.posix.basename(e)).toList();
-      final args = names.map(_shellQuote).join(' ');
-      final lowerName = trimmedName.toLowerCase();
+    final trimmedName = archiveName.trim();
+    if (trimmedName.isEmpty) {
+      throw Exception('압축 파일명을 입력하세요.');
+    }
+    final names = _selectedPaths.map((e) => p.posix.basename(e)).toList();
+    final args = names.map(_shellQuote).join(' ');
+    final lowerName = trimmedName.toLowerCase();
 
-      late final String cmd;
-      if (lowerName.endsWith('.zip')) {
-        cmd =
-            "cd ${_shellQuote(_currentPath)} && zip -r ${_shellQuote(trimmedName)} -- $args";
-      } else if (lowerName.endsWith('.tar')) {
-        cmd =
-            "cd ${_shellQuote(_currentPath)} && tar -cf ${_shellQuote(trimmedName)} -- $args";
-      } else if (lowerName.endsWith('.tar.gz') || lowerName.endsWith('.tgz')) {
-        cmd =
-            "cd ${_shellQuote(_currentPath)} && tar -czf ${_shellQuote(trimmedName)} -- $args";
-      } else {
-        throw Exception('지원 형식: .zip / .tar / .tar.gz / .tgz');
-      }
+    late final String cmd;
+    if (lowerName.endsWith('.zip')) {
+      cmd =
+          "cd ${_shellQuote(_currentPath)} && zip -r ${_shellQuote(trimmedName)} -- $args";
+    } else if (lowerName.endsWith('.tar')) {
+      cmd =
+          "cd ${_shellQuote(_currentPath)} && tar -cf ${_shellQuote(trimmedName)} -- $args";
+    } else if (lowerName.endsWith('.tar.gz') || lowerName.endsWith('.tgz')) {
+      cmd =
+          "cd ${_shellQuote(_currentPath)} && tar -czf ${_shellQuote(trimmedName)} -- $args";
+    } else {
+      throw Exception('지원 형식: .zip / .tar / .tar.gz / .tgz');
+    }
 
+    // Use batch framework so the toolbar shows progress indicator.
+    _beginBatch(
+      totalItems: 1,
+      initialMessage: '압축 중: $trimmedName (${names.length}개 항목)',
+      operationLabel: '압축',
+    );
+    try {
       final result =
           await _runCommand(cmd, timeout: const Duration(minutes: 15));
       if (!result.isSuccess) {
@@ -585,9 +659,14 @@ class FileExplorerController extends ChangeNotifier {
             ? '압축 실패 (exit=${result.exitCode})'
             : result.output.trim());
       }
+      _batchCompletedItems = 1;
+      _batchMessage = '압축 완료: $trimmedName';
+      _notifyTransferListeners();
       clearSelection(notify: false);
       await refresh();
-    });
+    } finally {
+      _finishBatch(canceled: false);
+    }
   }
 
   void setClipboard(Set<String> paths, {required bool cut}) {
@@ -607,7 +686,31 @@ class FileExplorerController extends ChangeNotifier {
   Future<void> pasteClipboardToCurrentPath() async {
     if (_clipboardPaths.isEmpty) return;
     final operationLabel = _clipboardCut ? '이동 붙여넣기' : '복사 붙여넣기';
+    _validateTransferDestination(
+      _clipboardPaths,
+      _currentPath,
+      move: _clipboardCut,
+    );
     await _runTrackedOperation(operationLabel, () async {
+      // Verify source paths still exist before executing paste.
+      final clipList = _clipboardPaths.toList();
+      final existCheck = clipList
+          .map((p) => 'test -e ${_shellQuote(p)} && echo Y || echo N')
+          .join('; ');
+      final checkResult =
+          await _runCommand(existCheck, timeout: const Duration(seconds: 10));
+      final missing = <String>[];
+      if (checkResult.isSuccess) {
+        final lines = checkResult.output.trim().split('\n');
+        for (var i = 0; i < clipList.length && i < lines.length; i++) {
+          if (lines[i].trim() != 'Y') missing.add(clipList[i]);
+        }
+      }
+      if (missing.isNotEmpty) {
+        throw Exception(
+          '원본 파일이 삭제되었습니다:\n${missing.join('\n')}',
+        );
+      }
       final sources = _clipboardPaths.map(_shellQuote).join(' ');
       final dest = _shellQuote('$_currentPath/');
       final command =
@@ -767,15 +870,17 @@ class FileExplorerController extends ChangeNotifier {
   String _ensureUniqueLocalPath(String directoryPath, String fileName) {
     final ext = p.extension(fileName);
     final stem = p.basenameWithoutExtension(fileName);
-    var index = 0;
-    while (true) {
+    const maxAttempts = 10000;
+    for (var index = 0; index < maxAttempts; index++) {
       final name = index == 0 ? fileName : '$stem($index)$ext';
       final candidate = p.join(directoryPath, name);
       if (!File(candidate).existsSync()) {
         return candidate;
       }
-      index += 1;
     }
+    // Fallback: append timestamp to guarantee uniqueness.
+    final ts = DateTime.now().millisecondsSinceEpoch;
+    return p.join(directoryPath, '$stem-$ts$ext');
   }
 
   String _buildTempArchivePath(String baseName) {
@@ -852,6 +957,10 @@ class FileExplorerController extends ChangeNotifier {
           _batchMessage =
               '${_batchPrefixForItem(i, totalItems)}압축 실패: $itemName';
           _notifyTransferListeners();
+          // Clean up temp archive that may have been partially written.
+          if (tempArchivePath != null) {
+            await _runCommand("rm -f -- ${_shellQuote(tempArchivePath)}");
+          }
           continue;
         }
         downloadTargetPath = tempArchivePath;
@@ -1282,6 +1391,7 @@ class FileExplorerController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _searchDebounce?.cancel();
     _browserNotifier.dispose();
     _transferNotifier.dispose();
     super.dispose();

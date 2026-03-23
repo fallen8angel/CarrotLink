@@ -2,7 +2,6 @@ package com.example.carrot_pilot_manager
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.os.SystemClock
 import org.json.JSONObject
 import org.pytorch.executorch.EValue
 import org.pytorch.executorch.Module
@@ -27,7 +26,6 @@ internal data class NativeDriveYoloModelMetadata(
     val outputName: String? = null,
     val weights: String? = null,
     val soc: String? = null,
-    val qnnSdkVersion: String? = null,
     val executorchRef: String? = null,
     val useFp16: Boolean? = null,
     val onlinePrepare: Boolean? = null,
@@ -216,7 +214,6 @@ internal object NativeDriveYoloModelLocator {
           outputName = json.optString("output_name").ifBlank { null },
           weights = json.optString("weights").ifBlank { null },
           soc = json.optString("soc").ifBlank { null },
-          qnnSdkVersion = json.optString("qnn_sdk_version").ifBlank { null },
           executorchRef = json.optString("executorch_ref").ifBlank { null },
           useFp16 = if (json.has("use_fp16")) json.optBoolean("use_fp16") else null,
           onlinePrepare = if (json.has("online_prepare")) json.optBoolean("online_prepare") else null,
@@ -291,18 +288,6 @@ internal object NativeDriveYoloModelLocator {
 internal class NativeDriveExecuTorchRuntime(
     context: Context,
 ) : NativeDriveYoloRuntime {
-  private companion object {
-    private const val qnnLoweredRuntimeGuardBlocker = "qnn_lowered_runtime_guarded"
-    private const val qnnLoweredRuntimeGuardMessage =
-        "QNN-lowered runtime is guarded because the current ExecuTorch/QNN stack " +
-            "can crash during delegate initialization. Rebuild the export/runtime " +
-            "from the same stack and enable it explicitly."
-    private const val qnnDelegateInitFailedBlocker = "qnn_delegate_init_failed"
-    private const val qnnDspTransportFailedBlocker = "qnn_dsp_transport_failed"
-    private const val qnnForwardRetryBackoffMs = 5_000L
-    private const val qnnForwardRetryThreshold = 3
-  }
-
   private data class NativeDriveYoloBackendSupport(
       val available: Boolean = false,
       val reason: String? = null,
@@ -312,6 +297,12 @@ internal class NativeDriveExecuTorchRuntime(
       val assetFiles: List<String> = emptyList(),
   )
 
+  @Volatile private var onInferenceReadyCallback: (() -> Unit)? = null
+
+  override fun setOnInferenceReadyCallback(callback: (() -> Unit)?) {
+    onInferenceReadyCallback = callback
+  }
+
   private val appContext = context.applicationContext
   private var config: NativeDriveYoloConfig = NativeDriveYoloConfig.disabled
   private var module: Module? = null
@@ -320,14 +311,15 @@ internal class NativeDriveExecuTorchRuntime(
   private var candidatePaths: List<String> = emptyList()
   private var modelMetadata: NativeDriveYoloModelMetadata = NativeDriveYoloModelMetadata()
   private var backendSupport = NativeDriveYoloBackendSupport()
-  private var qnnRuntimeDir: String? = null
-  private var qnnEnvReady: Boolean = false
   private var lastError: String? = null
   private var stage: String = "idle"
   private var blocker: String? = "disabled"
   private var inferenceRequests = 0
   private var lastRequestedFrameId = -1
   private var pixelFramesConsumed = 0
+  private var lastInferenceFrameId = -1
+  private var lastInferencePtsUs = 0L
+  private var lastInferenceElapsedMs: Double? = null
   private var forwardSuccesses = 0
   private var forwardFailures = 0
   private var lastPreprocessMs: Double? = null
@@ -343,12 +335,14 @@ internal class NativeDriveExecuTorchRuntime(
   private var parserMaxClassScore: Double? = null
   private var parsedDetectionsPreview: List<String> = emptyList()
   private var parsedDetections: List<Map<String, Any?>> = emptyList()
-  private var lastForwardFailureSignature: String? = null
-  private var repeatedForwardFailureCount = 0
-  private var qnnRetryBlockedUntilElapsedMs = 0L
   private var reusableInputBuffer: FloatBuffer? = null
   private var reusablePixels: IntArray? = null
   private var reusableInputShape: LongArray = longArrayOf(1, 3, 0, 0)
+  private var reusableScaledBitmap: android.graphics.Bitmap? = null
+  private var reusableScaledCanvas: android.graphics.Canvas? = null
+  @Volatile private var lastLetterbox: LetterboxTransform = LetterboxTransform.IDENTITY
+  @Volatile private var lastBitmapFingerprint = 0L
+  @Volatile private var duplicateFramesSkipped = 0
 
   private fun summarizeThrowable(t: Throwable): String {
     val primary = t.message?.trim().orEmpty()
@@ -388,8 +382,6 @@ internal class NativeDriveExecuTorchRuntime(
       candidatePaths = emptyList()
       modelMetadata = NativeDriveYoloModelMetadata()
       backendSupport = NativeDriveYoloBackendSupport()
-      qnnRuntimeDir = null
-      qnnEnvReady = false
       lastError = null
       inferenceRequests = 0
       lastRequestedFrameId = -1
@@ -409,7 +401,6 @@ internal class NativeDriveExecuTorchRuntime(
     parserMaxClassScore = null
     parsedDetectionsPreview = emptyList()
     parsedDetections = emptyList()
-    resetForwardFailureTracking()
     reusableInputBuffer = null
       reusablePixels = null
       reusableInputShape = longArrayOf(1, 3, 0, 0)
@@ -423,8 +414,6 @@ internal class NativeDriveExecuTorchRuntime(
       lastError = null
       candidatePaths = emptyList()
       modelMetadata = NativeDriveYoloModelMetadata()
-      qnnRuntimeDir = null
-      qnnEnvReady = false
       inferenceRequests = 0
       lastRequestedFrameId = -1
       pixelFramesConsumed = 0
@@ -443,7 +432,6 @@ internal class NativeDriveExecuTorchRuntime(
       parserMaxClassScore = null
       parsedDetectionsPreview = emptyList()
       parsedDetections = emptyList()
-      resetForwardFailureTracking()
       reusableInputBuffer = null
       reusablePixels = null
       reusableInputShape = longArrayOf(1, 3, 0, 0)
@@ -456,16 +444,9 @@ internal class NativeDriveExecuTorchRuntime(
       lastError = null
       candidatePaths = emptyList()
       modelMetadata = NativeDriveYoloModelMetadata()
-      qnnRuntimeDir = null
-      qnnEnvReady = false
-      resetForwardFailureTracking()
       reusableInputBuffer = null
       reusablePixels = null
       reusableInputShape = longArrayOf(1, 3, 0, 0)
-      return
-    }
-    if (shouldGuardQnnLoweredRuntime(config)) {
-      applyQnnLoweredRuntimeGuard()
       return
     }
     ensureInputBuffers()
@@ -482,10 +463,6 @@ internal class NativeDriveExecuTorchRuntime(
     if (!backendSupport.available) {
       stage = "backend_unavailable"
       blocker = backendSupport.reason ?: "backend_unavailable"
-      return
-    }
-    if (shouldGuardQnnLoweredRuntime(config)) {
-      applyQnnLoweredRuntimeGuard()
       return
     }
     inferenceRequests += 1
@@ -510,20 +487,21 @@ internal class NativeDriveExecuTorchRuntime(
       blocker = backendSupport.reason ?: "backend_unavailable"
       return
     }
-    if (shouldGuardQnnLoweredRuntime(config)) {
-      applyQnnLoweredRuntimeGuard()
-      return
-    }
-    if (isQnnRetryBackoffActive(config)) {
-      applyQnnRetryBackoffState()
-      return
-    }
     pixelFramesConsumed += 1
     lastRequestedFrameId = frame.frameId
     if (module == null) {
       ensureModuleLoaded(forceReload = false)
       return
     }
+    // Skip duplicate frames: if bitmap content is identical to last inference, reuse results.
+    val fingerprint = bitmapFingerprint(bitmap)
+    if (fingerprint != 0L && fingerprint == lastBitmapFingerprint && parsedDetections.isNotEmpty()) {
+      duplicateFramesSkipped += 1
+      lastInferenceFrameId = frame.frameId
+      lastInferencePtsUs = frame.ptsUs
+      return
+    }
+    lastBitmapFingerprint = fingerprint
     lastPreprocessMs = null
     lastForwardMs = null
     lastOutputShapes = emptyList()
@@ -548,7 +526,6 @@ internal class NativeDriveExecuTorchRuntime(
       val outputs = module!!.forward(EValue.from(inputTensor))
       lastForwardMs = elapsedMs(forwardStartNs)
       forwardSuccesses += 1
-      resetForwardFailureTracking()
       updateOutputDiagnostics(outputs)
       val parseResult =
           NativeDriveYoloParser.parse(
@@ -561,6 +538,7 @@ internal class NativeDriveExecuTorchRuntime(
               },
               inputWidth = config.inputWidth.coerceAtLeast(32),
               inputHeight = config.inputHeight.coerceAtLeast(32),
+              modelVariant = config.modelVariant,
           )
       lastError = null
       if (parseResult != null) {
@@ -574,13 +552,13 @@ internal class NativeDriveExecuTorchRuntime(
             buildList {
               add(
                   "strategy=${parseResult.strategy} " +
-                      "thr=${"%.2f".format(parseResult.scoreThreshold)} " +
+                      "thr=${((parseResult.scoreThreshold * 100).toInt())} " +
                       "above=${parseResult.aboveThresholdCount} " +
-                      "max=${"%.3f".format(parseResult.maxClassScore)}",
+                      "max=${((parseResult.maxClassScore * 1000).toInt() / 1000.0)}",
               )
               addAll(
                   parseResult.detections.take(5).map { detection ->
-                    "${detection.label}:${"%.2f".format(detection.score)}@" +
+                    "${detection.label}:${((detection.score * 100).toInt())}@" +
                         "${detection.left.roundDebug()},${detection.top.roundDebug()}," +
                         "${detection.right.roundDebug()},${detection.bottom.roundDebug()}"
                   },
@@ -593,6 +571,7 @@ internal class NativeDriveExecuTorchRuntime(
                   sourceHeight = config.sourceHeight,
                   inputWidth = config.inputWidth,
                   inputHeight = config.inputHeight,
+                  letterbox = lastLetterbox,
               )
             }
         if (parseResult.acceptedCount > 0) {
@@ -618,35 +597,19 @@ internal class NativeDriveExecuTorchRuntime(
               .ifBlank { t.message ?: t::class.java.simpleName }
       lastError = failureMessage
       if (!preprocessDone) {
-        resetForwardFailureTracking()
         stage = "preprocess_failed"
         blocker = "preprocess_error"
       } else {
-        val qnnForwardIssue = classifyQnnForwardFailure(config, failureMessage)
-        if (qnnForwardIssue != null) {
-          noteForwardFailure(qnnForwardIssue.blocker)
-          if (repeatedForwardFailureCount >= qnnForwardRetryThreshold) {
-            qnnRetryBlockedUntilElapsedMs =
-                SystemClock.elapsedRealtime() + qnnForwardRetryBackoffMs
-            stage = "backend_unavailable"
-            blocker = qnnDspTransportFailedBlocker
-            lastError =
-                "Repeated QNN delegate failures. " +
-                    "Backing off for ${qnnForwardRetryBackoffMs}ms. " +
-                    "Last error: $failureMessage"
-          } else {
-            stage = qnnForwardIssue.stage
-            blocker = qnnForwardIssue.blocker
-            lastError = qnnForwardIssue.message
-          }
-        } else {
-          resetForwardFailureTracking()
-          stage = "inference_failed"
-          blocker = "executorch_forward_failed"
-        }
+        stage = "inference_failed"
+        blocker = "executorch_forward_failed"
       }
       parsedDetections = emptyList()
     }
+    lastInferenceFrameId = frame.frameId
+    lastInferencePtsUs = frame.ptsUs
+    lastInferenceElapsedMs = lastForwardMs
+    // Pipeline idle — signal controller to capture next frame immediately.
+    try { onInferenceReadyCallback?.invoke() } catch (_: Throwable) {}
   }
 
   override fun snapshot(): NativeDriveYoloRuntimeSnapshot {
@@ -662,8 +625,8 @@ internal class NativeDriveExecuTorchRuntime(
         backendNativeLibDir = backendSupport.nativeLibDir,
         backendPackagingMode = backendSupport.packagingMode,
         backendAssetFiles = backendSupport.assetFiles,
-        backendRuntimeDir = qnnRuntimeDir,
-        backendEnvReady = qnnEnvReady,
+        backendRuntimeDir = null,
+        backendEnvReady = false,
         modelVariant = config.modelVariant,
         inferenceRequests = inferenceRequests,
         lastRequestedFrameId = lastRequestedFrameId,
@@ -675,7 +638,6 @@ internal class NativeDriveExecuTorchRuntime(
         modelMetadataSource = modelMetadata.metadataSource,
         modelMetadataOutputName = modelMetadata.outputName,
         modelMetadataSoc = modelMetadata.soc,
-        modelMetadataQnnSdkVersion = modelMetadata.qnnSdkVersion,
         modelMetadataExecutorchRef = modelMetadata.executorchRef,
         modelMetadataUseFp16 = modelMetadata.useFp16,
         modelMetadataOnlinePrepare = modelMetadata.onlinePrepare,
@@ -698,10 +660,14 @@ internal class NativeDriveExecuTorchRuntime(
         parserMaxClassScore = parserMaxClassScore,
         parsedDetectionsPreview = parsedDetectionsPreview,
         parsedDetections = parsedDetections,
+        lastInferenceFrameId = lastInferenceFrameId,
+        lastInferencePtsUs = lastInferencePtsUs,
+        lastInferenceElapsedMs = lastInferenceElapsedMs,
     )
   }
 
   override fun release() {
+    onInferenceReadyCallback = null
     releaseModule()
     config = NativeDriveYoloConfig.disabled
     stage = "idle"
@@ -709,10 +675,7 @@ internal class NativeDriveExecuTorchRuntime(
     candidatePaths = emptyList()
     modelMetadata = NativeDriveYoloModelMetadata()
     backendSupport = NativeDriveYoloBackendSupport()
-    qnnRuntimeDir = null
-    qnnEnvReady = false
     lastError = null
-    resetForwardFailureTracking()
     inferenceRequests = 0
     lastRequestedFrameId = -1
     pixelFramesConsumed = 0
@@ -734,6 +697,10 @@ internal class NativeDriveExecuTorchRuntime(
       reusableInputBuffer = null
     reusablePixels = null
     reusableInputShape = longArrayOf(1, 3, 0, 0)
+    reusableScaledBitmap?.let { if (!it.isRecycled) it.recycle() }
+    reusableScaledBitmap = null
+    reusableScaledCanvas = null
+    lastLetterbox = LetterboxTransform.IDENTITY
   }
 
   private fun ensureModuleLoaded(forceReload: Boolean) {
@@ -745,7 +712,6 @@ internal class NativeDriveExecuTorchRuntime(
       blocker = "unsafe_runtime_disabled"
       lastError = null
       modelMetadata = NativeDriveYoloModelMetadata()
-      resetForwardFailureTracking()
       return
     }
     if (!backendSupport.available) {
@@ -754,29 +720,7 @@ internal class NativeDriveExecuTorchRuntime(
       blocker = backendSupport.reason ?: "backend_unavailable"
       lastError = null
       modelMetadata = NativeDriveYoloModelMetadata()
-      resetForwardFailureTracking()
       return
-    }
-    if (shouldGuardQnnLoweredRuntime(config)) {
-      applyQnnLoweredRuntimeGuard()
-      return
-    }
-    if (config.runtimeBackend.contains("qnn", ignoreCase = true)) {
-      val prepared = NativeDriveQnnRuntimeFiles.prepare(appContext, backendSupport.nativeLibDir)
-      qnnRuntimeDir = prepared.runtimeDir
-      qnnEnvReady = prepared.envConfigured
-      if (!prepared.envConfigured) {
-        releaseModule()
-        stage = "backend_environment_unavailable"
-        blocker = prepared.reason ?: "qnn_environment_unavailable"
-        lastError = null
-        modelMetadata = NativeDriveYoloModelMetadata()
-        resetForwardFailureTracking()
-        return
-      }
-    } else {
-      qnnRuntimeDir = null
-      qnnEnvReady = false
     }
     if (!forceReload && module != null) return
 
@@ -792,17 +736,6 @@ internal class NativeDriveExecuTorchRuntime(
       blocker = "model_asset_missing"
       lastError = null
       modelMetadata = NativeDriveYoloModelMetadata(candidatePaths = modelMetadata.candidatePaths)
-      resetForwardFailureTracking()
-      return
-    }
-
-    val metadataIssue = validateQnnModelCompatibility(config, modelMetadata)
-    if (metadataIssue != null) {
-      releaseModule()
-      stage = metadataIssue.stage
-      blocker = metadataIssue.blocker
-      lastError = metadataIssue.message
-      resetForwardFailureTracking()
       return
     }
 
@@ -819,194 +752,14 @@ internal class NativeDriveExecuTorchRuntime(
       // produced native SIGSEGV crashes in libexecutorch_jni.so. We keep the
       // module loaded and let the first forward() own method initialization.
       lastError = null
-      resetForwardFailureTracking()
       stage = "awaiting_preprocess_pipeline"
       blocker = "preprocess_missing"
     } catch (t: Throwable) {
       releaseModule()
       lastError = summarizeThrowable(t)
-      resetForwardFailureTracking()
       stage = "module_load_failed"
       blocker = "executorch_module_load_failed"
     }
-  }
-
-  private fun shouldGuardQnnLoweredRuntime(config: NativeDriveYoloConfig): Boolean {
-    if (BuildConfig.ENABLE_QNN_LOWERED_RUNTIME) {
-      return false
-    }
-    if (!config.runtimeBackend.contains("qnn", ignoreCase = true)) {
-      return false
-    }
-    return NativeDriveYoloModelCatalog.isQnnLoweredReference(config.modelVariant)
-  }
-
-  private data class NativeDriveYoloRuntimeIssue(
-      val stage: String,
-      val blocker: String,
-      val message: String,
-  )
-
-  private fun validateQnnModelCompatibility(
-      config: NativeDriveYoloConfig,
-      metadata: NativeDriveYoloModelMetadata,
-  ): NativeDriveYoloRuntimeIssue? {
-    if (!config.runtimeBackend.contains("qnn", ignoreCase = true) &&
-        NativeDriveYoloModelCatalog.isQnnLoweredReference(config.modelVariant)) {
-      return NativeDriveYoloRuntimeIssue(
-          stage = "backend_unavailable",
-          blocker = "qnn_model_requires_qnn_backend",
-          message =
-              "QNN-lowered model ${config.modelVariant} requires the ExecuTorch QNN backend.",
-      )
-    }
-    if (!config.runtimeBackend.contains("qnn", ignoreCase = true)) {
-      return null
-    }
-    if (!NativeDriveYoloModelCatalog.isQnnLoweredReference(config.modelVariant)) {
-      return null
-    }
-    if (!metadata.present) {
-      return NativeDriveYoloRuntimeIssue(
-          stage = "awaiting_model_metadata",
-          blocker = "qnn_model_metadata_missing",
-          message =
-              "QNN model metadata is missing. Re-export the model so " +
-                  "<model>.metadata.json is packaged next to the .pte.",
-      )
-    }
-    if (!metadata.parseError.isNullOrBlank()) {
-      return NativeDriveYoloRuntimeIssue(
-          stage = "awaiting_model_metadata",
-          blocker = "qnn_model_metadata_invalid",
-          message =
-              "QNN model metadata could not be parsed: ${metadata.parseError}",
-      )
-    }
-
-    val expectedNames =
-        NativeDriveYoloModelCatalog
-            .candidateBaseNamesFor(config.modelVariant)
-            .map { NativeDriveYoloModelCatalog.normalize(it) }
-            .toSet()
-    val metadataOutputName = NativeDriveYoloModelCatalog.normalize(metadata.outputName)
-    if (metadataOutputName.isBlank()) {
-      return NativeDriveYoloRuntimeIssue(
-          stage = "awaiting_model_metadata",
-          blocker = "qnn_model_metadata_incomplete",
-          message = "QNN model metadata is missing output_name.",
-      )
-    }
-    if (metadataOutputName !in expectedNames) {
-      return NativeDriveYoloRuntimeIssue(
-          stage = "awaiting_model_metadata",
-          blocker = "qnn_model_variant_mismatch",
-          message =
-              "QNN model metadata output_name=${metadata.outputName} does not match " +
-                  "requested variant=${config.modelVariant}.",
-      )
-    }
-
-    val exportedSdkVersion = metadata.qnnSdkVersion?.trim().orEmpty()
-    if (exportedSdkVersion.isBlank()) {
-      return NativeDriveYoloRuntimeIssue(
-          stage = "awaiting_model_metadata",
-          blocker = "qnn_model_metadata_incomplete",
-          message = "QNN model metadata is missing qnn_sdk_version.",
-      )
-    }
-
-    val packagedSdkVersion = BuildConfig.QNN_SDK_VERSION.trim()
-    if (packagedSdkVersion.isNotEmpty() && packagedSdkVersion != exportedSdkVersion) {
-      return NativeDriveYoloRuntimeIssue(
-          stage = "backend_unavailable",
-          blocker = "qnn_sdk_version_mismatch",
-          message =
-              "QNN export/runtime mismatch. Model was lowered with QNN SDK " +
-                  "$exportedSdkVersion but the app packages $packagedSdkVersion.",
-      )
-    }
-
-    return null
-  }
-
-  private fun classifyQnnForwardFailure(
-      config: NativeDriveYoloConfig,
-      failureMessage: String,
-  ): NativeDriveYoloRuntimeIssue? {
-    if (!config.runtimeBackend.contains("qnn", ignoreCase = true)) {
-      return null
-    }
-    if (!NativeDriveYoloModelCatalog.isQnnLoweredReference(config.modelVariant)) {
-      return null
-    }
-    val normalized = failureMessage.lowercase()
-    if (!normalized.contains("execution failed for method: forward") &&
-        !normalized.contains("internal error")) {
-      return null
-    }
-    return NativeDriveYoloRuntimeIssue(
-        stage = "inference_failed",
-        blocker = qnnDelegateInitFailedBlocker,
-        message =
-            "QNN delegate initialization failed during forward(). " +
-                "If this persists, inspect device logcat for QnnDsp transport/skel load errors.",
-    )
-  }
-
-  private fun noteForwardFailure(signature: String) {
-    if (lastForwardFailureSignature == signature) {
-      repeatedForwardFailureCount += 1
-    } else {
-      lastForwardFailureSignature = signature
-      repeatedForwardFailureCount = 1
-    }
-  }
-
-  private fun resetForwardFailureTracking() {
-    lastForwardFailureSignature = null
-    repeatedForwardFailureCount = 0
-    qnnRetryBlockedUntilElapsedMs = 0L
-  }
-
-  private fun isQnnRetryBackoffActive(config: NativeDriveYoloConfig): Boolean {
-    if (!config.runtimeBackend.contains("qnn", ignoreCase = true)) {
-      return false
-    }
-    if (!NativeDriveYoloModelCatalog.isQnnLoweredReference(config.modelVariant)) {
-      return false
-    }
-    val until = qnnRetryBlockedUntilElapsedMs
-    if (until <= 0L) {
-      return false
-    }
-    val now = SystemClock.elapsedRealtime()
-    if (now >= until) {
-      qnnRetryBlockedUntilElapsedMs = 0L
-      repeatedForwardFailureCount = 0
-      lastForwardFailureSignature = null
-      return false
-    }
-    return true
-  }
-
-  private fun applyQnnRetryBackoffState() {
-    val remainingMs =
-        (qnnRetryBlockedUntilElapsedMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
-    stage = "backend_unavailable"
-    blocker = qnnDspTransportFailedBlocker
-    lastError =
-        "QNN delegate retries are temporarily paused after repeated failures. " +
-            "Retrying in ${remainingMs}ms."
-  }
-
-  private fun applyQnnLoweredRuntimeGuard() {
-    releaseModule()
-    modelMetadata = NativeDriveYoloModelMetadata()
-    lastError = qnnLoweredRuntimeGuardMessage
-    resetForwardFailureTracking()
-    stage = "backend_unavailable"
-    blocker = qnnLoweredRuntimeGuardBlocker
   }
 
   private fun requiresModuleReload(
@@ -1031,7 +784,12 @@ internal class NativeDriveExecuTorchRuntime(
       config: NativeDriveYoloConfig,
   ): NativeDriveYoloBackendSupport {
     val nativeDirPath = appContext.applicationInfo.nativeLibraryDir
-    val nativeLibs = NativeDriveQnnRuntimeFiles.listPackagedNativeLibs(appContext)
+    val nativeLibs =
+        File(nativeDirPath)
+            .listFiles()
+            ?.mapNotNull { it.name.takeIf { name -> name.endsWith(".so") } }
+            ?.sorted()
+            ?: emptyList()
     val packagingMode = BuildConfig.EXECUTORCH_PACKAGING_MODE
     val backend = config.runtimeBackend.trim().lowercase()
     if (backend.isBlank()) {
@@ -1042,68 +800,6 @@ internal class NativeDriveExecuTorchRuntime(
           nativeLibDir = nativeDirPath,
           packagingMode = packagingMode,
       )
-    }
-    if (backend.contains("qnn")) {
-      val normalizedLibs = nativeLibs.map { it.lowercase() }
-      val packagedSkels = NativeDriveQnnRuntimeFiles.listPackagedSkels(appContext)
-      val hasQnnBackendBridge =
-          normalizedLibs.any { name ->
-            name == "libqnn_executorch_backend.so"
-          }
-      val hasQnnHtpLib =
-          normalizedLibs.any { name ->
-            name == "libqnnhtp.so"
-          }
-      val hasQnnSystemLib =
-          normalizedLibs.any { name ->
-            name == "libqnnsystem.so"
-          }
-      val hasQnnStubLib =
-          normalizedLibs.any { name ->
-            name.startsWith("libqnnhtpv") && name.endsWith("stub.so")
-          }
-      return if (
-          hasQnnBackendBridge &&
-              hasQnnHtpLib &&
-              hasQnnSystemLib &&
-              hasQnnStubLib &&
-              packagedSkels.isNotEmpty()) {
-        NativeDriveYoloBackendSupport(
-            available = true,
-            nativeLibs = nativeLibs,
-            nativeLibDir = nativeDirPath,
-            packagingMode = packagingMode,
-            assetFiles = packagedSkels,
-        )
-      } else {
-        NativeDriveYoloBackendSupport(
-            available = false,
-            reason =
-                if (!hasQnnBackendBridge) {
-                  if (BuildConfig.USE_LOCAL_EXECUTORCH_AAR) {
-                    "qnn_backend_bridge_missing"
-                  } else {
-                    "qnn_backend_not_packaged"
-                  }
-                } else if (!hasQnnHtpLib) {
-                  "qnn_htp_runtime_missing"
-                } else if (!hasQnnSystemLib) {
-                  "qnn_system_runtime_missing"
-                } else if (!hasQnnStubLib) {
-                  "qnn_htp_stub_missing"
-                } else if (packagedSkels.isEmpty()) {
-                  "qnn_skel_assets_missing"
-                } else if (BuildConfig.USE_LOCAL_EXECUTORCH_AAR) {
-                  "qnn_runtime_libs_missing"
-                } else {
-                  "qnn_backend_not_packaged"
-                },
-            nativeLibs = nativeLibs,
-            nativeLibDir = nativeDirPath,
-            packagingMode = packagingMode,
-            assetFiles = packagedSkels,
-        )
-      }
     }
     if (backend.contains("xnnpack")) {
       return NativeDriveYoloBackendSupport(
@@ -1141,23 +837,85 @@ internal class NativeDriveExecuTorchRuntime(
     ensureInputBuffers()
     val width = config.inputWidth.coerceAtLeast(32)
     val height = config.inputHeight.coerceAtLeast(32)
-    require(bitmap.width == width && bitmap.height == height) {
-      "bitmap_size_mismatch:${bitmap.width}x${bitmap.height} expected=${width}x${height}"
-    }
+    val prepared = prepareBitmapForInput(bitmap, width, height)
 
     val pixels = reusablePixels ?: error("pixel_buffer_unavailable")
-    bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+    prepared.getPixels(pixels, 0, width, 0, 0, width, height)
 
     val inputBuffer = reusableInputBuffer ?: error("input_buffer_unavailable")
     val planeSize = width * height
-    for (index in 0 until planeSize) {
-      val argb = pixels[index]
-      inputBuffer.put(index, ((argb shr 16) and 0xFF) / 255.0f)
-      inputBuffer.put(index + planeSize, ((argb shr 8) and 0xFF) / 255.0f)
-      inputBuffer.put(index + (planeSize * 2), (argb and 0xFF) / 255.0f)
+    // Write each colour plane sequentially for better cache locality.
+    val inv = 1.0f / 255.0f
+    val rOff = 0
+    val gOff = planeSize
+    val bOff = planeSize * 2
+    val unrolledEnd = planeSize - (planeSize % 4)
+    var i = 0
+    while (i < unrolledEnd) {
+      val a0 = pixels[i]; val a1 = pixels[i + 1]; val a2 = pixels[i + 2]; val a3 = pixels[i + 3]
+      inputBuffer.put(rOff + i,     ((a0 shr 16) and 0xFF) * inv)
+      inputBuffer.put(rOff + i + 1, ((a1 shr 16) and 0xFF) * inv)
+      inputBuffer.put(rOff + i + 2, ((a2 shr 16) and 0xFF) * inv)
+      inputBuffer.put(rOff + i + 3, ((a3 shr 16) and 0xFF) * inv)
+      inputBuffer.put(gOff + i,     ((a0 shr 8) and 0xFF) * inv)
+      inputBuffer.put(gOff + i + 1, ((a1 shr 8) and 0xFF) * inv)
+      inputBuffer.put(gOff + i + 2, ((a2 shr 8) and 0xFF) * inv)
+      inputBuffer.put(gOff + i + 3, ((a3 shr 8) and 0xFF) * inv)
+      inputBuffer.put(bOff + i,     (a0 and 0xFF) * inv)
+      inputBuffer.put(bOff + i + 1, (a1 and 0xFF) * inv)
+      inputBuffer.put(bOff + i + 2, (a2 and 0xFF) * inv)
+      inputBuffer.put(bOff + i + 3, (a3 and 0xFF) * inv)
+      i += 4
+    }
+    while (i < planeSize) {
+      val argb = pixels[i]
+      inputBuffer.put(rOff + i, ((argb shr 16) and 0xFF) * inv)
+      inputBuffer.put(gOff + i, ((argb shr 8) and 0xFF) * inv)
+      inputBuffer.put(bOff + i, (argb and 0xFF) * inv)
+      i++
     }
     inputBuffer.rewind()
     return Tensor.fromBlob(inputBuffer, reusableInputShape)
+  }
+
+  private fun bitmapFingerprint(bitmap: Bitmap): Long {
+    val w = bitmap.width
+    val h = bitmap.height
+    if (w < 8 || h < 8) return 0L
+    var hash = w.toLong() * 31 + h.toLong()
+    val stepX = w / 4
+    val stepY = h / 4
+    for (i in 0 until 4) {
+      for (j in 0 until 4) {
+        val x = (stepX * i + stepX / 2).coerceIn(0, w - 1)
+        val y = (stepY * j + stepY / 2).coerceIn(0, h - 1)
+        hash = hash * 31 + bitmap.getPixel(x, y).toLong()
+      }
+    }
+    return hash
+  }
+
+  private fun prepareBitmapForInput(bitmap: Bitmap, width: Int, height: Int): Bitmap {
+    if (bitmap.width == width && bitmap.height == height) {
+      lastLetterbox = LetterboxTransform.IDENTITY
+      return bitmap
+    }
+    val lb = LetterboxTransform.compute(bitmap.width, bitmap.height, width, height)
+    lastLetterbox = lb
+    var target = reusableScaledBitmap
+    if (target == null || target.isRecycled || target.width != width || target.height != height) {
+      target?.let { if (!it.isRecycled) it.recycle() }
+      target = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+      reusableScaledBitmap = target
+      reusableScaledCanvas = android.graphics.Canvas(target)
+    }
+    target.eraseColor(android.graphics.Color.rgb(114, 114, 114))
+    val canvas = reusableScaledCanvas ?: android.graphics.Canvas(target).also { reusableScaledCanvas = it }
+    val scaledW = bitmap.width * lb.scale
+    val scaledH = bitmap.height * lb.scale
+    val dstRect = android.graphics.RectF(lb.padLeft, lb.padTop, lb.padLeft + scaledW, lb.padTop + scaledH)
+    canvas.drawBitmap(bitmap, null, dstRect, null)
+    return target
   }
 
   private fun updateOutputDiagnostics(outputs: Array<EValue>) {
@@ -1184,7 +942,10 @@ internal class NativeDriveExecuTorchRuntime(
                 prefix = "[$index]:",
                 separator = ",",
             ) { sampleIndex ->
-              "%.4f".format(floats[sampleIndex])
+              val v = floats[sampleIndex]
+              val intPart = v.toInt()
+              val fracPart = ((v - intPart) * 10000).toInt().let { if (it < 0) -it else it }
+              "$intPart.${fracPart.toString().padStart(4, '0')}"
             }
         preview += sampleText
       } else {
@@ -1202,6 +963,8 @@ internal class NativeDriveExecuTorchRuntime(
   }
 
   private fun Float.roundDebug(): String {
-    return "%.1f".format(this)
+    val intPart = this.toInt()
+    val frac = ((this - intPart) * 10).toInt().let { if (it < 0) -it else it }
+    return "$intPart.$frac"
   }
 }

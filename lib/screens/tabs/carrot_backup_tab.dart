@@ -76,20 +76,35 @@ class _CarrotBackupTabState extends State<CarrotBackupTab>
   bool get _isCloudMode => _source == _BackupSource.cloud;
   bool get _isProfileMode => _source == _BackupSource.profile;
 
+  // Cached filter results — invalidated via _invalidateFilterCache().
+  List<String>? _cachedDateOptions;
+  List<String>? _cachedBranchOptions;
+  List<_BackupListItem>? _cachedFilteredItems;
+
+  void _invalidateFilterCache() {
+    _cachedDateOptions = null;
+    _cachedBranchOptions = null;
+    _cachedFilteredItems = null;
+  }
+
   List<String> get _dateOptions {
-    final values = _activeItems.map((e) => e.dateLabel).toSet().toList()
-      ..sort((a, b) => b.compareTo(a));
-    return <String>[_allDates, ...values];
+    return _cachedDateOptions ??= () {
+      final values = _activeItems.map((e) => e.dateLabel).toSet().toList()
+        ..sort((a, b) => b.compareTo(a));
+      return <String>[_allDates, ...values];
+    }();
   }
 
   List<String> get _branchOptions {
-    final values = _activeItems.map((e) => e.branch).toSet().toList()
-      ..sort((a, b) => a.compareTo(b));
-    return <String>[_allBranches, ...values];
+    return _cachedBranchOptions ??= () {
+      final values = _activeItems.map((e) => e.branch).toSet().toList()
+        ..sort((a, b) => a.compareTo(b));
+      return <String>[_allBranches, ...values];
+    }();
   }
 
   List<_BackupListItem> get _filteredItems {
-    return _activeItems.where((item) {
+    return _cachedFilteredItems ??= _activeItems.where((item) {
       final dateOk =
           _selectedDate == _allDates || item.dateLabel == _selectedDate;
       final branchOk =
@@ -152,6 +167,12 @@ class _CarrotBackupTabState extends State<CarrotBackupTab>
         UiWindowClass.large || UiWindowClass.extraLarge => 13.5,
       },
     );
+  }
+
+  @override
+  void setState(VoidCallback fn) {
+    _invalidateFilterCache();
+    super.setState(fn);
   }
 
   @override
@@ -1321,13 +1342,9 @@ class _CarrotBackupTabState extends State<CarrotBackupTab>
             physics: const AlwaysScrollableScrollPhysics(),
             slivers: [
               SliverToBoxAdapter(child: topSection),
-              SliverToBoxAdapter(
-                child: _buildList(
-                  isSignedIn: isSignedIn,
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  listBottomPadding: listBottomPadding,
-                ),
+              _buildTinyLandscapeListSliver(
+                isSignedIn: isSignedIn,
+                listBottomPadding: listBottomPadding,
               ),
             ],
           )
@@ -1407,32 +1424,100 @@ class _CarrotBackupTabState extends State<CarrotBackupTab>
       separatorBuilder: (_, __) => const SizedBox(height: 8),
       itemBuilder: (context, index) {
         final item = list[index];
-        final isApplying = _isApplying && _applyingId == item.id;
-        return Material(
-          color: Theme.of(context).colorScheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(10),
-          child: ListTile(
-            dense: true,
-            onTap: (_isApplying && !isApplying)
-                ? null
-                : () => item.source == _BackupSource.profile
-                    ? _openProfileFromItem(item)
-                    : _showBackupDetails(item),
-            title: Text(
-              item.title,
-              style: const TextStyle(fontWeight: FontWeight.w700),
-            ),
-            subtitle: Text(item.subtitle),
-            trailing: isApplying
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.chevron_right),
-          ),
-        );
+        return _buildListTile(item);
       },
+    );
+  }
+
+  Widget _buildListTile(_BackupListItem item) {
+    final isApplying = _isApplying && _applyingId == item.id;
+    return Material(
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      borderRadius: BorderRadius.circular(10),
+      child: ListTile(
+        dense: true,
+        onTap: (_isApplying && !isApplying)
+            ? null
+            : () => item.source == _BackupSource.profile
+                ? _openProfileFromItem(item)
+                : _showBackupDetails(item),
+        title: Text(
+          item.title,
+          style: const TextStyle(fontWeight: FontWeight.w700),
+        ),
+        subtitle: Text(item.subtitle),
+        trailing: isApplying
+            ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.chevron_right),
+      ),
+    );
+  }
+
+  Widget _buildListPlaceholder({required String message}) {
+    return Center(
+      child: Text(
+        message,
+        style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant),
+        textAlign: TextAlign.center,
+      ),
+    );
+  }
+
+  Widget _buildTinyLandscapeListSliver({
+    required bool isSignedIn,
+    required double listBottomPadding,
+  }) {
+    final horizontalPadding =
+        UiLayoutTokens.of(context).screenPadding.clamp(12.0, 24.0).toDouble();
+    if (_isLoading) {
+      return const SliverFillRemaining(
+        hasScrollBody: false,
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    if (_isCloudMode && !isSignedIn) {
+      return SliverFillRemaining(
+        hasScrollBody: false,
+        child: _buildListPlaceholder(
+          message: '구글 연동 후 클라우드 백업을 확인할 수 있습니다.',
+        ),
+      );
+    }
+
+    final list = _filteredItems;
+    if (list.isEmpty) {
+      return SliverFillRemaining(
+        hasScrollBody: false,
+        child: _buildListPlaceholder(
+          message: _isProfileMode ? '조건에 맞는 프로필이 없습니다.' : '조건에 맞는 백업이 없습니다.',
+        ),
+      );
+    }
+
+    return SliverPadding(
+      padding: EdgeInsets.fromLTRB(
+        horizontalPadding,
+        0,
+        horizontalPadding,
+        listBottomPadding,
+      ),
+      sliver: SliverList(
+        delegate: SliverChildBuilderDelegate(
+          (context, index) {
+            final itemIndex = index ~/ 2;
+            if (index.isOdd) {
+              return const SizedBox(height: 8);
+            }
+            return _buildListTile(list[itemIndex]);
+          },
+          childCount: list.length * 2 - 1,
+        ),
+      ),
     );
   }
 }

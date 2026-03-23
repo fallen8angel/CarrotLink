@@ -32,6 +32,22 @@ class YoloDetection {
   double get sourceCenterX => (sourceLeft + sourceRight) * 0.5;
   double get sourceCenterY => (sourceTop + sourceBottom) * 0.5;
 
+  YoloDetection withScore(double score) {
+    return YoloDetection(
+      classId: classId,
+      label: label,
+      score: score,
+      inputLeft: inputLeft,
+      inputTop: inputTop,
+      inputRight: inputRight,
+      inputBottom: inputBottom,
+      sourceLeft: sourceLeft,
+      sourceTop: sourceTop,
+      sourceRight: sourceRight,
+      sourceBottom: sourceBottom,
+    );
+  }
+
   YoloDetection copyWith({
     int? classId,
     String? label,

@@ -1,6 +1,245 @@
 part of 'live_drive_canvas_screen.dart';
 
 extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
+  bool _smartRecoveryCooldownActive(
+    int nowUs,
+    int lastTriggeredUs,
+    int cooldownUs,
+  ) {
+    if (lastTriggeredUs <= 0) return false;
+    final elapsedUs = nowUs - lastTriggeredUs;
+    return elapsedUs >= 0 && elapsedUs < cooldownUs;
+  }
+
+  bool _smartRecoveryEnabled() {
+    return mounted &&
+        !_isDisposing &&
+        !_isDeveloperPlaybackRequested &&
+        _openpilotOverlayMode &&
+        _useNativeLiveCamera &&
+        !_cameraSuspendedByLifecycle;
+  }
+
+  bool _cameraFrameProgressLooksStalled(
+    int nowUs, {
+    int maxAgeUs = _LiveDriveCanvasScreenState._cameraFrameStaleUs,
+  }) {
+    if (_lastCameraFrameId == null || _lastCameraFrameEventUs <= 0) {
+      return false;
+    }
+    final ageUs = nowUs - _lastCameraFrameEventUs;
+    return ageUs >= maxAgeUs;
+  }
+
+  bool _overlayProgressLooksStalled(
+    int nowUs, {
+    int maxAgeUs =
+        _LiveDriveCanvasScreenState._smartRecoveryRuntimeOverlayRepushUs,
+  }) {
+    if (_overlayStaleActive) {
+      return true;
+    }
+    if (_lastPublishedModelFrameId == null) {
+      return _hasRenderableOverlayFallback();
+    }
+    final referenceUs = math.max(_lastOverlayPublishUs, _lastSyncHitUs);
+    if (referenceUs <= 0) {
+      return true;
+    }
+    final ageUs = nowUs - referenceUs;
+    return ageUs >= maxAgeUs;
+  }
+
+  bool _startupRecoveryWindowOpen(int nowUs) {
+    if (_cameraAttachStartedUs <= 0) return false;
+    if (_lastCameraFrameId != null) return false;
+    final elapsedUs = nowUs - _cameraAttachStartedUs;
+    return elapsedUs >= 0 &&
+        elapsedUs <=
+            (_LiveDriveCanvasScreenState._cameraFirstFrameDegradedHoldUs +
+                2000000);
+  }
+
+  Future<void> _runSmartOverlayRepush({
+    required int nowUs,
+    required String reason,
+  }) async {
+    if (_smartRecoveryCooldownActive(
+      nowUs,
+      _lastSmartOverlayRepushUs,
+      _LiveDriveCanvasScreenState._smartRecoveryOverlayRepushCooldownUs,
+    )) {
+      return;
+    }
+    _lastSmartOverlayRepushUs = nowUs;
+    _smartRecoveryEscalationLevel = math.max(_smartRecoveryEscalationLevel, 1);
+    _appendDriveDiagEvent(
+      'smart_recover_overlay_repush',
+      <String, dynamic>{
+        'reason': reason,
+        'cameraFrameId': _lastCameraFrameId,
+        'modelFrameId': _lastPublishedModelFrameId,
+        'attachPhase': _cameraAttachPhase.name,
+        'overlayStale': _overlayStaleActive,
+      },
+    );
+    debugPrint('[DriveCanvas][recover] overlay repush reason=$reason');
+    _beginStartupProvisionalSync(
+      reason: 'smart_repush:$reason',
+      windowUs: 1800000,
+    );
+    if (_useNativeOverlayRenderer) {
+      unawaited(_pushNativeOverlay(_overlayNotifier.value, force: true));
+    }
+    unawaited(_pushNativeYoloConfig(force: true));
+  }
+
+  void _runSmartCameraReattach({
+    required int nowUs,
+    required String reason,
+  }) {
+    if (_smartRecoveryCooldownActive(
+      nowUs,
+      _lastSmartCameraReattachUs,
+      _LiveDriveCanvasScreenState._smartRecoveryCameraReattachCooldownUs,
+    )) {
+      return;
+    }
+    _lastSmartCameraReattachUs = nowUs;
+    _smartRecoveryEscalationLevel = math.max(_smartRecoveryEscalationLevel, 2);
+    _appendDriveDiagEvent(
+      'smart_recover_camera_reattach',
+      <String, dynamic>{
+        'reason': reason,
+        'cameraFrameId': _lastCameraFrameId,
+        'modelFrameId': _lastPublishedModelFrameId,
+        'attachPhase': _cameraAttachPhase.name,
+        'overlayStale': _overlayStaleActive,
+      },
+    );
+    debugPrint('[DriveCanvas][recover] camera reattach reason=$reason');
+    _forceRestartNativeCameraAttach(reason: reason);
+  }
+
+  void _runSmartSidecarRecovery({
+    required int nowUs,
+    required String reason,
+    bool preferSooner = false,
+  }) {
+    if (_smartRecoveryCooldownActive(
+      nowUs,
+      _lastSmartSidecarRecoveryUs,
+      _LiveDriveCanvasScreenState._smartRecoverySidecarCooldownUs,
+    )) {
+      return;
+    }
+    _lastSmartSidecarRecoveryUs = nowUs;
+    _smartRecoveryEscalationLevel = math.max(_smartRecoveryEscalationLevel, 3);
+    _appendDriveDiagEvent(
+      'smart_recover_sidecar',
+      <String, dynamic>{
+        'reason': reason,
+        'cameraFrameId': _lastCameraFrameId,
+        'modelFrameId': _lastPublishedModelFrameId,
+        'sidecarConnected': _sidecarConnected,
+        'graphicsReady':
+            _sidecarHealthIndicatesGraphicsRuntimeReady(_sidecarHealthSnapshot),
+      },
+    );
+    debugPrint('[DriveCanvas][recover] sidecar recovery reason=$reason');
+    _scheduleSidecarRuntimeRecovery(
+      reason: reason,
+      preferSooner: preferSooner,
+    );
+  }
+
+  void _maybeRunSmartDriveRecovery({
+    required int nowUs,
+  }) {
+    if (!_smartRecoveryEnabled()) return;
+    if (_smartRecoveryCooldownActive(
+      nowUs,
+      _lastSmartRecoveryCheckUs,
+      _LiveDriveCanvasScreenState._smartRecoveryCheckIntervalUs,
+    )) {
+      return;
+    }
+    _lastSmartRecoveryCheckUs = nowUs;
+
+    final startupWindow = _startupRecoveryWindowOpen(nowUs);
+    final attachElapsedUs =
+        _cameraAttachStartedUs > 0 ? (nowUs - _cameraAttachStartedUs) : 0;
+    final hasFallback = _hasRenderableOverlayFallback();
+    final overlayStalled = _overlayProgressLooksStalled(nowUs);
+    final cameraStalled = _cameraFrameProgressLooksStalled(nowUs);
+    final graphicsReady =
+        _sidecarHealthIndicatesGraphicsRuntimeReady(_sidecarHealthSnapshot);
+
+    if (_cameraRuntimeLooksHealthy() &&
+        (!hasFallback || _overlayPublicationLooksHealthy(maxAgeUs: 1200000))) {
+      _smartRecoveryEscalationLevel = 0;
+      return;
+    }
+
+    if (startupWindow &&
+        hasFallback &&
+        attachElapsedUs >=
+            _LiveDriveCanvasScreenState._smartRecoveryStartupOverlayRepushUs) {
+      unawaited(
+        _runSmartOverlayRepush(
+          nowUs: nowUs,
+          reason: 'startup_progress_stalled',
+        ),
+      );
+    }
+
+    if (startupWindow &&
+        hasFallback &&
+        attachElapsedUs >=
+            _LiveDriveCanvasScreenState._smartRecoveryStartupCameraReattachUs &&
+        (_cameraAttachPendingBeforeFirstFrame || overlayStalled)) {
+      _runSmartCameraReattach(
+        nowUs: nowUs,
+        reason: 'startup_progress_stalled_auto',
+      );
+      return;
+    }
+
+    if (_lastCameraFrameId != null &&
+        overlayStalled &&
+        !_cameraLoading &&
+        hasFallback) {
+      unawaited(
+        _runSmartOverlayRepush(
+          nowUs: nowUs,
+          reason: 'runtime_overlay_stalled',
+        ),
+      );
+    }
+
+    if (_lastCameraFrameId != null &&
+        cameraStalled &&
+        overlayStalled &&
+        !_cameraLoading) {
+      _runSmartCameraReattach(
+        nowUs: nowUs,
+        reason: 'runtime_camera_stalled_auto',
+      );
+      return;
+    }
+
+    if (_shouldEscalateToSidecarRecovery(graphicsCritical: true) &&
+        (!graphicsReady || overlayStalled)) {
+      _runSmartSidecarRecovery(
+        nowUs: nowUs,
+        reason: startupWindow
+            ? 'startup_graphics_stalled_auto'
+            : 'runtime_graphics_stalled_auto',
+        preferSooner: startupWindow || _overlayStaleActive,
+      );
+    }
+  }
+
   Map<String, dynamic>? _overlayCamera2dForSnapshot(
     _DriveOverlaySnapshot snapshot,
   ) {
@@ -1075,7 +1314,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
     _renderFromSnapshot = _overlayNotifier.value;
     _renderToSnapshot = next;
     _renderInterpStartUs = nowUs;
-    _renderInterpDurationUs = (_smoothedSyncIntervalUs * 0.45).round().clamp(
+    _renderInterpDurationUs = (_smoothedSyncIntervalUs * 0.28).round().clamp(
         _LiveDriveCanvasScreenState._interpMinUs,
         _LiveDriveCanvasScreenState._interpMaxUs);
     _recordFrameSyncRenderTarget(next);
@@ -1157,6 +1396,7 @@ extension _LiveDriveCanvasOverlaySyncComponents on _LiveDriveCanvasScreenState {
   void _onRenderTick(Duration _) {
     if (!mounted) return;
     final nowUs = _renderClock.elapsedMicroseconds;
+    _maybeRunSmartDriveRecovery(nowUs: nowUs);
     _pumpDebugPlotTick(nowUs: nowUs);
     final tickSnapshot =
         _renderInterpActive ? _renderToSnapshot : _overlayNotifier.value;

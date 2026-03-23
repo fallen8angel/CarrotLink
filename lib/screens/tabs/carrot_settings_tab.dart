@@ -87,6 +87,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
   final TextEditingController _groupSearchController = TextEditingController();
   final FocusNode _groupSearchFocusNode = FocusNode();
   final List<_CarrotSettingFavorite> _favorites = <_CarrotSettingFavorite>[];
+  List<_CarrotSettingSearchHit> _searchHits = const <_CarrotSettingSearchHit>[];
   String? _activeHost;
   int _loadEpoch = 0;
   bool _initialFocusHandled = false;
@@ -119,7 +120,10 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
   void _onGroupSearchChanged() {
     final next = _groupSearchController.text.trim();
     if (next == _query) return;
-    setState(() => _query = next);
+    setState(() {
+      _query = next;
+      _searchHits = _computeSettingHits(_bundle, next);
+    });
   }
 
   Future<void> _loadFavorites() async {
@@ -338,6 +342,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
       setState(() {
         _bundle = bundle;
         _currentCar = values['CarSelected3']?.toString();
+        _searchHits = _computeSettingHits(bundle, _query);
         _error = null;
       });
       _scheduleInitialFocusIfNeeded();
@@ -390,9 +395,15 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
   }
 
   List<_CarrotSettingSearchHit> _filteredSettingHits() {
-    final bundle = _bundle;
+    return _computeSettingHits(_bundle, _query);
+  }
+
+  List<_CarrotSettingSearchHit> _computeSettingHits(
+    CarrotSettingsBundle? bundle,
+    String queryText,
+  ) {
     if (bundle == null) return const [];
-    final query = _query.toLowerCase();
+    final query = queryText.toLowerCase();
     if (query.isEmpty) return const [];
 
     final out = <_CarrotSettingSearchHit>[];
@@ -546,8 +557,12 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
             ),
           );
 
-    return WillPopScope(
-      onWillPop: () async => !_consumeBackForSearchKeyboard(),
+    return PopScope(
+      canPop: _currentKeyboardInset() <= 0.0 && !_groupSearchFocusNode.hasFocus,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        _dismissSearchKeyboard();
+      },
       child: body,
     );
   }
@@ -716,7 +731,7 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
     final bundle = _bundle;
     if (bundle == null) return const SizedBox.shrink();
     final groups = bundle.groups;
-    final hits = _filteredSettingHits();
+    final hits = _searchHits;
     final isSearching = _query.isNotEmpty;
     return DesignCard(
       child: Column(
@@ -817,77 +832,85 @@ class _CarrotSettingsTabState extends State<CarrotSettingsTab>
               ),
             )
           else if (isSearching)
-            ListView.separated(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: hits.length,
-              separatorBuilder: (_, __) => const Divider(height: 1),
-              itemBuilder: (context, index) {
-                final hit = hits[index];
-                return ListTile(
-                  contentPadding:
-                      EdgeInsets.symmetric(horizontal: tokens.itemGap / 2),
-                  leading: const Icon(Icons.tune, size: 18),
-                  title: Text(
-                    hit.item.displayTitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
-                  subtitle: Text(
-                    '${hit.group.displayName} · ${hit.item.name}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () => _openGroupScreen(
-                    hit.group,
-                    focusItemName: hit.item.name,
-                  ),
-                );
-              },
-            )
-          else
-            ListView.separated(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: groups.length,
-              separatorBuilder: (_, __) => const Divider(height: 1),
-              itemBuilder: (context, index) {
-                final g = groups[index];
-                return ListTile(
-                  contentPadding:
-                      EdgeInsets.symmetric(horizontal: tokens.itemGap / 2),
-                  leading: CircleAvatar(
-                    radius: 16,
-                    backgroundColor:
-                        Theme.of(context).colorScheme.primaryContainer,
-                    child: Text(
-                      '${g.count}',
-                      style: TextStyle(
-                        fontSize: groupCountFontSize,
-                        color: Theme.of(context).colorScheme.onPrimaryContainer,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                  title: Text(
-                    g.displayName,
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
-                  subtitle: g.subtitle == null
-                      ? null
-                      : Text(
-                          g.subtitle!,
+            Column(
+              children: [
+                for (var index = 0; index < hits.length; index++) ...[
+                  if (index > 0) const Divider(height: 1),
+                  Builder(
+                    builder: (context) {
+                      final hit = hits[index];
+                      return ListTile(
+                        contentPadding: EdgeInsets.symmetric(
+                            horizontal: tokens.itemGap / 2),
+                        leading: const Icon(Icons.tune, size: 18),
+                        title: Text(
+                          hit.item.displayTitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                        subtitle: Text(
+                          '${hit.group.displayName} · ${hit.item.name}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () async {
-                    await _openGroupScreen(g);
-                  },
-                );
-              },
+                        trailing: const Icon(Icons.chevron_right),
+                        onTap: () => _openGroupScreen(
+                          hit.group,
+                          focusItemName: hit.item.name,
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ],
+            )
+          else
+            Column(
+              children: [
+                for (var index = 0; index < groups.length; index++) ...[
+                  if (index > 0) const Divider(height: 1),
+                  Builder(
+                    builder: (context) {
+                      final g = groups[index];
+                      return ListTile(
+                        contentPadding: EdgeInsets.symmetric(
+                            horizontal: tokens.itemGap / 2),
+                        leading: CircleAvatar(
+                          radius: 16,
+                          backgroundColor:
+                              Theme.of(context).colorScheme.primaryContainer,
+                          child: Text(
+                            '${g.count}',
+                            style: TextStyle(
+                              fontSize: groupCountFontSize,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onPrimaryContainer,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                        title: Text(
+                          g.displayName,
+                          style: const TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                        subtitle: g.subtitle == null
+                            ? null
+                            : Text(
+                                g.subtitle!,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                        trailing: const Icon(Icons.chevron_right),
+                        onTap: () async {
+                          await _openGroupScreen(g);
+                        },
+                      );
+                    },
+                  ),
+                ],
+              ],
             ),
         ],
       ),
@@ -1062,17 +1085,16 @@ class _CarrotSettingsGroupScreenState
     }
 
     await Future<void>.delayed(const Duration(milliseconds: 20));
-    final key = _rowKeyFor(itemName);
-    final ctx = key.currentContext;
-    if (ctx != null) {
+    if (!mounted) return;
+    final rowContext = _rowKeyFor(itemName).currentContext;
+    if (rowContext != null && rowContext.mounted) {
       Scrollable.ensureVisible(
-        ctx,
+        rowContext,
         duration: const Duration(milliseconds: 280),
         curve: Curves.easeOutCubic,
         alignment: 0.2,
       );
     }
-    if (!mounted) return;
     _pendingFocusItemName = null;
     _setHighlighted(itemName);
   }

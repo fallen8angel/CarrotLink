@@ -214,6 +214,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
   }) {
     _cameraAttachStartedUs = _renderClock.elapsedMicroseconds;
     _cameraStartupSocketFailureCount = 0;
+    _smartRecoveryEscalationLevel = 0;
     _setCameraAttachPhase(_CameraAttachPhase.surfaceReady, reason: reason);
     debugPrint('[DriveCanvas][native] attach-session begin reason=$reason');
   }
@@ -223,6 +224,7 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
   }) {
     _cameraAttachStartedUs = 0;
     _cameraStartupSocketFailureCount = 0;
+    _smartRecoveryEscalationLevel = 0;
     _setCameraAttachPhase(_CameraAttachPhase.streaming, reason: reason);
     debugPrint('[DriveCanvas][native] attach-session settled reason=$reason');
   }
@@ -447,26 +449,57 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
     Size next, {
     required _DriveCameraKind kind,
   }) {
-    if (!next.width.isFinite ||
-        !next.height.isFinite ||
-        next.width <= 10 ||
-        next.height <= 10) {
+    final normalized = _normalizeCameraSourceSizeImpl(next, kind: kind);
+    if (!normalized.width.isFinite ||
+        !normalized.height.isFinite ||
+        normalized.width <= 10 ||
+        normalized.height <= 10) {
       return;
     }
     final previous = _sourceSizeByKind[kind];
-    _sourceSizeByKind[kind] = next;
+    _sourceSizeByKind[kind] = normalized;
     if (kind != _liveCameraKind) {
       return;
     }
-    _cameraSourceSize = next;
+    _cameraSourceSize = normalized;
     if (previous == null ||
-        (previous.width - next.width).abs() > 0.5 ||
-        (previous.height - next.height).abs() > 0.5) {
+        (previous.width - normalized.width).abs() > 0.5 ||
+        (previous.height - normalized.height).abs() > 0.5) {
       _invalidateNativeOverlayLayout(
         reason: 'source_size',
         clearExisting: true,
       );
+      unawaited(_pushNativeYoloConfig(force: true));
     }
+  }
+
+  Size _normalizeCameraSourceSizeImpl(
+    Size next, {
+    required _DriveCameraKind kind,
+  }) {
+    if (_openpilotOverlayMode && _useNativeLiveCamera) {
+      final diag = _lastNativeCameraDiag;
+      if (diag != null) {
+        final diagWidth = _DriveOverlaySnapshot._asDouble(diag['currentWidth']);
+        final diagHeight =
+            _DriveOverlaySnapshot._asDouble(diag['currentHeight']);
+        if (diagWidth != null &&
+            diagHeight != null &&
+            diagWidth > 10 &&
+            diagHeight > 10 &&
+            (next.width - diagWidth).abs() <= 4.0 &&
+            (next.height - diagHeight).abs() <= 12.0) {
+          return Size(diagWidth, diagHeight);
+        }
+      }
+      if (kind == _DriveCameraKind.road &&
+          (next.width - 1344.0).abs() <= 4.0 &&
+          next.height >= 756.0 &&
+          next.height <= 768.5) {
+        return const Size(1344, 760);
+      }
+    }
+    return next;
   }
 
   Future<void> _unloadWebCameraSurfaceImpl() async {
@@ -576,23 +609,49 @@ extension _LiveDriveCanvasCameraComponents on _LiveDriveCanvasScreenState {
       return;
     }
     if (type == 'yolo_config') {
-      debugPrint(
-        '[DriveCanvas][native] yolo enabled=${map['yoloEnabled']} backend=${map['runtimeBackend']} model=${map['modelVariant']} source=${map['sourceWidth']}x${map['sourceHeight']}',
+      final payload = Map<String, dynamic>.from(map);
+      final enabled = _driveYoloPayloadBoolValueImpl(payload, 'yoloEnabled') ||
+          _driveYoloPayloadBoolValueImpl(payload, 'enabled');
+      final snapshot = YoloRuntimeStatusSnapshot(
+        config: enabled ? payload : _disabledDriveYoloConfigImpl(payload),
+        state: enabled
+            ? _driveYoloRuntimeStatus.state
+            : _disabledDriveYoloStateImpl(stage: 'disabled'),
+        updatedAt: DateTime.now(),
       );
       unawaited(
-        YoloRuntimeStatusStore.saveConfig(Map<String, dynamic>.from(map)),
+        _replaceDriveYoloRuntimeStatusImpl(
+          snapshot,
+          persistConfig: true,
+          persistState: !enabled,
+        ),
+      );
+      debugPrint(
+        '[DriveCanvas][native] yolo enabled=${map['yoloEnabled']} backend=${map['runtimeBackend']} model=${map['modelVariant']} source=${map['sourceWidth']}x${map['sourceHeight']}',
       );
       return;
     }
     if (type == 'yolo_state') {
       final payload = Map<String, dynamic>.from(map);
-      unawaited(
-        YoloRuntimeStatusStore.saveState(payload),
-      );
+      final enabled = _driveYoloPayloadBoolValueImpl(payload, 'yoloEnabled') ||
+          _driveYoloPayloadBoolValueImpl(payload, 'enabled');
+      final stage =
+          payload['stage']?.toString().trim().isNotEmpty == true
+              ? payload['stage'].toString()
+              : 'disabled';
       final snapshot = YoloRuntimeStatusSnapshot(
-        config: _driveYoloRuntimeStatus.config,
-        state: payload,
+        config: enabled
+            ? _driveYoloRuntimeStatus.config
+            : _disabledDriveYoloConfigImpl(_driveYoloRuntimeStatus.config),
+        state: enabled ? payload : _disabledDriveYoloStateImpl(stage: stage),
         updatedAt: DateTime.now(),
+      );
+      unawaited(
+        _replaceDriveYoloRuntimeStatusImpl(
+          snapshot,
+          persistConfig: !enabled,
+          persistState: true,
+        ),
       );
       unawaited(_maybeAutoFallbackDriveYoloFromRuntimeStatus(snapshot));
       return;

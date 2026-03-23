@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:path_provider/path_provider.dart';
@@ -34,7 +35,7 @@ class _DriveListWidgetState extends State<DriveListWidget> {
     _refreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       if (mounted) {
         final ssh = Provider.of<SSHService>(context, listen: false);
-        if (ssh.isConnected) {
+        if (ssh.isConnected && !_isLoading) {
           _loadRoutes(silent: true);
         }
       }
@@ -89,10 +90,18 @@ class _DriveListWidgetState extends State<DriveListWidget> {
       final routes = routeSet.toList()..sort((a, b) => b.compareTo(a));
 
       if (mounted) {
-        setState(() {
-          _routes = routes;
-          _isLoading = false;
-        });
+        // Skip rebuild when silent refresh yields identical data.
+        final changed = !silent ||
+            routes.length != _routes.length ||
+            !listEquals(routes, _routes);
+        if (changed) {
+          setState(() {
+            _routes = routes;
+            _isLoading = false;
+          });
+        } else if (!silent) {
+          setState(() => _isLoading = false);
+        }
       }
     } catch (e) {
       if (mounted) {

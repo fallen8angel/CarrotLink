@@ -316,7 +316,7 @@ class _DeveloperToolsScreenState extends State<DeveloperToolsScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              for (final backend in YoloRuntimeBackend.values)
+              for (final backend in YoloRuntimeBackend.selectableValues)
                 ListTile(
                   title: Text(backend.label),
                   trailing: backend == _yoloSettings.runtimeBackend

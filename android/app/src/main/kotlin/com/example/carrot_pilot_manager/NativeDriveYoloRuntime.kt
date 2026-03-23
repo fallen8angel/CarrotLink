@@ -10,6 +10,7 @@ data class NativeDriveYoloRuntimeSnapshot(
     val backend: String = NativeDriveYoloConfig.DEFAULT_RUNTIME_BACKEND,
     val backendAvailable: Boolean = false,
     val backendReason: String? = null,
+    val actualBackend: String? = null,
     val backendNativeLibs: List<String> = emptyList(),
     val backendNativeLibDir: String? = null,
     val backendPackagingMode: String = "maven",
@@ -20,6 +21,8 @@ data class NativeDriveYoloRuntimeSnapshot(
     val inferenceRequests: Int = 0,
     val lastRequestedFrameId: Int = -1,
     val pixelFramesConsumed: Int = 0,
+    val inferenceInFlight: Boolean = false,
+    val inferenceSkippedBusy: Int = 0,
     val modelPath: String? = null,
     val modelSource: String? = null,
     val modelSearchPaths: List<String> = emptyList(),
@@ -27,7 +30,6 @@ data class NativeDriveYoloRuntimeSnapshot(
     val modelMetadataSource: String? = null,
     val modelMetadataOutputName: String? = null,
     val modelMetadataSoc: String? = null,
-    val modelMetadataQnnSdkVersion: String? = null,
     val modelMetadataExecutorchRef: String? = null,
     val modelMetadataUseFp16: Boolean? = null,
     val modelMetadataOnlinePrepare: Boolean? = null,
@@ -35,10 +37,24 @@ data class NativeDriveYoloRuntimeSnapshot(
     val modelMetadataBatch: Int? = null,
     val modelMetadataParseError: String? = null,
     val lastError: String? = null,
+    val lastFailureStage: String? = null,
+    val initAttempts: Int = 0,
+    val gpuInitAttempts: Int = 0,
+    val gpuInitFailures: Int = 0,
+    val gpuBufferAllocFailures: Int = 0,
+    val cpuFallbackCount: Int = 0,
     val forwardSuccesses: Int = 0,
     val forwardFailures: Int = 0,
+    val inputTransferMode: String? = null,
+    val directBitmapFrames: Int = 0,
+    val clonedBitmapFrames: Int = 0,
+    val lastInputAcquireMs: Double? = null,
     val lastPreprocessMs: Double? = null,
     val lastForwardMs: Double? = null,
+    val lastPipelineMs: Double? = null,
+    val lastOutputReadMs: Double? = null,
+    val lastParseMs: Double? = null,
+    val lastPayloadBuildMs: Double? = null,
     val lastOutputShapes: List<String> = emptyList(),
     val lastOutputDtypes: List<String> = emptyList(),
     val lastOutputPreview: List<String> = emptyList(),
@@ -50,6 +66,9 @@ data class NativeDriveYoloRuntimeSnapshot(
     val parserMaxClassScore: Double? = null,
     val parsedDetectionsPreview: List<String> = emptyList(),
     val parsedDetections: List<Map<String, Any?>> = emptyList(),
+    val lastInferenceFrameId: Int = -1,
+    val lastInferencePtsUs: Long = 0L,
+    val lastInferenceElapsedMs: Double? = null,
 ) {
   fun toPayload(): Map<String, Any?> {
     return mapOf(
@@ -60,6 +79,7 @@ data class NativeDriveYoloRuntimeSnapshot(
         "runtimeBackend" to backend,
         "backendAvailable" to backendAvailable,
         "backendReason" to backendReason,
+        "actualBackend" to actualBackend,
         "backendNativeLibs" to backendNativeLibs,
         "backendNativeLibDir" to backendNativeLibDir,
         "backendPackagingMode" to backendPackagingMode,
@@ -70,6 +90,8 @@ data class NativeDriveYoloRuntimeSnapshot(
         "inferenceRequests" to inferenceRequests,
         "lastRequestedFrameId" to lastRequestedFrameId,
         "pixelFramesConsumed" to pixelFramesConsumed,
+        "inferenceInFlight" to inferenceInFlight,
+        "inferenceSkippedBusy" to inferenceSkippedBusy,
         "modelPath" to modelPath,
         "modelSource" to modelSource,
         "modelSearchPaths" to modelSearchPaths,
@@ -77,7 +99,6 @@ data class NativeDriveYoloRuntimeSnapshot(
         "modelMetadataSource" to modelMetadataSource,
         "modelMetadataOutputName" to modelMetadataOutputName,
         "modelMetadataSoc" to modelMetadataSoc,
-        "modelMetadataQnnSdkVersion" to modelMetadataQnnSdkVersion,
         "modelMetadataExecutorchRef" to modelMetadataExecutorchRef,
         "modelMetadataUseFp16" to modelMetadataUseFp16,
         "modelMetadataOnlinePrepare" to modelMetadataOnlinePrepare,
@@ -85,10 +106,24 @@ data class NativeDriveYoloRuntimeSnapshot(
         "modelMetadataBatch" to modelMetadataBatch,
         "modelMetadataParseError" to modelMetadataParseError,
         "lastError" to lastError,
+        "lastFailureStage" to lastFailureStage,
+        "initAttempts" to initAttempts,
+        "gpuInitAttempts" to gpuInitAttempts,
+        "gpuInitFailures" to gpuInitFailures,
+        "gpuBufferAllocFailures" to gpuBufferAllocFailures,
+        "cpuFallbackCount" to cpuFallbackCount,
         "forwardSuccesses" to forwardSuccesses,
         "forwardFailures" to forwardFailures,
+        "inputTransferMode" to inputTransferMode,
+        "directBitmapFrames" to directBitmapFrames,
+        "clonedBitmapFrames" to clonedBitmapFrames,
+        "lastInputAcquireMs" to lastInputAcquireMs,
         "lastPreprocessMs" to lastPreprocessMs,
         "lastForwardMs" to lastForwardMs,
+        "lastPipelineMs" to lastPipelineMs,
+        "lastOutputReadMs" to lastOutputReadMs,
+        "lastParseMs" to lastParseMs,
+        "lastPayloadBuildMs" to lastPayloadBuildMs,
         "lastOutputShapes" to lastOutputShapes,
         "lastOutputDtypes" to lastOutputDtypes,
         "lastOutputPreview" to lastOutputPreview,
@@ -100,6 +135,9 @@ data class NativeDriveYoloRuntimeSnapshot(
         "parserMaxClassScore" to parserMaxClassScore,
         "parsedDetectionsPreview" to parsedDetectionsPreview,
         "parsedDetections" to parsedDetections,
+        "lastInferenceFrameId" to lastInferenceFrameId,
+        "lastInferencePtsUs" to lastInferencePtsUs,
+        "lastInferenceElapsedMs" to lastInferenceElapsedMs,
     )
   }
 }
@@ -111,7 +149,18 @@ interface NativeDriveYoloRuntime {
 
   fun onPixelFrame(frame: NativeDriveYoloFrame, bitmap: Bitmap)
 
+  fun onPixelFrame(
+      frame: NativeDriveYoloFrame,
+      bitmap: Bitmap,
+      releaseBitmap: (() -> Unit)?,
+  ) {
+    onPixelFrame(frame, bitmap)
+  }
+
   fun snapshot(): NativeDriveYoloRuntimeSnapshot
+
+  /** Called when inference pipeline becomes idle and is ready for the next frame. */
+  fun setOnInferenceReadyCallback(callback: (() -> Unit)?) {}
 
   fun release()
 }

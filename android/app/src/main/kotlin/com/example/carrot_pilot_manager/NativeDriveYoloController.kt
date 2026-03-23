@@ -1,6 +1,9 @@
 package com.example.carrot_pilot_manager
 
-private const val YOLO_STATE_EMIT_INTERVAL_MS = 1_000L
+import android.os.Handler
+import android.os.Looper
+
+private const val YOLO_STATE_EMIT_INTERVAL_MS = 300L
 
 class NativeDriveYoloController(
     surfaceView: android.view.SurfaceView,
@@ -11,14 +14,17 @@ class NativeDriveYoloController(
 ) {
   private var runtime: NativeDriveYoloRuntime = initialRuntime
   private var runtimeBackend: String = initialRuntimeBackend
+  private val mainHandler = Handler(Looper.getMainLooper())
   private val pixelSampler =
       NativeDriveYoloPixelSampler(
           surfaceView = surfaceView,
-          onPixelSampled = { frame, bitmap ->
+          onPixelSampled = { frame, bitmap, releaseBitmap ->
             if (config.enabled) {
-              runtime.onPixelFrame(frame, bitmap)
+              runtime.onPixelFrame(frame, bitmap, releaseBitmap)
               lastSkipReason = "pixel_ready"
               emitState(force = true, reason = "pixel_sample_ready")
+            } else {
+              releaseBitmap()
             }
           },
       )
@@ -30,8 +36,18 @@ class NativeDriveYoloController(
   private var lastFramePtsUs = 0L
   private var lastSamplePtsUs = Long.MIN_VALUE
   private var lastSkipReason = "disabled"
+  private var lastEffectiveSamplePeriodMs =
+      NativeDriveYoloConfig.disabled.samplePeriodMs.coerceAtLeast(33)
   private var lastEmitAtMs = 0L
   private var lastEmitSignature = 0
+
+  // Stash the latest rendered frame for inference-ready resample.
+  @Volatile private var lastRenderedFrame: NativeDriveYoloFrame? = null
+  @Volatile private var inferenceReadyResamplePending = false
+
+  init {
+    attachInferenceReadyCallback(runtime)
+  }
 
   fun updateConfig(next: NativeDriveYoloConfig) {
     val wasEnabled = config.enabled
@@ -47,9 +63,13 @@ class NativeDriveYoloController(
       lastFramePtsUs = 0L
       lastSamplePtsUs = Long.MIN_VALUE
       lastSkipReason = "disabled"
+      lastEffectiveSamplePeriodMs = NativeDriveYoloConfig.disabled.samplePeriodMs.coerceAtLeast(33)
+      smoothedForwardMs = 0.0
+      lastRenderedFrame = null
     } else if (!wasEnabled) {
       lastSamplePtsUs = Long.MIN_VALUE
       lastSkipReason = "awaiting_rendered_frame_feed"
+      lastEffectiveSamplePeriodMs = next.samplePeriodMs.coerceAtLeast(33)
     }
     emitState(force = true, reason = "config_updated")
   }
@@ -61,13 +81,16 @@ class NativeDriveYoloController(
     framesSeen += 1
     lastFrameId = frame.frameId
     lastFramePtsUs = frame.ptsUs
+    lastRenderedFrame = frame
     if (frame.sourceWidth < 32 || frame.sourceHeight < 32) {
       framesSkipped += 1
       lastSkipReason = "source_size_missing"
       emitState(reason = "source_size_missing")
       return
     }
-    val samplePeriodUs = (config.samplePeriodMs.coerceAtLeast(33) * 1000L)
+    val effectiveSamplePeriodMs = effectiveSamplePeriodMs(frame)
+    lastEffectiveSamplePeriodMs = effectiveSamplePeriodMs
+    val samplePeriodUs = (effectiveSamplePeriodMs * 1000L)
     if (lastSamplePtsUs != Long.MIN_VALUE) {
       val deltaUs = frame.ptsUs - lastSamplePtsUs
       if (deltaUs in 0 until samplePeriodUs) {
@@ -115,7 +138,7 @@ class NativeDriveYoloController(
         "framesSkipped" to framesSkipped,
         "lastFrameId" to lastFrameId,
         "lastFramePtsUs" to lastFramePtsUs,
-        "samplePeriodMs" to config.samplePeriodMs.coerceAtLeast(33),
+        "samplePeriodMs" to lastEffectiveSamplePeriodMs,
         "lastSkipReason" to lastSkipReason,
     )
     payload.putAll(pixelSnapshot.toPayload())
@@ -132,8 +155,10 @@ class NativeDriveYoloController(
   }
 
   fun release() {
+    runtime.setOnInferenceReadyCallback(null)
     runtime.release()
     pixelSampler.release()
+    lastRenderedFrame = null
     emitState(force = true, reason = "released")
   }
 
@@ -161,10 +186,36 @@ class NativeDriveYoloController(
     if (requestedBackend == runtimeBackend && runtime !is NativeDriveYoloStubRuntime) {
       return
     }
+    runtime.setOnInferenceReadyCallback(null)
     val replacement = factory(requestedBackend)
     runtime.release()
     runtime = replacement
     runtimeBackend = requestedBackend
+    attachInferenceReadyCallback(replacement)
+  }
+
+  private fun attachInferenceReadyCallback(target: NativeDriveYoloRuntime) {
+    target.setOnInferenceReadyCallback {
+      // Post to main thread for thread-safe SurfaceView access in PixelCopy.
+      if (!inferenceReadyResamplePending && config.enabled) {
+        inferenceReadyResamplePending = true
+        mainHandler.post { handleInferenceReady() }
+      }
+    }
+  }
+
+  private fun handleInferenceReady() {
+    inferenceReadyResamplePending = false
+    if (!config.enabled) return
+    val frame = lastRenderedFrame ?: return
+    if (frame.sourceWidth < 32 || frame.sourceHeight < 32) return
+    // Bypass the normal sample throttle — inference is idle, capture immediately.
+    if (pixelSampler.trySample(frame)) {
+      lastSamplePtsUs = frame.ptsUs
+      framesSampled += 1
+      lastSkipReason = "pixel_requested_inference_ready"
+      emitState(force = true, reason = "inference_ready_resample")
+    }
   }
 
   private fun deriveEffectiveStageAndBlocker(
@@ -194,5 +245,33 @@ class NativeDriveYoloController(
       return "awaiting_runtime_pixel_consume" to "runtime_pixel_consume_missing"
     }
     return runtimeSnapshot.stage to runtimeSnapshot.blocker
+  }
+
+  private var smoothedForwardMs: Double = 0.0
+
+  private fun effectiveSamplePeriodMs(frame: NativeDriveYoloFrame): Int {
+    val configured = config.samplePeriodMs.coerceAtLeast(33)
+    val liveRoadFastPath =
+        frame.camera.equals("road", ignoreCase = true) &&
+            frame.sourceWidth >= 1000 &&
+            frame.sourceHeight >= 600
+
+    val basePeriod = if (liveRoadFastPath) minOf(configured, 60) else configured
+
+    // Adaptive: use forward (inference-only) time instead of full pipeline time,
+    // since PixelCopy and preprocessing overlap with the previous inference cycle
+    // thanks to the inference-ready callback and double-buffering.
+    val snapshot = runtime.snapshot()
+    val rawForwardMs = snapshot.lastForwardMs
+    if (rawForwardMs != null && rawForwardMs > 0) {
+      smoothedForwardMs = if (smoothedForwardMs <= 0.0) {
+        rawForwardMs
+      } else {
+        (smoothedForwardMs * 0.70) + (rawForwardMs * 0.30)
+      }
+      val adaptivePeriod = (smoothedForwardMs * 1.15).toInt().coerceAtLeast(basePeriod)
+      return adaptivePeriod.coerceAtMost(160)
+    }
+    return basePeriod
   }
 }

@@ -256,7 +256,7 @@ def _extract_h264_codec(payload: bytes) -> str | None:
 
 
 class CameraRelayHub:
-    CAMERA_QUEUE_MAXSIZE = 4
+    CAMERA_QUEUE_MAXSIZE = 12
     CAMERA_SERVICE_CANDIDATES = {
         "road": [
             "livestreamRoadEncodeData",
@@ -273,12 +273,11 @@ class CameraRelayHub:
     }
     QUALITY_MODES = ("quality", "stable")
 
-    # Max send FPS per camera.  The cereal encoder may produce 20 fps but
-    # on slow WiFi the client can't keep up — capping the send rate reduces
-    # wasted bandwidth, codec overload, and unnecessary frame drops on the
-    # client side.
-    MAX_SEND_FPS: float = 20.0
-    _MIN_FRAME_INTERVAL: float = 1.0 / MAX_SEND_FPS  # ~50 ms
+    # Internal transport can sustain materially more than the old Wi‑Fi tuned
+    # cap.  Preserve an upper bound so runaway producers still get backpressure,
+    # but keep it high enough that road-camera motion remains continuous.
+    MAX_SEND_FPS: float = 60.0
+    _MIN_FRAME_INTERVAL: float = 1.0 / MAX_SEND_FPS  # ~22 ms
 
     def __init__(self, messaging: Any):
         self.messaging = messaging
@@ -383,7 +382,7 @@ class CameraRelayHub:
             cam: 0 for cam in self.CAMERA_SERVICE_CANDIDATES.keys()
         }
         self._quality_mode = self._normalize_quality_mode(
-            os.environ.get("CARROTLINK_CAMERA_QUALITY_MODE", "quality")
+            os.environ.get("CARROTLINK_CAMERA_QUALITY_MODE", "stable")
         )
         self._lock = asyncio.Lock()
 
@@ -855,8 +854,16 @@ class CameraRelayHub:
                 elapsed = now_mono - self._last_send_at_mono.get(camera, 0.0)
                 _flags = _safe_int(frame_sample.get("flags"))
                 is_key = bool(_flags is not None and _flags & 0x8)
-                if not is_key and elapsed < self._MIN_FRAME_INTERVAL:
+                if (
+                    not is_key
+                    and elapsed < self._MIN_FRAME_INTERVAL
+                    and queue.qsize() >= 2
+                ):
                     # Too soon since last queued frame — skip this P-frame.
+                    # Update the timestamp so the next frame's elapsed is
+                    # measured from the skipped frame, not the last sent
+                    # one — prevents frame bursts after a sequence of drops.
+                    self._last_send_at_mono[camera] = now_mono
                     self._queue_drop_count[camera] += 1
                     await asyncio.sleep(0.001)
                     continue
@@ -880,9 +887,24 @@ class CameraRelayHub:
                         continue
 
                 if queue.full():
+                    # When the queue is full, drop the oldest frame —
+                    # but never drop a keyframe (the decoder needs it
+                    # to avoid extended black-screen gaps).
                     try:
-                        queue.get_nowait()
-                        self._queue_drop_count[camera] += 1
+                        oldest = queue.get_nowait()
+                        if self._packet_is_keyframe(oldest):
+                            # Put the keyframe back and drop the NEW
+                            # non-keyframe instead.
+                            try:
+                                queue.put_nowait(oldest)
+                            except Exception:
+                                pass
+                            if not is_key:
+                                self._queue_drop_count[camera] += 1
+                                await asyncio.sleep(0.001)
+                                continue
+                        else:
+                            self._queue_drop_count[camera] += 1
                     except Exception:
                         pass
                 try:
@@ -926,12 +948,16 @@ class CameraRelayHub:
                 except asyncio.TimeoutError:
                     continue
 
-                # Low-latency mode prefers the freshest frame.  When
-                # draining, preserve the latest keyframe so the client
-                # decoder can always resync — dropping a keyframe forces
-                # the client to wait for the next one (~1-2 seconds).
+                # Low-latency mode prefers fresher frames.  On internal
+                # transport, keeping one extra queued frame adds avoidable
+                # latency, so stable/low-latency keeps only the freshest
+                # packet while quality mode preserves a bit more continuity.
+                # When draining, preserve the latest keyframe so the client
+                # decoder can always resync — dropping a keyframe forces the
+                # client to wait for the next one (~1-2 seconds).
                 last_keyframe_packet = None
-                while not queue.empty():
+                backlog_keep = 1 if quality_mode == "stable" else 2
+                while queue.qsize() > backlog_keep:
                     try:
                         candidate = queue.get_nowait()
                         # Check if the outgoing packet we're about to
@@ -1162,6 +1188,13 @@ class SidecarApp:
             "roadCameraState",
             "wideRoadCameraState",
         ],
+        "p2c4m": [
+            "selfdriveState",
+            "liveCalibration",
+            "modelV2",
+            "roadCameraState",
+            "wideRoadCameraState",
+        ],
         "p2d": [
             "carState",
             "selfdriveState",
@@ -1229,6 +1262,7 @@ class SidecarApp:
         "p1": 0.06,
         "p1c4": 0.08,
         "p2c4": 0.05,
+        "p2c4m": 0.05,
         "p2d": 0.05,
         "p2": 0.033,
         "p3": 0.033,
@@ -1240,6 +1274,7 @@ class SidecarApp:
         "p1": 0.12,
         "p1c4": 0.16,
         "p2c4": 0.05,
+        "p2c4m": 0.05,
         "p2d": 0.05,
         "p2": 0.033,
         "p3": 0.033,
@@ -1251,6 +1286,7 @@ class SidecarApp:
         "p1": 0.08,
         "p1c4": 0.12,
         "p2c4": 0.05,
+        "p2c4m": 0.05,
         "p2d": 0.05,
         "p2": 0.033,
         "p3": 0.033,
@@ -1262,6 +1298,7 @@ class SidecarApp:
         "p1": 0.08,
         "p1c4": 0.10,
         "p2c4": 0.08,
+        "p2c4m": 0.10,
         "p2d": 0.08,
         "p2": 0.08,
         "p3": 0.08,
@@ -1273,12 +1310,13 @@ class SidecarApp:
     # C4 bootstrap keeps graphics-critical feeds but still omits carState to
     # reduce reader pressure on c4 while preserving overlay rendering.
     C4_SAFE_RELAXATION_ENABLED = False
-    C4_SAFE_LIVE_PROFILES = ("p2c4", "p2d", "p2", "p3", "p4")
+    C4_SAFE_LIVE_PROFILES = ("p2c4", "p2c4m", "p2d", "p2", "p3", "p4")
     C4_SAFE_RADAR_MONITOR_PROFILES = ("p1", "p1c4", "p2c4", "p2d", "p2", "p3", "p4")
     C4_SAFE_STARTUP_GRACE_SEC = 12.0
     C4_SAFE_RADAR_STABLE_SEC = 1.5
     C4_SAFE_SM_UPDATE_INTERVAL = {
         "p2c4": 0.06,
+        "p2c4m": 0.06,
         "p2d": 0.06,
         "p2": 0.06,
         "p3": 0.06,
@@ -1286,6 +1324,7 @@ class SidecarApp:
     }
     C4_SAFE_LIVE_INTERVAL = {
         "p2c4": 0.06,
+        "p2c4m": 0.06,
         "p2d": 0.06,
         "p2": 0.06,
         "p3": 0.06,
@@ -1293,6 +1332,7 @@ class SidecarApp:
     }
     C4_SAFE_LIVE_CACHE_INTERVAL = {
         "p2c4": 0.06,
+        "p2c4m": 0.06,
         "p2d": 0.06,
         "p2": 0.06,
         "p3": 0.06,
@@ -1519,7 +1559,7 @@ class SidecarApp:
 
     def _profile_has_graphics_runtime(self, profile: str | None = None) -> bool:
         normalized = (profile or self.profile or "").strip().lower()
-        return normalized in ("p1c4", "p2c4", "p2d", "p2", "p3", "p4")
+        return normalized in ("p1c4", "p2c4", "p2c4m", "p2d", "p2", "p3", "p4")
 
     def _profile_has_vehicle_runtime(self, profile: str | None = None) -> bool:
         normalized = (profile or self.profile or "").strip().lower()

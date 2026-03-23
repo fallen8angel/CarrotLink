@@ -91,6 +91,8 @@ extension _LiveDriveCanvasLifecycleComponents on _LiveDriveCanvasScreenState {
     _startupProvisionalSyncEnabled = false;
     _startupProvisionalSyncUntilUs = 0;
     _startupNativeFrameSettleCount = 0;
+    _lastSmartRecoveryCheckUs = 0;
+    _smartRecoveryEscalationLevel = 0;
     _lastPublishedModelFrameId = null;
     _lastSyncHitUs = 0;
     _lastOverlayPublishUs = 0;

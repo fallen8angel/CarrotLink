@@ -253,7 +253,8 @@ extension _LiveDriveCanvasSettingsPopupComponents
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                for (final backend in YoloRuntimeBackend.values)
+                                for (final backend
+                                    in YoloRuntimeBackend.selectableValues)
                                   ListTile(
                                     title: Text(
                                       backend.label,
@@ -290,69 +291,74 @@ extension _LiveDriveCanvasSettingsPopupComponents
                       final selectorSections = buildYoloModelSelectorSections(
                         backend: _driveYoloDebugSettings.runtimeBackend,
                       );
+                      // Flatten sections into a typed list for
+                      // ListView.builder (avoids nested for-in in build).
+                      final flatItems = <({String? header, dynamic choice})>[];
+                      for (final entry in selectorSections.entries) {
+                        flatItems.add((header: entry.key, choice: null));
+                        for (final choice in entry.value) {
+                          flatItems.add((header: null, choice: choice));
+                        }
+                      }
                       final selected =
                           await showModalBottomSheet<YoloModelVariant>(
                         context: sheetContext,
                         backgroundColor: _driveMenuDialogBg,
                         builder: (ctx) {
                           return SafeArea(
-                            child: ListView(
+                            child: ListView.builder(
                               shrinkWrap: true,
-                              children: [
-                                for (final entry
-                                    in selectorSections.entries) ...[
-                                  Padding(
+                              itemCount: flatItems.length + 1,
+                              itemBuilder: (ctx, index) {
+                                if (index == flatItems.length) {
+                                  return const SizedBox(height: 8);
+                                }
+                                final item = flatItems[index];
+                                if (item.header != null) {
+                                  return Padding(
                                     padding: const EdgeInsets.fromLTRB(
-                                      16,
-                                      14,
-                                      16,
-                                      6,
-                                    ),
+                                        16, 14, 16, 6),
                                     child: Text(
-                                      entry.key,
+                                      item.header!,
                                       style: const TextStyle(
                                         color: Colors.white70,
                                         fontSize: 12,
                                         fontWeight: FontWeight.w800,
                                       ),
                                     ),
-                                  ),
-                                  for (final choice in entry.value)
-                                    Opacity(
-                                      opacity: choice.enabled ? 1 : 0.5,
-                                      child: ListTile(
-                                        enabled: choice.enabled,
-                                        title: Text(
-                                          choice.title,
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                          ),
-                                        ),
-                                        subtitle: Text(
-                                          choice.subtitle,
-                                          style: const TextStyle(
-                                            color: Colors.white70,
-                                          ),
-                                        ),
-                                        trailing: choice.variant ==
-                                                _driveYoloDebugSettings
-                                                    .modelVariant
-                                            ? const Icon(
-                                                Icons.check_rounded,
-                                                color: Color(0xFFFFB07A),
-                                              )
-                                            : null,
-                                        onTap: !choice.enabled ||
-                                                choice.variant == null
-                                            ? null
-                                            : () => Navigator.of(
-                                                  ctx,
-                                                ).pop(choice.variant),
-                                      ),
+                                  );
+                                }
+                                final choice = item.choice;
+                                return Opacity(
+                                  opacity: choice.enabled ? 1 : 0.5,
+                                  child: ListTile(
+                                    enabled: choice.enabled,
+                                    title: Text(
+                                      choice.title,
+                                      style: const TextStyle(
+                                          color: Colors.white),
                                     ),
-                                ],
-                                const SizedBox(height: 8),
-                              ],
+                                    subtitle: Text(
+                                      choice.subtitle,
+                                      style: const TextStyle(
+                                          color: Colors.white70),
+                                    ),
+                                    trailing: choice.variant ==
+                                            _driveYoloDebugSettings
+                                                .modelVariant
+                                        ? const Icon(
+                                            Icons.check_rounded,
+                                            color: Color(0xFFFFB07A),
+                                          )
+                                        : null,
+                                    onTap: !choice.enabled ||
+                                            choice.variant == null
+                                        ? null
+                                        : () => Navigator.of(ctx)
+                                            .pop(choice.variant),
+                                  ),
+                                );
+                              },
                             ),
                           );
                         },

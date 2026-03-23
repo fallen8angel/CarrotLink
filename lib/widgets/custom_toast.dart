@@ -7,10 +7,28 @@ class CustomToast {
 
   static void show(BuildContext context, String message,
       {bool isError = false}) {
-    _lastEntry?.remove();
-    _lastEntry = null;
+    // Guard: remove previous entry only if it is still mounted in the
+    // overlay.  Calling remove() on a detached entry triggers a
+    // "Duplicate GlobalKeys" assertion during widget tree finalization.
+    final previous = _lastEntry;
+    if (previous != null) {
+      try {
+        if (previous.mounted) previous.remove();
+      } catch (_) {
+        // Entry already removed or overlay disposed — safe to ignore.
+      }
+      _lastEntry = null;
+    }
 
-    final overlay = Overlay.of(context);
+    // Ensure overlay is still available (context might be stale after
+    // navigation or dispose).
+    final OverlayState overlay;
+    try {
+      overlay = Overlay.of(context);
+    } catch (_) {
+      return; // No overlay — skip toast silently.
+    }
+
     final overlayEntry = OverlayEntry(
       builder: (context) => Positioned(
         top: MediaQuery.of(context).padding.top +
@@ -35,7 +53,9 @@ class CustomToast {
 
     Future.delayed(const Duration(seconds: 2), () {
       if (_lastEntry == overlayEntry) {
-        overlayEntry.remove();
+        try {
+          if (overlayEntry.mounted) overlayEntry.remove();
+        } catch (_) {}
         _lastEntry = null;
       }
     });

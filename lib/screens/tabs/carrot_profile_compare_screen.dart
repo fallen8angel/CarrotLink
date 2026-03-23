@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../services/carrot_profile_compare_service.dart';
@@ -7,6 +9,20 @@ import '../../widgets/custom_toast.dart';
 import 'widgets/carrot_setting_group_status_widgets.dart';
 
 enum CarrotProfileCompareApplyTarget { device, profile }
+
+class _CompareListEntry {
+  final String group;
+  final CarrotProfileDiffEntry? entry;
+
+  const _CompareListEntry.header(this.group) : entry = null;
+
+  const _CompareListEntry.item({
+    required this.group,
+    required this.entry,
+  });
+
+  bool get isHeader => entry == null;
+}
 
 class CarrotProfileCompareActionResult {
   final CarrotProfileCompareApplyTarget target;
@@ -39,6 +55,7 @@ class CarrotProfileCompareScreen extends StatefulWidget {
 
 class _CarrotProfileCompareScreenState
     extends State<CarrotProfileCompareScreen> {
+  static const Duration _visibleGroupSyncThrottle = Duration(milliseconds: 80);
   static const double _estimatedGroupHeaderExtent = 52.0;
   static const double _estimatedDiffCardExtent = 116.0;
 
@@ -47,26 +64,26 @@ class _CarrotProfileCompareScreenState
   final Map<String, GlobalKey> _groupHeaderKeys = <String, GlobalKey>{};
   final Map<String, double> _groupScrollOffsets = <String, double>{};
   final Set<String> _collapsedGroups = <String>{};
+  late final Map<String, List<CarrotProfileDiffEntry>> _grouped;
+  late final List<String> _groups;
+  List<_CompareListEntry> _listEntries = const <_CompareListEntry>[];
   String? _visibleGroup;
   bool _applyBusy = false;
   String? _applyBusyLabel;
   bool _groupSyncScheduled = false;
-
-  Map<String, List<CarrotProfileDiffEntry>> get _grouped {
-    final grouped = <String, List<CarrotProfileDiffEntry>>{};
-    for (final entry in widget.result.entries) {
-      grouped
-          .putIfAbsent(entry.group, () => <CarrotProfileDiffEntry>[])
-          .add(entry);
-    }
-    return grouped;
-  }
-
-  List<String> get _groups => _grouped.keys.toList();
+  Timer? _groupSyncThrottleTimer;
 
   @override
   void initState() {
     super.initState();
+    _grouped = <String, List<CarrotProfileDiffEntry>>{};
+    for (final entry in widget.result.entries) {
+      _grouped
+          .putIfAbsent(entry.group, () => <CarrotProfileDiffEntry>[])
+          .add(entry);
+    }
+    _groups = _grouped.keys.toList();
+    _rebuildListEntries();
     _visibleGroup = _groups.isEmpty ? null : _groups.first;
     _scrollController.addListener(_scheduleVisibleGroupSync);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -77,6 +94,7 @@ class _CarrotProfileCompareScreenState
 
   @override
   void dispose() {
+    _groupSyncThrottleTimer?.cancel();
     _scrollController.removeListener(_scheduleVisibleGroupSync);
     _scrollController.dispose();
     super.dispose();
@@ -86,6 +104,23 @@ class _CarrotProfileCompareScreenState
     return _groupHeaderKeys.putIfAbsent(group, () => GlobalKey());
   }
 
+  void _rebuildListEntries() {
+    final nextListEntries = <_CompareListEntry>[];
+    for (final group in _groups) {
+      nextListEntries.add(_CompareListEntry.header(group));
+      if (_collapsedGroups.contains(group)) continue;
+      for (final entry in _grouped[group] ?? const <CarrotProfileDiffEntry>[]) {
+        nextListEntries.add(_CompareListEntry.item(group: group, entry: entry));
+      }
+    }
+    _listEntries = nextListEntries;
+    if (_groups.isEmpty) {
+      _visibleGroup = null;
+    } else if (_visibleGroup == null || !_groups.contains(_visibleGroup)) {
+      _visibleGroup = _groups.first;
+    }
+  }
+
   void _toggleGroup(String group) {
     setState(() {
       if (_collapsedGroups.contains(group)) {
@@ -93,6 +128,7 @@ class _CarrotProfileCompareScreenState
       } else {
         _collapsedGroups.add(group);
       }
+      _rebuildListEntries();
       _visibleGroup = group;
     });
     _groupScrollOffsets.clear();
@@ -103,6 +139,7 @@ class _CarrotProfileCompareScreenState
     if (_collapsedGroups.isEmpty) return;
     setState(() {
       _collapsedGroups.clear();
+      _rebuildListEntries();
     });
     _groupScrollOffsets.clear();
     _scheduleVisibleGroupSync();
@@ -115,6 +152,7 @@ class _CarrotProfileCompareScreenState
       _collapsedGroups
         ..clear()
         ..addAll(groups);
+      _rebuildListEntries();
     });
     _groupScrollOffsets.clear();
     _scheduleVisibleGroupSync();
@@ -157,10 +195,18 @@ class _CarrotProfileCompareScreenState
   void _scheduleVisibleGroupSync() {
     if (_groupSyncScheduled) return;
     _groupSyncScheduled = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _groupSyncScheduled = false;
-      if (!mounted) return;
-      _syncVisibleGroup();
+    _groupSyncThrottleTimer?.cancel();
+    _groupSyncThrottleTimer = Timer(_visibleGroupSyncThrottle, () {
+      _groupSyncThrottleTimer = null;
+      if (!mounted) {
+        _groupSyncScheduled = false;
+        return;
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _groupSyncScheduled = false;
+        if (!mounted) return;
+        _syncVisibleGroup();
+      });
     });
   }
 
@@ -308,7 +354,7 @@ class _CarrotProfileCompareScreenState
   @override
   Widget build(BuildContext context) {
     final grouped = _grouped;
-    final groups = grouped.keys.toList();
+    final groups = _groups;
     final window = UiWindowInfo.of(context);
     final tokens = UiLayoutTokens.of(context);
     final horizontalPadding = window.isCompact
@@ -345,7 +391,7 @@ class _CarrotProfileCompareScreenState
               Expanded(
                 child: Container(
                   key: _listViewportKey,
-                  child: ListView(
+                  child: ListView.builder(
                     controller: _scrollController,
                     padding: EdgeInsets.fromLTRB(
                       horizontalPadding,
@@ -353,9 +399,11 @@ class _CarrotProfileCompareScreenState
                       horizontalPadding,
                       listBottomPadding,
                     ),
-                    children: [
-                      if (!widget.result.hasDiffs)
-                        Padding(
+                    itemCount:
+                        widget.result.hasDiffs ? _listEntries.length + 1 : 1,
+                    itemBuilder: (context, index) {
+                      if (!widget.result.hasDiffs) {
+                        return Padding(
                           padding: const EdgeInsets.symmetric(vertical: 32),
                           child: Center(
                             child: Text(
@@ -367,11 +415,17 @@ class _CarrotProfileCompareScreenState
                               ),
                             ),
                           ),
-                        )
-                      else
-                        SizedBox(height: cardGap + 2),
-                      for (final group in groups) ...[
-                        Padding(
+                        );
+                      }
+
+                      if (index == 0) {
+                        return SizedBox(height: cardGap + 2);
+                      }
+
+                      final listEntry = _listEntries[index - 1];
+                      if (listEntry.isHeader) {
+                        final group = listEntry.group;
+                        return Padding(
                           padding: const EdgeInsets.fromLTRB(2, 8, 2, 8),
                           child: CarrotGroupSectionHeader(
                             key: _groupHeaderKeyFor(group),
@@ -380,19 +434,17 @@ class _CarrotProfileCompareScreenState
                             isCollapsed: _collapsedGroups.contains(group),
                             onTap: () => _toggleGroup(group),
                           ),
+                        );
+                      }
+
+                      return Padding(
+                        padding: EdgeInsets.only(bottom: cardGap),
+                        child: _CompareEntryCard(
+                          entry: listEntry.entry!,
+                          baselineLabel: widget.result.baselineLabel,
                         ),
-                        if (!_collapsedGroups.contains(group))
-                          ...grouped[group]!.map(
-                            (entry) => Padding(
-                              padding: EdgeInsets.only(bottom: cardGap),
-                              child: _CompareEntryCard(
-                                entry: entry,
-                                baselineLabel: widget.result.baselineLabel,
-                              ),
-                            ),
-                          ),
-                      ],
-                    ],
+                      );
+                    },
                   ),
                 ),
               ),

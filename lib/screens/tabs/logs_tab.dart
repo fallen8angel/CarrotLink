@@ -15,15 +15,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../services/diagnostics_service.dart';
-import '../../services/developer_mode_service.dart';
 import '../../services/ssh_service.dart';
 import '../../services/storage_layout_service.dart';
-import '../../features/yolo/yolo.dart';
 import '../../ui/adaptive/layout_tokens.dart';
 import '../../ui/adaptive/window_class.dart';
 import '../../widgets/connection_required_view.dart';
 import '../../widgets/custom_toast.dart';
 import '../../widgets/dashcam_player_screen.dart';
+import '../../widgets/design_components.dart';
 import '../../widgets/section_tab_bar.dart';
 
 class LogsTab extends StatefulWidget {
@@ -123,6 +122,154 @@ class _DashcamRouteEntry {
   });
 }
 
+class _DashcamThumbnailPipeline {
+  static int _activeGenerations = 0;
+  static final List<Future<void> Function()> _taskQueue =
+      <Future<void> Function()>[];
+
+  static String _safeToken(String value) {
+    return value
+        .replaceAll(RegExp(r'\s+'), '_')
+        .replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
+  }
+
+  static Future<File?> ensureSegmentThumbnail({
+    required SSHService ssh,
+    required String segmentFolderName,
+  }) async {
+    try {
+      final tempDir = await getTemporaryDirectory();
+      final cacheDir = Directory(p.join(tempDir.path, 'dashcam_thumb_cache'));
+      if (!await cacheDir.exists()) {
+        await cacheDir.create(recursive: true);
+      }
+      final localFile = File(
+        p.join(cacheDir.path, '${_safeToken(segmentFolderName)}.jpg'),
+      );
+      if (await localFile.exists()) {
+        return localFile;
+      }
+      if (!ssh.isConnected) return null;
+
+      final completer = Completer<File?>();
+      _enqueue(() async {
+        try {
+          final remoteDir = '/data/media/0/realdata/$segmentFolderName';
+          final remoteImg = '$remoteDir/thumbnail.jpg';
+          final remoteTs = '$remoteDir/qcamera.ts';
+          final remoteMp4 = '$remoteDir/qcamera.mp4';
+          final existsCmd =
+              'test -f ${_shellQuote(remoteImg)} && echo yes || echo no';
+          final exists = (await ssh.executeCommand(existsCmd)).trim() == 'yes';
+          if (!exists) {
+            final sourceCmd =
+                'if test -f ${_shellQuote(remoteTs)}; then echo ${_shellQuote(remoteTs)}; '
+                'elif test -f ${_shellQuote(remoteMp4)}; then echo ${_shellQuote(remoteMp4)}; '
+                'else echo missing; fi';
+            final source = (await ssh.executeCommand(sourceCmd)).trim();
+            if (source.isEmpty || source == 'missing') {
+              completer.complete(null);
+              return;
+            }
+            final genCmd =
+                'ffmpeg -hide_banner -loglevel error -y -ss 2 -i $source '
+                '-vframes 1 -vf scale=320:-1 ${_shellQuote(remoteImg)}';
+            await ssh.executeCommand(genCmd);
+          }
+          final bytes = await ssh.readBinaryFile(remoteImg);
+          await localFile.writeAsBytes(bytes, flush: true);
+          completer.complete(localFile);
+        } catch (_) {
+          completer.complete(null);
+        }
+      });
+      return completer.future;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<File?> ensureSegmentAnimatedPreview({
+    required SSHService ssh,
+    required String segmentFolderName,
+  }) async {
+    try {
+      final tempDir = await getTemporaryDirectory();
+      final cacheDir = Directory(p.join(tempDir.path, 'dashcam_preview_cache'));
+      if (!await cacheDir.exists()) {
+        await cacheDir.create(recursive: true);
+      }
+      final localFile = File(
+        p.join(cacheDir.path, '${_safeToken(segmentFolderName)}.gif'),
+      );
+      if (await localFile.exists()) {
+        return localFile;
+      }
+      if (!ssh.isConnected) return null;
+
+      final completer = Completer<File?>();
+      _enqueue(() async {
+        try {
+          final remoteDir = '/data/media/0/realdata/$segmentFolderName';
+          final remotePreview = '$remoteDir/.carrotlink_preview.gif';
+          final remoteTs = '$remoteDir/qcamera.ts';
+          final remoteMp4 = '$remoteDir/qcamera.mp4';
+          final existsCmd =
+              'test -f ${_shellQuote(remotePreview)} && echo yes || echo no';
+          final exists = (await ssh.executeCommand(existsCmd)).trim() == 'yes';
+          if (!exists) {
+            final sourceCmd =
+                'if test -f ${_shellQuote(remoteTs)}; then echo ${_shellQuote(remoteTs)}; '
+                'elif test -f ${_shellQuote(remoteMp4)}; then echo ${_shellQuote(remoteMp4)}; '
+                'else echo missing; fi';
+            final source = (await ssh.executeCommand(sourceCmd)).trim();
+            if (source.isEmpty || source == 'missing') {
+              completer.complete(null);
+              return;
+            }
+            final genCmd =
+                'ffmpeg -hide_banner -loglevel error -y -ss 1 -t 2.4 -i $source '
+                '-vf "fps=4,scale=320:-1:flags=lanczos" -loop 0 ${_shellQuote(remotePreview)}';
+            await ssh.executeCommand(genCmd);
+          }
+          final bytes = await ssh.readBinaryFile(remotePreview);
+          await localFile.writeAsBytes(bytes, flush: true);
+          completer.complete(localFile);
+        } catch (_) {
+          completer.complete(null);
+        }
+      });
+      return completer.future;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static String _shellQuote(String value) {
+    return "'${value.replaceAll("'", "'\"'\"'")}'";
+  }
+
+  static void _enqueue(Future<void> Function() task) {
+    if (_activeGenerations < 2) {
+      _activeGenerations += 1;
+      task().whenComplete(_processNext);
+      return;
+    }
+    _taskQueue.add(task);
+  }
+
+  static void _processNext() {
+    _activeGenerations -= 1;
+    if (_activeGenerations < 0) {
+      _activeGenerations = 0;
+    }
+    if (_taskQueue.isEmpty) return;
+    _activeGenerations += 1;
+    final next = _taskQueue.removeAt(0);
+    next().whenComplete(_processNext);
+  }
+}
+
 class _SegmentPlaybackAssets {
   final File? videoFile;
   final Uri? videoUri;
@@ -178,6 +325,7 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
   static const Duration _autoRefreshInterval = Duration(seconds: 10);
   static const int _shareSizeWarningBytes = 150 * 1024 * 1024;
   final DiagnosticsService _diag = DiagnosticsService.instance;
+  final ScrollController _routeListController = ScrollController();
 
   bool _isLoading = true;
   bool _isDisconnected = false;
@@ -187,6 +335,8 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
   List<_DashcamRouteEntry> _routes = const <_DashcamRouteEntry>[];
   final Set<String> _expandedRoutes = <String>{};
   Timer? _refreshTimer;
+  Timer? _scrollIdleTimer;
+  bool _routeListScrolling = false;
 
   ({
     EdgeInsets insetPadding,
@@ -271,6 +421,8 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
   @override
   void dispose() {
     _stopAutoRefresh();
+    _scrollIdleTimer?.cancel();
+    _routeListController.dispose();
     super.dispose();
   }
 
@@ -278,6 +430,7 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
     _refreshTimer?.cancel();
     _refreshTimer = Timer.periodic(_autoRefreshInterval, (_) {
       if (!mounted) return;
+      if (_routeListScrolling) return;
       final ssh = Provider.of<SSHService>(context, listen: false);
       if (!ssh.isConnected) return;
       unawaited(_loadRoutes(silent: true));
@@ -341,8 +494,11 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
       }
 
       final loaded = routeSegments.entries.map((entry) {
-        final sortedSegments = [...entry.value]
-          ..sort((a, b) => _segmentIndex(a).compareTo(_segmentIndex(b)));
+        final sortedSegments = [...entry.value]..sort((a, b) {
+            final byIndex = _segmentIndex(a).compareTo(_segmentIndex(b));
+            if (byIndex != 0) return byIndex;
+            return a.compareTo(b);
+          });
         return _DashcamRouteEntry(
           route: entry.key,
           segmentFolders: sortedSegments,
@@ -414,6 +570,52 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
       }
     } catch (_) {}
     return null;
+  }
+
+  String _formatRelativeModifiedTime(int epochSeconds) {
+    if (epochSeconds <= 0) return '방금 갱신';
+    final modified = DateTime.fromMillisecondsSinceEpoch(epochSeconds * 1000);
+    final diff = DateTime.now().difference(modified);
+    if (diff.inMinutes < 1) return '방금 갱신';
+    if (diff.inHours < 1) return '${diff.inMinutes}분 전';
+    if (diff.inDays < 1) return '${diff.inHours}시간 전';
+    return '${diff.inDays}일 전';
+  }
+
+  Widget _buildRouteMetricChip({
+    required BuildContext context,
+    required IconData icon,
+    required String label,
+  }) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(
+          color: scheme.outlineVariant.withValues(alpha: 0.4),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            icon,
+            size: 14,
+            color: scheme.onSurfaceVariant,
+          ),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w700,
+                ),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _openSegmentInBrowser(
@@ -672,36 +874,24 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
       onStatus?.call('캐시된 영상을 불러오는 중...');
       playbackFile = localVideo;
     } else {
-      onStatus?.call('미캐시 상태: 영상 다운로드 준비 중...');
-      try {
-        await ssh.downloadBinaryFile(
-          remoteVideoPath,
-          localVideoPath,
-          onProgress: (received, total) {
-            if (total > 0) {
-              final percent = (received * 100 ~/ total).clamp(0, 100);
-              onStatus?.call('영상 다운로드 중... $percent%');
-            } else {
-              onStatus?.call('영상 다운로드 중...');
-            }
-          },
-        );
-        final localSize = await localVideo.length();
-        if (localSize <= 0) {
-          throw Exception('다운로드된 영상 크기가 0입니다.');
-        }
-        playbackFile = localVideo;
-      } catch (e) {
-        final ip = (ssh.connectedIp ?? ssh.targetIp ?? '').trim();
-        if (ip.isNotEmpty) {
-          onStatus?.call('다운로드 실패, 스트리밍 재생으로 전환 중...');
-          final segment = _segmentIndex(segmentFolderName);
-          playbackUri =
-              Uri.parse('http://$ip:8082/footage/$route?$segment,qcamera');
-        } else {
-          throw Exception('영상 다운로드 실패: $e');
-        }
+      onStatus?.call('영상 다운로드 준비 중...');
+      await ssh.downloadBinaryFile(
+        remoteVideoPath,
+        localVideoPath,
+        onProgress: (received, total) {
+          if (total > 0) {
+            final percent = (received * 100 ~/ total).clamp(0, 100);
+            onStatus?.call('영상 다운로드 중... $percent%');
+          } else {
+            onStatus?.call('영상 다운로드 중...');
+          }
+        },
+      );
+      final localSize = await localVideo.length();
+      if (localSize <= 0) {
+        throw Exception('다운로드된 영상 크기가 0입니다.');
       }
+      playbackFile = localVideo;
     }
 
     return _SegmentPlaybackAssets(
@@ -718,7 +908,7 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
   ) async {
     try {
       final assets = await _runWithStatusDialog<_SegmentPlaybackAssets>(
-        '세그먼트 정밀 재생 준비 중...',
+        '세그먼트 재생 준비 중...',
         (updateStatus) => _preparePlaybackAssets(
           route,
           segmentFolderName,
@@ -727,12 +917,6 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
       );
       if (!mounted) return;
       final segment = _segmentIndex(segmentFolderName);
-      final developerModeEnabled = context.read<DeveloperModeService>().enabled;
-      final yoloAvailabilityHint = !developerModeEnabled
-          ? '개발자 모드가 꺼져 있어 route YOLO playback이 비활성입니다.'
-          : (assets.videoFile == null
-              ? '현재 스트리밍 재생(videoUri)이라 local file 기반 route YOLO playback을 시작할 수 없습니다.'
-              : null);
       await showDialog<void>(
         context: context,
         barrierDismissible: true,
@@ -754,7 +938,6 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
             UiWindowClass.extraLarge => 24.0,
           };
           final contentWidth = screenSize.width - (dialogHorizontalInset * 2);
-          final targetHeight = (contentWidth * 9 / 16) + 200;
           final maxHeightRatio = switch (window.windowClass) {
             UiWindowClass.compact => 0.82,
             UiWindowClass.medium => 0.80,
@@ -763,16 +946,6 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
             UiWindowClass.extraLarge => 0.74,
           };
           final maxHeight = screenSize.height * maxHeightRatio;
-          final minHeight = switch (window.windowClass) {
-            UiWindowClass.compact => 380.0,
-            UiWindowClass.medium => 400.0,
-            UiWindowClass.expanded => 420.0,
-            UiWindowClass.large => 430.0,
-            UiWindowClass.extraLarge => 440.0,
-          };
-          final dialogHeight = targetHeight < minHeight
-              ? minHeight
-              : (targetHeight > maxHeight ? maxHeight : targetHeight);
           return Dialog(
             insetPadding: EdgeInsets.symmetric(
               horizontal: dialogHorizontalInset,
@@ -783,9 +956,11 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
               borderRadius: BorderRadius.circular(16),
               child: Material(
                 color: Colors.black,
-                child: SizedBox(
-                  width: double.infinity,
-                  height: dialogHeight,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: contentWidth,
+                    maxHeight: maxHeight,
+                  ),
                   child: DashcamPlayerScreen(
                     videoFile: assets.videoFile,
                     videoUri: assets.videoUri,
@@ -794,16 +969,11 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
                     previewStep: assets.previewStep,
                     useScaffold: false,
                     onShareRange: (startSec, endSec) => _shareSegmentClip(
-                        route, segmentFolderName,
-                        startSec: startSec, endSec: endSec),
-                    yoloAvailabilityHint: yoloAvailabilityHint,
-                    onRunYoloDebugAtPosition:
-                        developerModeEnabled && assets.videoFile != null
-                            ? (position) => _runSegmentYoloDebugAtPosition(
-                                  videoFile: assets.videoFile!,
-                                  position: position,
-                                )
-                            : null,
+                      route,
+                      segmentFolderName,
+                      startSec: startSec,
+                      endSec: endSec,
+                    ),
                     onClose: () => Navigator.of(dialogContext).pop(),
                   ),
                 ),
@@ -816,16 +986,6 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
       if (!mounted) return;
       CustomToast.show(context, '정밀 재생 실패: $e', isError: true);
     }
-  }
-
-  Future<YoloRuntimeStatusSnapshot> _runSegmentYoloDebugAtPosition({
-    required File videoFile,
-    required Duration position,
-  }) async {
-    return YoloOfflineDebugRunner.runVideoFrameAtPosition(
-      path: videoFile.path,
-      position: position,
-    );
   }
 
   Future<_SegmentShareOptions?> _showShareOptionsDialog(
@@ -1055,10 +1215,45 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
         throw Exception('영상 구간 자르기 실패: 생성 파일 크기가 0입니다.');
       }
       onStatus?.call('구간 영상 생성 완료');
+      final remoteStartThumbPath =
+          '$remoteDir/.carrotlink_share_clip_${startSec}s_${endSec}s_start.jpg';
+      final remoteEndThumbPath =
+          '$remoteDir/.carrotlink_share_clip_${startSec}s_${endSec}s_end.jpg';
+      final endPreviewSec = endSec > startSec
+          ? (endSec - 0.2).clamp(startSec.toDouble(), endSec.toDouble())
+          : startSec.toDouble();
+      onStatus?.call('시작/종료 썸네일 생성 중...');
+      final thumbCmd =
+          'rm -f ${_shellQuote(remoteStartThumbPath)} ${_shellQuote(remoteEndThumbPath)}; '
+          'ffmpeg -hide_banner -loglevel error -y -ss $startSec -i ${_shellQuote(sourceVideoPath)} '
+          '-frames:v 1 -vf scale=640:-1 ${_shellQuote(remoteStartThumbPath)} && '
+          'ffmpeg -hide_banner -loglevel error -y -ss $endPreviewSec -i ${_shellQuote(sourceVideoPath)} '
+          '-frames:v 1 -vf scale=640:-1 ${_shellQuote(remoteEndThumbPath)}';
+      final thumbResult = await ssh.executeCommandResult(thumbCmd);
+      if (thumbResult.exitCode != 0 ||
+          !await _remoteFileExists(ssh, remoteStartThumbPath) ||
+          !await _remoteFileExists(ssh, remoteEndThumbPath)) {
+        final reason = thumbResult.stderr.isNotEmpty
+            ? thumbResult.stderr
+            : thumbResult.stdout;
+        throw Exception('구간 썸네일 생성 실패: $reason');
+      }
       items.add(
         (
           remoteClipPath,
           '$route--$segmentIndex--clip_${startSec}s_${endSec}s.mp4',
+        ),
+      );
+      items.add(
+        (
+          remoteStartThumbPath,
+          '$route--$segmentIndex--clip_${startSec}s_${endSec}s_start.jpg',
+        ),
+      );
+      items.add(
+        (
+          remoteEndThumbPath,
+          '$route--$segmentIndex--clip_${startSec}s_${endSec}s_end.jpg',
         ),
       );
     } else if (options.convertToMp4) {
@@ -1443,6 +1638,10 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
         attachedKinds.add('rlog');
       } else if (lower.contains('qlog')) {
         attachedKinds.add('qlog');
+      } else if (lower.endsWith('.jpg') ||
+          lower.endsWith('.jpeg') ||
+          lower.endsWith('.png')) {
+        attachedKinds.add('썸네일');
       } else if (lower.contains('qcamera') ||
           lower.contains('clip_') ||
           lower.endsWith('.mp4') ||
@@ -1600,149 +1799,134 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
     });
   }
 
+  bool _handleRouteScrollNotification(ScrollNotification notification) {
+    if (notification is ScrollStartNotification ||
+        notification is ScrollUpdateNotification ||
+        notification is UserScrollNotification) {
+      _routeListScrolling = true;
+      _scrollIdleTimer?.cancel();
+      _scrollIdleTimer = Timer(const Duration(milliseconds: 360), () {
+        _routeListScrolling = false;
+      });
+    } else if (notification is ScrollEndNotification) {
+      _scrollIdleTimer?.cancel();
+      _scrollIdleTimer = Timer(const Duration(milliseconds: 120), () {
+        _routeListScrolling = false;
+      });
+    }
+    return false;
+  }
+
   Widget _buildRouteTile(_DashcamRouteEntry entry) {
     final window = UiWindowInfo.of(context);
-    final tileHorizontalPadding = switch (window.windowClass) {
-      UiWindowClass.compact => 12.0,
-      UiWindowClass.medium => 13.0,
-      UiWindowClass.expanded => 14.0,
-      UiWindowClass.large => 16.0,
-      UiWindowClass.extraLarge => 16.0,
-    };
-    final expandedHorizontalPadding = switch (window.windowClass) {
-      UiWindowClass.compact => 10.0,
-      UiWindowClass.medium => 11.0,
-      UiWindowClass.expanded => 12.0,
-      UiWindowClass.large => 14.0,
-      UiWindowClass.extraLarge => 14.0,
-    };
-    final segmentBadgeRadius = switch (window.windowClass) {
-      UiWindowClass.compact => 13.0,
-      UiWindowClass.medium => 13.0,
-      UiWindowClass.expanded => 14.0,
-      UiWindowClass.large => 14.0,
-      UiWindowClass.extraLarge => 15.0,
-    };
-    final segmentBadgeFontSize = switch (window.windowClass) {
-      UiWindowClass.compact => 11.0,
-      UiWindowClass.medium => 11.0,
-      UiWindowClass.expanded => 12.0,
-      UiWindowClass.large => 12.0,
-      UiWindowClass.extraLarge => 12.0,
-    };
-    final segmentTitleFontSize = switch (window.windowClass) {
-      UiWindowClass.compact => 13.0,
-      UiWindowClass.medium => 13.0,
-      UiWindowClass.expanded => 13.5,
-      UiWindowClass.large => 14.0,
-      UiWindowClass.extraLarge => 14.0,
-    };
-    final segmentSubtitleFontSize = switch (window.windowClass) {
-      UiWindowClass.compact => 11.0,
-      UiWindowClass.medium => 11.0,
-      UiWindowClass.expanded => 12.0,
-      UiWindowClass.large => 12.0,
-      UiWindowClass.extraLarge => 12.0,
-    };
-    final segmentTrailingWidth = switch (window.windowClass) {
-      UiWindowClass.compact => 44.0,
-      UiWindowClass.medium => 46.0,
-      UiWindowClass.expanded => 48.0,
-      UiWindowClass.large => 48.0,
-      UiWindowClass.extraLarge => 50.0,
-    };
-
+    final scheme = Theme.of(context).colorScheme;
     final expanded = _expandedRoutes.contains(entry.route);
     final dateLabel = _formatRouteDateLabel(entry.route);
-    final subtitle = dateLabel == null
-        ? '세그먼트 ${entry.segmentFolders.length}개'
-        : '$dateLabel · 세그먼트 ${entry.segmentFolders.length}개';
+    final representativeSegment =
+        entry.segmentFolders.isEmpty ? null : entry.segmentFolders.first;
 
-    return Material(
-      color: Theme.of(context).colorScheme.surfaceContainerHighest,
-      borderRadius: BorderRadius.circular(10),
+    return DesignCard(
+      color: scheme.surfaceContainerHigh,
+      padding: EdgeInsets.zero,
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          ListTile(
-            dense: true,
-            contentPadding:
-                EdgeInsets.symmetric(horizontal: tileHorizontalPadding),
-            onTap: () => _toggleRouteExpanded(entry.route),
-            leading: const Icon(Icons.alt_route),
-            title: Text(
-              _formatRouteTitle(entry.route),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontWeight: FontWeight.w700),
-            ),
-            subtitle: Text(
-              subtitle,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            trailing: Icon(
-              expanded ? Icons.expand_less : Icons.expand_more,
-            ),
-          ),
-          if (expanded)
-            Padding(
-              padding: EdgeInsets.fromLTRB(
-                expandedHorizontalPadding,
-                0,
-                expandedHorizontalPadding,
-                8,
+          if (representativeSegment != null)
+            _DashcamRoutePreviewPanel(
+              segmentFolderName: representativeSegment,
+              onTap: () => unawaited(
+                _openSegmentPlayer(entry.route, representativeSegment),
               ),
-              child: Column(
-                children: entry.segmentFolders.map((segmentFolder) {
-                  final segment = _segmentIndex(segmentFolder);
-                  return ListTile(
-                    dense: true,
-                    visualDensity: const VisualDensity(vertical: -3),
-                    contentPadding: EdgeInsets.symmetric(
-                      horizontal: expandedHorizontalPadding,
-                      vertical: 0,
-                    ),
-                    leading: CircleAvatar(
-                      radius: segmentBadgeRadius,
-                      child: Text(
-                        '$segment',
-                        style: TextStyle(fontSize: segmentBadgeFontSize),
-                      ),
-                    ),
-                    title: Text(
-                      '세그먼트 $segment',
-                      style: TextStyle(fontSize: segmentTitleFontSize),
-                    ),
-                    subtitle: Text(
-                      segmentFolder,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: segmentSubtitleFontSize),
-                    ),
-                    trailing: SizedBox(
-                      width: segmentTrailingWidth,
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.end,
+            ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          IconButton(
-                            tooltip: '세그먼트 메뉴',
-                            visualDensity: const VisualDensity(
-                                horizontal: -3, vertical: -3),
-                            onPressed: () => unawaited(_showSegmentActions(
-                                entry.route, segmentFolder)),
-                            icon: const Icon(Icons.more_vert, size: 20),
+                          Text(
+                            _formatRouteTitle(entry.route),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleMedium
+                                ?.copyWith(fontWeight: FontWeight.w800),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            dateLabel ?? entry.route,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style:
+                                Theme.of(context).textTheme.bodySmall?.copyWith(
+                                      color: scheme.onSurfaceVariant,
+                                    ),
                           ),
                         ],
                       ),
                     ),
-                    onTap: () => unawaited(
-                        _openSegmentPlayer(entry.route, segmentFolder)),
-                    onLongPress: () => unawaited(
-                        _showSegmentActions(entry.route, segmentFolder)),
-                  );
-                }).toList(),
-              ),
+                    IconButton(
+                      tooltip: expanded ? '접기' : '세그먼트 보기',
+                      onPressed: () => _toggleRouteExpanded(entry.route),
+                      icon: Icon(
+                        expanded ? Icons.expand_less : Icons.expand_more,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _buildRouteMetricChip(
+                      context: context,
+                      icon: Icons.view_carousel_outlined,
+                      label: '세그먼트 ${entry.segmentFolders.length}개',
+                    ),
+                    _buildRouteMetricChip(
+                      context: context,
+                      icon: Icons.schedule_outlined,
+                      label: _formatRelativeModifiedTime(
+                        entry.latestModifiedEpoch,
+                      ),
+                    ),
+                  ],
+                ),
+                if (expanded) ...[
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    height: window.isCompact ? 140 : 156,
+                    child: ListView.separated(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: entry.segmentFolders.length,
+                      separatorBuilder: (_, __) => const SizedBox(width: 10),
+                      itemBuilder: (context, index) {
+                        final segmentFolder = entry.segmentFolders[index];
+                        return _DashcamSegmentPreviewTile(
+                          segmentFolderName: segmentFolder,
+                          segmentIndex: _segmentIndex(segmentFolder),
+                          onTap: () => unawaited(
+                            _openSegmentPlayer(entry.route, segmentFolder),
+                          ),
+                          onMenu: () => unawaited(
+                            _showSegmentActions(entry.route, segmentFolder),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ],
             ),
+          ),
         ],
       ),
     );
@@ -1780,21 +1964,370 @@ class _DashcamLogsViewState extends State<_DashcamLogsView> {
                       ? Center(child: Text(_error!))
                       : _routes.isEmpty
                           ? const Center(child: Text('주행 기록이 없습니다.'))
-                          : ListView.separated(
-                              padding: EdgeInsets.fromLTRB(
-                                listHorizontalPadding,
-                                10,
-                                listHorizontalPadding,
-                                16,
+                          : NotificationListener<ScrollNotification>(
+                              onNotification: _handleRouteScrollNotification,
+                              child: ListView.separated(
+                                controller: _routeListController,
+                                padding: EdgeInsets.fromLTRB(
+                                  listHorizontalPadding,
+                                  10,
+                                  listHorizontalPadding,
+                                  16,
+                                ),
+                                itemCount: _routes.length,
+                                separatorBuilder: (_, __) =>
+                                    SizedBox(height: listGap),
+                                itemBuilder: (context, index) =>
+                                    _buildRouteTile(_routes[index]),
                               ),
-                              itemCount: _routes.length,
-                              separatorBuilder: (_, __) =>
-                                  SizedBox(height: listGap),
-                              itemBuilder: (context, index) =>
-                                  _buildRouteTile(_routes[index]),
                             ),
         ),
       ],
+    );
+  }
+}
+
+class _DashcamRoutePreviewPanel extends StatelessWidget {
+  final String segmentFolderName;
+  final VoidCallback onTap;
+
+  const _DashcamRoutePreviewPanel({
+    required this.segmentFolderName,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        child: AspectRatio(
+          aspectRatio: 16 / 9,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              _DashcamRouteAnimatedPreview(
+                segmentFolderName: segmentFolderName,
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(18),
+                ),
+                overlay: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Colors.black.withValues(alpha: 0.08),
+                        Colors.transparent,
+                        Colors.black.withValues(alpha: 0.28),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              Align(
+                alignment: Alignment.center,
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.48),
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.20),
+                      ),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 12,
+                      ),
+                      child: Icon(
+                        Icons.play_arrow_rounded,
+                        size: 26,
+                        color: scheme.onPrimary,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DashcamRouteAnimatedPreview extends StatefulWidget {
+  final String segmentFolderName;
+  final Widget? overlay;
+  final BorderRadius borderRadius;
+
+  const _DashcamRouteAnimatedPreview({
+    required this.segmentFolderName,
+    this.overlay,
+    this.borderRadius = const BorderRadius.all(Radius.circular(14)),
+  });
+
+  @override
+  State<_DashcamRouteAnimatedPreview> createState() =>
+      _DashcamRouteAnimatedPreviewState();
+}
+
+class _DashcamRouteAnimatedPreviewState
+    extends State<_DashcamRouteAnimatedPreview> {
+  File? _preview;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadPreview());
+  }
+
+  @override
+  void didUpdateWidget(covariant _DashcamRouteAnimatedPreview oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.segmentFolderName == widget.segmentFolderName) return;
+    _preview = null;
+    unawaited(_loadPreview());
+  }
+
+  Future<void> _loadPreview() async {
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    final file = await _DashcamThumbnailPipeline.ensureSegmentAnimatedPreview(
+      ssh: ssh,
+      segmentFolderName: widget.segmentFolderName,
+    );
+    if (!mounted) return;
+    setState(() {
+      _preview = file;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: widget.borderRadius,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          _DashcamSegmentThumbnail(
+            segmentFolderName: widget.segmentFolderName,
+            borderRadius: widget.borderRadius,
+          ),
+          if (_preview != null)
+            Image.file(
+              _preview!,
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+            ),
+          if (widget.overlay != null) widget.overlay!,
+        ],
+      ),
+    );
+  }
+}
+
+class _DashcamSegmentThumbnail extends StatefulWidget {
+  final String segmentFolderName;
+  final BorderRadius borderRadius;
+
+  const _DashcamSegmentThumbnail({
+    required this.segmentFolderName,
+    this.borderRadius = const BorderRadius.all(Radius.circular(14)),
+  });
+
+  @override
+  State<_DashcamSegmentThumbnail> createState() =>
+      _DashcamSegmentThumbnailState();
+}
+
+class _DashcamSegmentThumbnailState extends State<_DashcamSegmentThumbnail> {
+  File? _thumbnail;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadThumbnail());
+  }
+
+  @override
+  void didUpdateWidget(covariant _DashcamSegmentThumbnail oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.segmentFolderName == widget.segmentFolderName) return;
+    _thumbnail = null;
+    _loading = true;
+    unawaited(_loadThumbnail());
+  }
+
+  Future<void> _loadThumbnail() async {
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    final file = await _DashcamThumbnailPipeline.ensureSegmentThumbnail(
+      ssh: ssh,
+      segmentFolderName: widget.segmentFolderName,
+    );
+    if (!mounted) return;
+    setState(() {
+      _thumbnail = file;
+      _loading = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return ClipRRect(
+      borderRadius: widget.borderRadius,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerHighest,
+            ),
+            child: _thumbnail != null
+                ? Image.file(_thumbnail!, fit: BoxFit.cover)
+                : _loading
+                    ? Center(
+                        child: SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.2,
+                            color: scheme.primary,
+                          ),
+                        ),
+                      )
+                    : Icon(
+                        Icons.videocam_outlined,
+                        color: scheme.onSurfaceVariant,
+                        size: 26,
+                      ),
+          ),
+          if (_thumbnail == null)
+            DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    scheme.surfaceContainerHighest,
+                    scheme.surfaceContainer,
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DashcamSegmentPreviewTile extends StatelessWidget {
+  final String segmentFolderName;
+  final int segmentIndex;
+  final VoidCallback onTap;
+  final VoidCallback onMenu;
+
+  const _DashcamSegmentPreviewTile({
+    required this.segmentFolderName,
+    required this.segmentIndex,
+    required this.onTap,
+    required this.onMenu,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return SizedBox(
+      width: 168,
+      child: Material(
+        color: scheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(14),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          onLongPress: onMenu,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              border: Border.all(
+                color: scheme.outlineVariant.withValues(alpha: 0.42),
+              ),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: _DashcamSegmentThumbnail(
+                      segmentFolderName: segmentFolderName,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 7,
+                          vertical: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: scheme.surfaceContainerHighest,
+                          borderRadius: BorderRadius.circular(999),
+                          border: Border.all(
+                            color:
+                                scheme.outlineVariant.withValues(alpha: 0.38),
+                          ),
+                        ),
+                        child: Text(
+                          'SEG $segmentIndex',
+                          style:
+                              Theme.of(context).textTheme.labelSmall?.copyWith(
+                                    fontWeight: FontWeight.w800,
+                                    color: scheme.onSurfaceVariant,
+                                  ),
+                        ),
+                      ),
+                      const Spacer(),
+                      SizedBox(
+                        width: 28,
+                        height: 28,
+                        child: IconButton(
+                          tooltip: '세그먼트 메뉴',
+                          padding: EdgeInsets.zero,
+                          visualDensity: const VisualDensity(
+                            horizontal: -4,
+                            vertical: -4,
+                          ),
+                          onPressed: onMenu,
+                          icon: const Icon(Icons.more_vert, size: 18),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    segmentFolderName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

@@ -133,20 +133,37 @@ class _HudSettingsScreenState extends State<HudSettingsScreen>
     }
   }
 
-  Future<void> _installSidecar() async {
+  Future<void> _installSidecarC3() =>
+      _installSidecarForTarget(HudStockInstallTarget.c3);
+
+  Future<void> _installSidecarC4() =>
+      _installSidecarForTarget(HudStockInstallTarget.c4);
+
+  Future<void> _installSidecarForTarget(HudStockInstallTarget target) async {
     if (_progress.busy) return;
     final ssh = _ssh;
     if (!ssh.isConnected) {
       _showSnack('SSH 연결이 되어있지 않습니다.', isError: true);
       return;
     }
+    final label = target == HudStockInstallTarget.c4 ? 'C4' : 'C3';
+    final requestedRepoFlavor = target == HudStockInstallTarget.c4
+        ? SidecarService.repoFlavorC4
+        : SidecarService.repoFlavorC3;
+    final bootstrapProfile = target == HudStockInstallTarget.c4
+        ? SidecarService.c4HudBootstrapProfile
+        : SidecarService.hudBootstrapProfile;
+    final driveProfile = target == HudStockInstallTarget.c4
+        ? SidecarService.c4MinimalGraphicsRuntimeProfile
+        : SidecarService.driveRuntimeProfile;
 
     final confirmed = await _confirm(
-      title: 'Stock 주행모드 설치',
+      title: 'Stock 주행모드 설치 ($label)',
       message: '디바이스에 sidecar를 배포하고 시작한 뒤 상태를 검증합니다.\n\n'
+          '${target == HudStockInstallTarget.c4 ? 'C4는 로드카메라/차선/경로패스 중심의 최소 그래픽 런타임으로 설치합니다.\n\n' : ''}'
           '설치 완료 후 안정적인 반영을 위해 openpilot 기기 재부팅이 필요합니다.\n'
           '마지막 단계에서 재부팅 여부를 다시 확인합니다.',
-      confirmText: '설치',
+      confirmText: '설치($label)',
     );
     if (!confirmed) return;
 
@@ -154,7 +171,10 @@ class _HudSettingsScreenState extends State<HudSettingsScreen>
     _clearTerminal();
 
     try {
-      _appendTerminal('INSTALL', 'Stock 주행모드 설치를 시작합니다.');
+      _appendTerminal(
+        'INSTALL',
+        'Stock 주행모드 설치를 시작합니다. target=$label profile=$driveProfile',
+      );
 
       _addStep('기존 상태 확인', status: _StepStatus.running);
       try {
@@ -206,12 +226,27 @@ class _HudSettingsScreenState extends State<HudSettingsScreen>
         detail: deployOut.trim(),
       );
 
-      final repoFlavor = await _sidecar.resolveRemoteRepoFlavor(ssh);
-      final bootstrapProfile = repoFlavor == SidecarService.repoFlavorC4
-          ? SidecarService.c4HudBootstrapProfile
-          : SidecarService.hudBootstrapProfile;
-      final driveProfile = SidecarService.driveRuntimeProfileForFlavor(
-        repoFlavor,
+      _addStep('설치 대상 확인', status: _StepStatus.running);
+      final repoFlavor = await _sidecar.resolveRemoteRepoFlavor(
+        ssh,
+        forceRefresh: true,
+      );
+      if (repoFlavor != SidecarService.repoFlavorUnknown &&
+          repoFlavor != requestedRepoFlavor) {
+        throw Exception(
+          '원격 openpilot flavor=$repoFlavor 이고 요청된 설치 대상은 $label 입니다.',
+        );
+      }
+      if (repoFlavor == SidecarService.repoFlavorUnknown) {
+        _appendTerminal(
+          'TARGET',
+          'repo flavor를 확정하지 못해 요청된 설치 대상($label)을 기준으로 진행합니다.',
+        );
+      }
+      await _featureSettings.setInstallTarget(target);
+      _updateLastStep(
+        status: _StepStatus.ok,
+        detail: 'target=$label bootstrap=$bootstrapProfile runtime=$driveProfile',
       );
 
       _addStep('사이드카 시작', status: _StepStatus.running);
@@ -238,7 +273,8 @@ class _HudSettingsScreenState extends State<HudSettingsScreen>
       );
 
       final shouldPrimeDriveRuntime =
-          _featureSettings.enabled && _supportsDriveRuntime(verify[1]);
+          _featureSettings.enabled &&
+          _supportsRequestedRuntime(verify[1], driveProfile);
       if (shouldPrimeDriveRuntime) {
         _addStep('주행 그래픽 예열', status: _StepStatus.running);
         final driveStartOut = await _sidecar.start(
@@ -438,7 +474,7 @@ class _HudSettingsScreenState extends State<HudSettingsScreen>
     return source.join(' | ');
   }
 
-  bool _supportsDriveRuntime(String raw) {
+  bool _supportsRequestedRuntime(String raw, String profile) {
     final pairs = <String, String>{};
     for (final line in raw.split('\n')) {
       final trimmed = line.trim();
@@ -449,12 +485,20 @@ class _HudSettingsScreenState extends State<HudSettingsScreen>
           trimmed.substring(idx + 1).trim();
     }
     bool up(String name) => (pairs[name] ?? '').trim().startsWith('up:');
-    final hasControlCore =
-        up('selfdrived') && (up('controlsd') || up('plannerd'));
     final hasVisionCore =
         up('stream_encoderd') && up('modeld') && up('camerad');
-    final hasRadarCore = up('radard');
-    return hasControlCore && hasVisionCore && hasRadarCore;
+    final hasVehicleCore =
+        up('selfdrived') && (up('controlsd') || up('plannerd'));
+    if (!SidecarService.profileProvidesGraphicsRuntime(profile)) {
+      return hasVisionCore || hasVehicleCore;
+    }
+    if (!SidecarService.profileProvidesVehicleRuntime(profile)) {
+      return hasVisionCore;
+    }
+    if (SidecarService.profileRequiresFullRuntime(profile)) {
+      return hasVisionCore && hasVehicleCore && up('radard');
+    }
+    return hasVisionCore && hasVehicleCore;
   }
 
   void _addStep(String label, {_StepStatus status = _StepStatus.pending}) {
@@ -708,8 +752,12 @@ class _HudSettingsScreenState extends State<HudSettingsScreen>
               child: SettingsItemGroup(
                 children: [
                   SettingsActionRow(
-                    title: '설치',
-                    onTap: busy ? null : _installSidecar,
+                    title: '설치(C3)',
+                    onTap: busy ? null : _installSidecarC3,
+                  ),
+                  SettingsActionRow(
+                    title: '설치(C4)',
+                    onTap: busy ? null : _installSidecarC4,
                   ),
                   SettingsActionRow(
                     title: '삭제',

@@ -393,6 +393,21 @@ extension _LiveDriveCanvasDeveloperPlaybackComponents
     return int.tryParse('${stateValue ?? configValue ?? ''}') ?? 0;
   }
 
+  bool _developerPlaybackSourceBoolValue(String key) {
+    final stateValue = _driveYoloRuntimeStatus.state[key];
+    if (stateValue is bool) return stateValue;
+    if (stateValue is num) return stateValue != 0;
+    final stateText = stateValue?.toString().trim().toLowerCase() ?? '';
+    if (stateText == 'true' || stateText == '1' || stateText == 'yes') {
+      return true;
+    }
+    final configValue = _driveYoloRuntimeStatus.config[key];
+    if (configValue is bool) return configValue;
+    if (configValue is num) return configValue != 0;
+    final configText = configValue?.toString().trim().toLowerCase() ?? '';
+    return configText == 'true' || configText == '1' || configText == 'yes';
+  }
+
   Duration _developerPlaybackTickInterval() {
     final raw = _developerPlaybackSourceIntValue('samplePeriodMs');
     final resolved = raw > 0 ? raw : 140;
@@ -648,9 +663,20 @@ extension _LiveDriveCanvasDeveloperPlaybackComponents
     if (controller == null || !controller.value.isInitialized) {
       return const ColoredBox(color: Colors.black);
     }
+    final enabled = _driveYoloDebugSettings.enabled &&
+        _developerPlaybackSourceBoolValue('yoloEnabled');
+    if (!enabled) {
+      return VideoPlayer(controller);
+    }
     final detections = YoloDetection.listFromPayload(
       _driveYoloRuntimeStatus.state['parsedDetections'],
     );
+    final showLabels = _developerPlaybackSourceBoolValue('yoloLabels');
+    final forceVisibleBoxes = detections.isNotEmpty &&
+        !_developerPlaybackSourceBoolValue('yoloBoxes') &&
+        !showLabels;
+    final showBoxes =
+        _developerPlaybackSourceBoolValue('yoloBoxes') || forceVisibleBoxes;
     final sourceWidth = _developerPlaybackSourceIntValue('sourceWidth');
     final sourceHeight = _developerPlaybackSourceIntValue('sourceHeight');
     final sourceSize = Size(
@@ -661,8 +687,7 @@ extension _LiveDriveCanvasDeveloperPlaybackComponents
       fit: StackFit.expand,
       children: [
         VideoPlayer(controller),
-        if (_driveYoloDebugSettings.showBoxes ||
-            _driveYoloDebugSettings.showLabels)
+        if (showBoxes || showLabels)
           YoloDetectionOverlay(
             key: ValueKey<String>(
               'developer_playback_overlay_$_developerPlaybackSourceEpoch',
@@ -670,8 +695,34 @@ extension _LiveDriveCanvasDeveloperPlaybackComponents
             detections: detections,
             sourceWidth: sourceSize.width,
             sourceHeight: sourceSize.height,
-            showBoxes: _driveYoloDebugSettings.showBoxes,
-            showLabels: _driveYoloDebugSettings.showLabels,
+            showBoxes: showBoxes,
+            showLabels: showLabels,
+          ),
+        if (detections.isNotEmpty)
+          Positioned(
+            left: 10,
+            top: 10,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.78),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: Colors.cyanAccent.withValues(alpha: 0.72),
+                ),
+              ),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                child: Text(
+                  'YOLO ${detections.length} detections',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ),
           ),
       ],
     );

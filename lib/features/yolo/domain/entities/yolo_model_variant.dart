@@ -9,12 +9,7 @@ enum YoloModelFamily {
   genericExecutorch(
     groupLabel: 'Generic ExecuTorch',
     shortLabel: 'generic',
-    selectorDescription: 'generic ExecuTorch/XNNPACK .pte (deprecated)',
-  ),
-  qnnLowered(
-    groupLabel: 'QNN-Lowered',
-    shortLabel: 'qnn',
-    selectorDescription: 'QNN-lowered .pte (deprecated — fastrpc blocked)',
+    selectorDescription: 'generic ExecuTorch/XNNPACK .pte',
   );
 
   const YoloModelFamily({
@@ -78,42 +73,6 @@ enum YoloModelVariant {
     family: YoloModelFamily.genericExecutorch,
     wireAliases: <String>['yolo26s'],
     assetBaseNames: <String>['yolo26s'],
-  ),
-  yolo26nQnn(
-    wireValue: 'yolo26n_qnn',
-    label: 'YOLO26n QNN',
-    family: YoloModelFamily.qnnLowered,
-    wireAliases: <String>[
-      'yolo26n_qnn',
-      'yolo26n-qnn',
-      'yolo26n.qnn',
-      'yolo26n_htp',
-      'yolo26n-htp',
-      'qnn_yolo26n',
-    ],
-    assetBaseNames: <String>[
-      'yolo26n_qnn',
-      'yolo26n.qnn',
-      'yolo26n_htp',
-    ],
-  ),
-  yolo26sQnn(
-    wireValue: 'yolo26s_qnn',
-    label: 'YOLO26s QNN',
-    family: YoloModelFamily.qnnLowered,
-    wireAliases: <String>[
-      'yolo26s_qnn',
-      'yolo26s-qnn',
-      'yolo26s.qnn',
-      'yolo26s_htp',
-      'yolo26s-htp',
-      'qnn_yolo26s',
-    ],
-    assetBaseNames: <String>[
-      'yolo26s_qnn',
-      'yolo26s.qnn',
-      'yolo26s_htp',
-    ],
   );
 
   const YoloModelVariant({
@@ -132,25 +91,19 @@ enum YoloModelVariant {
 
   String get settingsLabel => '$label / ${family.shortLabel}';
 
-  bool get isQnnLowered => family == YoloModelFamily.qnnLowered;
-
   bool get isLiteRt => family == YoloModelFamily.liteRt;
 
   bool get isLargeModel =>
       this == YoloModelVariant.yolo26s ||
-      this == YoloModelVariant.yolo26sQnn ||
       this == YoloModelVariant.yolo26sLiteRt;
 
-  // Returns the generic (non-LiteRt, non-QNN) variant for this model size.
   YoloModelVariant get genericVariant {
     switch (this) {
       case YoloModelVariant.yolo26nLiteRt:
       case YoloModelVariant.yolo26n:
-      case YoloModelVariant.yolo26nQnn:
         return YoloModelVariant.yolo26n;
       case YoloModelVariant.yolo26sLiteRt:
       case YoloModelVariant.yolo26s:
-      case YoloModelVariant.yolo26sQnn:
         return YoloModelVariant.yolo26s;
     }
   }
@@ -159,29 +112,13 @@ enum YoloModelVariant {
     switch (this) {
       case YoloModelVariant.yolo26nLiteRt:
       case YoloModelVariant.yolo26n:
-      case YoloModelVariant.yolo26nQnn:
         return YoloModelVariant.yolo26nLiteRt;
       case YoloModelVariant.yolo26sLiteRt:
       case YoloModelVariant.yolo26s:
-      case YoloModelVariant.yolo26sQnn:
         return YoloModelVariant.yolo26sLiteRt;
     }
   }
 
-  YoloModelVariant get qnnVariant {
-    switch (this) {
-      case YoloModelVariant.yolo26nLiteRt:
-      case YoloModelVariant.yolo26n:
-      case YoloModelVariant.yolo26nQnn:
-        return YoloModelVariant.yolo26nQnn;
-      case YoloModelVariant.yolo26sLiteRt:
-      case YoloModelVariant.yolo26s:
-      case YoloModelVariant.yolo26sQnn:
-        return YoloModelVariant.yolo26sQnn;
-    }
-  }
-
-  // LiteRT models use .tflite; ExecuTorch models use .pte.
   String get primaryAssetFileName => isLiteRt
       ? '${assetBaseNames.first}.tflite'
       : '${assetBaseNames.first}.pte';
@@ -191,35 +128,14 @@ enum YoloModelVariant {
     return assetBaseNames.take(3).map((name) => '$name$ext').join(' / ');
   }
 
-  YoloModelVariant? get suggestedQnnVariant {
-    switch (this) {
-      case YoloModelVariant.yolo26nLiteRt:
-      case YoloModelVariant.yolo26n:
-        return YoloModelVariant.yolo26nQnn;
-      case YoloModelVariant.yolo26sLiteRt:
-      case YoloModelVariant.yolo26s:
-        return YoloModelVariant.yolo26sQnn;
-      case YoloModelVariant.yolo26nQnn:
-      case YoloModelVariant.yolo26sQnn:
-        return null;
-    }
-  }
-
   String selectorSubtitle({
     required YoloRuntimeBackend backend,
   }) {
     if (isLiteRt) {
       return '${family.selectorDescription} · 예: $assetFileHint';
     }
-    if (isQnnLowered) {
-      const base = 'QNN-lowered .pte (deprecated)';
-      if (backend.isQnn) {
-        return '$base · 예: $assetFileHint';
-      }
-      return '$base · QNN backend 전환 후 사용 · 예: $assetFileHint';
-    }
     final base = family.selectorDescription;
-    if (backend.isQnn) {
+    if (backend.isLiteRt) {
       return '$base · XNNPACK backend에서 사용';
     }
     return base;
@@ -292,11 +208,7 @@ Map<String, List<YoloModelSelectorChoice>> buildYoloModelSelectorSections({
             variant: variant,
             title: variant.label,
             subtitle: variant.selectorSubtitle(backend: backend),
-            enabled: backend.isQnn
-                ? variant.isQnnLowered
-                : backend.isLiteRt
-                    ? variant.isLiteRt
-                    : !variant.isQnnLowered && !variant.isLiteRt,
+            enabled: backend.isLiteRt ? variant.isLiteRt : !variant.isLiteRt,
           ),
       ],
   };

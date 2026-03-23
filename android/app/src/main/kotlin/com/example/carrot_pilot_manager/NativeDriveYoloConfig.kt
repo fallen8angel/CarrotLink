@@ -24,7 +24,7 @@ data class NativeDriveYoloConfig(
     private const val DEFAULT_SOURCE_HEIGHT = 1208
     private const val DEFAULT_INPUT_WIDTH = 416
     private const val DEFAULT_INPUT_HEIGHT = 416
-    private const val DEFAULT_SAMPLE_PERIOD_MS = 200
+    private const val DEFAULT_SAMPLE_PERIOD_MS = 60
 
     val disabled = NativeDriveYoloConfig()
 

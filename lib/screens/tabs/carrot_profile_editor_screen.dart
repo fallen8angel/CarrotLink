@@ -27,6 +27,20 @@ enum _ProfileMenuAction {
   delete,
 }
 
+class _ProfileListEntry {
+  final String group;
+  final CarrotSettingItemMeta? item;
+
+  const _ProfileListEntry.header(this.group) : item = null;
+
+  const _ProfileListEntry.item({
+    required this.group,
+    required this.item,
+  });
+
+  bool get isHeader => item == null;
+}
+
 class CarrotProfileEditorScreen extends StatefulWidget {
   final CarrotProfileDocument document;
   final CarrotProfileService service;
@@ -45,6 +59,7 @@ class CarrotProfileEditorScreen extends StatefulWidget {
 class _CarrotProfileEditorScreenState extends State<CarrotProfileEditorScreen> {
   static const Duration _highlightDuration = Duration(seconds: 2);
   static const Duration _persistDebounceDelay = Duration(milliseconds: 320);
+  static const Duration _visibleGroupSyncThrottle = Duration(milliseconds: 80);
   static const double _estimatedRowExtent = 150.0;
   static const double _estimatedGroupHeaderExtent = 52.0;
 
@@ -62,7 +77,12 @@ class _CarrotProfileEditorScreenState extends State<CarrotProfileEditorScreen> {
   final Map<String, double> _groupScrollOffsets = <String, double>{};
   final Map<String, int> _stepByName = <String, int>{};
   final Map<String, double> _sliderDraftByName = <String, double>{};
+  final Map<String, List<CarrotSettingItemMeta>> _filteredItemsByGroup =
+      <String, List<CarrotSettingItemMeta>>{};
+  final Map<String, int> _itemEntryIndexes = <String, int>{};
   final Set<String> _collapsedGroups = <String>{};
+  List<String> _visibleGroups = const <String>[];
+  List<_ProfileListEntry> _listEntries = const <_ProfileListEntry>[];
   String _query = '';
   String? _highlightedItemName;
   String? _visibleGroup;
@@ -73,6 +93,7 @@ class _CarrotProfileEditorScreenState extends State<CarrotProfileEditorScreen> {
   bool _groupSyncScheduled = false;
   bool _persistInFlight = false;
   bool _persistQueued = false;
+  Timer? _groupSyncThrottleTimer;
 
   CarrotSettingsBundle get _bundle => _document.bundle;
 
@@ -80,7 +101,8 @@ class _CarrotProfileEditorScreenState extends State<CarrotProfileEditorScreen> {
   void initState() {
     super.initState();
     _document = widget.document;
-    _visibleGroup = _orderedGroups().isEmpty ? null : _orderedGroups().first;
+    _rebuildVisibleEntries();
+    _visibleGroup = _visibleGroups.isEmpty ? null : _visibleGroups.first;
     _searchController = TextEditingController()
       ..addListener(() {
         final next = _searchController.text.trim();
@@ -90,6 +112,7 @@ class _CarrotProfileEditorScreenState extends State<CarrotProfileEditorScreen> {
           if (_query.isNotEmpty) {
             _collapsedGroups.clear();
           }
+          _rebuildVisibleEntries();
         });
         _groupScrollOffsets.clear();
         _scheduleVisibleGroupSync();
@@ -105,6 +128,7 @@ class _CarrotProfileEditorScreenState extends State<CarrotProfileEditorScreen> {
   void dispose() {
     _highlightClearTimer?.cancel();
     _persistDebounceTimer?.cancel();
+    _groupSyncThrottleTimer?.cancel();
     _scrollController.removeListener(_scheduleVisibleGroupSync);
     _searchController.dispose();
     _scrollController.dispose();
@@ -125,27 +149,63 @@ class _CarrotProfileEditorScreenState extends State<CarrotProfileEditorScreen> {
   }
 
   List<CarrotSettingItemMeta> _filteredItemsForGroup(String group) {
-    final items =
-        _bundle.itemsByGroup[group] ?? const <CarrotSettingItemMeta>[];
-    if (_query.isEmpty) return items;
-    final needle = _query.toLowerCase();
-    return items.where((item) {
-      final haystack = <String>[
-        item.displayTitle,
-        item.name,
-        item.displayDescription ?? '',
-        item.group,
-      ].join(' ').toLowerCase();
-      return haystack.contains(needle);
-    }).toList();
+    return _filteredItemsByGroup[group] ?? const <CarrotSettingItemMeta>[];
   }
 
   List<CarrotSettingItemMeta> _flatFilteredItems() {
     final out = <CarrotSettingItemMeta>[];
-    for (final group in _orderedGroups()) {
+    for (final group in _visibleGroups) {
       out.addAll(_filteredItemsForGroup(group));
     }
     return out;
+  }
+
+  void _rebuildVisibleEntries() {
+    final nextFilteredItemsByGroup = <String, List<CarrotSettingItemMeta>>{};
+    final nextVisibleGroups = <String>[];
+    final nextListEntries = <_ProfileListEntry>[];
+    final nextItemEntryIndexes = <String, int>{};
+    final needle = _query.toLowerCase();
+
+    for (final group in _orderedGroups()) {
+      final baseItems =
+          _bundle.itemsByGroup[group] ?? const <CarrotSettingItemMeta>[];
+      final items = needle.isEmpty
+          ? baseItems
+          : baseItems.where((item) {
+              final haystack = <String>[
+                item.displayTitle,
+                item.name,
+                item.displayDescription ?? '',
+                item.group,
+              ].join(' ').toLowerCase();
+              return haystack.contains(needle);
+            }).toList();
+      if (items.isEmpty) continue;
+      nextFilteredItemsByGroup[group] = items;
+      nextVisibleGroups.add(group);
+      nextListEntries.add(_ProfileListEntry.header(group));
+      if (_query.isEmpty && _collapsedGroups.contains(group)) continue;
+      for (final item in items) {
+        nextItemEntryIndexes[item.name] = nextListEntries.length;
+        nextListEntries.add(_ProfileListEntry.item(group: group, item: item));
+      }
+    }
+
+    _filteredItemsByGroup
+      ..clear()
+      ..addAll(nextFilteredItemsByGroup);
+    _itemEntryIndexes
+      ..clear()
+      ..addAll(nextItemEntryIndexes);
+    _visibleGroups = nextVisibleGroups;
+    _listEntries = nextListEntries;
+    if (_visibleGroups.isEmpty) {
+      _visibleGroup = null;
+    } else if (_visibleGroup == null ||
+        !_visibleGroups.contains(_visibleGroup)) {
+      _visibleGroup = _visibleGroups.first;
+    }
   }
 
   dynamic _effectiveValue(CarrotSettingItemMeta item) {
@@ -184,6 +244,7 @@ class _CarrotProfileEditorScreenState extends State<CarrotProfileEditorScreen> {
       } else {
         _collapsedGroups.add(group);
       }
+      _rebuildVisibleEntries();
       _visibleGroup = group;
     });
     _groupScrollOffsets.clear();
@@ -194,20 +255,20 @@ class _CarrotProfileEditorScreenState extends State<CarrotProfileEditorScreen> {
     if (_collapsedGroups.isEmpty) return;
     setState(() {
       _collapsedGroups.clear();
+      _rebuildVisibleEntries();
     });
     _groupScrollOffsets.clear();
     _scheduleVisibleGroupSync();
   }
 
   void _collapseAllGroups() {
-    final groups = _orderedGroups()
-        .where((group) => _filteredItemsForGroup(group).isNotEmpty)
-        .toList();
+    final groups = _visibleGroups;
     if (groups.isEmpty) return;
     setState(() {
       _collapsedGroups
         ..clear()
         ..addAll(groups);
+      _rebuildVisibleEntries();
     });
     _groupScrollOffsets.clear();
     _scheduleVisibleGroupSync();
@@ -216,17 +277,23 @@ class _CarrotProfileEditorScreenState extends State<CarrotProfileEditorScreen> {
   void _scheduleVisibleGroupSync() {
     if (_groupSyncScheduled) return;
     _groupSyncScheduled = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _groupSyncScheduled = false;
-      if (!mounted) return;
-      _syncVisibleGroup();
+    _groupSyncThrottleTimer?.cancel();
+    _groupSyncThrottleTimer = Timer(_visibleGroupSyncThrottle, () {
+      _groupSyncThrottleTimer = null;
+      if (!mounted) {
+        _groupSyncScheduled = false;
+        return;
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _groupSyncScheduled = false;
+        if (!mounted) return;
+        _syncVisibleGroup();
+      });
     });
   }
 
   void _syncVisibleGroup() {
-    final groups = _orderedGroups()
-        .where((group) => _filteredItemsForGroup(group).isNotEmpty)
-        .toList();
+    final groups = _visibleGroups;
     if (groups.isEmpty) {
       if (_visibleGroup != null) {
         setState(() => _visibleGroup = null);
@@ -308,14 +375,19 @@ class _CarrotProfileEditorScreenState extends State<CarrotProfileEditorScreen> {
   Future<void> _focusItemByName(String itemName) async {
     final group = _groupForItemName(itemName);
     if (group != null && _collapsedGroups.contains(group)) {
-      setState(() => _collapsedGroups.remove(group));
+      setState(() {
+        _collapsedGroups.remove(group);
+        _rebuildVisibleEntries();
+      });
     }
-    final items = _flatFilteredItems();
-    final index = items.indexWhere((e) => e.name == itemName);
+    final entryIndex = _itemEntryIndexes[itemName];
+    if (entryIndex == null) return;
+    final visibleItems = _flatFilteredItems();
+    final index = visibleItems.indexWhere((e) => e.name == itemName);
     if (index < 0) return;
 
     if (_scrollController.hasClients) {
-      final target = (index * _estimatedRowExtent).toDouble();
+      final target = _estimateEntryScrollOffset(entryIndex);
       final max = _scrollController.position.maxScrollExtent;
       await _scrollController.animateTo(
         target.clamp(0.0, max),
@@ -336,6 +408,18 @@ class _CarrotProfileEditorScreenState extends State<CarrotProfileEditorScreen> {
       );
     }
     _setHighlighted(itemName);
+  }
+
+  double _estimateEntryScrollOffset(int targetIndex) {
+    if (targetIndex <= 0) return 0.0;
+    const itemGap = 10.0;
+    var offset = 0.0;
+    for (var i = 0; i < targetIndex && i < _listEntries.length; i++) {
+      offset += _listEntries[i].isHeader
+          ? _estimatedGroupHeaderExtent
+          : _estimatedRowExtent + itemGap;
+    }
+    return offset;
   }
 
   String get _statusModeText {
@@ -385,6 +469,7 @@ class _CarrotProfileEditorScreenState extends State<CarrotProfileEditorScreen> {
             settingsBundleJson: saved.settingsBundleJson,
           );
         }
+        _rebuildVisibleEntries();
         if (!_persistQueued) break;
       }
     } catch (e) {
@@ -1090,9 +1175,7 @@ class _CarrotProfileEditorScreenState extends State<CarrotProfileEditorScreen> {
       UiWindowClass.large => 104.0,
       UiWindowClass.extraLarge => 104.0,
     };
-    final groups = _orderedGroups()
-        .where((group) => _filteredItemsForGroup(group).isNotEmpty)
-        .toList();
+    final groups = _visibleGroups;
     final listBottomPadding = 92.0 + bottomInset;
 
     return Scaffold(
@@ -1234,7 +1317,7 @@ class _CarrotProfileEditorScreenState extends State<CarrotProfileEditorScreen> {
                       )
                     : Container(
                         key: _listViewportKey,
-                        child: ListView(
+                        child: ListView.builder(
                           controller: _scrollController,
                           padding: EdgeInsets.fromLTRB(
                             horizontalPadding,
@@ -1242,79 +1325,73 @@ class _CarrotProfileEditorScreenState extends State<CarrotProfileEditorScreen> {
                             horizontalPadding,
                             listBottomPadding,
                           ),
-                          children: [
-                            for (final group in groups) ...[
-                              Builder(
-                                builder: (context) {
-                                  final items = _filteredItemsForGroup(group);
-                                  final isCollapsed = _query.isEmpty &&
-                                      _collapsedGroups.contains(group);
-                                  return Padding(
-                                    padding:
-                                        const EdgeInsets.fromLTRB(2, 8, 2, 8),
-                                    child: CarrotGroupSectionHeader(
-                                      key: _groupHeaderKeyFor(group),
-                                      title: group,
-                                      count: items.length,
-                                      isCollapsed: isCollapsed,
-                                      onTap: () => _toggleGroup(group),
-                                    ),
-                                  );
-                                },
-                              ),
-                              if (!(_query.isEmpty &&
-                                  _collapsedGroups.contains(group)))
-                                ..._filteredItemsForGroup(group).map((item) {
-                                  final effectiveValue = _effectiveValue(item);
-                                  final sliderValue = _sliderValueFor(item);
-                                  final step = item.isBooleanLike
+                          itemCount: _listEntries.length,
+                          itemBuilder: (context, index) {
+                            final entry = _listEntries[index];
+                            if (entry.isHeader) {
+                              final group = entry.group;
+                              final items = _filteredItemsForGroup(group);
+                              final isCollapsed = _query.isEmpty &&
+                                  _collapsedGroups.contains(group);
+                              return Padding(
+                                padding: const EdgeInsets.fromLTRB(2, 8, 2, 8),
+                                child: CarrotGroupSectionHeader(
+                                  key: _groupHeaderKeyFor(group),
+                                  title: group,
+                                  count: items.length,
+                                  isCollapsed: isCollapsed,
+                                  onTap: () => _toggleGroup(group),
+                                ),
+                              );
+                            }
+
+                            final item = entry.item!;
+                            final effectiveValue = _effectiveValue(item);
+                            final sliderValue = _sliderValueFor(item);
+                            final step =
+                                item.isBooleanLike ? null : _stepFor(item);
+                            return Padding(
+                              padding: EdgeInsets.only(bottom: listItemGap),
+                              child: KeyedSubtree(
+                                key: _rowKeyFor(item.name),
+                                child: CarrotSettingRowCard(
+                                  item: item,
+                                  value: effectiveValue,
+                                  isSaving: false,
+                                  isHighlighted:
+                                      _highlightedItemName == item.name,
+                                  quickStep: step,
+                                  onValueCommitted: item.isBooleanLike
                                       ? null
-                                      : _stepFor(item);
-                                  return Padding(
-                                    padding:
-                                        EdgeInsets.only(bottom: listItemGap),
-                                    child: KeyedSubtree(
-                                      key: _rowKeyFor(item.name),
-                                      child: CarrotSettingRowCard(
-                                        item: item,
-                                        value: effectiveValue,
-                                        isSaving: false,
-                                        isHighlighted:
-                                            _highlightedItemName == item.name,
-                                        quickStep: step,
-                                        onValueCommitted: item.isBooleanLike
-                                            ? null
-                                            : (next) => unawaited(
-                                                _saveValue(item, next)),
-                                        onBooleanChanged: item.isBooleanLike
-                                            ? (next) => _saveValue(
-                                                  item,
-                                                  next ? 1 : 0,
-                                                )
-                                            : null,
-                                        onTap: () => _openEditor(item),
-                                        onDecrement: null,
-                                        onIncrement: null,
-                                        onQuickInput: item.isBooleanLike
-                                            ? null
-                                            : () => _showQuickValueInput(item),
-                                        onStepTap: item.isBooleanLike
-                                            ? null
-                                            : () => _cycleStep(item),
-                                        sliderValue: sliderValue,
-                                        sliderMin: item.min?.toDouble(),
-                                        sliderMax: item.max?.toDouble(),
-                                        sliderDivisions: step == null
-                                            ? null
-                                            : _sliderDivisions(item, step),
-                                        onSliderChanged: null,
-                                        onSliderChangeEnd: null,
-                                      ),
-                                    ),
-                                  );
-                                }),
-                            ],
-                          ],
+                                      : (next) =>
+                                          unawaited(_saveValue(item, next)),
+                                  onBooleanChanged: item.isBooleanLike
+                                      ? (next) => _saveValue(
+                                            item,
+                                            next ? 1 : 0,
+                                          )
+                                      : null,
+                                  onTap: () => _openEditor(item),
+                                  onDecrement: null,
+                                  onIncrement: null,
+                                  onQuickInput: item.isBooleanLike
+                                      ? null
+                                      : () => _showQuickValueInput(item),
+                                  onStepTap: item.isBooleanLike
+                                      ? null
+                                      : () => _cycleStep(item),
+                                  sliderValue: sliderValue,
+                                  sliderMin: item.min?.toDouble(),
+                                  sliderMax: item.max?.toDouble(),
+                                  sliderDivisions: step == null
+                                      ? null
+                                      : _sliderDivisions(item, step),
+                                  onSliderChanged: null,
+                                  onSliderChangeEnd: null,
+                                ),
+                              ),
+                            );
+                          },
                         ),
                       ),
               ),

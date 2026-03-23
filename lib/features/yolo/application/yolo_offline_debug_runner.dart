@@ -1,6 +1,5 @@
 import 'package:flutter/services.dart';
 
-import '../domain/entities/yolo_runtime_backend.dart';
 import 'yolo_debug_settings_store.dart';
 import 'yolo_native_config_payload_builder.dart';
 import 'yolo_runtime_status_store.dart';
@@ -17,23 +16,15 @@ class YoloOfflineDebugRunner {
   ) {
     var effective = settings.copyWith(enabled: true);
     var forcedBoxesVisible = false;
-    var forcedRuntimeBackend = false;
 
     if (!effective.showBoxes && !effective.showLabels) {
       effective = effective.copyWith(showBoxes: true);
       forcedBoxesVisible = true;
     }
 
-    // Generic playback models are still not QNN-lowered, so keep the
-    // requested backend for diagnostics instead of silently swapping it.
-    if (effective.runtimeBackend == YoloRuntimeBackend.executorchQnn) {
-      forcedRuntimeBackend = false;
-    }
-
     return _OfflineDebugSettingsResolution(
       settings: effective,
       forcedBoxesVisible: forcedBoxesVisible,
-      forcedRuntimeBackend: forcedRuntimeBackend,
     );
   }
 
@@ -47,9 +38,6 @@ class YoloOfflineDebugRunner {
       state['yoloBoxes'] = true;
       state['offlineOverlayFallback'] = 'forced_boxes_visible';
       state['offlineOverlayHint'] = 'boxes_enabled_for_playback_visibility';
-    }
-    if (resolution.forcedRuntimeBackend) {
-      state['offlineBackendFallback'] = 'playback_backend_forced';
     }
   }
 
@@ -193,10 +181,8 @@ class _OfflineDebugSettingsResolution {
   const _OfflineDebugSettingsResolution({
     required this.settings,
     required this.forcedBoxesVisible,
-    required this.forcedRuntimeBackend,
   });
 
   final YoloDebugSettings settings;
   final bool forcedBoxesVisible;
-  final bool forcedRuntimeBackend;
 }

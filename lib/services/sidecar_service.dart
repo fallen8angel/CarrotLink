@@ -13,6 +13,7 @@ class SidecarService {
   static const String hudBootstrapProfile = 'p1';
   static const String c4HudBootstrapProfile = 'p1c4';
   static const String c4DriveRuntimeProfile = 'p2c4';
+  static const String c4MinimalGraphicsRuntimeProfile = 'p2c4m';
   static const String driveRuntimeProfile = 'p2d';
   static const String fullRuntimeProfile = 'p2';
 
@@ -72,6 +73,7 @@ class SidecarService {
     'p1',
     c4HudBootstrapProfile,
     c4DriveRuntimeProfile,
+    c4MinimalGraphicsRuntimeProfile,
     driveRuntimeProfile,
     'p2',
     'p3',
@@ -142,6 +144,7 @@ class SidecarService {
     switch ((profile ?? '').trim().toLowerCase()) {
       case c4HudBootstrapProfile:
       case c4DriveRuntimeProfile:
+      case c4MinimalGraphicsRuntimeProfile:
       case driveRuntimeProfile:
       case fullRuntimeProfile:
       case 'p3':
@@ -177,11 +180,21 @@ class SidecarService {
   }
 
   static bool profileOmitsCarState(String? profile) =>
-      isC4GraphicsBootstrapProfile(profile);
+      isC4GraphicsBootstrapProfile(profile) ||
+      (profile ?? '').trim().toLowerCase() == c4MinimalGraphicsRuntimeProfile;
 
   static String driveRuntimeProfileForFlavor(String? repoFlavor) {
+    return driveRuntimeProfileForFlavorWithPreference(repoFlavor);
+  }
+
+  static String driveRuntimeProfileForFlavorWithPreference(
+    String? repoFlavor, {
+    bool preferMinimalC4 = false,
+  }) {
     return (repoFlavor ?? '').trim().toLowerCase() == repoFlavorC4
-        ? c4DriveRuntimeProfile
+        ? (preferMinimalC4
+            ? c4MinimalGraphicsRuntimeProfile
+            : c4DriveRuntimeProfile)
         : driveRuntimeProfile;
   }
 
@@ -463,7 +476,7 @@ if profile in ("p2", "p3", "p4"):
     raise SystemExit(0 if full_ready else 1)
 if profile in ("p2d", "p2c4"):
     raise SystemExit(0 if drive_ready else 1)
-if profile in ("p1c4",):
+if profile in ("p1c4", "p2c4m"):
     raise SystemExit(0 if graphics_ready else 1)
 raise SystemExit(0 if (vehicle_ready or hud_ready) else 1)
 PY
@@ -1763,7 +1776,7 @@ if profile in ("p2", "p3", "p4"):
     raise SystemExit(0 if full_ready else 1)
 if profile in ("p2d", "p2c4"):
     raise SystemExit(0 if drive_ready else 1)
-if profile == "p1c4":
+if profile in ("p1c4", "p2c4m"):
     raise SystemExit(0 if graphics_ready else 1)
 raise SystemExit(0 if (vehicle_ready or hud_ready) else 1)
 PY

@@ -776,6 +776,7 @@ class CarrotSettingEditSheet extends StatefulWidget {
 
 class _CarrotSettingEditSheetState extends State<CarrotSettingEditSheet> {
   late final TextEditingController _inputController;
+  late final List<int> _sortedUnitCycle;
   late double _value;
   late int _step;
   bool _saving = false;
@@ -784,6 +785,8 @@ class _CarrotSettingEditSheetState extends State<CarrotSettingEditSheet> {
   @override
   void initState() {
     super.initState();
+    _sortedUnitCycle =
+        widget.unitCycle.where((e) => e > 0).toSet().toList()..sort();
     final initial = _toDouble(widget.currentValue) ??
         _toDouble(widget.item.defaultValue) ??
         (widget.item.min?.toDouble() ?? 0);
@@ -799,7 +802,7 @@ class _CarrotSettingEditSheetState extends State<CarrotSettingEditSheet> {
   }
 
   int _defaultStep() {
-    final cycle = widget.unitCycle.where((e) => e > 0).toSet().toList()..sort();
+    final cycle = _sortedUnitCycle;
     if (cycle.isEmpty) {
       return (widget.item.unit ?? 1) <= 0 ? 1 : widget.item.unit!;
     }
@@ -1017,7 +1020,7 @@ class _CarrotSettingEditSheetState extends State<CarrotSettingEditSheet> {
             spacing: 8,
             runSpacing: 8,
             children:
-                (widget.unitCycle.where((e) => e > 0).toSet().toList()..sort())
+                _sortedUnitCycle
                     .map(
                       (unit) => ChoiceChip(
                         label: Text('$unit'),

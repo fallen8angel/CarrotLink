@@ -76,6 +76,7 @@ enum _CameraAttachPhase {
 
 enum _AdaptiveCameraQualityMode {
   lowLatency,
+  quality,
 }
 
 enum _DriveBannerKind {
@@ -217,7 +218,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   Size _nativeOverlaySize = Size.zero;
   Rect _nativeOverlayVisibleViewportRect = Rect.zero;
   int _lastNativeOverlayPushUs = 0;
-  static const int _nativeOverlayPushIntervalUs = 16666;
+  static const int _nativeOverlayPushIntervalUs = 12500;
   bool _nativeOverlayPushBusy = false;
   int _nativeOverlayRelayoutEpoch = 0;
   int _nativeOverlayRelayoutGraceUntilUs = 0;
@@ -248,7 +249,7 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const int _overlayFrameBufferSize = 220;
   static const int _overlaySyncMaxDeltaLive = 8;
   static const bool _strictFrameLock = true;
-  static const int _strictFrameHoldUs = 120000;
+  static const int _strictFrameHoldUs = 80000;
   static const int _staleDegradedPublishAfterUs = 900000;
   static const int _cameraFrameStaleUs = 350000;
   static const int _cameraHealthyFrameAgeUs = 1200000;
@@ -257,8 +258,16 @@ class _LiveDriveCanvasScreenState extends State<LiveDriveCanvasScreen>
   static const int _cameraFirstFrameForceReattachUs = 6000000;
   static const int _cameraFirstFrameRecoveryCooldownUs = 8000000;
   static const int _startupProvisionalNativeSettleFrames = 3;
+  static const int _smartRecoveryCheckIntervalUs = 250000;
+  static const int _smartRecoveryStartupOverlayRepushUs = 1400000;
+  static const int _smartRecoveryStartupCameraReattachUs = 2800000;
+  static const int _smartRecoveryRuntimeOverlayRepushUs = 700000;
+  static const int _smartRecoveryRuntimeCameraReattachUs = 1800000;
+  static const int _smartRecoveryOverlayRepushCooldownUs = 1400000;
+  static const int _smartRecoveryCameraReattachCooldownUs = 4500000;
+  static const int _smartRecoverySidecarCooldownUs = 2500000;
   static const int _interpMinUs = 6000;
-  static const int _interpMaxUs = 50000;
+  static const int _interpMaxUs = 32000;
   static const Duration _cameraDiagCaptureCooldown = Duration(seconds: 12);
   static const Duration _cameraTransientErrorEscalationDelay =
       Duration(seconds: 5);
@@ -318,6 +327,11 @@ fi
   int _cameraStartupSocketFailureCount = 0;
   int _lastCameraFirstFrameRecoveryUs = 0;
   int _cameraFirstFrameRecoveryCount = 0;
+  int _lastSmartRecoveryCheckUs = 0;
+  int _lastSmartOverlayRepushUs = 0;
+  int _lastSmartCameraReattachUs = 0;
+  int _lastSmartSidecarRecoveryUs = 0;
+  int _smartRecoveryEscalationLevel = 0;
   _CameraAttachPhase _cameraAttachPhase = _CameraAttachPhase.idle;
   Timer? _cameraTransientErrorTimer;
   String? _cameraTransientErrorSource;
@@ -750,6 +764,11 @@ fi
     _cameraStartupSocketFailureCount = 0;
     _lastCameraFirstFrameRecoveryUs = 0;
     _cameraFirstFrameRecoveryCount = 0;
+    _lastSmartRecoveryCheckUs = 0;
+    _lastSmartOverlayRepushUs = 0;
+    _lastSmartCameraReattachUs = 0;
+    _lastSmartSidecarRecoveryUs = 0;
+    _smartRecoveryEscalationLevel = 0;
     _cameraAttachPhase = _CameraAttachPhase.idle;
     _lastPublishedModelFrameId = null;
     _lastSyncHitUs = 0;
@@ -887,6 +906,11 @@ fi
   String _driveYoloValue(String key) => _driveYoloValueImpl(key);
 
   String _driveYoloFrameSummary() => _driveYoloFrameSummaryImpl();
+
+  Widget? _buildLiveYoloOverlay({
+    required Size fallbackSourceSize,
+  }) =>
+      _buildLiveYoloOverlayImpl(fallbackSourceSize: fallbackSourceSize);
 
   void _onLayerToggleChanged(StateSetter setLocalState, VoidCallback update) =>
       _onLayerToggleChangedImpl(setLocalState, update);

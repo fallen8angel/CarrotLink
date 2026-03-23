@@ -552,6 +552,13 @@ extension _LiveDriveCanvasLayoutComponents on _LiveDriveCanvasScreenState {
                           },
                         ),
                       ),
+                    if (_buildLiveYoloOverlay(
+                          fallbackSourceSize: effectiveSourceSize,
+                        )
+                        case final liveYoloOverlay?)
+                      Positioned.fill(
+                        child: liveYoloOverlay,
+                      ),
                     if (_shouldShowCameraLoadingOverlay())
                       const Positioned.fill(
                         child: ColoredBox(

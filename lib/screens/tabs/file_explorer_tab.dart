@@ -30,6 +30,8 @@ enum _FileListTransitionDirection { neutral, forward, backward }
 
 const int _maxInternalTextEditBytes = 4 * 1024 * 1024;
 const int _maxInternalTextReadOnlyBytes = 32 * 1024 * 1024;
+const int _maxExternalPreviewOpenWarningBytes = 128 * 1024 * 1024;
+const int _maxExternalPreviewOpenHardLimitBytes = 1024 * 1024 * 1024; // 1GB
 const Duration _previewCacheMaxAge = Duration(days: 3);
 const Duration _previewCacheCleanupMinInterval = Duration(minutes: 5);
 const int _previewCacheMaxFiles = 32;
@@ -453,26 +455,30 @@ class FileExplorerTabState extends State<FileExplorerTab> {
     String actionLabel = '확인',
   }) async {
     final controller = TextEditingController(text: initialValue ?? '');
-    return showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(title),
-        content: TextField(
-          controller: controller,
-          decoration: InputDecoration(labelText: label),
+    try {
+      return await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text(title),
+          content: TextField(
+            controller: controller,
+            decoration: InputDecoration(labelText: label),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("취소"),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+              child: Text(actionLabel),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text("취소"),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
-            child: Text(actionLabel),
-          ),
-        ],
-      ),
-    );
+      );
+    } finally {
+      controller.dispose();
+    }
   }
 
   Future<bool> _confirm({
@@ -505,7 +511,7 @@ class FileExplorerTabState extends State<FileExplorerTab> {
 
   Future<void> _createFolder() async {
     final name =
-        await _promptInput(title: "새 폴더", label: "폴더 이름", actionLabel: "생성");
+        await _promptInput(title: "새 폴더", initialValue: "untitled", label: "폴더 이름", actionLabel: "생성");
     if (name == null || name.isEmpty) return;
     try {
       await _controller.createDirectory(name);
@@ -519,7 +525,7 @@ class FileExplorerTabState extends State<FileExplorerTab> {
 
   Future<void> _createFile() async {
     final name =
-        await _promptInput(title: "새 파일", label: "파일 이름", actionLabel: "생성");
+        await _promptInput(title: "새 파일", initialValue: "untitled", label: "파일 이름", actionLabel: "생성");
     if (name == null || name.isEmpty) return;
     try {
       await _controller.createFile(name);
@@ -615,15 +621,22 @@ class FileExplorerTabState extends State<FileExplorerTab> {
 
   Future<void> _showBookmarks() async {
     if (!mounted) return;
+    final bookmarks = _controller.bookmarks.toList();
     showModalBottomSheet<void>(
       context: context,
-      builder: (ctx) => ListView(
-        children: [
-          const ListTile(
-            title: Text("북마크", style: TextStyle(fontWeight: FontWeight.bold)),
-          ),
-          ..._controller.bookmarks.map(
-            (path) => ListTile(
+      builder: (ctx) => ListView.builder(
+        // +2 for header and "add current" footer.
+        itemCount: bookmarks.length + 2,
+        itemBuilder: (ctx, index) {
+          if (index == 0) {
+            return const ListTile(
+              title:
+                  Text("북마크", style: TextStyle(fontWeight: FontWeight.bold)),
+            );
+          }
+          if (index <= bookmarks.length) {
+            final path = bookmarks[index - 1];
+            return ListTile(
               leading: const Icon(Icons.bookmark),
               title: Text(path),
               onTap: () {
@@ -637,9 +650,9 @@ class FileExplorerTabState extends State<FileExplorerTab> {
                   await _controller.removeBookmark(path);
                 },
               ),
-            ),
-          ),
-          ListTile(
+            );
+          }
+          return ListTile(
             leading: const Icon(Icons.add),
             title: const Text("현재 위치 추가"),
             onTap: () async {
@@ -649,8 +662,8 @@ class FileExplorerTabState extends State<FileExplorerTab> {
                 CustomToast.show(context, "북마크 추가됨");
               }
             },
-          ),
-        ],
+          );
+        },
       ),
     );
   }
@@ -675,11 +688,30 @@ class FileExplorerTabState extends State<FileExplorerTab> {
     }
   }
 
+  /// Parse octal permission string from SftpName.longname (e.g. "drwxr-xr-x").
+  String _parseCurrentPermissions(SftpName item) {
+    try {
+      final mode = item.longname;
+      if (mode.length < 10) return '755';
+      final perms = mode.substring(1, 10); // "rwxr-xr-x"
+      int octal = 0;
+      for (var i = 0; i < 9; i++) {
+        if (perms[i] != '-') {
+          octal |= 1 << (8 - i);
+        }
+      }
+      return octal.toRadixString(8).padLeft(3, '0');
+    } catch (_) {
+      return '755';
+    }
+  }
+
   Future<void> _changePermissions(SftpName item) async {
+    final currentPerms = _parseCurrentPermissions(item);
     final perms = await _promptInput(
       title: "권한 변경 (chmod)",
-      initialValue: "755",
-      label: "예: 755",
+      initialValue: currentPerms,
+      label: "현재: $currentPerms",
     );
     if (perms == null || perms.isEmpty) return;
     try {
@@ -750,6 +782,7 @@ class FileExplorerTabState extends State<FileExplorerTab> {
     if (_controller.selectedCount == 0) return;
     final name = await _promptInput(
       title: "압축 파일명",
+      initialValue: "archive.tar.gz",
       label: "예: backup.zip / backup.tar.gz",
       actionLabel: "압축",
     );
@@ -825,8 +858,11 @@ class FileExplorerTabState extends State<FileExplorerTab> {
       if (ssh == null || !ssh.isConnected) {
         throw Exception('기기와 연결되어 있지 않습니다.');
       }
+      final targetPath = name.startsWith('/')
+          ? p.posix.normalize(name)
+          : p.posix.normalize(p.posix.join(_controller.currentPath, name));
       final cmd =
-          "mkdir -p -- ${_quoteShell(name)} && (tar -xf ${_quoteShell(fullPath)} -C ${_quoteShell(name)} || unzip -o ${_quoteShell(fullPath)} -d ${_quoteShell(name)})";
+          "mkdir -p -- ${_quoteShell(targetPath)} && (tar -xf ${_quoteShell(fullPath)} -C ${_quoteShell(targetPath)} || unzip -o ${_quoteShell(fullPath)} -d ${_quoteShell(targetPath)})";
       final result = await ssh.executeCommandResult(
         cmd,
         timeout: const Duration(minutes: 5),
@@ -838,6 +874,7 @@ class FileExplorerTabState extends State<FileExplorerTab> {
       }
       if (!mounted) return;
       CustomToast.show(context, "압축 해제 완료");
+      await _refresh();
     } catch (e) {
       if (!mounted) return;
       CustomToast.show(context, "압축 해제 실패: $e", isError: true);
@@ -974,6 +1011,24 @@ class FileExplorerTabState extends State<FileExplorerTab> {
     }
 
     final remotePath = _controller.fullPathOf(item);
+    final size = item.attr.size ?? 0;
+
+    if (size > _maxExternalPreviewOpenHardLimitBytes) {
+      final sizeGb = (size / (1024 * 1024 * 1024)).toStringAsFixed(1);
+      if (!mounted) return;
+      CustomToast.show(context, "$sizeGb GB — 외부 열기에 너무 큰 파일입니다.",
+          isError: true);
+      return;
+    }
+    if (size > _maxExternalPreviewOpenWarningBytes) {
+      final sizeMb = (size / (1024 * 1024)).toStringAsFixed(1);
+      final shouldContinue = await _confirm(
+        title: "대용량 외부 열기",
+        message:
+            "$sizeMb MB 파일입니다. 임시 저장 후 외부 앱으로 열기 때문에 오래 걸리거나 실패할 수 있습니다. 계속하시겠습니까?",
+      );
+      if (!shouldContinue) return;
+    }
 
     try {
       _schedulePreviewCacheCleanup();
@@ -1076,8 +1131,7 @@ class FileExplorerTabState extends State<FileExplorerTab> {
     try {
       await _openTextFile(
         item,
-        showErrorToast:
-            _knownTextExtensions.contains(_fileExtension(item.filename)),
+        showErrorToast: false,
       );
     } catch (e) {
       final isTooLarge = e.toString().contains('TEXT_FILE_TOO_LARGE');
@@ -1090,9 +1144,7 @@ class FileExplorerTabState extends State<FileExplorerTab> {
         await _openFileExternally(item);
         return;
       }
-      if (!_knownTextExtensions.contains(_fileExtension(item.filename))) {
-        await _openFileExternally(item);
-      }
+      await _openFileExternally(item);
     }
   }
 
@@ -1524,8 +1576,7 @@ class FileExplorerTabState extends State<FileExplorerTab> {
             AnimatedBuilder(
               animation: _browserListenable,
               builder: (context, _) {
-                if (!(_controller.isLoading &&
-                    _controller.visibleFiles.isNotEmpty)) {
+                if (!_controller.isLoading) {
                   return const SizedBox.shrink();
                 }
                 return const LinearProgressIndicator();

@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.view.PixelCopy
 import android.view.SurfaceView
+import java.util.ArrayDeque
 
 data class NativeDriveYoloPixelSamplerSnapshot(
     val pixelPathReady: Boolean = false,
@@ -35,10 +36,15 @@ data class NativeDriveYoloPixelSamplerSnapshot(
 
 class NativeDriveYoloPixelSampler(
     private val surfaceView: SurfaceView,
-    private val onPixelSampled: (NativeDriveYoloFrame, Bitmap) -> Unit,
+    private val onPixelSampled: (NativeDriveYoloFrame, Bitmap, () -> Unit) -> Unit,
 ) {
+  companion object {
+    private const val MAX_BITMAP_POOL_SIZE = 3
+  }
+
   private val workerThread = HandlerThread("CarrotYoloPixelSampler").apply { start() }
   private val workerHandler = Handler(workerThread.looper)
+  private val bitmapPoolLock = Any()
 
   @Volatile private var config: NativeDriveYoloConfig = NativeDriveYoloConfig.disabled
   @Volatile private var copyInFlight = false
@@ -47,9 +53,12 @@ class NativeDriveYoloPixelSampler(
   @Volatile private var copyFailures = 0
   @Volatile private var copySkippedBusy = 0
   @Volatile private var lastCopyResult = "idle"
-  private var reusableBitmap: Bitmap? = null
-  private var reusableBitmapWidth = 0
-  private var reusableBitmapHeight = 0
+  private val availableBitmaps = ArrayDeque<Bitmap>()
+  private var pooledBitmapWidth = 0
+  private var pooledBitmapHeight = 0
+  @Volatile private var released = false
+  @Volatile private var lastCaptureWidth = 0
+  @Volatile private var lastCaptureHeight = 0
 
   fun updateConfig(config: NativeDriveYoloConfig) {
     this.config = config
@@ -60,6 +69,7 @@ class NativeDriveYoloPixelSampler(
       copyFailures = 0
       copySkippedBusy = 0
       lastCopyResult = "disabled"
+      clearBitmapPool()
     }
   }
 
@@ -82,9 +92,13 @@ class NativeDriveYoloPixelSampler(
       return false
     }
 
+    val capW = config.inputWidth.coerceAtLeast(64)
+    val capH = config.inputHeight.coerceAtLeast(64)
+    lastCaptureWidth = capW
+    lastCaptureHeight = capH
     val bitmap = obtainBitmap(
-        width = config.inputWidth.coerceAtLeast(64),
-        height = config.inputHeight.coerceAtLeast(64),
+        width = capW,
+        height = capH,
     )
     copyInFlight = true
     copyRequests += 1
@@ -97,10 +111,19 @@ class NativeDriveYoloPixelSampler(
           if (result == PixelCopy.SUCCESS) {
             copySuccesses += 1
             lastCopyResult = "success"
-            onPixelSampled(frame, bitmap)
+            try {
+              onPixelSampled(frame, bitmap) {
+                releaseBitmapToPool(bitmap)
+              }
+            } catch (_: Throwable) {
+              copyFailures += 1
+              lastCopyResult = "pixel_sample_consume_failed"
+              releaseBitmapToPool(bitmap)
+            }
           } else {
             copyFailures += 1
             lastCopyResult = "pixel_copy_result_$result"
+            releaseBitmapToPool(bitmap)
           }
           copyInFlight = false
         },
@@ -119,14 +142,14 @@ class NativeDriveYoloPixelSampler(
         copyFailures = copyFailures,
         copySkippedBusy = copySkippedBusy,
         lastCopyResult = lastCopyResult,
-        sampleWidth = config.inputWidth.coerceAtLeast(64),
-        sampleHeight = config.inputHeight.coerceAtLeast(64),
+        sampleWidth = lastCaptureWidth,
+        sampleHeight = lastCaptureHeight,
     )
   }
 
   fun release() {
-    reusableBitmap?.recycle()
-    reusableBitmap = null
+    released = true
+    clearBitmapPool()
     try {
       workerThread.quitSafely()
     } catch (_: Throwable) {
@@ -134,17 +157,81 @@ class NativeDriveYoloPixelSampler(
   }
 
   private fun obtainBitmap(width: Int, height: Int): Bitmap {
-    val existing = reusableBitmap
-    if (existing != null &&
-        reusableBitmapWidth == width &&
-        reusableBitmapHeight == height &&
-        !existing.isRecycled) {
-      return existing
+    synchronized(bitmapPoolLock) {
+      if (pooledBitmapWidth != width || pooledBitmapHeight != height) {
+        recycleAvailableBitmapsLocked()
+        pooledBitmapWidth = width
+        pooledBitmapHeight = height
+      }
+      while (availableBitmaps.isNotEmpty()) {
+        val existing = availableBitmaps.removeFirst()
+        if (!existing.isRecycled) {
+          return existing
+        }
+      }
     }
-    existing?.recycle()
-    reusableBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    reusableBitmapWidth = width
-    reusableBitmapHeight = height
-    return reusableBitmap!!
+    return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
   }
+
+  private fun releaseBitmapToPool(bitmap: Bitmap) {
+    if (bitmap.isRecycled) {
+      return
+    }
+    synchronized(bitmapPoolLock) {
+      if (released) {
+        bitmap.recycle()
+        return
+      }
+      if (bitmap.width != pooledBitmapWidth ||
+          bitmap.height != pooledBitmapHeight ||
+          availableBitmaps.size >= MAX_BITMAP_POOL_SIZE) {
+        bitmap.recycle()
+        return
+      }
+      availableBitmaps.addLast(bitmap)
+    }
+  }
+
+  private fun clearBitmapPool() {
+    synchronized(bitmapPoolLock) {
+      recycleAvailableBitmapsLocked()
+      pooledBitmapWidth = 0
+      pooledBitmapHeight = 0
+    }
+  }
+
+  private fun recycleAvailableBitmapsLocked() {
+    while (availableBitmaps.isNotEmpty()) {
+      val bitmap = availableBitmaps.removeFirst()
+      if (!bitmap.isRecycled) {
+        bitmap.recycle()
+      }
+    }
+  }
+
+}
+
+/**
+ * Computes the PixelCopy target size that preserves source aspect ratio
+ * within [inputWidth]×[inputHeight] bounds.  The runtime then pads with
+ * letterbox gray to fill the remaining space.
+ *
+ * Falls back to full [inputWidth]×[inputHeight] when source dims are unknown.
+ */
+internal fun letterboxCaptureSize(
+    sourceWidth: Int,
+    sourceHeight: Int,
+    inputWidth: Int,
+    inputHeight: Int,
+): Pair<Int, Int> {
+  if (sourceWidth <= 0 || sourceHeight <= 0 || inputWidth <= 0 || inputHeight <= 0) {
+    return inputWidth to inputHeight
+  }
+  val scale = minOf(
+      inputWidth.toFloat() / sourceWidth,
+      inputHeight.toFloat() / sourceHeight,
+  )
+  val w = (sourceWidth * scale).toInt().coerceIn(1, inputWidth)
+  val h = (sourceHeight * scale).toInt().coerceIn(1, inputHeight)
+  return w to h
 }

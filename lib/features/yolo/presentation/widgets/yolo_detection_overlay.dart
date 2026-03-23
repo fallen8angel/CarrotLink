@@ -13,6 +13,8 @@ class YoloDetectionOverlay extends StatefulWidget {
     required this.sourceHeight,
     required this.showBoxes,
     required this.showLabels,
+    this.detectionAgeUs = 0,
+    this.leadAreas = const <Rect>[],
   });
 
   final List<YoloDetection> detections;
@@ -21,20 +23,32 @@ class YoloDetectionOverlay extends StatefulWidget {
   final bool showBoxes;
   final bool showLabels;
 
+  /// Pipeline latency in microseconds — how old detections are when they arrive.
+  final int detectionAgeUs;
+
+  /// Openpilot lead area rects in source coordinates for track anchoring.
+  final List<Rect> leadAreas;
+
   @override
   State<YoloDetectionOverlay> createState() => _YoloDetectionOverlayState();
 }
 
 class _YoloDetectionOverlayState extends State<YoloDetectionOverlay>
     with SingleTickerProviderStateMixin {
-  static const Duration _trackTransitionDuration = Duration(milliseconds: 120);
-  static const Duration _missingHoldDuration = Duration(milliseconds: 140);
+  static const Duration _trackTransitionDuration = Duration(milliseconds: 60);
+  static const Duration _missingHoldDuration = Duration(milliseconds: 160);
   static const Duration _missingFadeDuration = Duration(milliseconds: 180);
-  static const double _minMatchScore = 0.18;
+  static const double _minMatchScore = 0.10;
+  static const double _kalmanAlphaPosition = 0.78;
+  static const double _kalmanBetaPosition = 0.18;
+  static const double _kalmanAlphaSize = 0.55;
+  static const double _kalmanBetaSize = 0.06;
+  static const double _predictionLeadFactor = 1.15;
 
   final List<_SmoothedDetectionTrack> _tracks = <_SmoothedDetectionTrack>[];
   late final Ticker _ticker;
   int _nextTrackId = 1;
+  int? _leadTrackId;
 
   @override
   void initState() {
@@ -46,7 +60,13 @@ class _YoloDetectionOverlayState extends State<YoloDetectionOverlay>
   @override
   void didUpdateWidget(covariant YoloDetectionOverlay oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!listEquals(oldWidget.detections, widget.detections)) {
+    if (oldWidget.sourceWidth != widget.sourceWidth ||
+        oldWidget.sourceHeight != widget.sourceHeight) {
+      _resetTracks();
+      return;
+    }
+    if (!listEquals(oldWidget.detections, widget.detections) ||
+        oldWidget.detectionAgeUs != widget.detectionAgeUs) {
       _reconcileDetections();
     }
   }
@@ -60,26 +80,52 @@ class _YoloDetectionOverlayState extends State<YoloDetectionOverlay>
   void _handleTick(Duration elapsed) {
     final nowUs = DateTime.now().microsecondsSinceEpoch;
     _tracks.removeWhere((track) => track.isExpired(nowUs));
-    if (!_tracks.any((track) => track.needsAnimation(nowUs))) {
+    final needsAnim = _tracks.any((track) => track.needsAnimation(nowUs));
+    if (!needsAnim) {
       _ticker.stop();
+      // No animation needed — skip repaint.
+      return;
     }
     if (!mounted) return;
     setState(() {});
   }
 
+  void _resetTracks() {
+    _tracks.clear();
+    _leadTrackId = null;
+    _nextTrackId = 1;
+    if (_ticker.isActive) {
+      _ticker.stop();
+    }
+    _reconcileDetections();
+  }
+
   void _reconcileDetections() {
     final nowUs = DateTime.now().microsecondsSinceEpoch;
+    final ageUs = widget.detectionAgeUs.clamp(0, 300000);
+    final measurementTimeUs = ageUs > 0 ? nowUs - ageUs : nowUs;
     final matchedTrackIds = <int>{};
     final sortedDetections = widget.detections.toList(growable: false)
       ..sort((left, right) => right.score.compareTo(left.score));
 
+    // Adaptive transition duration: match detection cadence when age is known.
+    final transitionDuration = ageUs > 20000
+        ? Duration(microseconds: (ageUs * 0.85).round().clamp(40000, 180000))
+        : _trackTransitionDuration;
+
     for (final detection in sortedDetections) {
-      final matched = _bestTrackFor(detection, nowUs, matchedTrackIds);
+      final matched = _bestTrackFor(
+        detection,
+        nowUs,
+        matchedTrackIds,
+        measurementTimeUs: measurementTimeUs,
+      );
       if (matched != null) {
         matched.adopt(
           detection,
           nowUs,
-          transitionDuration: _trackTransitionDuration,
+          transitionDuration: transitionDuration,
+          measurementTimeUs: measurementTimeUs,
         );
         matchedTrackIds.add(matched.id);
         continue;
@@ -88,6 +134,7 @@ class _YoloDetectionOverlayState extends State<YoloDetectionOverlay>
         id: _nextTrackId++,
         detection: detection,
         nowUs: nowUs,
+        measurementTimeUs: measurementTimeUs,
       );
       _tracks.add(track);
       matchedTrackIds.add(track.id);
@@ -99,12 +146,18 @@ class _YoloDetectionOverlayState extends State<YoloDetectionOverlay>
       }
       track.markMissing(
         nowUs,
-        holdDuration: _missingHoldDuration,
+        holdDuration: _leadTrackId == track.id
+            ? Duration(
+                microseconds:
+                    (_missingHoldDuration.inMicroseconds * 1.3).round(),
+              )
+            : _missingHoldDuration,
         fadeDuration: _missingFadeDuration,
       );
     }
 
     _tracks.removeWhere((track) => track.isExpired(nowUs));
+    _leadTrackId = _selectLeadTrack(nowUs);
     final shouldAnimate = _tracks.any((track) => track.needsAnimation(nowUs));
     if (shouldAnimate && !_ticker.isActive) {
       _ticker.start();
@@ -119,18 +172,23 @@ class _YoloDetectionOverlayState extends State<YoloDetectionOverlay>
   _SmoothedDetectionTrack? _bestTrackFor(
     YoloDetection detection,
     int nowUs,
-    Set<int> matchedTrackIds,
-  ) {
+    Set<int> matchedTrackIds, {
+    required int measurementTimeUs,
+  }) {
     _SmoothedDetectionTrack? bestTrack;
     var bestScore = double.negativeInfinity;
+    // Compare track prediction at measurement time (when frame was captured),
+    // not at nowUs, to avoid systematic lag offset in matching.
+    final matchTimeUs = measurementTimeUs;
     for (final track in _tracks) {
       if (matchedTrackIds.contains(track.id) || track.isExpired(nowUs)) {
         continue;
       }
-      if (track.classId != detection.classId) {
+      if (_trackingGroupForClass(track.classId) !=
+          _trackingGroupForClass(detection.classId)) {
         continue;
       }
-      final candidate = track.currentDetection(nowUs);
+      final candidate = track.currentDetection(matchTimeUs);
       final iou = _sourceIou(candidate, detection);
       final dx = candidate.sourceCenterX - detection.sourceCenterX;
       final dy = candidate.sourceCenterY - detection.sourceCenterY;
@@ -142,14 +200,54 @@ class _YoloDetectionOverlayState extends State<YoloDetectionOverlay>
           math.max(detection.sourceWidth, detection.sourceHeight),
         ),
       );
-      final maxDistance = math.max(92.0, sizeReference * 1.8);
-      if (distance > maxDistance && iou < 0.04) {
+      final maxDistance = math.max(160.0, sizeReference * 2.0);
+      if (distance > maxDistance && iou < 0.02) {
         continue;
       }
       final closeness = (1.0 - (distance / maxDistance)).clamp(0.0, 1.0);
-      final score = (iou * 1.35) +
-          (closeness * 0.75) +
-          (math.min(candidate.score, detection.score) * 0.15);
+      // Size similarity: reward when candidate and detection have similar dimensions.
+      final wRatio = math.min(candidate.sourceWidth, detection.sourceWidth) /
+          math.max(candidate.sourceWidth, detection.sourceWidth).clamp(1.0, double.infinity);
+      final hRatio = math.min(candidate.sourceHeight, detection.sourceHeight) /
+          math.max(candidate.sourceHeight, detection.sourceHeight).clamp(1.0, double.infinity);
+      final sizeSimilarity = math.sqrt(wRatio * hRatio).clamp(0.0, 1.0);
+      // Aspect ratio similarity: penalise shape changes.
+      final candAr = candidate.sourceWidth /
+          candidate.sourceHeight.clamp(1.0, double.infinity);
+      final detAr = detection.sourceWidth /
+          detection.sourceHeight.clamp(1.0, double.infinity);
+      final arSimilarity =
+          (math.min(candAr, detAr) / math.max(candAr, detAr).clamp(0.01, double.infinity))
+              .clamp(0.0, 1.0);
+      final exactClassBonus = track.classId == detection.classId ? 0.16 : 0.0;
+      final leadTrackBonus = track.id == _leadTrackId ? 0.22 : 0.0;
+      // Lead area anchoring: boost match when detection overlaps openpilot lead.
+      var leadAreaBonus = 0.0;
+      if (widget.leadAreas.isNotEmpty) {
+        final detRect = Rect.fromLTRB(
+          detection.sourceLeft,
+          detection.sourceTop,
+          detection.sourceRight,
+          detection.sourceBottom,
+        );
+        for (final leadRect in widget.leadAreas) {
+          final intersection = detRect.intersect(leadRect);
+          if (!intersection.isEmpty && intersection.width > 0 && intersection.height > 0) {
+            final detArea = detRect.width * detRect.height;
+            final overlap = (intersection.width * intersection.height) /
+                math.max(detArea, 1.0);
+            leadAreaBonus = math.max(leadAreaBonus, overlap * 0.30);
+          }
+        }
+      }
+      final score = (iou * 1.30) +
+          (closeness * 1.10) +
+          (sizeSimilarity * 0.45) +
+          (arSimilarity * 0.20) +
+          (math.min(candidate.score, detection.score) * 0.18) +
+          exactClassBonus +
+          leadTrackBonus +
+          leadAreaBonus;
       if (score > bestScore) {
         bestScore = score;
         bestTrack = track;
@@ -161,6 +259,25 @@ class _YoloDetectionOverlayState extends State<YoloDetectionOverlay>
     return bestTrack;
   }
 
+  String _trackingGroupForClass(int classId) {
+    switch (classId) {
+      case 2:
+      case 3:
+        return 'car'; // car + motorcycle
+      case 5:
+      case 7:
+        return 'large_vehicle'; // bus + truck
+      case 0:
+        return 'person';
+      case 1:
+        return 'bicycle';
+      case 9:
+        return 'traffic_light';
+      default:
+        return 'class_$classId';
+    }
+  }
+
   List<_RenderedDetection> _renderedDetections() {
     final nowUs = DateTime.now().microsecondsSinceEpoch;
     final rendered = <_RenderedDetection>[];
@@ -170,15 +287,67 @@ class _YoloDetectionOverlayState extends State<YoloDetectionOverlay>
       if (opacity <= 0.01) continue;
       rendered.add(
         _RenderedDetection(
+          trackId: track.id,
           detection: track.currentDetection(nowUs),
           opacity: opacity,
         ),
       );
     }
     rendered.sort(
-      (left, right) => right.detection.score.compareTo(left.detection.score),
+      (left, right) => _renderPriority(right).compareTo(_renderPriority(left)),
     );
     return rendered;
+  }
+
+  int? _selectLeadTrack(int nowUs) {
+    _SmoothedDetectionTrack? bestTrack;
+    var bestPriority = double.negativeInfinity;
+    for (final track in _tracks) {
+      if (track.isExpired(nowUs) || !_isVehicleClass(track.classId)) {
+        continue;
+      }
+      final priority = _detectionPriority(track.currentDetection(nowUs));
+      if (priority > bestPriority) {
+        bestPriority = priority;
+        bestTrack = track;
+      }
+    }
+    return bestTrack?.id;
+  }
+
+  bool _isVehicleClass(int classId) {
+    return classId == 2 || classId == 5 || classId == 7;
+  }
+
+  double _renderPriority(_RenderedDetection rendered) {
+    final leadBonus = rendered.trackId == _leadTrackId ? 0.35 : 0.0;
+    return _detectionPriority(rendered.detection) + leadBonus;
+  }
+
+  double _detectionPriority(YoloDetection detection) {
+    final centerBias = (1.0 -
+            ((detection.sourceCenterX / widget.sourceWidth - 0.5).abs() / 0.5))
+        .clamp(0.0, 1.0);
+    final centerY =
+        (detection.sourceCenterY / widget.sourceHeight).clamp(0.0, 1.0);
+    final areaRatio = ((detection.sourceWidth * detection.sourceHeight) /
+            (widget.sourceWidth * widget.sourceHeight))
+        .clamp(0.0, 1.0);
+    switch (detection.classId) {
+      case 2:
+      case 5:
+      case 7:
+        return (detection.score * 1.55) +
+            (centerBias * 0.60) +
+            (centerY * 0.75) +
+            math.min(areaRatio * 10.0, 0.45);
+      case 9:
+        return (detection.score * 1.30) +
+            ((1.0 - centerY) * 0.45) +
+            (centerBias * 0.15);
+      default:
+        return detection.score;
+    }
   }
 
   @override
@@ -225,33 +394,110 @@ class _SmoothedDetectionTrack {
     required this.id,
     required YoloDetection detection,
     required int nowUs,
-  })  : _from = detection,
-        _to = detection,
+    int? measurementTimeUs,
+  })  : _state = detection,
+        _renderFrom = detection,
+        _lastMeasurementUs = measurementTimeUs ?? nowUs,
         _transitionStartedUs = nowUs,
         _transitionDurationUs = 1;
 
   final int id;
-  YoloDetection _from;
-  YoloDetection _to;
+  YoloDetection _state;
+  YoloDetection _renderFrom;
+  int _lastMeasurementUs;
   int _transitionStartedUs;
   int _transitionDurationUs;
   int _holdUntilUs = 0;
   int _removeAfterUs = 0;
+  int _consecutiveMisses = 0;
+  double _velocityX = 0;
+  double _velocityY = 0;
+  double _velocityW = 0;
+  double _velocityH = 0;
 
-  int get classId => _to.classId;
+  int get classId => _state.classId;
 
   void adopt(
     YoloDetection detection,
     int nowUs, {
     required Duration transitionDuration,
+    int? measurementTimeUs,
   }) {
-    final current = currentDetection(nowUs);
-    _from = current;
-    _to = detection;
+    // Use measurement time (when frame was captured) for Kalman state,
+    // so prediction automatically compensates for pipeline latency.
+    final effectiveMeasurementUs = measurementTimeUs ?? nowUs;
+    final predicted = currentDetection(effectiveMeasurementUs);
+    final dtUs = math.max(1, effectiveMeasurementUs - _lastMeasurementUs);
+    final dtSec = dtUs / 1000000.0;
+
+    final predictedCx = predicted.sourceCenterX;
+    final predictedCy = predicted.sourceCenterY;
+    final predictedW = predicted.sourceWidth;
+    final predictedH = predicted.sourceHeight;
+
+    final measuredCx = detection.sourceCenterX;
+    final measuredCy = detection.sourceCenterY;
+    final measuredW = detection.sourceWidth;
+    final measuredH = detection.sourceHeight;
+
+    final residualCx = measuredCx - predictedCx;
+    final residualCy = measuredCy - predictedCy;
+    final residualW = measuredW - predictedW;
+    final residualH = measuredH - predictedH;
+
+    _velocityX = _clampVelocity(
+      (_velocityX +
+              ((_YoloDetectionOverlayState._kalmanBetaPosition * residualCx) /
+                  dtSec)) *
+          0.90,
+    );
+    _velocityY = _clampVelocity(
+      (_velocityY +
+              ((_YoloDetectionOverlayState._kalmanBetaPosition * residualCy) /
+                  dtSec)) *
+          0.90,
+    );
+    _velocityW = _clampVelocity(
+      (_velocityW +
+              ((_YoloDetectionOverlayState._kalmanBetaSize * residualW) /
+                  dtSec)) *
+          0.82,
+    );
+    _velocityH = _clampVelocity(
+      (_velocityH +
+              ((_YoloDetectionOverlayState._kalmanBetaSize * residualH) /
+                  dtSec)) *
+          0.82,
+    );
+
+    final correctedCx = predictedCx +
+        (_YoloDetectionOverlayState._kalmanAlphaPosition * residualCx);
+    final correctedCy = predictedCy +
+        (_YoloDetectionOverlayState._kalmanAlphaPosition * residualCy);
+    final correctedW =
+        predictedW + (_YoloDetectionOverlayState._kalmanAlphaSize * residualW);
+    final correctedH =
+        predictedH + (_YoloDetectionOverlayState._kalmanAlphaSize * residualH);
+
+    // _renderFrom captures current visual position for smooth transition.
+    _renderFrom = currentDetection(nowUs);
+    // _state is set at measurement time; _predictedState extrapolates forward
+    // by pipeline latency automatically when rendering at nowUs.
+    _state = _withSourceRect(
+      detection.copyWith(
+        score: (predicted.score * 0.20) + (detection.score * 0.80),
+      ),
+      centerX: correctedCx,
+      centerY: correctedCy,
+      width: correctedW,
+      height: correctedH,
+    );
+    _lastMeasurementUs = effectiveMeasurementUs;
     _transitionStartedUs = nowUs;
     _transitionDurationUs = math.max(1, transitionDuration.inMicroseconds);
     _holdUntilUs = 0;
     _removeAfterUs = 0;
+    _consecutiveMisses = 0;
   }
 
   void markMissing(
@@ -262,25 +508,48 @@ class _SmoothedDetectionTrack {
     if (_removeAfterUs > 0) {
       return;
     }
-    final current = currentDetection(nowUs);
-    _from = current;
-    _to = current;
-    _transitionStartedUs = nowUs;
-    _transitionDurationUs = 1;
+    _renderFrom = currentDetection(nowUs);
+    _consecutiveMisses += 1;
     _holdUntilUs = nowUs + holdDuration.inMicroseconds;
     _removeAfterUs = _holdUntilUs + fadeDuration.inMicroseconds;
+    _velocityX *= 0.80;
+    _velocityY *= 0.80;
+    _velocityW *= 0.70;
+    _velocityH *= 0.70;
   }
 
   YoloDetection currentDetection(int nowUs) {
+    final predicted = _predictedState(nowUs);
     if (_transitionDurationUs <= 1) {
-      return _to;
+      return predicted;
     }
-    final elapsed = (nowUs - _transitionStartedUs)
-        .clamp(0, _transitionDurationUs)
-        .toDouble();
-    final rawT = (elapsed / _transitionDurationUs).clamp(0.0, 1.0);
+    final elapsedUs =
+        (nowUs - _transitionStartedUs).clamp(0, _transitionDurationUs);
+    final rawT = (elapsedUs / _transitionDurationUs).clamp(0.0, 1.0);
     final easedT = 1.0 - math.pow(1.0 - rawT, 3).toDouble();
-    return YoloDetection.lerp(_from, _to, easedT);
+    return YoloDetection.lerp(_renderFrom, predicted, easedT);
+  }
+
+  YoloDetection _predictedState(int nowUs) {
+    // Allow up to 400ms prediction window to accommodate pipeline latency.
+    final elapsedUs = (nowUs - _lastMeasurementUs).clamp(0, 400000);
+    final dtSec = elapsedUs / 1000000.0;
+    final predictiveGain = _removeAfterUs > 0
+        ? 1.0
+        : _YoloDetectionOverlayState._predictionLeadFactor;
+    final centerX =
+        _state.sourceCenterX + (_velocityX * dtSec * predictiveGain);
+    final centerY =
+        _state.sourceCenterY + (_velocityY * dtSec * predictiveGain);
+    final width = _state.sourceWidth + (_velocityW * dtSec * 0.35);
+    final height = _state.sourceHeight + (_velocityH * dtSec * 0.35);
+    return _withSourceRect(
+      _state,
+      centerX: centerX,
+      centerY: centerY,
+      width: width,
+      height: height,
+    );
   }
 
   double opacity(int nowUs) {
@@ -300,28 +569,64 @@ class _SmoothedDetectionTrack {
     if (isExpired(nowUs)) {
       return false;
     }
+    if (_removeAfterUs > 0 && nowUs < _removeAfterUs) {
+      return true;
+    }
     final transitionEndsAtUs = _transitionStartedUs + _transitionDurationUs;
-    return nowUs < transitionEndsAtUs ||
-        (_removeAfterUs > 0 && nowUs < _removeAfterUs);
+    if (nowUs < transitionEndsAtUs) {
+      return true;
+    }
+    final velocityMagnitude = _velocityX.abs() +
+        _velocityY.abs() +
+        (_velocityW.abs() * 0.35) +
+        (_velocityH.abs() * 0.35);
+    return (nowUs - _lastMeasurementUs) < 400000 || velocityMagnitude > 12.0;
   }
 
   bool isExpired(int nowUs) {
     return _removeAfterUs > 0 && nowUs >= _removeAfterUs;
   }
+
+  static YoloDetection _withSourceRect(
+    YoloDetection base, {
+    required double centerX,
+    required double centerY,
+    required double width,
+    required double height,
+  }) {
+    final safeWidth = math.max(6.0, width);
+    final safeHeight = math.max(6.0, height);
+    final left = centerX - (safeWidth * 0.5);
+    final top = centerY - (safeHeight * 0.5);
+    return base.copyWith(
+      sourceLeft: left,
+      sourceTop: top,
+      sourceRight: left + safeWidth,
+      sourceBottom: top + safeHeight,
+    );
+  }
+
+  static double _clampVelocity(double value) {
+    return value.clamp(-1500.0, 1500.0).toDouble();
+  }
 }
 
 class _RenderedDetection {
-  const _RenderedDetection({
+  _RenderedDetection({
+    required this.trackId,
     required this.detection,
     required this.opacity,
-  });
+  }) : labelText =
+            '${detection.label} ${(detection.score * 100).toInt()}%';
 
+  final int trackId;
   final YoloDetection detection;
   final double opacity;
+  final String labelText;
 }
 
 class _YoloDetectionOverlayPainter extends CustomPainter {
-  const _YoloDetectionOverlayPainter({
+  _YoloDetectionOverlayPainter({
     required this.detections,
     required this.sourceWidth,
     required this.sourceHeight,
@@ -335,11 +640,26 @@ class _YoloDetectionOverlayPainter extends CustomPainter {
   final bool showBoxes;
   final bool showLabels;
 
+  // Reusable Paint objects — only color is updated per detection.
+  static final Paint _boxShadowPaint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 5.2;
+  static final Paint _boxStrokePaint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 2.8;
+  static final Paint _boxFillPaint = Paint()..style = PaintingStyle.fill;
+  static final Paint _labelFillPaint = Paint()..style = PaintingStyle.fill;
+  static final Paint _labelAccentPaint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 1.1;
+  static const Radius _boxRadius = Radius.circular(7);
+
   @override
   void paint(Canvas canvas, Size size) {
     if (detections.isEmpty || sourceWidth <= 0 || sourceHeight <= 0) return;
     final scaleX = size.width / sourceWidth;
     final scaleY = size.height / sourceHeight;
+    final labelMaxWidth = math.min(size.width * 0.6, 220.0);
 
     for (final rendered in detections) {
       final detection = rendered.detection;
@@ -352,26 +672,22 @@ class _YoloDetectionOverlayPainter extends CustomPainter {
       if (rect.width < 2 || rect.height < 2) continue;
 
       final opacity = rendered.opacity.clamp(0.0, 1.0);
-      final color = _colorForLabel(detection.label).withValues(
-        alpha: opacity,
-      );
+      final color = _colorForLabel(detection.label).withValues(alpha: opacity);
       if (showBoxes) {
-        final stroke = Paint()
-          ..color = color
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 2.2;
-        canvas.drawRRect(
-          RRect.fromRectAndRadius(rect, const Radius.circular(7)),
-          stroke,
-        );
+        _boxShadowPaint.color =
+            Colors.black.withValues(alpha: opacity * 0.88);
+        _boxStrokePaint.color = color;
+        _boxFillPaint.color = color.withValues(alpha: opacity * 0.12);
+        final shape = RRect.fromRectAndRadius(rect, _boxRadius);
+        canvas.drawRRect(shape, _boxFillPaint);
+        canvas.drawRRect(shape, _boxShadowPaint);
+        canvas.drawRRect(shape, _boxStrokePaint);
       }
 
       if (showLabels) {
-        final label =
-            '${detection.label} ${(detection.score * 100).toStringAsFixed(0)}%';
         final textPainter = TextPainter(
           text: TextSpan(
-            text: label,
+            text: rendered.labelText,
             style: TextStyle(
               color: Colors.white.withValues(alpha: opacity),
               fontSize: 10.5,
@@ -381,20 +697,19 @@ class _YoloDetectionOverlayPainter extends CustomPainter {
           textDirection: TextDirection.ltr,
           maxLines: 1,
           ellipsis: '…',
-        )..layout(maxWidth: math.min(size.width * 0.6, 220));
+        )..layout(maxWidth: labelMaxWidth);
         final labelRect = Rect.fromLTWH(
           rect.left,
           math.max(0, rect.top - textPainter.height - 8),
           textPainter.width + 10,
           textPainter.height + 6,
         );
-        final fill = Paint()
-          ..color = color.withValues(alpha: opacity * 0.82)
-          ..style = PaintingStyle.fill;
-        canvas.drawRRect(
-          RRect.fromRectAndRadius(labelRect, const Radius.circular(7)),
-          fill,
-        );
+        _labelFillPaint.color =
+            Colors.black.withValues(alpha: opacity * 0.84);
+        _labelAccentPaint.color = color.withValues(alpha: opacity * 0.92);
+        final labelShape = RRect.fromRectAndRadius(labelRect, _boxRadius);
+        canvas.drawRRect(labelShape, _labelFillPaint);
+        canvas.drawRRect(labelShape, _labelAccentPaint);
         textPainter.paint(
           canvas,
           Offset(labelRect.left + 5, labelRect.top + 3),

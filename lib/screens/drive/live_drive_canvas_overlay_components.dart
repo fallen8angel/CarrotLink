@@ -25,6 +25,8 @@ class _DriveOverlayPainter extends CustomPainter {
 
   static const double _baseSourceWidth = 1928.0;
   static const double _baseSourceHeight = 1208.0;
+  static const double _c4CanonicalSourceWidth = 1344.0;
+  static const double _c4CanonicalSourceHeight = 760.0;
   static const double _clipMargin = 500.0;
 
   // Keep some smoothing, but bias closer to live radar movement for lower lag.
@@ -213,6 +215,14 @@ class _DriveOverlayPainter extends CustomPainter {
       // calibrated for 1928x1208. Snap near-by metadata to the canonical size.
       if (dw <= 16.0 && dh <= 16.0) {
         return const Size(_baseSourceWidth, _baseSourceHeight);
+      }
+      final c4Dw = (sourceSize.width - _c4CanonicalSourceWidth).abs();
+      final c4Dh = (sourceSize.height - _c4CanonicalSourceHeight).abs();
+      final c4AltDh = (sourceSize.height - 768.0).abs();
+      // C4 livestream metadata can drift between 760 and 768 even though the
+      // actual decoder/native relay path is consistently 760px tall.
+      if (c4Dw <= 8.0 && (c4Dh <= 12.0 || c4AltDh <= 12.0)) {
+        return const Size(_c4CanonicalSourceWidth, _c4CanonicalSourceHeight);
       }
       return sourceSize;
     }

@@ -10,7 +10,6 @@ import '../../ui/adaptive/window_class.dart';
 import '../../services/ssh_service.dart';
 import '../../widgets/connection_required_view.dart';
 import '../../services/device_action_service.dart';
-import '../../widgets/design_components.dart';
 import '../../widgets/custom_toast.dart';
 
 enum _GitToolsMenuAction {
@@ -2052,378 +2051,298 @@ class _GitTabState extends State<GitTab> {
     await _runGitAction(DeviceActionType.gitSync, "Git Sync 완료");
   }
 
+  // ── Cached layout metrics ──────────────────────────────────────────
+  Size? _cachedViewportSize;
+  UiWindowClass? _cachedWindowClass;
+  _GitLayoutMetrics? _cachedLayout;
+
+  _GitLayoutMetrics _computeLayout(
+    Size viewportSize,
+    UiWindowInfo window,
+    UiLayoutTokens tokens,
+  ) {
+    if (_cachedLayout != null &&
+        _cachedViewportSize == viewportSize &&
+        _cachedWindowClass == window.windowClass) {
+      return _cachedLayout!;
+    }
+    _cachedViewportSize = viewportSize;
+    _cachedWindowClass = window.windowClass;
+    _cachedLayout = _GitLayoutMetrics.compute(
+      viewportSize: viewportSize,
+      window: window,
+      tokens: tokens,
+      isLoading: _isLoading,
+    );
+    return _cachedLayout!;
+  }
+
   @override
   Widget build(BuildContext context) {
     final viewportSize = MediaQuery.sizeOf(context);
-    final shortViewport = viewportSize.height < 620;
     final connected = context.watch<SSHService>().isConnected;
     final window = UiWindowInfo.of(context);
     final tokens = UiLayoutTokens.of(context);
-    final fixedTwoPaneLandscape = window.isLandscape &&
-        viewportSize.width >= 700.0 &&
-        (window.isCompact ||
-            window.isConstrainedLandscape ||
-            viewportSize.height < 700.0);
-    final useWideSplit = fixedTwoPaneLandscape ||
-        (!window.isConstrainedLandscape &&
-            window.isLandscape &&
-            (window.isExpandedOrAbove || viewportSize.width >= 680.0));
-    final compactLandscapeLayout =
-        fixedTwoPaneLandscape || (useWideSplit && shortViewport);
-    final outerHorizontal = compactLandscapeLayout
-        ? 10.0
-        : (window.isCompact
-            ? 12.0
-            : tokens.screenPadding.clamp(14.0, 28.0).toDouble());
-    final topPadding = compactLandscapeLayout
-        ? 8.0
-        : switch (window.windowClass) {
-            UiWindowClass.compact => tokens.sectionGap,
-            UiWindowClass.medium => tokens.itemGap + 4,
-            UiWindowClass.expanded => tokens.itemGap + 2,
-            UiWindowClass.large ||
-            UiWindowClass.extraLarge =>
-              tokens.itemGap + 2,
-          };
-    final bottomPanelPadding = compactLandscapeLayout
-        ? 8.0
-        : (window.isCompact ? tokens.itemGap + 2 : tokens.sectionGap + 2);
-    final logHeaderGap =
-        compactLandscapeLayout ? 8.0 : (window.isCompact ? 12.0 : 14.0);
-    final logContainerPadding =
-        compactLandscapeLayout ? 6.0 : (window.isCompact ? 8.0 : 10.0);
-    final logContainerRadius =
-        compactLandscapeLayout ? 8.0 : (window.isCompact ? 8.0 : 10.0);
+    final m = _computeLayout(viewportSize, window, tokens);
+
+    final fixedTwoPaneLandscape = m.fixedTwoPaneLandscape;
+    final compactLandscapeLayout = m.compactLandscapeLayout;
+    final useWideSplit = m.useWideSplit;
+    final outerHorizontal = m.outerHorizontal;
+    final topPadding = m.topPadding;
+    final bottomPanelPadding = m.bottomPanelPadding;
+    final logContainerPadding = m.logContainerPadding;
+    final logContainerRadius = m.logContainerRadius;
+    final logOverlayInset = m.logOverlayInset;
+    final logBottomOverlayReservedHeight = _isLoading
+        ? (compactLandscapeLayout ? 28.0 : (window.isCompact ? 32.0 : 36.0))
+        : 0.0;
     final logLineFontSize = _gitLogFontSizePt;
-    final actionSpacing = compactLandscapeLayout
-        ? 8.0
-        : (window.isCompact ? tokens.itemGap + 2 : 10.0);
-    final actionPaneWidth = compactLandscapeLayout
-        ? switch (window.windowClass) {
-            UiWindowClass.compact => 292.0,
-            UiWindowClass.medium => 304.0,
-            UiWindowClass.expanded => 316.0,
-            UiWindowClass.large => 324.0,
-            UiWindowClass.extraLarge => 332.0,
-          }
-        : switch (window.windowClass) {
-            UiWindowClass.compact => 300.0,
-            UiWindowClass.medium => 320.0,
-            UiWindowClass.expanded => 330.0,
-            UiWindowClass.large => 350.0,
-            UiWindowClass.extraLarge => 370.0,
-          };
-    final actionButtonExtent = compactLandscapeLayout
-        ? switch (window.windowClass) {
-            UiWindowClass.compact => 62.0,
-            UiWindowClass.medium => 60.0,
-            UiWindowClass.expanded => 58.0,
-            UiWindowClass.large => 56.0,
-            UiWindowClass.extraLarge => 56.0,
-          }
-        : switch (window.windowClass) {
-            UiWindowClass.compact => 76.0,
-            UiWindowClass.medium => 74.0,
-            UiWindowClass.expanded => 70.0,
-            UiWindowClass.large => 68.0,
-            UiWindowClass.extraLarge => 66.0,
-          };
-    final estimatedGridColumns = actionPaneWidth >= 960
-        ? 4
-        : (actionPaneWidth >= 700 ? 3 : (actionPaneWidth >= 280 ? 2 : 1));
-    const actionButtonCount = 4;
-    final estimatedGridRows =
-        (actionButtonCount + estimatedGridColumns - 1) ~/ estimatedGridColumns;
-    final estimatedActionBodyHeight = (estimatedGridRows * actionButtonExtent) +
-        ((estimatedGridRows - 1) * actionSpacing) +
-        actionSpacing +
-        actionButtonExtent +
-        8.0;
-    final baseActionPanelMaxHeight = switch (window.windowClass) {
-      UiWindowClass.compact => 430.0,
-      UiWindowClass.medium => 390.0,
-      UiWindowClass.expanded => 360.0,
-      UiWindowClass.large => 350.0,
-      UiWindowClass.extraLarge => 340.0,
-    };
-    final computedActionPanelMaxHeight =
-        (viewportSize.height * (shortViewport ? 0.38 : 0.46))
-            .clamp(140.0, baseActionPanelMaxHeight)
-            .toDouble();
-    final wideActionPanelMaxHeight =
-        computedActionPanelMaxHeight < estimatedActionBodyHeight
-            ? estimatedActionBodyHeight
-            : computedActionPanelMaxHeight;
-    final veryShortViewport = viewportSize.height < 520;
-    final actionPanelMaxHeight = useWideSplit
-        ? (compactLandscapeLayout
-            ? (viewportSize.height - (topPadding + bottomPanelPadding))
-                .clamp(220.0, wideActionPanelMaxHeight)
-                .toDouble()
-            : wideActionPanelMaxHeight)
-        : (veryShortViewport
-            ? computedActionPanelMaxHeight.clamp(120.0, 210.0).toDouble()
-            : computedActionPanelMaxHeight);
-    final actionPaneEffectiveMaxWidth =
-        (viewportSize.width * (compactLandscapeLayout ? 0.40 : 0.44))
-            .clamp(compactLandscapeLayout ? 276.0 : 240.0, actionPaneWidth)
-            .toDouble();
-    final actionPaneMinWidth = compactLandscapeLayout
-        ? 276.0
-        : switch (window.windowClass) {
-            UiWindowClass.compact => 200.0,
-            UiWindowClass.medium => 220.0,
-            UiWindowClass.expanded => 228.0,
-            UiWindowClass.large || UiWindowClass.extraLarge => 248.0,
-          };
+    final actionSpacing = m.actionSpacing;
+    final actionButtonExtent = m.actionButtonExtent;
+    final actionPanelMaxHeight = m.actionPanelMaxHeight;
+    final actionPaneEffectiveMaxWidth = m.actionPaneEffectiveMaxWidth;
+    final actionPaneMinWidth = m.actionPaneMinWidth;
 
     Widget buildLogCard() {
-      return DesignCard(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+      final overlayMenuIconSize =
+          compactLandscapeLayout ? 17.0 : (window.isCompact ? 18.0 : 20.0);
+      final overlayControl = DecoratedBox(
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.28),
+          borderRadius: BorderRadius.circular(logContainerRadius),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            LayoutBuilder(
-              builder: (context, constraints) {
-                final compactHeader = constraints.maxWidth < 360;
-                final headerIconSize = compactLandscapeLayout ? 16.0 : 18.0;
-                final headerMenuIconSize = compactLandscapeLayout
-                    ? 17.0
-                    : (compactHeader ? 18.0 : 20.0);
-                final title = Text(
-                  "Git 로그",
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                        fontWeight: FontWeight.w700,
-                        fontSize: compactLandscapeLayout ? 15.0 : null,
-                      ),
-                );
-                final menu = PopupMenuButton<_GitToolsMenuAction>(
-                  tooltip: "Git 옵션",
-                  enabled: !(_isLoading || _isLoadingSourceInfo),
-                  padding: compactLandscapeLayout
-                      ? const EdgeInsets.all(2)
-                      : compactHeader
-                          ? const EdgeInsets.all(2)
-                          : const EdgeInsets.all(8),
-                  constraints: compactLandscapeLayout
-                      ? const BoxConstraints(minWidth: 32, minHeight: 32)
-                      : compactHeader
-                          ? const BoxConstraints(minWidth: 34, minHeight: 34)
-                          : const BoxConstraints(minWidth: 40, minHeight: 40),
-                  icon: Icon(Icons.settings, size: headerMenuIconSize),
-                  onSelected: _handleGitToolsMenuAction,
-                  itemBuilder: (_) => [
-                    const PopupMenuItem(
-                      value: _GitToolsMenuAction.quickSetupFromLink,
-                      child: Text("소스 링크 자동 설정"),
-                    ),
-                    const PopupMenuDivider(),
-                    const PopupMenuItem(
-                      value: _GitToolsMenuAction.showDetails,
-                      child: Text("현재 Git 상세정보"),
-                    ),
-                    const PopupMenuDivider(),
-                    const PopupMenuItem(
-                      value: _GitToolsMenuAction.logDisplaySettings,
-                      child: Text("로그 표시 설정"),
-                    ),
-                    const PopupMenuDivider(),
-                    const PopupMenuItem(
-                      value: _GitToolsMenuAction.clearLogs,
-                      child: Text("로그 지우기"),
-                    ),
-                    const PopupMenuDivider(),
-                    const PopupMenuItem(
-                      value: _GitToolsMenuAction.advancedSettings,
-                      child: Text("고급 Git 설정"),
-                    ),
-                  ],
-                );
-                final loading = _isLoading
-                    ? Padding(
-                        padding: EdgeInsets.only(
-                            right: compactLandscapeLayout
-                                ? 4.0
-                                : (compactHeader ? 4.0 : 8.0)),
-                        child: SizedBox(
-                          width: compactLandscapeLayout ? 14 : 16,
-                          height: compactLandscapeLayout ? 14 : 16,
-                          child:
-                              const CircularProgressIndicator(strokeWidth: 2),
-                        ),
-                      )
-                    : const SizedBox.shrink();
-
-                return Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    Icon(
-                      Icons.terminal,
-                      size: headerIconSize,
-                      color: Theme.of(context).colorScheme.primary,
-                    ),
-                    SizedBox(
-                        width:
-                            compactLandscapeLayout ? 8.0 : tokens.itemGap + 2),
-                    Expanded(child: title),
-                    loading,
-                    menu,
-                  ],
-                );
-              },
-            ),
-            SizedBox(height: logHeaderGap),
-            Expanded(
-              child: connected
-                  ? Container(
-                      padding: EdgeInsets.all(logContainerPadding),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF1E1E1E),
-                        borderRadius: BorderRadius.circular(logContainerRadius),
-                        border: Border.all(
-                            color: Colors.grey.withValues(alpha: 0.2)),
-                      ),
-                      child: _logs.isEmpty
-                          ? Center(
-                              child: Text(
-                                _isLoading
-                                    ? 'Git 작업을 진행 중입니다...'
-                                    : '아직 Git 로그가 없습니다.',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(
-                                  color: Colors.grey[400],
-                                  fontSize:
-                                      compactLandscapeLayout ? 12.0 : 13.0,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                            )
-                          : ListView.builder(
-                              controller: _scrollController,
-                              itemCount: _logs.length,
-                              itemBuilder: (context, index) {
-                                final log = _logs[index];
-                                final isOld = log['isOld'] == 'true';
-                                final emphasisActive = _gitLogEmphasisLevel > 0;
-                                final messageColor = isOld && _gitLogDimOld
-                                    ? (emphasisActive
-                                        ? Colors.white70
-                                        : Colors.grey)
-                                    : Colors.white;
-                                final timeColor = isOld && _gitLogDimOld
-                                    ? (emphasisActive
-                                        ? Colors.greenAccent.shade100
-                                        : Colors.grey[600])
-                                    : Colors.greenAccent;
-                                final emphasisShadows =
-                                    switch (_gitLogEmphasisLevel) {
-                                  1 => const [
-                                      Shadow(
-                                        color: Colors.black87,
-                                        offset: Offset(1, 0),
-                                        blurRadius: 0,
-                                      ),
-                                      Shadow(
-                                        color: Colors.black87,
-                                        offset: Offset(-1, 0),
-                                        blurRadius: 0,
-                                      ),
-                                      Shadow(
-                                        color: Colors.black87,
-                                        offset: Offset(0, 1),
-                                        blurRadius: 0,
-                                      ),
-                                      Shadow(
-                                        color: Colors.black87,
-                                        offset: Offset(0, -1),
-                                        blurRadius: 0,
-                                      ),
-                                      Shadow(
-                                        color: Colors.black45,
-                                        offset: Offset(0, 0),
-                                        blurRadius: 3,
-                                      ),
-                                    ],
-                                  2 => const [
-                                      Shadow(
-                                        color: Colors.black,
-                                        offset: Offset(1.2, 0),
-                                        blurRadius: 0,
-                                      ),
-                                      Shadow(
-                                        color: Colors.black,
-                                        offset: Offset(-1.2, 0),
-                                        blurRadius: 0,
-                                      ),
-                                      Shadow(
-                                        color: Colors.black,
-                                        offset: Offset(0, 1.2),
-                                        blurRadius: 0,
-                                      ),
-                                      Shadow(
-                                        color: Colors.black,
-                                        offset: Offset(0, -1.2),
-                                        blurRadius: 0,
-                                      ),
-                                      Shadow(
-                                        color: Colors.black87,
-                                        offset: Offset(1, 1),
-                                        blurRadius: 3,
-                                      ),
-                                      Shadow(
-                                        color: Colors.black54,
-                                        offset: Offset(0, 0),
-                                        blurRadius: 6,
-                                      ),
-                                    ],
-                                  _ => null,
-                                };
-                                final text = RichText(
-                                  softWrap: _gitLogWrap,
-                                  overflow: TextOverflow.visible,
-                                  text: TextSpan(
-                                    style: TextStyle(
-                                      fontFamily: 'monospace',
-                                      fontSize: logLineFontSize,
-                                      color: messageColor,
-                                      height: 1.3,
-                                      shadows: emphasisShadows,
-                                    ),
-                                    children: [
-                                      TextSpan(
-                                        text: "[${log['time']}] ",
-                                        style: TextStyle(
-                                          color: timeColor,
-                                          fontWeight: FontWeight.w700,
-                                          shadows: emphasisShadows,
-                                        ),
-                                      ),
-                                      TextSpan(text: log['message']),
-                                    ],
-                                  ),
-                                );
-                                return Padding(
-                                  padding: EdgeInsets.symmetric(
-                                    vertical: compactLandscapeLayout
-                                        ? 1.5
-                                        : (window.isCompact ? 2.0 : 3.0),
-                                  ),
-                                  child: _gitLogWrap
-                                      ? text
-                                      : SingleChildScrollView(
-                                          scrollDirection: Axis.horizontal,
-                                          child: text,
-                                        ),
-                                );
-                              },
-                            ),
-                    )
-                  : const ConnectionRequiredView(
-                      description: 'Git 기능을 사용하려면 먼저 기기에 연결하세요.',
-                    ),
+            PopupMenuButton<_GitToolsMenuAction>(
+              tooltip: "Git 옵션",
+              enabled: !(_isLoading || _isLoadingSourceInfo),
+              padding: compactLandscapeLayout
+                  ? const EdgeInsets.all(2)
+                  : const EdgeInsets.all(6),
+              constraints: compactLandscapeLayout
+                  ? const BoxConstraints(minWidth: 32, minHeight: 32)
+                  : const BoxConstraints(minWidth: 38, minHeight: 38),
+              icon: Icon(Icons.settings, size: overlayMenuIconSize),
+              onSelected: _handleGitToolsMenuAction,
+              itemBuilder: (_) => [
+                const PopupMenuItem(
+                  value: _GitToolsMenuAction.quickSetupFromLink,
+                  child: Text("소스 링크 자동 설정"),
+                ),
+                const PopupMenuDivider(),
+                const PopupMenuItem(
+                  value: _GitToolsMenuAction.showDetails,
+                  child: Text("현재 Git 상세정보"),
+                ),
+                const PopupMenuDivider(),
+                const PopupMenuItem(
+                  value: _GitToolsMenuAction.logDisplaySettings,
+                  child: Text("로그 표시 설정"),
+                ),
+                const PopupMenuDivider(),
+                const PopupMenuItem(
+                  value: _GitToolsMenuAction.clearLogs,
+                  child: Text("로그 지우기"),
+                ),
+                const PopupMenuDivider(),
+                const PopupMenuItem(
+                  value: _GitToolsMenuAction.advancedSettings,
+                  child: Text("고급 Git 설정"),
+                ),
+              ],
             ),
           ],
+        ),
+      );
+
+      final emptyContent = Center(
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+            logContainerPadding,
+            logContainerPadding,
+            logContainerPadding,
+            logContainerPadding + logBottomOverlayReservedHeight,
+          ),
+          child: Text(
+            _isLoading ? 'Git 작업을 진행 중입니다...' : '아직 Git 로그가 없습니다.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.grey[400],
+              fontSize: compactLandscapeLayout ? 12.0 : 13.0,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+      );
+
+      final logList = ListView.builder(
+        controller: _scrollController,
+        padding: EdgeInsets.fromLTRB(
+          logContainerPadding,
+          logContainerPadding,
+          logContainerPadding,
+          logContainerPadding + logBottomOverlayReservedHeight,
+        ),
+        itemCount: _logs.length,
+        itemBuilder: (context, index) {
+          final log = _logs[index];
+          final isOld = log['isOld'] == 'true';
+          final emphasisActive = _gitLogEmphasisLevel > 0;
+          final messageColor = isOld && _gitLogDimOld
+              ? (emphasisActive ? Colors.white70 : Colors.grey)
+              : Colors.white;
+          final timeColor = isOld && _gitLogDimOld
+              ? (emphasisActive
+                  ? Colors.greenAccent.shade100
+                  : Colors.grey[600])
+              : Colors.greenAccent;
+          final emphasisShadows = switch (_gitLogEmphasisLevel) {
+            1 => const [
+                Shadow(
+                  color: Colors.black87,
+                  offset: Offset(1, 0),
+                  blurRadius: 0,
+                ),
+                Shadow(
+                  color: Colors.black87,
+                  offset: Offset(-1, 0),
+                  blurRadius: 0,
+                ),
+                Shadow(
+                  color: Colors.black87,
+                  offset: Offset(0, 1),
+                  blurRadius: 0,
+                ),
+                Shadow(
+                  color: Colors.black87,
+                  offset: Offset(0, -1),
+                  blurRadius: 0,
+                ),
+                Shadow(
+                  color: Colors.black45,
+                  offset: Offset(0, 0),
+                  blurRadius: 3,
+                ),
+              ],
+            2 => const [
+                Shadow(
+                  color: Colors.black,
+                  offset: Offset(1.2, 0),
+                  blurRadius: 0,
+                ),
+                Shadow(
+                  color: Colors.black,
+                  offset: Offset(-1.2, 0),
+                  blurRadius: 0,
+                ),
+                Shadow(
+                  color: Colors.black,
+                  offset: Offset(0, 1.2),
+                  blurRadius: 0,
+                ),
+                Shadow(
+                  color: Colors.black,
+                  offset: Offset(0, -1.2),
+                  blurRadius: 0,
+                ),
+                Shadow(
+                  color: Colors.black87,
+                  offset: Offset(1, 1),
+                  blurRadius: 3,
+                ),
+                Shadow(
+                  color: Colors.black54,
+                  offset: Offset(0, 0),
+                  blurRadius: 6,
+                ),
+              ],
+            _ => null,
+          };
+          final text = RichText(
+            softWrap: _gitLogWrap,
+            overflow: TextOverflow.visible,
+            text: TextSpan(
+              style: TextStyle(
+                fontFamily: 'monospace',
+                fontSize: logLineFontSize,
+                color: messageColor,
+                height: 1.3,
+                shadows: emphasisShadows,
+              ),
+              children: [
+                TextSpan(
+                  text: "[${log['time']}] ",
+                  style: TextStyle(
+                    color: timeColor,
+                    fontWeight: FontWeight.w700,
+                    shadows: emphasisShadows,
+                  ),
+                ),
+                TextSpan(text: log['message']),
+              ],
+            ),
+          );
+          return Padding(
+            padding: EdgeInsets.symmetric(
+              vertical:
+                  compactLandscapeLayout ? 1.5 : (window.isCompact ? 2.0 : 3.0),
+            ),
+            child: _gitLogWrap
+                ? text
+                : SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: text,
+                  ),
+          );
+        },
+      );
+
+      return DecoratedBox(
+        decoration: BoxDecoration(
+          color: const Color(0xFF1E1E1E),
+          borderRadius: BorderRadius.circular(logContainerRadius),
+          border: Border.all(color: Colors.grey.withValues(alpha: 0.2)),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(logContainerRadius),
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: connected
+                    ? (_logs.isEmpty ? emptyContent : logList)
+                    : Padding(
+                        padding: EdgeInsets.fromLTRB(
+                          logContainerPadding,
+                          logContainerPadding,
+                          logContainerPadding,
+                          logContainerPadding + logBottomOverlayReservedHeight,
+                        ),
+                        child: const ConnectionRequiredView(
+                          description: 'Git 기능을 사용하려면 먼저 기기에 연결하세요.',
+                        ),
+                      ),
+              ),
+              Positioned(
+                top: logOverlayInset,
+                right: logOverlayInset,
+                child: overlayControl,
+              ),
+              if (_isLoading)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: logOverlayInset,
+                  child: Center(
+                    child: _GitLogLoadingIndicator(
+                      compact: compactLandscapeLayout || window.isCompact,
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ),
       );
     }
@@ -2688,6 +2607,86 @@ class _GitTabState extends State<GitTab> {
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(radius),
           side: BorderSide(color: color.withValues(alpha: 0.3)),
+        ),
+      ),
+    );
+  }
+}
+
+class _GitLogLoadingIndicator extends StatefulWidget {
+  final bool compact;
+
+  const _GitLogLoadingIndicator({required this.compact});
+
+  @override
+  State<_GitLogLoadingIndicator> createState() =>
+      _GitLogLoadingIndicatorState();
+}
+
+class _GitLogLoadingIndicatorState extends State<_GitLogLoadingIndicator> {
+  Timer? _timer;
+  int _activeIndex = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(milliseconds: 240), (_) {
+      if (!mounted) return;
+      setState(() {
+        _activeIndex = (_activeIndex + 1) % 3;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dotSize = widget.compact ? 5.0 : 6.0;
+    final spacing = widget.compact ? 5.0 : 6.0;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.36),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Padding(
+        padding: EdgeInsets.symmetric(
+          horizontal: widget.compact ? 10 : 12,
+          vertical: widget.compact ? 6 : 7,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: List.generate(3, (index) {
+            final isActive = index == _activeIndex;
+            return Padding(
+              padding: EdgeInsets.symmetric(horizontal: spacing / 2),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                width: dotSize,
+                height: dotSize,
+                decoration: BoxDecoration(
+                  color: isActive
+                      ? Colors.greenAccent
+                      : Colors.white.withValues(alpha: 0.34),
+                  borderRadius: BorderRadius.circular(dotSize),
+                  boxShadow: isActive
+                      ? [
+                          BoxShadow(
+                            color: Colors.greenAccent.withValues(alpha: 0.45),
+                            blurRadius: widget.compact ? 6 : 8,
+                            spreadRadius: 0.4,
+                          ),
+                        ]
+                      : null,
+                ),
+              ),
+            );
+          }),
         ),
       ),
     );
@@ -3593,6 +3592,183 @@ class _BranchListDialogState extends State<_BranchListDialog> {
           child: const Text("닫기"),
         ),
       ],
+    );
+  }
+}
+
+// ── Pre-computed layout metrics for _GitTabState.build() ──────────
+class _GitLayoutMetrics {
+  final bool fixedTwoPaneLandscape;
+  final bool compactLandscapeLayout;
+  final bool useWideSplit;
+  final double outerHorizontal;
+  final double topPadding;
+  final double bottomPanelPadding;
+  final double logContainerPadding;
+  final double logContainerRadius;
+  final double logOverlayInset;
+  final double actionSpacing;
+  final double actionButtonExtent;
+  final double actionPanelMaxHeight;
+  final double actionPaneEffectiveMaxWidth;
+  final double actionPaneMinWidth;
+
+  const _GitLayoutMetrics._({
+    required this.fixedTwoPaneLandscape,
+    required this.compactLandscapeLayout,
+    required this.useWideSplit,
+    required this.outerHorizontal,
+    required this.topPadding,
+    required this.bottomPanelPadding,
+    required this.logContainerPadding,
+    required this.logContainerRadius,
+    required this.logOverlayInset,
+    required this.actionSpacing,
+    required this.actionButtonExtent,
+    required this.actionPanelMaxHeight,
+    required this.actionPaneEffectiveMaxWidth,
+    required this.actionPaneMinWidth,
+  });
+
+  factory _GitLayoutMetrics.compute({
+    required Size viewportSize,
+    required UiWindowInfo window,
+    required UiLayoutTokens tokens,
+    required bool isLoading,
+  }) {
+    final shortViewport = viewportSize.height < 620;
+    final fixedTwoPaneLandscape = window.isLandscape &&
+        viewportSize.width >= 700.0 &&
+        (window.isCompact ||
+            window.isConstrainedLandscape ||
+            viewportSize.height < 700.0);
+    final useWideSplit = fixedTwoPaneLandscape ||
+        (!window.isConstrainedLandscape &&
+            window.isLandscape &&
+            (window.isExpandedOrAbove || viewportSize.width >= 680.0));
+    final compactLandscapeLayout =
+        fixedTwoPaneLandscape || (useWideSplit && shortViewport);
+    final outerHorizontal = compactLandscapeLayout
+        ? 10.0
+        : (window.isCompact
+            ? 12.0
+            : tokens.screenPadding.clamp(14.0, 28.0).toDouble());
+    final topPadding = compactLandscapeLayout
+        ? 8.0
+        : switch (window.windowClass) {
+            UiWindowClass.compact => tokens.sectionGap,
+            UiWindowClass.medium => tokens.itemGap + 4,
+            UiWindowClass.expanded => tokens.itemGap + 2,
+            UiWindowClass.large ||
+            UiWindowClass.extraLarge =>
+              tokens.itemGap + 2,
+          };
+    final bottomPanelPadding = compactLandscapeLayout
+        ? 8.0
+        : (window.isCompact ? tokens.itemGap + 2 : tokens.sectionGap + 2);
+    final logContainerPadding =
+        compactLandscapeLayout ? 6.0 : (window.isCompact ? 8.0 : 10.0);
+    final logContainerRadius =
+        compactLandscapeLayout ? 8.0 : (window.isCompact ? 8.0 : 10.0);
+    final logOverlayInset =
+        compactLandscapeLayout ? 6.0 : (window.isCompact ? 8.0 : 10.0);
+    final actionSpacing = compactLandscapeLayout
+        ? 8.0
+        : (window.isCompact ? tokens.itemGap + 2 : 10.0);
+    final actionPaneWidth = compactLandscapeLayout
+        ? switch (window.windowClass) {
+            UiWindowClass.compact => 292.0,
+            UiWindowClass.medium => 304.0,
+            UiWindowClass.expanded => 316.0,
+            UiWindowClass.large => 324.0,
+            UiWindowClass.extraLarge => 332.0,
+          }
+        : switch (window.windowClass) {
+            UiWindowClass.compact => 300.0,
+            UiWindowClass.medium => 320.0,
+            UiWindowClass.expanded => 330.0,
+            UiWindowClass.large => 350.0,
+            UiWindowClass.extraLarge => 370.0,
+          };
+    final actionButtonExtent = compactLandscapeLayout
+        ? switch (window.windowClass) {
+            UiWindowClass.compact => 62.0,
+            UiWindowClass.medium => 60.0,
+            UiWindowClass.expanded => 58.0,
+            UiWindowClass.large => 56.0,
+            UiWindowClass.extraLarge => 56.0,
+          }
+        : switch (window.windowClass) {
+            UiWindowClass.compact => 76.0,
+            UiWindowClass.medium => 74.0,
+            UiWindowClass.expanded => 70.0,
+            UiWindowClass.large => 68.0,
+            UiWindowClass.extraLarge => 66.0,
+          };
+    final estimatedGridColumns = actionPaneWidth >= 960
+        ? 4
+        : (actionPaneWidth >= 700 ? 3 : (actionPaneWidth >= 280 ? 2 : 1));
+    const actionButtonCount = 4;
+    final estimatedGridRows =
+        (actionButtonCount + estimatedGridColumns - 1) ~/ estimatedGridColumns;
+    final estimatedActionBodyHeight = (estimatedGridRows * actionButtonExtent) +
+        ((estimatedGridRows - 1) * actionSpacing) +
+        actionSpacing +
+        actionButtonExtent +
+        8.0;
+    final baseActionPanelMaxHeight = switch (window.windowClass) {
+      UiWindowClass.compact => 430.0,
+      UiWindowClass.medium => 390.0,
+      UiWindowClass.expanded => 360.0,
+      UiWindowClass.large => 350.0,
+      UiWindowClass.extraLarge => 340.0,
+    };
+    final computedActionPanelMaxHeight =
+        (viewportSize.height * (shortViewport ? 0.38 : 0.46))
+            .clamp(140.0, baseActionPanelMaxHeight)
+            .toDouble();
+    final wideActionPanelMaxHeight =
+        computedActionPanelMaxHeight < estimatedActionBodyHeight
+            ? estimatedActionBodyHeight
+            : computedActionPanelMaxHeight;
+    final veryShortViewport = viewportSize.height < 520;
+    final actionPanelMaxHeight = useWideSplit
+        ? (compactLandscapeLayout
+            ? (viewportSize.height - (topPadding + bottomPanelPadding))
+                .clamp(220.0, wideActionPanelMaxHeight)
+                .toDouble()
+            : wideActionPanelMaxHeight)
+        : (veryShortViewport
+            ? computedActionPanelMaxHeight.clamp(120.0, 210.0).toDouble()
+            : computedActionPanelMaxHeight);
+    final actionPaneEffectiveMaxWidth =
+        (viewportSize.width * (compactLandscapeLayout ? 0.40 : 0.44))
+            .clamp(compactLandscapeLayout ? 276.0 : 240.0, actionPaneWidth)
+            .toDouble();
+    final actionPaneMinWidth = compactLandscapeLayout
+        ? 276.0
+        : switch (window.windowClass) {
+            UiWindowClass.compact => 200.0,
+            UiWindowClass.medium => 220.0,
+            UiWindowClass.expanded => 228.0,
+            UiWindowClass.large || UiWindowClass.extraLarge => 248.0,
+          };
+
+    return _GitLayoutMetrics._(
+      fixedTwoPaneLandscape: fixedTwoPaneLandscape,
+      compactLandscapeLayout: compactLandscapeLayout,
+      useWideSplit: useWideSplit,
+      outerHorizontal: outerHorizontal,
+      topPadding: topPadding,
+      bottomPanelPadding: bottomPanelPadding,
+      logContainerPadding: logContainerPadding,
+      logContainerRadius: logContainerRadius,
+      logOverlayInset: logOverlayInset,
+      actionSpacing: actionSpacing,
+      actionButtonExtent: actionButtonExtent,
+      actionPanelMaxHeight: actionPanelMaxHeight,
+      actionPaneEffectiveMaxWidth: actionPaneEffectiveMaxWidth,
+      actionPaneMinWidth: actionPaneMinWidth,
     );
   }
 }

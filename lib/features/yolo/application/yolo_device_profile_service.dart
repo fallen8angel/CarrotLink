@@ -43,26 +43,6 @@ class YoloAndroidDeviceProfile {
 
   String get _soc => socModel.trim().toLowerCase();
 
-  String get _combinedText => <String>[
-        manufacturer,
-        brand,
-        model,
-        device,
-        hardware,
-        board,
-        product,
-        socManufacturer,
-      ].join(' ').toLowerCase();
-
-  bool get supportsQnn {
-    if (_soc.startsWith('sm')) {
-      return true;
-    }
-    return _combinedText.contains('qualcomm') ||
-        _combinedText.contains('qcom') ||
-        _combinedText.contains('snapdragon');
-  }
-
   bool get allowsYolo26sByDefault {
     const highEndSocMarkers = <String>[
       'sm8550',

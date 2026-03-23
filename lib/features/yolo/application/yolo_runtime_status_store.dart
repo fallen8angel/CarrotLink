@@ -50,6 +50,20 @@ class YoloRuntimeStatusStore {
     );
   }
 
+  static Future<void> clear({
+    bool clearConfig = false,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_lastStatePrefKey);
+    if (clearConfig) {
+      await prefs.remove(_lastConfigPrefKey);
+    }
+    await prefs.setString(
+      _lastUpdatedPrefKey,
+      DateTime.now().toIso8601String(),
+    );
+  }
+
   static Map<String, dynamic> _decodeMap(String? raw) {
     if (raw == null || raw.trim().isEmpty) {
       return const <String, dynamic>{};

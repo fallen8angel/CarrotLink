@@ -2,6 +2,10 @@ part of 'live_drive_canvas_screen.dart';
 
 extension _LiveDriveCanvasSidecarRuntimeComponents
     on _LiveDriveCanvasScreenState {
+  _AdaptiveCameraQualityMode _preferredAdaptiveCameraQualityMode() {
+    return _AdaptiveCameraQualityMode.lowLatency;
+  }
+
   void _clearSidecarRecoveryScheduleImpl() {
     _sidecarRecoveryTimer?.cancel();
     _sidecarRecoveryTimer = null;
@@ -43,13 +47,18 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
   }
 
   String _adaptiveCameraQualityLabel(_AdaptiveCameraQualityMode mode) {
-    return 'stable';
+    switch (mode) {
+      case _AdaptiveCameraQualityMode.lowLatency:
+        return 'stable';
+      case _AdaptiveCameraQualityMode.quality:
+        return 'quality';
+    }
   }
 
   void _resetAdaptiveCameraQualityState({bool resetMode = false}) {
     _adaptiveCameraQualitySynced = false;
     if (resetMode) {
-      _adaptiveCameraQualityMode = _AdaptiveCameraQualityMode.lowLatency;
+      _adaptiveCameraQualityMode = _preferredAdaptiveCameraQualityMode();
     }
   }
 
@@ -74,7 +83,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
   }
 
   Future<void> _setAdaptiveCameraQualityMode(
-    _AdaptiveCameraQualityMode _, {
+    _AdaptiveCameraQualityMode mode, {
     required String reason,
     bool force = false,
   }) async {
@@ -84,8 +93,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       return;
     }
     _adaptiveCameraQualityBusy = true;
-    final modeLabel =
-        _adaptiveCameraQualityLabel(_AdaptiveCameraQualityMode.lowLatency);
+    final modeLabel = _adaptiveCameraQualityLabel(mode);
     try {
       final response = await _cameraPostJson(
         '/camera_quality',
@@ -94,7 +102,7 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       if (response['ok'] != true) {
         throw Exception(response['error']?.toString() ?? 'unknown error');
       }
-      _adaptiveCameraQualityMode = _AdaptiveCameraQualityMode.lowLatency;
+      _adaptiveCameraQualityMode = mode;
       _adaptiveCameraQualitySynced = true;
       _pushSidecarHistory('CAM_QUALITY', 'mode=$modeLabel reason=$reason');
     } catch (e) {
@@ -132,10 +140,27 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
     return SidecarService.profileProvidesGraphicsRuntime(profile);
   }
 
+  HudStockInstallTarget _preferredStockInstallTarget() {
+    if (!mounted) {
+      return HudStockInstallTarget.c3;
+    }
+    return Provider.of<HudFeatureSettingsService>(context, listen: false)
+        .installTarget;
+  }
+
   String _preferredDriveRuntimeProfile([Map<String, dynamic>? health]) {
-    return SidecarService.driveRuntimeProfileForFlavor(_sidecarRepoFlavorOf(
-      health,
-    ));
+    final repoFlavor = _sidecarRepoFlavorOf(health);
+    final preferMinimalC4 =
+        _preferredStockInstallTarget() == HudStockInstallTarget.c4;
+    if (repoFlavor == SidecarService.repoFlavorUnknown) {
+      return preferMinimalC4
+          ? SidecarService.c4MinimalGraphicsRuntimeProfile
+          : SidecarService.driveRuntimeProfile;
+    }
+    return SidecarService.driveRuntimeProfileForFlavorWithPreference(
+      repoFlavor,
+      preferMinimalC4: preferMinimalC4,
+    );
   }
 
   String _normalizeSidecarVariant(String? variant) {
@@ -247,7 +272,13 @@ extension _LiveDriveCanvasSidecarRuntimeComponents
       SidecarService.hudBootstrapProfile;
 
   String _preferredBootstrapProfile([Map<String, dynamic>? health]) {
-    if (_sidecarRepoFlavorOf(health) == SidecarService.repoFlavorC4) {
+    final repoFlavor = _sidecarRepoFlavorOf(health);
+    if (repoFlavor == SidecarService.repoFlavorUnknown) {
+      return _preferredStockInstallTarget() == HudStockInstallTarget.c4
+          ? SidecarService.c4HudBootstrapProfile
+          : SidecarService.hudBootstrapProfile;
+    }
+    if (repoFlavor == SidecarService.repoFlavorC4) {
       return SidecarService.c4HudBootstrapProfile;
     }
     return SidecarService.hudBootstrapProfile;

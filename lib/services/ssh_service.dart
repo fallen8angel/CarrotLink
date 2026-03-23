@@ -1095,16 +1095,19 @@ class SSHService extends ChangeNotifier {
   Future<String> readTextFile(String path) async {
     final client = await sftp;
     final file = await client.open(path);
-    final size = (await file.stat()).size ?? 0;
-    final content = file.read(length: size);
+    try {
+      final size = (await file.stat()).size ?? 0;
+      final content = file.read(length: size);
 
-    final List<int> bytes = [];
-    await for (final chunk in content) {
-      bytes.addAll(chunk);
+      final List<int> bytes = [];
+      await for (final chunk in content) {
+        bytes.addAll(chunk);
+      }
+
+      return utf8.decode(bytes, allowMalformed: true);
+    } finally {
+      await file.close();
     }
-
-    await file.close();
-    return utf8.decode(bytes);
   }
 
   Future<void> writeTextFile(String path, String content) async {
@@ -1113,22 +1116,28 @@ class SSHService extends ChangeNotifier {
         mode: SftpFileOpenMode.write |
             SftpFileOpenMode.create |
             SftpFileOpenMode.truncate);
-    await file.write(Stream.value(utf8.encode(content)));
-    await file.close();
+    try {
+      await file.write(Stream.value(utf8.encode(content)));
+    } finally {
+      await file.close();
+    }
   }
 
   Future<Uint8List> readBinaryFile(String path) async {
     final client = await sftp;
     final file = await client.open(path);
-    final stat = await client.stat(path);
-    final size = stat.size ?? 0;
-    final stream = file.read(length: size);
-    final chunks = <int>[];
-    await for (final chunk in stream) {
-      chunks.addAll(chunk);
+    try {
+      final stat = await client.stat(path);
+      final size = stat.size ?? 0;
+      final stream = file.read(length: size);
+      final chunks = <int>[];
+      await for (final chunk in stream) {
+        chunks.addAll(chunk);
+      }
+      return Uint8List.fromList(chunks);
+    } finally {
+      await file.close();
     }
-    await file.close();
-    return Uint8List.fromList(chunks);
   }
 
   /// Streams a remote file directly to local disk to reduce memory pressure.
