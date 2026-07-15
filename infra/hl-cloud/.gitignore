@@ -1,0 +1,4 @@
+.wrangler/
+.deploy/
+.dev.vars
+*.cookies

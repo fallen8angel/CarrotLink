@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hl-cloud",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-07-14",
+  "workers_dev": true,
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "kv_namespaces": [
+    {
+      "binding": "APK_KV",
+      "id": "19b4df9bafa74086ab241d6ebd4f99ba"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
