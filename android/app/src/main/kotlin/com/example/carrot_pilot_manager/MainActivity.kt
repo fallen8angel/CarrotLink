@@ -257,6 +257,7 @@ class MainActivity : FlutterActivity() {
   }
 
   private fun ensureMediaBridgeBound() {
+    PhoneMediaNotificationListener.ensureRunning(this)
     val enabledListeners =
         Settings.Secure.getString(contentResolver, "enabled_notification_listeners").orEmpty()
     if (enabledListeners.contains(packageName)) {
