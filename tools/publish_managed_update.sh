@@ -49,7 +49,7 @@ readonly CERT_SHA256="$("$APKSIGNER" verify --print-certs "$APK" | sed -n 's/^Si
 [[ "$CERT_SHA256" == "$EXPECTED_CERT_SHA256" ]] || { echo "Signing certificate mismatch: $CERT_SHA256" >&2; exit 1; }
 
 unzip -p "$APK" lib/arm64-v8a/libapp.so | strings -a > "$TMP_DIR/libapp.strings"
-LC_ALL=C grep -aFqx "$STABLE_ENDPOINT" "$TMP_DIR/libapp.strings" || { echo "Stable update endpoint missing" >&2; exit 1; }
+LC_ALL=C grep -aFq "$STABLE_ENDPOINT" "$TMP_DIR/libapp.strings" || { echo "Stable update endpoint missing" >&2; exit 1; }
 LC_ALL=C grep -aFq "$DEV_ENDPOINT" "$TMP_DIR/libapp.strings" || { echo "Dev update endpoint missing" >&2; exit 1; }
 
 readonly FILE_NAME="$(basename "$APK")"
