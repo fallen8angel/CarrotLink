@@ -1,7 +1,7 @@
 name: carrot_pilot_manager
 description: A CarrotLink App
 publish_to: 'kooingh354'
-version: 2.0104.0+2010400
+version: 2.0106.9-fix5+2010609
 
 environment:
   sdk: '>=3.0.0 <4.0.0'

@@ -4,6 +4,7 @@ import android.app.ActivityManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -14,6 +15,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.service.notification.NotificationListenerService
 import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
@@ -42,6 +44,7 @@ class MainActivity : FlutterActivity() {
   private var nativeDriveVideoPlugin: NativeDriveVideoPlugin? = null
   private var oauthCodeHudView: View? = null
   private var oauthCodeHudParams: WindowManager.LayoutParams? = null
+  private var mediaPermissionPrompted = false
   private val launchAtMs = SystemClock.elapsedRealtime()
 
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -52,6 +55,7 @@ class MainActivity : FlutterActivity() {
   override fun onStart() {
     Log.i(TAG, "onStart +${elapsedSinceLaunch()}ms")
     super.onStart()
+    ensureMediaBridgeBound()
   }
 
   override fun onResume() {
@@ -250,6 +254,21 @@ class MainActivity : FlutterActivity() {
       addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
     startActivity(intent)
+  }
+
+  private fun ensureMediaBridgeBound() {
+    val enabledListeners =
+        Settings.Secure.getString(contentResolver, "enabled_notification_listeners").orEmpty()
+    if (enabledListeners.contains(packageName)) {
+      NotificationListenerService.requestRebind(
+          ComponentName(this, PhoneMediaNotificationListener::class.java)
+      )
+      return
+    }
+    if (!mediaPermissionPrompted) {
+      mediaPermissionPrompted = true
+      startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+    }
   }
 
   private fun showOAuthCodeNotification(code: String, url: String) {
@@ -539,6 +558,9 @@ class MainActivity : FlutterActivity() {
       host: String?,
       snapshotJson: String? = null
   ) {
+    if (!host.isNullOrBlank()) {
+      PhoneMediaNotificationListener.setSidecarHost(this, host)
+    }
     val intent = Intent(this, OverlayHudService::class.java).apply {
       this.action = action
       if (!host.isNullOrBlank()) {
