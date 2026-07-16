@@ -1,13 +1,13 @@
 const APK = Object.freeze({
-  fileName: "CarrotLink-fix5-v13.apk",
-  fileSize: 199471185,
-  sha256: "a571d4baf4f75aa3006210d043a21ed1092cf64b47c7274ea010953ea69a63d7",
-  version: "2.0106.9-fix5",
-  versionCode: 2010609,
-  releaseBuild: "v13",
+  fileName: "CarrotLink-fix5-v14.apk",
+  fileSize: 199508296,
+  sha256: "1a425cf6e0961d42e451598dfc812498a44b8eb65f4327aa30c082bde21a95c3",
+  version: "2.0106.10-fix5",
+  versionCode: 2010610,
+  releaseBuild: "v14",
   releaseDate: "2026-07-16",
-  sourceCommit: "10074f9",
-  partKeys: Array.from({ length: 10 }, (_, index) => `apk:v13:part:${String(index).padStart(2, "0")}`),
+  sourceCommit: "db7adfd",
+  partKeys: Array.from({ length: 10 }, (_, index) => `apk:v14:part:${String(index).padStart(2, "0")}`),
 });
 
 const RELEASE_SOURCE = Object.freeze({

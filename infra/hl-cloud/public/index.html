@@ -45,7 +45,7 @@
       <header class="section-heading">
         <div>
           <p class="section-label">LATEST RELEASE</p>
-          <h2 id="download-title">최신 APK · v13</h2>
+          <h2 id="download-title">최신 APK · v14</h2>
         </div>
         <span class="section-meta" id="release-date">2026.07.16</span>
       </header>
@@ -53,22 +53,22 @@
       <div class="download-tool">
         <div class="release-info">
           <div class="release-title-line">
-            <span class="latest-badge">최신 v13</span>
-            <span id="release-build">v13</span>
+            <span class="latest-badge">최신 v14</span>
+            <span id="release-build">v14</span>
           </div>
-          <h3 id="release-version">2.0106.9-fix5</h3>
+          <h3 id="release-version">2.0106.10-fix5</h3>
           <ul class="release-highlights">
-            <li>미디어 알림 서비스 연결 해제 시 자동 재연결</li>
-            <li>2초 주기 재생 진행률 전송과 빈 데이터 덮어쓰기 방지</li>
-            <li>전송 실패 시 저장 주소 재시도 후 콤마 주소 자동 재탐색</li>
-            <li>네트워크 제한시간 보강과 5분 주기 앨범 커버 재전송</li>
-            <li>앱 업데이트만 필요하며 fix5 추가 업데이트 불필요</li>
+            <li>폰 자체 IP와 loopback을 콤마로 오인하던 주소 탐색 결함 수정</li>
+            <li><code>phoneMedia</code> 식별 응답이 있는 서버만 연결 대상으로 허용</li>
+            <li>앱 실행 시 미디어 전송기를 foreground service로 직접 유지</li>
+            <li>Android 14 이상 장시간 연동용 <code>specialUse</code> 타입 적용</li>
+            <li>API 36에서 한글·2초 진행률·앨범 커버 실제 POST 검증 완료</li>
           </ul>
 
           <dl class="file-meta">
             <div>
               <dt>파일</dt>
-              <dd id="file-name">CarrotLink-fix5-v13.apk</dd>
+              <dd id="file-name">CarrotLink-fix5-v14.apk</dd>
             </div>
             <div>
               <dt>크기</dt>
@@ -99,7 +99,7 @@
           </form>
 
           <div class="download-actions" id="download-actions" hidden>
-            <a class="primary-button" id="download-link" href="#" download>v13 APK 다운로드</a>
+            <a class="primary-button" id="download-link" href="#" download>v14 APK 다운로드</a>
             <button class="secondary-button" id="lock-button" type="button">다시 잠그기</button>
           </div>
 
@@ -122,12 +122,17 @@
           <p class="section-label">ANDROID RELEASES</p>
           <h2 id="apk-history-title">APK 업데이트</h2>
         </div>
-        <span class="section-meta">12개 빌드</span>
+        <span class="section-meta">13개 빌드</span>
       </header>
 
       <ol class="update-list">
         <li class="update-row current">
-          <div class="update-version"><strong>v13</strong><span>현재</span></div>
+          <div class="update-version"><strong>v14</strong><span>현재</span></div>
+          <div class="update-copy"><h3>2.0106.10-fix5</h3><p>폰 자체 서버 오선택을 차단하고 미디어 전송기를 장시간 유지되는 foreground service로 전환</p></div>
+          <div class="update-meta"><time datetime="2026-07-16">2026.07.16</time><span>190.3 MB</span></div>
+        </li>
+        <li class="update-row">
+          <div class="update-version"><strong>v13</strong><span>이전</span></div>
           <div class="update-copy"><h3>2.0106.9-fix5</h3><p>장시간 사용 후 멈추던 미디어 전송을 자동 재연결·주소 재탐색·주기적 앨범 커버 재전송으로 복구</p></div>
           <div class="update-meta"><time datetime="2026-07-16">2026.07.16</time><span>190.2 MB</span></div>
         </li>
