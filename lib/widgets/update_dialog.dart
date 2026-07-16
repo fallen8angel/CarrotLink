@@ -8,7 +8,12 @@ import '../ui/adaptive/layout_tokens.dart';
 import '../ui/adaptive/window_class.dart';
 
 class UpdateDialog extends StatefulWidget {
-  const UpdateDialog({super.key});
+  const UpdateDialog({
+    super.key,
+    this.refreshOnOpen = true,
+  });
+
+  final bool refreshOnOpen;
 
   @override
   State<UpdateDialog> createState() => _UpdateDialogState();
@@ -22,6 +27,7 @@ class _UpdateDialogState extends State<UpdateDialog> {
     super.didChangeDependencies();
     if (_requestedRefresh) return;
     _requestedRefresh = true;
+    if (!widget.refreshOnOpen) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       unawaited(context.read<UpdateService>().checkForUpdate());

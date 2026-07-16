@@ -11,10 +11,8 @@ import 'github_service.dart';
 class UpdateService extends ChangeNotifier {
   static const String _ignoreUpdateUntilKey = 'ignore_update_until';
   static const String _ignoreUpdateTagKey = 'ignore_update_tag';
-  static const String _repoOwner = 'jominki354';
-  static const String _repoName = 'CarrotLink';
-  static const String _gitHubApiBase =
-      'https://api.github.com/repos/$_repoOwner/$_repoName';
+  static const String _releaseApiBase =
+      'https://hl-cloud.leehyuk1108-comma.workers.dev/api/releases';
 
   bool _isChecking = false;
   bool _isDownloading = false;
@@ -24,6 +22,7 @@ class UpdateService extends ChangeNotifier {
   String _currentVersion = ""; // 표시용 (예: 1.1007.2)
   String _currentVersionFull = ""; // 비교용 (예: 1.1007.2+19)
   String _statusMessage = "";
+  bool _lastCheckSucceeded = false;
   String _channel = "stable"; // stable or dev
   late final Future<void> _versionLoadFuture;
   late final Future<void> _channelLoadFuture;
@@ -41,6 +40,7 @@ class UpdateService extends ChangeNotifier {
   String get currentVersion => _currentVersion;
   String get currentVersionFull => _currentVersionFull;
   String get statusMessage => _statusMessage;
+  bool get lastCheckSucceeded => _lastCheckSucceeded;
   String get channel => _channel;
   String? get latestReleaseTag => _latestRelease?['tag_name']?.toString();
   DateTime? get ignoredUntil => isUpdateIgnored ? _ignoredUntil : null;
@@ -138,6 +138,7 @@ class UpdateService extends ChangeNotifier {
     if (_isChecking) return false;
     await _ensureReady();
     _isChecking = true;
+    _lastCheckSucceeded = false;
     if (!silent) {
       _statusMessage = "";
     }
@@ -147,9 +148,9 @@ class UpdateService extends ChangeNotifier {
       final releaseData = await _fetchLatestRelease(silent: silent);
 
       if (releaseData != null) {
+        _lastCheckSucceeded = true;
         final String tagName = releaseData['tag_name'] ?? "";
-        // Remove 'v' prefix only (keep build metadata for comparison)
-        final latestVersion = tagName.replaceAll('v', '');
+        final latestVersion = tagName.replaceFirst(RegExp(r'^[vV]'), '');
 
         // Compare versions (including build number if present)
         if (_isNewer(latestVersion, _currentVersionFull)) {
@@ -188,54 +189,47 @@ class UpdateService extends ChangeNotifier {
   }
 
   bool _isNewer(String remote, String current) {
-    try {
-      // 빌드 메타데이터 (+숫자) 제거
-      final remoteBase = remote.split('+')[0];
-      final currentBase = current.split('+')[0];
+    List<int>? parseCore(String value) {
+      final normalized = value.trim().replaceFirst(RegExp(r'^[vV]'), '');
+      final core = normalized.split('+').first.split('-').first;
+      final parts = core.split('.').map(int.tryParse).toList();
+      if (parts.isEmpty || parts.any((part) => part == null)) return null;
+      return parts.cast<int>();
+    }
 
-      List<int> rParts =
-          remoteBase.split('.').map((e) => int.parse(e)).toList();
-      List<int> cParts =
-          currentBase.split('.').map((e) => int.parse(e)).toList();
+    int parseBuild(String value) {
+      final pieces = value.split('+');
+      if (pieces.length < 2) return 0;
+      return int.tryParse(pieces.last.trim()) ?? 0;
+    }
 
-      // Pad with zeros if lengths differ (e.g. 1.0 vs 1.0.0)
-      while (rParts.length < 3) {
-        rParts.add(0);
-      }
-      while (cParts.length < 3) {
-        cParts.add(0);
-      }
-
-      for (int i = 0; i < 3; i++) {
-        if (rParts[i] > cParts[i]) return true;
-        if (rParts[i] < cParts[i]) return false;
-      }
-
-      // 버전이 같으면 빌드 번호 비교 (있는 경우)
-      final remoteBuild =
-          remote.contains('+') ? int.tryParse(remote.split('+')[1]) ?? 0 : 0;
-      final currentBuild =
-          current.contains('+') ? int.tryParse(current.split('+')[1]) ?? 0 : 0;
-
-      return remoteBuild > currentBuild;
-    } catch (e) {
-      // Fallback to string comparison if parsing fails
-      debugPrint("Version comparison failed: $e");
+    final remoteParts = parseCore(remote);
+    final currentParts = parseCore(current);
+    if (remoteParts == null || currentParts == null) {
+      debugPrint('Version comparison failed: remote=$remote current=$current');
       return remote != current;
     }
+
+    final partCount = remoteParts.length > currentParts.length
+        ? remoteParts.length
+        : currentParts.length;
+    for (var i = 0; i < partCount; i++) {
+      final remotePart = i < remoteParts.length ? remoteParts[i] : 0;
+      final currentPart = i < currentParts.length ? currentParts[i] : 0;
+      if (remotePart > currentPart) return true;
+      if (remotePart < currentPart) return false;
+    }
+
+    return parseBuild(remote) > parseBuild(current);
   }
 
   Future<Map<String, dynamic>?> _fetchLatestRelease({
     required bool silent,
   }) async {
-    final token = await _githubService.getToken();
-    final response = await _requestReleaseEndpoint(token: token);
+    final response = await _requestReleaseEndpoint();
     if (response.statusCode != 200) {
       if (!silent) {
-        _statusMessage = _buildReleaseErrorMessage(
-          response.statusCode,
-          usedToken: token != null && token.isNotEmpty,
-        );
+        _statusMessage = '업데이트 확인 실패: HTTP ${response.statusCode}';
       }
       return null;
     }
@@ -260,16 +254,14 @@ class UpdateService extends ChangeNotifier {
     return null;
   }
 
-  Future<http.Response> _requestReleaseEndpoint({String? token}) {
+  Future<http.Response> _requestReleaseEndpoint() {
     final path = _channel == 'stable'
-        ? '$_gitHubApiBase/releases/latest'
-        : '$_gitHubApiBase/releases?per_page=1';
-    return http
-        .get(
-          Uri.parse(path),
-          headers: _buildGitHubHeaders(token: token),
-        )
-        .timeout(const Duration(seconds: 20));
+        ? '$_releaseApiBase/latest'
+        : '$_releaseApiBase?per_page=1';
+    return http.get(
+      Uri.parse(path),
+      headers: const {'Accept': 'application/json'},
+    ).timeout(const Duration(seconds: 20));
   }
 
   Map<String, String> _buildGitHubHeaders({
@@ -285,26 +277,6 @@ class UpdateService extends ChangeNotifier {
       headers['Authorization'] = 'token $token';
     }
     return headers;
-  }
-
-  String _buildReleaseErrorMessage(
-    int statusCode, {
-    required bool usedToken,
-  }) {
-    switch (statusCode) {
-      case 401:
-        return '업데이트 확인 실패: GitHub 인증이 만료되었습니다. 다시 로그인하세요.';
-      case 403:
-        return usedToken
-            ? '업데이트 확인 실패: GitHub 권한이 부족합니다. 다시 로그인하세요.'
-            : '업데이트 확인 실패: GitHub API 접근이 제한되었습니다.';
-      case 404:
-        return usedToken
-            ? '업데이트 확인 실패: private 릴리즈 접근 권한이 없습니다. GitHub를 다시 로그인하세요.'
-            : '업데이트 확인 실패: 릴리즈를 찾을 수 없습니다.';
-      default:
-        return '업데이트 확인 실패: HTTP $statusCode';
-    }
   }
 
   Map<String, dynamic>? _findApkAsset(Map<String, dynamic> releaseData) {

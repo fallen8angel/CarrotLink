@@ -45,6 +45,12 @@ class _DashboardScreenState extends State<DashboardScreen>
   static const Duration _appStartFastAuthTimeout = Duration(
     milliseconds: 1800,
   );
+  static const Duration _updateResumeCooldown = Duration(minutes: 15);
+  static const List<Duration> _updateRetryDelays = [
+    Duration.zero,
+    Duration(seconds: 4),
+    Duration(seconds: 12),
+  ];
   int _currentIndex = 0;
   StreamSubscription<String>? _discoverySubscription;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
@@ -53,6 +59,10 @@ class _DashboardScreenState extends State<DashboardScreen>
   List<ConnectivityResult>? _lastConnectivity;
   bool _isAutoConnectRunning = false;
   bool _setupPromptShown = false;
+  bool _startupPromptsComplete = false;
+  bool _updateCheckRunning = false;
+  bool _updateDialogOpen = false;
+  DateTime? _lastUpdateCheckAt;
   bool _overlayLifecycleBusy = false;
   String? _lastDiscoveryLogIp;
   final DiagnosticsService _diag = DiagnosticsService.instance;
@@ -110,19 +120,44 @@ class _DashboardScreenState extends State<DashboardScreen>
         debounce: const Duration(seconds: 2),
       );
 
-      _checkUpdate();
-      unawaited(_showOpenpilotSetupPromptIfNeeded());
+      unawaited(_runStartupPrompts());
     });
   }
 
+  Future<void> _runStartupPrompts() async {
+    await _showOpenpilotSetupPromptIfNeeded();
+    if (!mounted) return;
+    await _checkUpdate();
+    _startupPromptsComplete = true;
+  }
+
   Future<void> _checkUpdate() async {
-    final hasUpdate =
-        await context.read<UpdateService>().checkForUpdate(silent: true);
-    if (hasUpdate && mounted) {
-      showDialog(
-        context: context,
-        builder: (ctx) => const UpdateDialog(),
-      );
+    if (_updateCheckRunning || _updateDialogOpen || !mounted) return;
+    _updateCheckRunning = true;
+    try {
+      final updateService = context.read<UpdateService>();
+      for (final delay in _updateRetryDelays) {
+        if (delay > Duration.zero) await Future<void>.delayed(delay);
+        if (!mounted) return;
+
+        final hasUpdate = await updateService.checkForUpdate(silent: true);
+        _lastUpdateCheckAt = DateTime.now();
+        if (hasUpdate && mounted) {
+          _updateDialogOpen = true;
+          try {
+            await showDialog<void>(
+              context: context,
+              builder: (ctx) => const UpdateDialog(refreshOnOpen: false),
+            );
+          } finally {
+            _updateDialogOpen = false;
+          }
+          return;
+        }
+        if (updateService.lastCheckSucceeded) return;
+      }
+    } finally {
+      _updateCheckRunning = false;
     }
   }
 
@@ -412,6 +447,13 @@ class _DashboardScreenState extends State<DashboardScreen>
           timeout: const Duration(seconds: 60),
         );
         unawaited(_tryAutoConnect(reason: 'resume'));
+      }
+      final shouldCheckUpdate = _startupPromptsComplete &&
+          (_lastUpdateCheckAt == null ||
+              DateTime.now().difference(_lastUpdateCheckAt!) >=
+                  _updateResumeCooldown);
+      if (shouldCheckUpdate) {
+        unawaited(_checkUpdate());
       }
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
