@@ -56,7 +56,7 @@ readonly FILE_NAME="$(basename "$APK")"
 readonly FILE_SIZE="$(stat -f '%z' "$APK" 2>/dev/null || stat -c '%s' "$APK")"
 readonly SHA256="$(shasum -a 256 "$APK" | awk '{print $1}')"
 readonly TAG="v${VERSION_NAME}+${VERSION_CODE}"
-readonly RELEASE_BUILD="$(printf '%s\n' "$FILE_NAME" | sed -n 's/.*-v\\([0-9][0-9]*\\)\\.apk$/v\\1/p')"
+readonly RELEASE_BUILD="$(printf '%s\n' "$FILE_NAME" | sed -n 's/.*-v\([0-9][0-9]*\)\.apk$/v\1/p')"
 readonly RELEASE_NAME="CarrotLink fix5 ${RELEASE_BUILD:-$VERSION_NAME}"
 
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then
