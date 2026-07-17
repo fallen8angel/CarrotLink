@@ -1,15 +1,9 @@
 package com.example.carrot_pilot_manager;
 
 import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.app.PendingIntent;
-import android.app.Service;
 import android.content.ComponentName;
 import android.content.Context;
-import android.content.Intent;
 import android.content.SharedPreferences;
-import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -25,7 +19,6 @@ import android.media.session.PlaybackState;
 import android.net.DhcpInfo;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Parcelable;
 import android.os.SystemClock;
@@ -64,9 +57,6 @@ public class PhoneMediaNotificationListener extends NotificationListenerService 
     private static final int ART_MAX_PX = 256;
     private static final int ART_QUALITY = 86;
     private static final long ART_REFRESH_INTERVAL_MS = 5 * 60 * 1000L;
-    private static final String ACTION_START = "carrot.media.START";
-    private static final String NOTIFICATION_CHANNEL_ID = "carrot_media_bridge";
-    private static final int NOTIFICATION_ID = 9022;
     private static final String PREFS = "carrot_media_bridge";
     private static final String PREF_HOST = "carrot_host";
     private static final String PREF_URL = "sidecar_url";
@@ -94,24 +84,6 @@ public class PhoneMediaNotificationListener extends NotificationListenerService 
     private volatile int consecutivePostFailures;
     private volatile boolean listenerConnected;
     private String cachedArtUri = "";
-
-    public static void ensureRunning(Context context) {
-        if (context == null) {
-            return;
-        }
-        Context appContext = context.getApplicationContext();
-        Intent intent = new Intent(appContext, PhoneMediaNotificationListener.class)
-                .setAction(ACTION_START);
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                appContext.startForegroundService(intent);
-            } else {
-                appContext.startService(intent);
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "media bridge start failed", e);
-        }
-    }
 
     public static void setSidecarHost(Context context, String str) {
         if (context == null || str == null) {
@@ -182,14 +154,7 @@ public class PhoneMediaNotificationListener extends NotificationListenerService 
     @Override // android.app.Service
     public void onCreate() {
         super.onCreate();
-    }
-
-    @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
-        startAsForeground();
         ensurePeriodicPublisher();
-        schedulePublish();
-        return Service.START_STICKY;
     }
 
     @Override // android.service.notification.NotificationListenerService
@@ -254,55 +219,7 @@ public class PhoneMediaNotificationListener extends NotificationListenerService 
     public void onDestroy() {
         this.executor.shutdownNow();
         this.artworkExecutor.shutdownNow();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_REMOVE);
-        } else {
-            stopForeground(true);
-        }
         super.onDestroy();
-    }
-
-    private void startAsForeground() {
-        NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && manager != null) {
-            NotificationChannel channel = new NotificationChannel(
-                    NOTIFICATION_CHANNEL_ID,
-                    "HL Media Bridge",
-                    NotificationManager.IMPORTANCE_LOW);
-            channel.setShowBadge(false);
-            manager.createNotificationChannel(channel);
-        }
-
-        Intent launchIntent = getPackageManager().getLaunchIntentForPackage(getPackageName());
-        PendingIntent contentIntent = launchIntent == null ? null : PendingIntent.getActivity(
-                this,
-                0,
-                launchIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        int icon = getApplicationInfo().icon;
-        if (icon == 0) {
-            icon = android.R.drawable.stat_sys_upload_done;
-        }
-        Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? new Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
-                : new Notification.Builder(this);
-        builder.setSmallIcon(icon)
-                .setContentTitle("HL Media Bridge")
-                .setContentText("외장 계기판으로 음악 정보 전송 중")
-                .setCategory(Notification.CATEGORY_SERVICE)
-                .setOngoing(true)
-                .setShowWhen(false);
-        if (contentIntent != null) {
-            builder.setContentIntent(contentIntent);
-        }
-        Notification notification = builder.build();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
-        } else {
-            startForeground(NOTIFICATION_ID, notification);
-        }
     }
 
     /* JADX INFO: Access modifiers changed from: private */
