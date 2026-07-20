@@ -60,6 +60,8 @@ public class PhoneMediaNotificationListener extends NotificationListenerService 
     private static final String PREFS = "carrot_media_bridge";
     private static final String PREF_HOST = "carrot_host";
     private static final String PREF_URL = "sidecar_url";
+    private static final String FLUTTER_PREFS = "FlutterSharedPreferences";
+    private static final String FLUTTER_PREF_HOST = "flutter.phone_media_host";
     private static final long PUBLISH_INTERVAL_SECONDS = 2;
     private static final long REBIND_DELAY_SECONDS = 2;
     private static final String TAG = "CarrotMediaBridge";
@@ -874,6 +876,18 @@ public class PhoneMediaNotificationListener extends NotificationListenerService 
         if (configuredHost.isEmpty()) {
             configuredHost = normalizeHost(sharedPreferences.getString(PREF_HOST, ""));
         }
+        String discoveredHost = externallyDiscoveredHost();
+        if (!discoveredHost.isEmpty() && !discoveredHost.equalsIgnoreCase(configuredHost)) {
+            preferredHost = discoveredHost;
+            configuredHost = discoveredHost;
+            this.activeSidecarUrl = "";
+            this.consecutivePostFailures = 0;
+            sharedPreferences.edit()
+                    .putString(PREF_HOST, discoveredHost)
+                    .remove(PREF_URL)
+                    .apply();
+            Log.i(TAG, "sidecar host updated from discovery: " + discoveredHost);
+        }
         if (!this.activeSidecarUrl.isEmpty()
                 && (configuredHost.isEmpty() || configuredHost.equalsIgnoreCase(hostFromUrl(this.activeSidecarUrl)))) {
             return this.activeSidecarUrl;
@@ -907,6 +921,7 @@ public class PhoneMediaNotificationListener extends NotificationListenerService 
     private List<String> candidateUrls() {
         LinkedHashSet linkedHashSet = new LinkedHashSet();
         LinkedHashSet localAddresses = new LinkedHashSet();
+        addHostUrls(linkedHashSet, externallyDiscoveredHost());
         addHostUrls(linkedHashSet, preferredHost);
         addHostUrls(linkedHashSet, getSharedPreferences(PREFS, 0).getString(PREF_HOST, ""));
         addHostsFromAppData(linkedHashSet);
@@ -946,6 +961,12 @@ public class PhoneMediaNotificationListener extends NotificationListenerService 
             candidates.add(url);
         }
         return candidates;
+    }
+
+    private String externallyDiscoveredHost() {
+        String host = normalizeHost(
+                getSharedPreferences(FLUTTER_PREFS, 0).getString(FLUTTER_PREF_HOST, ""));
+        return validIpv4(host) ? host : "";
     }
 
     private void addHostsFromAppData(Set<String> set) {

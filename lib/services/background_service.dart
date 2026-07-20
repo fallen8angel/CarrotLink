@@ -1,11 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+import 'phone_media_host_store.dart';
 
 const String notificationChannelId = 'carrot_link_service';
 const int notificationId = 888;
@@ -78,6 +81,8 @@ Future<bool> onIosBackground(ServiceInstance service) async {
 
 @pragma('vm:entry-point')
 void onStart(ServiceInstance service) async {
+  DartPluginRegistrant.ensureInitialized();
+
   SSHClient? sshClient;
   Timer? heartbeatTimer;
   Timer? reconnectTimer;
@@ -724,6 +729,7 @@ String manualDisconnectReason = 'none';
       reconnectAttempt = 0;
       noBroadcastWaitAttempt = 0;
       cancelActiveDiscoveryScan();
+      await PhoneMediaHostStore.remember(ip);
 
       emitConnectionState(
         isConnected: true,
@@ -810,6 +816,7 @@ String manualDisconnectReason = 'none';
     candidateSource = source;
     candidateSeenAt = now;
     noBroadcastWaitAttempt = 0;
+    unawaited(PhoneMediaHostStore.remember(ip));
     emitDiscoveryState(source: source);
 
     if (changed ||

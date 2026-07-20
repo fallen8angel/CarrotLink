@@ -7,6 +7,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import '../constants.dart';
 import 'diagnostics_service.dart';
+import 'phone_media_host_store.dart';
 
 class SSHCommandResult {
   final String command;
@@ -121,6 +122,7 @@ class SSHService extends ChangeNotifier {
       if ((_serviceConnectedIp ?? '').trim().isNotEmpty) {
         _disconnectedSince = null;
         _clearServiceSessionLossHint();
+        unawaited(PhoneMediaHostStore.remember(_serviceConnectedIp));
       }
 
       if (!isServiceConnected) {
@@ -157,6 +159,7 @@ class SSHService extends ChangeNotifier {
       final ip = event['ip']?.toString();
       if (ip == null || !_isValidIpv4(ip)) return;
       _serviceCandidateIp = ip;
+      unawaited(PhoneMediaHostStore.remember(ip));
       final tsRaw = event['ts'];
       if (tsRaw is int && tsRaw > 0) {
         _serviceCandidateSeenAt =
@@ -193,6 +196,11 @@ class SSHService extends ChangeNotifier {
         _disconnectedSince = null;
         _clearServiceSessionLossHint();
       }
+      unawaited(
+        PhoneMediaHostStore.remember(
+          _serviceConnectedIp ?? _serviceCandidateIp,
+        ),
+      );
       final lastSuccessful = event['lastSuccessfulIp']?.toString();
       if (lastSuccessful != null && _isValidIpv4(lastSuccessful)) {
         _serviceLastSuccessfulIp = lastSuccessful;
@@ -229,6 +237,11 @@ class SSHService extends ChangeNotifier {
         _disconnectedSince = null;
         _clearServiceSessionLossHint();
       }
+      unawaited(
+        PhoneMediaHostStore.remember(
+          _serviceConnectedIp ?? _serviceCandidateIp,
+        ),
+      );
       final lastSuccessful = event['lastSuccessfulIp']?.toString();
       if (lastSuccessful != null && _isValidIpv4(lastSuccessful)) {
         _serviceLastSuccessfulIp = lastSuccessful;
@@ -656,6 +669,7 @@ class SSHService extends ChangeNotifier {
       _serviceCandidateSeenAt = DateTime.now();
       _serviceLastSuccessfulIp = ip;
       _serviceLastSuccessfulSeenAt = DateTime.now();
+      await PhoneMediaHostStore.remember(ip);
       await _storage.write(key: _lastConnectedIpStorageKey, value: ip);
       _diag.info('ssh', 'Connected to $ip:$port');
       stopDiscovery();
